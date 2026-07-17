@@ -56,7 +56,11 @@ void compute_bbox(MeshT& mesh,
 }
 
 template <typename MeshT>
-SpatialVelocityBundle load_impl(const VelocitySpec& spec, MeshT& mesh)
+SpatialVelocityBundle load_impl(const VelocitySpec& spec, MeshT& mesh
+#ifdef MFEM_USE_MPI
+                                , MPI_Comm node_comm = MPI_COMM_NULL
+#endif
+                                )
 {
    const std::string path = ResolveSpatialVelocitySidecarPath(spec);
    MFEM_VERIFY(file_exists(path),
@@ -72,9 +76,25 @@ SpatialVelocityBundle load_impl(const VelocitySpec& spec, MeshT& mesh)
                                               : OOBPolicy::Abort;
 
    SpatialVelocityBundle b;
-   b.vp_field  = std::make_unique<DataField3D>(path, "Vp",      oob);
-   b.vs_field  = std::make_unique<DataField3D>(path, "Vs",      oob);
-   b.rho_field = std::make_unique<DataField3D>(path, "density", oob);
+#ifdef MFEM_USE_MPI
+   if (node_comm != MPI_COMM_NULL)
+   {
+      // MPI-3 shared-memory mode: one physical copy of each grid per
+      // node (PLAN_sidecar_mpi_shared_memory_2026-07-17.md §4).
+      b.vp_field  = std::make_unique<DataField3D>(path, "Vp",      oob,
+                                                  node_comm);
+      b.vs_field  = std::make_unique<DataField3D>(path, "Vs",      oob,
+                                                  node_comm);
+      b.rho_field = std::make_unique<DataField3D>(path, "density", oob,
+                                                  node_comm);
+   }
+   else
+#endif
+   {
+      b.vp_field  = std::make_unique<DataField3D>(path, "Vp",      oob);
+      b.vs_field  = std::make_unique<DataField3D>(path, "Vs",      oob);
+      b.rho_field = std::make_unique<DataField3D>(path, "density", oob);
+   }
 
    real_t mxmin, mxmax, mymin, mymax, mzmin, mzmax;
    compute_bbox(mesh, mxmin, mxmax, mymin, mymax, mzmin, mzmax);
@@ -146,6 +166,15 @@ SpatialVelocityBundle LoadSpatialVelocityBundle(const VelocitySpec& spec,
 {
    return load_impl<ParMesh>(spec, pmesh);
 }
+
+#ifdef MFEM_USE_MPI
+SpatialVelocityBundle LoadSpatialVelocityBundle(const VelocitySpec& spec,
+                                                ParMesh&            pmesh,
+                                                MPI_Comm            node_comm)
+{
+   return load_impl<ParMesh>(spec, pmesh, node_comm);
+}
+#endif
 
 SpatialVelocityBundle LoadSpatialVelocityBundle(const VelocitySpec& spec,
                                                 mfem::Mesh&         mesh)

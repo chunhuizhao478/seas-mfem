@@ -67,6 +67,20 @@ namespace spatial
 void ApplyCsmStressSidecar(const StressSpec&       spec,
                            FaultGeometry<ParMesh>& geom);
 
+#ifdef MFEM_USE_MPI
+/// MPI-3 shared-memory overload
+/// (PLAN_sidecar_mpi_shared_memory_2026-07-17.md §5 Phase 2): forwards
+/// a NODE-LOCAL communicator to the StressField3D ctor so the six
+/// sigma_* grids live in node-shared windows (one physical copy per
+/// node each) for the duration of the projection; the windows are
+/// freed when the transient StressField3D goes out of scope at the end
+/// of the call.  MPI_COMM_NULL selects the classic per-rank path.
+/// COLLECTIVE over node_comm when it is non-null.
+void ApplyCsmStressSidecar(const StressSpec&       spec,
+                           FaultGeometry<ParMesh>& geom,
+                           MPI_Comm                node_comm);
+#endif
+
 /// Serial-mesh overload (BP2 fault path; not used by the SAFS dynamic
 /// driver but exposed for symmetry / completeness).
 void ApplyCsmStressSidecar(const StressSpec&     spec,

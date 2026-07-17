@@ -73,6 +73,19 @@ std::string ResolveSpatialVelocitySidecarPath(const VelocitySpec& spec);
 SpatialVelocityBundle LoadSpatialVelocityBundle(const VelocitySpec& spec,
                                                 ParMesh&            pmesh);
 
+#ifdef MFEM_USE_MPI
+/// MPI-3 shared-memory overload
+/// (PLAN_sidecar_mpi_shared_memory_2026-07-17.md §5 Phase 0): forwards
+/// a NODE-LOCAL communicator to the three DataField3D ctors so the
+/// Vp/Vs/density grids live in node-shared windows (one physical copy
+/// per node) instead of three copies per rank.  MPI_COMM_NULL selects
+/// the classic per-rank path (identical to the 2-arg overload).
+/// COLLECTIVE over node_comm when it is non-null.
+SpatialVelocityBundle LoadSpatialVelocityBundle(const VelocitySpec& spec,
+                                                ParMesh&            pmesh,
+                                                MPI_Comm            node_comm);
+#endif
+
 /// Serial-mesh overload for unit tests (the bbox check is done against
 /// the supplied Mesh; the rest of the bundle construction is identical).
 SpatialVelocityBundle LoadSpatialVelocityBundle(const VelocitySpec& spec,

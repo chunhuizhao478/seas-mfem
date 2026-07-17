@@ -1,206 +1,289 @@
-# Code Review: RK45 + LSW + mixed-flux IMPLEMENTATION (adversarial audit, 2026-05-29)
+# Code Review: 2026-07-17 — MPI-3 shared-memory sidecar windows (Phases 0–2)
 
-> Reviews the implemented code (not the plan). The earlier plan review is archived
-> at `REVIEW_rk45_lsw_plan_2026-05-29.md`; the Phase-13 review at
-> `REVIEW_phase13_round2_2026-05-29.md`.
+> Reviews the implemented code against
+> `document/code_optimization_dev/PLAN_sidecar_mpi_shared_memory_2026-07-17.md`.
+> The previous review (RK45+LSW, 2026-05-29) is archived at
+> `REVIEW_rk45_lsw_impl_2026-05-29.md`.
 
 ## Review Scope
-- Plan: `document/mixed_flux_dev/PLAN_rk45_lsw_mixed_flux_2026-05-29.md` (Phases 1–5).
-- Files reviewed (the diff vs HEAD + new files):
-  - `dynamic/fault_face_flux.{hpp,cpp}` — `EvaluateLSW`
-  - `dynamic/wave_operator.inl` — Mult-path LSW dispatch (interior `:~2617`, shared `:~3260`)
-  - `dynamic/rk_time_stepper.hpp` — `AdvanceRKCoupledLSW_Spatial` + symmetric RS guard
-  - `drivers/spatial_dyn_driver.cpp` — guard relax, gated rate_state guard, 3-way dispatch, banner
-  - `tests/unit/test_lsw_rk_mixed_flux.cpp` (L1–L7), `tests/unit/test_lsw_rk_shared_fault_mpi.cpp` (L8)
-  - `tpv205/configs/tpv205_spatial_rk45_mixedflux.toml`, `jobs/tpv205/tpv205_p1_rk45_mixedflux.sbatch`, `Makefile`
-- Domain context: `miniapps/seas/CLAUDE.md` (sign/frame, no-local-full-mesh), the BUILD doc, the implementation report, memory (`preexisting-worktree-test-failures-2026-05`).
-
-**Pass-1 (plan compliance):** all 5 phases implemented as specified; the R-002 (`=` not `+=`) and R-003 (symmetric guard) plan-fixes are present in code and exercised. **Pass-2 (correctness):** the algorithm is correct — verified by L1 (bit-exact `EvaluateLSW` vs `EvaluateADER_LSW`), L5 (bit-exact bulk RK4), L6 (absolute-combine vs `+=` discrimination), L8 (shared==interior==analytic), and the byte-exact guard suite (`rk_time_stepper` 22/22, `fault_face_flux_ader_equivalence` 11/11, `bimaterial_wave_operator_parity` 22/22). **No CRITICAL correctness bug found.** The findings below are real **coverage gaps** (untested production paths) and minor quality items — the kind that hide a *future* bug, not a present wrong result.
-
----
+- Plan: `document/code_optimization_dev/PLAN_sidecar_mpi_shared_memory_2026-07-17.md`
+- Files reviewed: `io/data_field_3d.{hpp,cpp}`, `io/stress_field_3d.{hpp,cpp}`,
+  `spatial/code/spatial_velocity.{hpp,cpp}`, `spatial/code/spatial_stress.{hpp,cpp}`,
+  `drivers/spatial_dyn_driver.cpp` (flag/guard/3 call sites),
+  `tests/unit/test_data_field_3d_shared_mem.cpp`, `Makefile` (test wiring)
+- Domain context: `miniapps/seas/CLAUDE.md` (no-refactor/no-TODO rules, MPI patterns),
+  `general/error.cpp:182` (MFEM_ABORT → global MPI_Abort, verified),
+  driver MPIContext comment (`MPI_Comm_free`-after-finalize abort hazard)
+- Verification performed during review: re-read all final hunks; recompiled
+  `io/data_field_3d.o` with warnings visible (none); ran
+  `make test-data-field-3d-shared-mem` (np=2: 12/12, np=4: 24/24) and the five
+  regression targets (all pass); **ran a purpose-built probe** that destroys a
+  shared-mode `DataField3D` AFTER `MPI_Finalize` (the driver's real lifetime) —
+  exit 0, no crash.
 
 ## Findings
 
-### [R-001] [MODERATE] [test_lsw_rk_shared_fault_mpi.cpp] — L8 only exercises the shared-fault LSW dispatch AT REST (Q=0); the cross-rank Q± exchange is never tested with a non-trivial jump
+### [R-001] [MODERATE] [io/data_field_3d.cpp:~DataField3D] — Whole-run windows are never freed before MPI_Finalize (plan §7 wording unachievable; guard is correct but untested in-tree)
 
-**Category:** EDGE_CASE (the parallel path R-004-of-the-plan exists to guard is only half-covered)
+**Category:** DEVIATION / ASSUMPTION
 
 **Description:**
-L8 sets `Q = 0.0` on both the serial and the parallel run (lines 234 and 279). With
-`Q = 0`, the trial traction is identically 0 on every fault QP, so the LSW slip-rate
-`V = (τ_nuc − μ_s·σ_n)/η_s` is the SAME closed-form value at every QP — interior and
-shared alike — driven purely by the per-DOF prestress in `DOFData`. The test therefore
-proves the `:3260` arm *runs* and yields correct *at-rest* physics, but it does NOT
-exercise the cross-rank Q± exchange: there is no velocity/stress jump for the shared-face
-ghost exchange to carry, so a bug in the shared-fault Q± plumbing feeding `EvaluateLSW`
-(e.g. swapped +/− sides, a missing rotation, or a stale ghost) would still pass — both
-sides see Q=0. This is exactly the failure mode the plan's R-004/risk-2 wanted covered.
+Plan §7's mitigation says "ensure sidecar readers are destroyed before
+`MPI_Finalize`". That is NOT achievable for the two long-lived owners:
+`vel_bundle` and `rs_sidecar` (+ the resolver's captured `shared_ptr` copies)
+are main-scope locals, and the driver calls `MPI_Finalize()`
+(`drivers/spatial_dyn_driver.cpp:4006` and the dry-run exit) before main's
+locals unwind. They also cannot be `reset()` earlier: the R-008 lifetime
+contract requires `vel_bundle` to outlive `wave_ptr`, which itself outlives
+finalize. The implementation therefore skips `MPI_Win_unlock_all`/`MPI_Win_free`
+when `MPI_Finalized()` is true. Per the MPI standard, finalizing with live
+windows is formally erroneous; OpenMPI tolerates it (session-dir cleanup), and
+the review probe confirms no crash — but the in-tree test suite never exercises
+this exact path (the unit test's readers are all scoped and freed pre-finalize).
 
-**Trigger:** any production run is dynamic (non-zero Q across the seam); L8 never is.
+**Trigger:**
+Any production run with `--sidecar-shared-mem`: material (3 windows) and
+friction (2+) windows are alive at `MPI_Finalize`; their dtors run after.
 
-**Actual behavior:** L8 passes whether or not the shared-fault Q± pairing is correct,
-because Q=0 removes the only signal that pairing affects.
+**Actual behavior:**
+Dtor detects `MPI_Finalized` and skips the collective free; OS reclaims the
+shm segment at process exit. Verified by probe (exit 0). The transient stress
+windows (6) are freed properly inside `apply_csm_impl`.
 
-**Expected behavior:** drive a one-sided Q perturbation (a VX kick on the −y side only,
-as the sibling `test_interior_vs_shared_branch_live.cpp::SetOneSidedQ` does) so the
-shared QPs see a real jump, then assert parallel-shared `V/τ*_corr` == serial-interior to
-round-off.
+**Expected behavior:**
+Same runtime behavior, but (a) the guard path must be covered by a permanent
+regression test, and (b) plan §7 must state the real mitigation (guarded skip)
+instead of the false "destroyed before finalize" claim.
 
-**Suggested fix (extend L8):** add a one-sided Q kick before each `wave.Mult`, applied to
-the element on the −y side, identical in the serial and parallel builds:
+**Suggested fix:**
+1. Add the probe as a permanent single-rank test file
+   `tests/unit/test_data_field_3d_shared_mem_finalize.cpp` (fixture writer +
+   `new DataField3D(path, "F", Abort, MPI_COMM_SELF)` → `MPI_Finalize()` →
+   `delete` → print OK), with target:
+```diff
+ test-data-field-3d-shared-mem: seas_test_data_field_3d_shared_mem
+ 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_data_field_3d_shared_mem
+ 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_data_field_3d_shared_mem
++	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_data_field_3d_shared_mem_finalize
+```
+2. In plan §7, replace the row "Window lifetime vs MPI_Finalize | … ensure
+   sidecar readers are destroyed before MPI_Finalize …" with the actual
+   mechanism: "long-lived readers outlive finalize by design; dtor skips the
+   collective free under `MPI_Finalized()` (probe-tested); transient stress
+   windows free normally."
+
+**Test case:**
 ```cpp
-// after `Vector Q(wave.Height()); Q = 0.0;` in BOTH the serial and parallel blocks:
-const auto &fes = wave.GetFESpace();
-const int ndof = fes.GetNDofs();
-for (int e = 0; e < mesh.GetNE(); e++) {           // `mesh` = the (par)mesh in scope
-   real_t cy = 0; Array<int> ev; mesh.GetElementVertices(e, ev);
-   for (int v = 0; v < ev.Size(); v++) cy += mesh.GetVertex(ev[v])[1];
-   if (cy / ev.Size() >= 0.0) continue;            // −y side only
-   Array<int> ed; fes.GetElementDofs(e, ed);
-   for (int j = 0; j < ed.Size(); j++) Q(VX * ndof + ed[j]) += 1.0e-5;
+// tests/unit/test_data_field_3d_shared_mem_finalize.cpp (np=1)
+int main(int argc, char** argv) {
+   MPI_Init(&argc, &argv);
+   write_min_fixture(path);                       // 2x2x2 grid, field "F"=2.0
+   auto* f = new mfem::seas::DataField3D(path, "F",
+                mfem::seas::OOBPolicy::Abort, MPI_COMM_SELF);
+   if (f->Evaluate(0.5,0.5,0.5) != 2.0) { return 1; }
+   MPI_Finalize();
+   delete f;                                      // must not crash (guard path)
+   std::puts("dtor-after-finalize OK");
+   return 0;
 }
 ```
-This makes V at the fault depend on the cross-rank jump, so the existing
-`parallel == serial` assertion now actually tests the `:3260` Q± pairing.
-
-**Test case:** the extension above is the test — with the kick, flipping the +/− side
-selection in the `:3260` dispatch (or the ghost pairing) must make
-`V_parallel != V_serial`, which the assertion `|V_parallel − V_serial| ≤ 1e-9·…` catches.
+(Ran during review as an ad-hoc probe: prints `eval=2`, `dtor-after-finalize
+OK`, exit 0.)
 
 ---
 
-### [R-002] [MODERATE] [POSSIBLE] [drivers/spatial_dyn_driver.cpp] — the end-to-end rk45+LSW driver path past mesh-load is unverified locally
+### [R-002] [MODERATE] [tests/unit/test_data_field_3d_shared_mem.cpp] — No coverage of the shared-mode FAILURE path (loading-rank validation abort must kill all node ranks, not hang them)
 
-**Category:** ASSUMPTION (coverage gap on the integration path)
+**Category:** EDGE_CASE (test gap)
 
 **Description:**
-Local verification of the driver stops at the `--dry-run --verify-dispatch` banner, which
-prints BEFORE the wave-operator assembly and aborts at mesh-load (the 101 MB TPV205 mesh
-is absent and is a "full-mesh" op the project rule forbids locally). The unit tests (L1–L8)
-drive `EvaluateLSW` / `AdvanceRKCoupledLSW_Spatial` / `Mult` DIRECTLY — they never go
-through `spatial_dyn_driver`'s setup between mesh-load and the time loop. So the
-driver-integration wiring for `is_rk && is_lsw` is unexercised locally:
-  - `MakeFrictionIterator(cfg, fault_flux, /*rs=*/nullptr)` is still constructed for the
-    LSW-RK path (`:~2515`) and then unused — if that construction asserts for a
-    `time_integrator=rk45` LSW config, the run dies before the time loop, and nothing
-    local catches it;
-  - the 3-way dispatch actually selecting `AdvanceRKCoupledLSW_Spatial` (vs the RS arm)
-    is only covered by code-reading, not execution.
+The load-bearing safety claim of the design — "a NaN/out-of-range/H5Dread
+failure on node-rank-0 MPI_Aborts the whole job while peers wait at the publish
+barrier" — is argued from `general/error.cpp:182` but never tested. The
+per-rank reader has fork()-based abort tests (`test_data_field_3d.cpp`); the
+shared-mode reader has none. fork() inside an MPI process is not reliable, so
+the same idiom cannot be reused directly.
 
-**Trigger:** the first real `seas_spatial_dyn_driver … --time-integrator rk45 --mixed-flux
-adjacent` run (Frontera).
+**Trigger:**
+A sidecar with a NaN or out-of-range cell (or truncated dataset) loaded with
+`--sidecar-shared-mem` on np≥2. Expected: whole job aborts promptly. A
+regression that broke the abort-before-barrier ordering (e.g. moving
+validation after the publish barrier, or an MFEM build where MFEM_ABORT does
+not reach MPI_Abort) would instead hang every non-root rank at
+`MPI_Barrier(node_comm_)` — a wall-clock-eating deadlock on a cluster.
 
-**Actual behavior:** unknown past mesh-load locally; relies on the Frontera sbatch.
+**Actual behavior:**
+Untested; correctness rests on code reading only.
 
-**Expected behavior:** at least one execution that reaches the time loop on the LSW-RK
-path before production reliance.
+**Expected behavior:**
+An automated np=2 test proves: bad fixture → nonzero exit for the whole
+`mpirun`, within a timeout (no hang).
 
-**Suggested fix:** the `jobs/tpv205/tpv205_p1_rk45_mixedflux.sbatch` preflight already runs
-`--dry-run --verify-dispatch --mesh <200m>` on Frontera, which DOES exercise mesh-load +
-iterator construction + dispatch resolution. Make that the documented gate (it is), and —
-to shrink the gap — add a coarse idev smoke: mesh `tpv2053d_200m.geo` at a coarse
-characteristic length on an idev node (conda `pythonenv`) and run the same dry-run, OR add
-a 1–2-step `--tfinal 1e-4` run on that coarse mesh to confirm the time loop enters the LSW
-stepper. Document in the sbatch header that "scheme resolves locally; full driver path is
-idev/Frontera-gated per the no-local-full-mesh rule."
+**Suggested fix:**
+Add a hidden self-test mode to the existing test binary and drive it from the
+Makefile with a bounded, negated invocation:
+```diff
+ # in tests/unit/test_data_field_3d_shared_mem.cpp main(), before fixtures:
++   if (argc > 1 && std::string(argv[1]) == "--nan-fixture-abort-child")
++   {
++      // rank 0 writes a fixture whose "F" contains a NaN cell; ALL ranks
++      // then construct shared-mode readers.  EXPECTED: global abort.
++      std::string p = make_tmp_path("nanchild");
++      if (g_world_rank == 0) { write_nan_fixture(p); }
++      p = bcast_path(p, MPI_COMM_WORLD);
++      MPI_Barrier(MPI_COMM_WORLD);
++      DataField3D bad(p, "F", OOBPolicy::Abort, node_comm);   // aborts here
++      return 0;   // NOT reached
++   }
+```
+```diff
+ test-data-field-3d-shared-mem: seas_test_data_field_3d_shared_mem
+ 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_data_field_3d_shared_mem
+ 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_data_field_3d_shared_mem
++	@echo "--- expecting ABORT (NaN fixture, shared mode) ---"
++	! timeout 60 $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 \
++	    ./seas_test_data_field_3d_shared_mem --nan-fixture-abort-child \
++	    > /dev/null 2>&1
+```
+(`! timeout 60 …` asserts nonzero exit AND bounds a hang at 60 s. On macOS
+without `timeout`, use `gtimeout` from coreutils or guard with
+`command -v timeout`; fall back to the un-timed `!` form.)
 
-**Test case:** N/A as a unit test (the driver is not unit-testable without a mesh); the
-gate is the idev/Frontera dry-run. Acceptance: the dry-run on a real (coarse) mesh exits 0
-with the `[time-integrator] … [LSW coupled-RK on (Q, slip)]` banner line printed.
+**Test case:** the Makefile stanza above IS the test (asserts abort, bounds
+hang).
 
 ---
 
-### [R-003] [LOW] [fault_face_flux.cpp:EvaluateLSW] — `s.Theta` is computed but never used
+### [R-003] [LOW] [io/data_field_3d.cpp:load_] — Missing defensive checks: loading rank's `base` null, and `disp_unit` from shared_query unchecked
 
-**Category:** QUALITY
+**Category:** ASSUMPTION
 
 **Description:**
-`EvaluateLSW` computes `s.Theta = sqrt(tau1_total² + tau2_total²)` (Step 2), but nothing
-downstream reads it: `SolveLSW_TPV205` recomputes `tau_abs` from `tau{1,2}_total`
-internally. It is dead arithmetic (one `sqrt` per fault QP per RK stage). It mirrors the
-same dead line in `EvaluateADER_LSW`, so this is a pre-existing pattern, not a new defect —
-but it is dead in the new code too.
+After `MPI_Win_allocate_shared` returns `MPI_SUCCESS` on the loading rank,
+`base` is assumed non-null (standard-guaranteed for size>0, but a null deref
+here would be a silent SEGV inside the converted writes). On peers, the
+returned `qdisp` (disp_unit) is ignored; a mismatch would indicate a
+heterogeneous build.
 
-**Trigger:** every `EvaluateLSW` call.
+**Trigger:**
+Buggy/exotic MPI implementation; mixed-ABI node. Not reachable on OpenMPI 4.x.
 
-**Actual/Expected:** harmless; a wasted `sqrt`. Drop for clarity (or leave for parity with
-`EvaluateADER_LSW`).
+**Actual behavior:** no check.
+
+**Expected behavior:** abort with a precise message.
 
 **Suggested fix:**
 ```diff
--   s.Theta         = std::sqrt(s.tau1_total * s.tau1_total
--                              + s.tau2_total * s.tau2_total);
-+   // (No s.Theta needed: SolveLSW_TPV205 recomputes |tau_total| internally.)
+       if (err != MPI_SUCCESS)
+       {
+          ...
+       }
++      if (loads && base == nullptr)
++      {
++         H5Dclose(did);
++         H5Fclose(file);
++         MFEM_ABORT("DataField3D: MPI_Win_allocate_shared returned a null "
++                    "base pointer for field '" << field_name << "'");
++      }
+       if (!loads)
+       {
+          MPI_Aint qsize = 0;
+          int qdisp = 0;
+          err = MPI_Win_shared_query(shared_win_, 0, &qsize, &qdisp, &base);
+          ...
++         if (qdisp != static_cast<int>(sizeof(real_t)))
++         {
++            H5Dclose(did);
++            H5Fclose(file);
++            MFEM_ABORT("DataField3D: shared window disp_unit " << qdisp
++                       << " != sizeof(real_t) " << sizeof(real_t)
++                       << " for field '" << field_name << "'");
++         }
 ```
-(No test — dead-code removal, behaviour-neutral.)
+
+**Test case:** not demonstrable on a conforming MPI (defensive only) — hence LOW.
 
 ---
 
-### [R-004] [LOW] [fault_face_flux.cpp:EvaluateLSW] — no `SEAS_DIAG_FAULT_FLUX` diagnostic block on the LSW Mult path
+### [R-004] [LOW] [tests/unit/test_data_field_3d_shared_mem.cpp:27-42] — `std::array` used without `#include <array>`
 
 **Category:** QUALITY
 
 **Description:**
-The rate-and-state `Evaluate` carries a `#ifdef SEAS_DIAG_FAULT_FLUX` hypocenter-QP trace
-(the C-1/C-1n checkpoints). `EvaluateLSW` (like `EvaluateADER_LSW`) has none, so a
-`SEAS_DIAG_FAULT_FLUX` build debugging an LSW-RK rupture gets zero fault-flux diagnostics
-on the Mult path — the C-1 bisection tooling is silently unavailable for LSW. Consistent
-with `EvaluateADER_LSW` (which also omits it), so not a regression; flagged so the gap is
-on record if an LSW-RK rupture ever needs the C-1 trace.
+`sample_points()` returns `std::vector<std::array<real_t, 3>>` but the file
+never includes `<array>`; it compiles via transitive inclusion from
+`data_field_3d.hpp` (which includes `<array>`), so a future header cleanup
+there would break this test.
 
-**Trigger:** a `SEAS_DIAG_FAULT_FLUX` build running LSW + RK.
+**Trigger:** header hygiene change in an included header.
 
-**Actual/Expected:** no diag output vs the RS path's per-QP trace. Optional: add a guarded
-diag block mirroring `Evaluate`'s if/when LSW-RK needs bisection debugging.
+**Actual behavior:** compiles by luck of transitivity.
 
-**Suggested fix:** defer unless needed; if added, mirror `Evaluate`'s
-`#ifdef SEAS_DIAG_FAULT_FLUX … if (data.diag_print) { … }` block after `ComputeTrialTraction`.
-(No test — diagnostics only.)
+**Expected behavior:** self-sufficient includes.
 
----
+**Suggested fix:**
+```diff
+ #include <cmath>
++#include <array>
+ #include <cstdio>
+```
 
-### [R-005] [LOW] [test_lsw_rk_mixed_flux.cpp:L6 / DoLSWRK4Reference] — the L6 reference re-implements the stepper, so a shared conceptual error would pass
-
-**Category:** QUALITY (test robustness)
-
-**Description:**
-L6's `DoLSWRK4Reference` reproduces the same coupled-(Q,slip) RK4 logic as
-`AdvanceRKCoupledLSW_Spatial` (stage-local slip staging + absolute combine). If BOTH shared
-the same conceptual error (e.g. both staged slip from the wrong stage subset), the
-`stepper == reference` assertion would pass falsely. The test mitigates this with (a) the
-discrimination assertion (`slip_abs != slip_bug`, which a `+=` regression fails) and (b) L1
-anchoring the per-QP physics — so the residual risk is low, but the "matches reference"
-check alone is not an independent oracle.
-
-**Trigger:** a refactor that changes the staging convention in both stepper and reference.
-
-**Actual/Expected:** the reference is faithful-by-construction, not independent. Acceptable
-given the discrimination + L1 anchor, but worth noting.
-
-**Suggested fix:** strengthen the independent anchor — assert L6's per-QP `V1/V2` after the
-final stage matches the analytic LSW closed form `(|τ_total| − μ(δ)·σ_n)/η_s` at the
-post-step `(Q_new, slip_new)` for at least one sliding QP (an oracle that does NOT depend
-on the stepper's internal structure). (No code-under-test change; test-only hardening.)
+**Test case:** n/a (compile-time; LOW).
 
 ---
+
+## Fix round 1 (2026-07-17, /code-fix) — ALL FINDINGS RESOLVED
+- **R-001 FIXED**: permanent np=1 regression
+  `tests/unit/test_data_field_3d_shared_mem_finalize.cpp` added + wired into
+  `test-data-field-3d-shared-mem`; plan §7 row reworded to the real mechanism
+  (Finalized-guard skip; R-008 ordering forbids early reset).  Run: prints
+  `dtor-after-finalize OK`, exit 0.
+- **R-002 FIXED**: `--nan-fixture-abort-child` mode added to the shared-mem
+  test (clean-exit-0 on a BROKEN guard so the negated Makefile check trips);
+  Makefile stanza asserts nonzero mpirun exit AND distinguishes a hang
+  (timeout/gtimeout exit 124 → FAIL) from the expected abort.  Run:
+  `OK: aborted as expected (mpirun exit 1)`.
+- **R-003 FIXED**: `loads && base == nullptr` abort after
+  `MPI_Win_allocate_shared`; `qdisp != sizeof(real_t)` abort after
+  `MPI_Win_shared_query` (both with field-named messages).
+- **R-004 FIXED**: `#include <array>` added.
+- Post-fix verification: shared-mem target green (np=2 12/12, np=4 24/24,
+  finalize OK, NaN-abort OK); full classic suite unchanged (data-projection
+  ALL PASSED, prestress 12/12, friction-sidecar 40/40, velocity-bundle 6/6,
+  safs-params 25/25); driver relinks.
 
 ## Summary
 - Critical issues: 0
-- Moderate issues: 2 (R-001 shared-fault-at-rest-only; R-002 driver-path-unverified-locally)
-- Low issues: 3 (R-003 dead Theta; R-004 no LSW diag block; R-005 L6 reference not independent)
-- Plan compliance: **FULL** — all 5 phases implemented as specified; the plan's own
-  review-fixes (`=` combine, symmetric guard, L1/L6/L8 tests) are present and pass.
-- Verdict: **PASS WITH FIXES** — the implementation is correct and well-tested (L1–L8 +
-  byte-exact guards green; the 5 `make test` failures are pre-existing, in files the diff
-  touches 0 lines of). Apply R-001 (give L8 a real cross-rank jump) and R-002 (an
-  idev/Frontera driver smoke past mesh-load) to close the two production-path coverage gaps
-  before relying on the feature in production; R-003/R-004/R-005 are fix-when-convenient.
+- Moderate issues: 2 (R-001 deviation/coverage, R-002 failure-path coverage)
+- Low issues: 2 (R-003 defensive checks, R-004 include hygiene)
+- Plan compliance: FULL for the implemented scope (Phases 0–2 + §6 gates;
+  Phase 3 explicitly deferred to Expanse per the plan's own gating — plan
+  status line updated accordingly). One §7 mitigation was reworded in code
+  (Finalized-guard instead of impossible destroy-before-finalize) — flagged as
+  R-001 rather than silently accepted.
+- Verdict: **PASS WITH FIXES** — apply R-001/R-002 (coverage + doc wording)
+  and the two LOW patches; no algorithmic changes required.
+
+## Positive verification performed (not findings)
+- Flag OFF ⇒ classic path: all five pre-existing sidecar test targets pass
+  unchanged (data-projection roll-up, project-fault-prestress 12/12,
+  spatial-friction-sidecar 40/40, spatial-velocity-bundle 6/6,
+  compute-safs-params 25/25).
+- Shared ⇒ per-rank bit-identity + cross-rank payload identity: np=2 12/12,
+  np=4 24/24 (the corner sweep samples EVERY stored cell, so the §6(b)
+  "checksum" requirement is fully covered, not sampled).
+- Collective-ordering audit: all three loaders are config-driven and execute
+  in identical order on every rank (velocity → stress → friction); node-comm
+  collectives complete before the next world collective; no interleaving
+  deadlock found.
+- Copy/move safety: `DataField3D` copy deleted; no in-repo code copies or
+  moves it (StressField3D members constructed in place; bundles hold
+  `unique_ptr`); every consumer (driver, 2 standalone projector tools, all
+  test binaries) recompiles and links.
+- dtor-after-finalize probe: exit 0 (see R-001).
 
 ## Unreviewed Areas
-- **CFL stability of RK45 + central flux at p1 on the real TPV205 mesh** — empirical,
-  Frontera-only (the sbatch reads the stable dt off the dev smoke); cannot be assessed
-  statically.
-- **SCEC TPV205 physics correctness end-to-end** — post-merge Frontera benchmark vs the
-  overlays; out of scope for a static code review.
-- **`LSW_ForcedRupture` Mult abort** — reviewed (defensive, unreachable from the current
-  driver since `is_lsw → LSW`); correct as a fail-loud guard.
+- On-cluster behavior (Lustre HDF5 metadata storm at 128 ranks/node, OpenMPI
+  4.1.x on Expanse, real ~253 MB windows) — Phase 3 scope, needs the cluster.
+- Serial (non-MPI) MFEM build of the io/ files: code paths are `#ifdef`-clean
+  by inspection, but no serial build exists in this environment to compile.

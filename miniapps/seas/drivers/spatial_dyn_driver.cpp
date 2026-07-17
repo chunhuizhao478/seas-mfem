@@ -531,7 +531,15 @@ void AdvanceADERWithSubStep_Spatial(
 // accepts as "no sidecar" -- so the call site needs no branch.
 // -------------------------------------------------------------------------
 std::shared_ptr<const seas::spatial::RateStateSidecarFields>
-MakeRateStateSidecarFields(const seas::spatial::FrictionSidecarSpec &spec)
+MakeRateStateSidecarFields(const seas::spatial::FrictionSidecarSpec &spec
+#ifdef MFEM_USE_MPI
+                           // PLAN_sidecar_mpi_shared_memory Phase 0: pass a
+                           // node-local comm to hold each field grid in ONE
+                           // MPI-3 shared window per node; MPI_COMM_NULL =
+                           // the classic per-rank replication.
+                           , MPI_Comm node_comm = MPI_COMM_NULL
+#endif
+                           )
 {
    using seas::spatial::RateStateSidecarFields;
    if (!spec.enabled) { return nullptr; }
@@ -544,8 +552,19 @@ MakeRateStateSidecarFields(const seas::spatial::FrictionSidecarSpec &spec)
    // (schema_version / crs / z_positive / monotone axes / no NaN / bounds)
    // and aborts with a precise message on a bad file, so a missing dataset
    // fails HERE, at setup, not mid-time-loop.
-   auto open_reader = [&spec, oob](const std::string &field)
+   auto open_reader = [&spec, oob
+#ifdef MFEM_USE_MPI
+                       , node_comm
+#endif
+                      ](const std::string &field)
    {
+#ifdef MFEM_USE_MPI
+      if (node_comm != MPI_COMM_NULL)
+      {
+         return std::make_shared<seas::DataField3D>(spec.path, field, oob,
+                                                    node_comm);
+      }
+#endif
       return std::make_shared<seas::DataField3D>(spec.path, field, oob);
    };
    // Type-erase a reader into the resolver's callable.  The shared_ptr is
@@ -785,6 +804,12 @@ int main(int argc, char *argv[])
    const bool no_sidecar_material =
       HasFlag(argc, argv, "--no-sidecar-material");
    const bool print_derived = HasFlag(argc, argv, "--print-derived");
+   // PLAN_sidecar_mpi_shared_memory_2026-07-17.md Phase 0: opt-in MPI-3
+   // shared-memory sidecar windows — ONE physical copy of each gridded
+   // sidecar (material / stress / friction) per NODE instead of one per
+   // rank.  Default OFF = the classic per-rank replication, byte-identical
+   // to the pre-flag behaviour.
+   const bool sidecar_shared_mem = HasFlag(argc, argv, "--sidecar-shared-mem");
 
    const std::string cli_mesh        = GetStringArg(argc, argv, "--mesh", "");
    const std::string cli_vel_model   =
@@ -1323,6 +1348,47 @@ int main(int argc, char *argv[])
    real_t mat_mu     = cfg.material_fallback.mu;
    real_t mat_rho    = cfg.material_fallback.rho;
 
+#ifdef MFEM_USE_MPI
+   // PLAN_sidecar_mpi_shared_memory_2026-07-17.md Phase 0: node-local
+   // communicator for the MPI-3 shared-memory sidecar windows
+   // (--sidecar-shared-mem).  MPI_COMM_NULL when the flag is off — every
+   // loader then takes its classic per-rank path.  RAII guard: the comm
+   // is freed on destruction UNLESS MPI_Finalize already ran (this
+   // driver finalizes before main's locals unwind — see the MPIContext
+   // note below; MPI_Comm_free after finalize aborts, and MPI_Finalize
+   // itself reclaims the communicator).  The windows created on this
+   // comm do NOT need it alive to be freed (MPI keeps an internal group
+   // reference), so guard-vs-window destruction order is immaterial.
+   struct NodeCommGuard
+   {
+      MPI_Comm comm = MPI_COMM_NULL;
+      ~NodeCommGuard()
+      {
+         if (comm != MPI_COMM_NULL)
+         {
+            int finalized = 0;
+            MPI_Finalized(&finalized);
+            if (!finalized) { MPI_Comm_free(&comm); }
+         }
+      }
+   } sidecar_node_comm;
+   if (sidecar_shared_mem)
+   {
+      // key = world rank: node-local rank order mirrors MPI_COMM_WORLD,
+      // so "node-local rank 0" (the loading rank) is deterministic.
+      MPI_Comm_split_type(comm, MPI_COMM_TYPE_SHARED, /*key=*/rank,
+                          MPI_INFO_NULL, &sidecar_node_comm.comm);
+      int node_size = 0;
+      MPI_Comm_size(sidecar_node_comm.comm, &node_size);
+      if (rank == 0)
+      {
+         std::cout << "[sidecar] --sidecar-shared-mem: MPI-3 shared-memory "
+                   << "windows ON (rank 0's node: " << node_size
+                   << " rank(s) share ONE copy of each gridded sidecar)\n";
+      }
+   }
+#endif
+
    // REVIEW R-008 (lifetime): `vel_bundle` (owns the Coefficient objects the
    // sidecar MaterialField points at) and `material` MUST outlive `wave_ptr`
    // — the matrix-path het ctor stores a non-owning `material_ = &material`,
@@ -1408,8 +1474,14 @@ int main(int argc, char *argv[])
    {
       try
       {
+#ifdef MFEM_USE_MPI
+         vel_bundle = std::make_unique<spatial::SpatialVelocityBundle>(
+            spatial::LoadSpatialVelocityBundle(cfg.velocity, pmesh,
+                                               sidecar_node_comm.comm));
+#else
          vel_bundle = std::make_unique<spatial::SpatialVelocityBundle>(
             spatial::LoadSpatialVelocityBundle(cfg.velocity, pmesh));
+#endif
          material = vel_bundle->MakeMaterialField();
          if (rank == 0)
          {
@@ -2038,7 +2110,12 @@ int main(int argc, char *argv[])
    }
    else
    {
+#ifdef MFEM_USE_MPI
+      spatial::ApplyCsmStressSidecar(cfg.stress, geom,
+                                     sidecar_node_comm.comm);
+#else
       spatial::ApplyCsmStressSidecar(cfg.stress, geom);
+#endif
    }
    MFEM_VERIFY(geom.HasParams(),
                "spatial_dyn_driver: stress source projection failed");
@@ -2056,7 +2133,12 @@ int main(int argc, char *argv[])
    std::shared_ptr<const spatial::RateStateSidecarFields> rs_sidecar;
    if (!is_lsw && cfg.rate_state.has_value())
    {
+#ifdef MFEM_USE_MPI
+      rs_sidecar = MakeRateStateSidecarFields(cfg.rate_state->sidecar,
+                                              sidecar_node_comm.comm);
+#else
       rs_sidecar = MakeRateStateSidecarFields(cfg.rate_state->sidecar);
+#endif
       if (rs_sidecar && rank == 0)
       {
          std::cout << "[spatial_dyn] friction sidecar: "

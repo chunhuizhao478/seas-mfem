@@ -86,6 +86,49 @@ public:
                const std::string& field_name,
                OOBPolicy oob = OOBPolicy::Abort);
 
+#ifdef MFEM_USE_MPI
+   /// MPI-3 shared-memory overload
+   /// (PLAN_sidecar_mpi_shared_memory_2026-07-17.md §4).
+   ///
+   /// ``node_comm`` must be a NODE-LOCAL communicator (all member ranks
+   /// share physical memory; build it with
+   /// ``MPI_Comm_split_type(..., MPI_COMM_TYPE_SHARED, ...)``).  The
+   /// grid payload is then held in ONE ``MPI_Win_allocate_shared``
+   /// window per node: node-local rank 0 performs the HDF5 read and the
+   /// NaN/range validation; every other member maps the same physical
+   /// pages via ``MPI_Win_shared_query``.  The tiny per-rank members
+   /// (axes, bbox, scalars) stay replicated on every rank.
+   ///
+   /// Passing ``MPI_COMM_NULL`` selects the classic per-rank owning
+   /// path, byte-identical to the 3-argument constructor.
+   ///
+   /// COLLECTIVE over ``node_comm`` (window allocation + publish
+   /// barrier): every member rank must construct the same field from
+   /// the same sidecar in the same order.  A validation failure on the
+   /// loading rank aborts the WHOLE job (MFEM_ABORT calls MPI_Abort on
+   /// MPI builds), so peers cannot hang at the publish barrier.
+   DataField3D(const std::string& sidecar_path,
+               const std::string& field_name,
+               OOBPolicy oob,
+               MPI_Comm node_comm);
+#endif
+
+   /// Frees the shared-memory window when this instance owns one.  If
+   /// MPI has already been finalized (this driver calls MPI_Finalize
+   /// before main's scope unwinds — see spatial_dyn_driver.cpp's
+   /// MPIContext note), the free is skipped: the OS reclaims the
+   /// shared segment at process exit, and calling MPI_Win_free after
+   /// MPI_Finalize would abort.  SPMD control flow makes the
+   /// skip-vs-free decision consistent across node-local ranks.
+   ~DataField3D();
+
+   /// Non-copyable: the instance may own an MPI shared-memory window
+   /// handle, which cannot be duplicated.  (No in-repo code copied
+   /// DataField3D before this change; StressField3D constructs its six
+   /// members in place.)
+   DataField3D(const DataField3D&) = delete;
+   DataField3D& operator=(const DataField3D&) = delete;
+
    /// Evaluate at (x, y, z) in canonical CRS (UTM 11 N, m) using the
    /// currently-selected ``InterpMode`` (default Trilinear).
    /// Aborts on out-of-bbox query.
@@ -125,6 +168,14 @@ public:
    int FindIndexZ(real_t v) const { return find_index_(z_, v); }
 
 private:
+   /// Shared load body for both constructors: metadata + axes on every
+   /// rank, then the field payload into either the per-rank owned
+   /// vector (node_comm_ == MPI_COMM_NULL / serial build) or the
+   /// node-shared MPI-3 window (loading rank fills + validates, peers
+   /// map).  Sets ``data_`` / ``data_len_`` in both modes.
+   void load_(const std::string& sidecar_path,
+              const std::string& field_name);
+
    /// Trilinear (8-voxel) evaluation; the original Phase-3 path,
    /// unchanged.
    real_t evaluate_trilinear_(real_t x, real_t y, real_t z) const;
@@ -148,7 +199,28 @@ private:
    }
 
    std::vector<real_t> x_, y_, z_;
-   std::vector<real_t> data_;       ///< (Nx, Ny, Nz) row-major flat
+
+   /// Grid payload, (Nx, Ny, Nz) row-major flat.  ``data_`` is the ONE
+   /// read pointer every evaluator indexes; it aims at either
+   ///   - ``data_owned_.data()``     (per-rank owning mode, the
+   ///     pre-shared-memory behaviour, and the only mode on serial
+   ///     builds), or
+   ///   - the node-shared MPI-3 window base (shared mode; one physical
+   ///     copy per node, mapped read-only by every node-local rank).
+   /// Keeping the name ``data_`` leaves the trilinear / Catmull-Rom
+   /// read code byte-for-byte unchanged.
+   std::vector<real_t> data_owned_;
+   const real_t* data_ = nullptr;
+   size_t data_len_ = 0;
+#ifdef MFEM_USE_MPI
+   /// Node-local communicator used ONLY during load_ (not owned, not
+   /// freed here); MPI_COMM_NULL selects the per-rank owning mode.
+   MPI_Comm node_comm_ = MPI_COMM_NULL;
+   /// Shared-memory window owning the payload in shared mode;
+   /// MPI_WIN_NULL in owning mode.  Freed (collectively) in ~DataField3D
+   /// unless MPI has already been finalized.
+   MPI_Win shared_win_ = MPI_WIN_NULL;
+#endif
    std::array<real_t, 6> bbox_;
    std::string field_name_;
    std::string units_;

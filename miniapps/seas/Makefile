@@ -526,6 +526,11 @@ MATERIAL_COEFFICIENTS_HEADERS               = io/material_coefficients.hpp \
                                               io/data_field_3d.hpp
 MATERIAL_COEFFICIENTS_SRC                   = io/material_coefficients.cpp
 TEST_DATA_FIELD_3D_SRC                      = tests/unit/test_data_field_3d.cpp
+# PLAN_sidecar_mpi_shared_memory_2026-07-17.md §6: MPI-3 shared-memory
+# sidecar mode (np>=2 parity + cross-rank sharing assertions).
+TEST_DATA_FIELD_3D_SHARED_MEM_SRC           = tests/unit/test_data_field_3d_shared_mem.cpp
+# REVIEW.md R-001: dtor-after-MPI_Finalize guard regression (np=1).
+TEST_DATA_FIELD_3D_SHARED_MEM_FIN_SRC       = tests/unit/test_data_field_3d_shared_mem_finalize.cpp
 TEST_STRESS_FIELD_3D_SRC                    = tests/unit/test_stress_field_3d.cpp
 TEST_FIELD_PROJECTOR_SRC                    = tests/unit/test_field_projector.cpp
 TEST_HETEROGENEOUS_MATERIAL_SRC             = tests/unit/test_heterogeneous_material.cpp
@@ -576,6 +581,8 @@ FIELD_COEFFICIENT_OBJ            = $(FIELD_COEFFICIENT_SRC:.cpp=.o)
 HETEROGENEOUS_MATERIAL_OBJ       = $(HETEROGENEOUS_MATERIAL_SRC:.cpp=.o)
 MATERIAL_COEFFICIENTS_OBJ        = $(MATERIAL_COEFFICIENTS_SRC:.cpp=.o)
 TEST_DATA_FIELD_3D_OBJ           = $(TEST_DATA_FIELD_3D_SRC:.cpp=.o)
+TEST_DATA_FIELD_3D_SHARED_MEM_OBJ = $(TEST_DATA_FIELD_3D_SHARED_MEM_SRC:.cpp=.o)
+TEST_DATA_FIELD_3D_SHARED_MEM_FIN_OBJ = $(TEST_DATA_FIELD_3D_SHARED_MEM_FIN_SRC:.cpp=.o)
 TEST_STRESS_FIELD_3D_OBJ         = $(TEST_STRESS_FIELD_3D_SRC:.cpp=.o)
 TEST_FIELD_PROJECTOR_OBJ         = $(TEST_FIELD_PROJECTOR_SRC:.cpp=.o)
 TEST_HETEROGENEOUS_MATERIAL_OBJ  = $(TEST_HETEROGENEOUS_MATERIAL_SRC:.cpp=.o)
@@ -1102,6 +1109,22 @@ SEAS_INCLUDES = $(if $(SRC),-I$(MFEM_DIR))
 # MaterialField unit tests (Phase 3..5 of plan v2).
 seas_test_data_field_3d: $(TEST_DATA_FIELD_3D_OBJ) $(DATA_FIELD_3D_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_DATA_FIELD_3D_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# PLAN_sidecar_mpi_shared_memory_2026-07-17.md §6: MPI shared-memory
+# sidecar parity test (needs StressField3D for the comm-forwarding case).
+seas_test_data_field_3d_shared_mem: $(TEST_DATA_FIELD_3D_SHARED_MEM_OBJ) \
+                                    $(DATA_FIELD_3D_OBJ) $(STRESS_FIELD_3D_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_DATA_FIELD_3D_SHARED_MEM_OBJ) \
+	    $(STRESS_FIELD_3D_OBJ) $(DATA_FIELD_3D_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# REVIEW.md R-001: destroy a shared-mode reader AFTER MPI_Finalize (np=1).
+seas_test_data_field_3d_shared_mem_finalize: \
+                                    $(TEST_DATA_FIELD_3D_SHARED_MEM_FIN_OBJ) \
+                                    $(DATA_FIELD_3D_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_DATA_FIELD_3D_SHARED_MEM_FIN_OBJ) \
 	    $(DATA_FIELD_3D_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
@@ -3082,6 +3105,18 @@ $(TEST_DATA_FIELD_3D_OBJ): %.o: $(SRC)%.cpp $(DATA_FIELD_3D_HEADERS) \
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -c $< -o $@
 
+$(TEST_DATA_FIELD_3D_SHARED_MEM_OBJ): %.o: $(SRC)%.cpp \
+                                $(STRESS_FIELD_3D_HEADERS) \
+                                $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -c $< -o $@
+
+$(TEST_DATA_FIELD_3D_SHARED_MEM_FIN_OBJ): %.o: $(SRC)%.cpp \
+                                $(DATA_FIELD_3D_HEADERS) \
+                                $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -c $< -o $@
+
 $(TEST_STRESS_FIELD_3D_OBJ): %.o: $(SRC)%.cpp $(STRESS_FIELD_3D_HEADERS) \
                                   $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
@@ -4107,6 +4142,30 @@ test-data-projection: test-data-field-3d test-stress-field-3d test-field-project
 
 test-data-field-3d: seas_test_data_field_3d
 	./seas_test_data_field_3d
+
+# PLAN_sidecar_mpi_shared_memory_2026-07-17.md §6 gate.  Kept OUT of the
+# test-data-projection roll-up for the same reason as the other np>=2
+# targets (mpirun -np 2 is not guaranteed in every dev environment); run
+# manually as a pre-submit check:
+#     make test-data-field-3d-shared-mem
+test-data-field-3d-shared-mem: seas_test_data_field_3d_shared_mem \
+                               seas_test_data_field_3d_shared_mem_finalize
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_data_field_3d_shared_mem
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_data_field_3d_shared_mem
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_data_field_3d_shared_mem_finalize
+	@echo "--- R-002: NaN fixture in shared mode MUST abort (not hang) ---"
+	@TO=""; command -v timeout  >/dev/null 2>&1 && TO="timeout 60"; \
+	 [ -z "$$TO" ] && command -v gtimeout >/dev/null 2>&1 && TO="gtimeout 60"; \
+	 $$TO $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 \
+	     ./seas_test_data_field_3d_shared_mem --nan-fixture-abort-child \
+	     >/dev/null 2>&1; rc=$$?; \
+	 if [ $$rc -eq 0 ]; then \
+	     echo "FAILED: NaN shared-mode fixture did NOT abort (guard broken)"; exit 1; \
+	 elif [ -n "$$TO" ] && [ $$rc -eq 124 ]; then \
+	     echo "FAILED: NaN shared-mode fixture HUNG (killed at 60 s)"; exit 1; \
+	 else \
+	     echo "OK: aborted as expected (mpirun exit $$rc)"; \
+	 fi
 
 # Phase 6 §1 of PLAN_onfaultstress.md (six-component stress reader).
 test-stress-field-3d: seas_test_stress_field_3d

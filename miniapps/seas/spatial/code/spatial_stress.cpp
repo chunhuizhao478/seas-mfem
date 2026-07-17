@@ -26,7 +26,11 @@ namespace
 {
 
 template <typename MeshT>
-void apply_csm_impl(const StressSpec& spec, FaultGeometry<MeshT>& geom)
+void apply_csm_impl(const StressSpec& spec, FaultGeometry<MeshT>& geom
+#ifdef MFEM_USE_MPI
+                    , MPI_Comm node_comm = MPI_COMM_NULL
+#endif
+                    )
 {
    MFEM_VERIFY(spec.kind == StressSourceKind::SidecarHDF5,
                "ApplyCsmStressSidecar: StressSpec.kind must be SidecarHDF5");
@@ -55,7 +59,14 @@ void apply_csm_impl(const StressSpec& spec, FaultGeometry<MeshT>& geom)
                "ElasticityDomainOperator::GetFaultDOFBasis) before "
                "applying the CSM sidecar.");
 
+   // The StressField3D is TRANSIENT: it destructs (and, in shared-
+   // memory mode, frees its six node-shared windows) when this function
+   // returns — the per-DOF projection below is its only consumer.
+#ifdef MFEM_USE_MPI
+   StressField3D field(spec.sidecar_path, OOBPolicy::Abort, node_comm);
+#else
    StressField3D field(spec.sidecar_path);
+#endif
    geom.ComputeParams(field,
                           spec.pore_pressure.P_p_pa,
                           spec.pore_pressure.P_p_grad_pa_per_m,
@@ -72,6 +83,15 @@ void ApplyCsmStressSidecar(const StressSpec&       spec,
 {
    apply_csm_impl<ParMesh>(spec, geom);
 }
+
+#ifdef MFEM_USE_MPI
+void ApplyCsmStressSidecar(const StressSpec&       spec,
+                           FaultGeometry<ParMesh>& geom,
+                           MPI_Comm                node_comm)
+{
+   apply_csm_impl<ParMesh>(spec, geom, node_comm);
+}
+#endif
 
 void ApplyCsmStressSidecar(const StressSpec&         spec,
                            FaultGeometry<mfem::Mesh>& geom)

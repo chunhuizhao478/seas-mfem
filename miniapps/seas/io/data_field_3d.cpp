@@ -185,7 +185,7 @@ std::vector<double> read_axis_(hid_t file, const char* path,
 
 
 // ----------------------------------------------------------------------
-// DataField3D ctor
+// DataField3D ctors / dtor
 // ----------------------------------------------------------------------
 
 DataField3D::DataField3D(const std::string& sidecar_path,
@@ -196,6 +196,59 @@ DataField3D::DataField3D(const std::string& sidecar_path,
    , max_value_(0.0)
    , oob_policy_(oob)
 {
+   load_(sidecar_path, field_name);
+}
+
+#ifdef MFEM_USE_MPI
+DataField3D::DataField3D(const std::string& sidecar_path,
+                         const std::string& field_name,
+                         OOBPolicy oob,
+                         MPI_Comm node_comm)
+   : field_name_(field_name)
+   , min_value_(0.0)
+   , max_value_(0.0)
+   , oob_policy_(oob)
+{
+   node_comm_ = node_comm;   // MPI_COMM_NULL == classic per-rank path
+   load_(sidecar_path, field_name);
+}
+#endif
+
+DataField3D::~DataField3D()
+{
+#ifdef MFEM_USE_MPI
+   if (shared_win_ != MPI_WIN_NULL)
+   {
+      // spatial_dyn_driver calls MPI_Finalize before main's locals
+      // unwind (see its MPIContext comment), so long-lived readers can
+      // reach this dtor after finalize.  MPI_Finalized is one of the
+      // few MPI calls legal at any time; when finalize has already run
+      // we skip the (collective) unlock/free — the OS reclaims the
+      // shared segment at process exit.  SPMD control flow makes the
+      // decision consistent across the node-local ranks, so the
+      // collective pair below is either entered by all of them or by
+      // none.
+      int finalized = 0;
+      MPI_Finalized(&finalized);
+      if (!finalized)
+      {
+         MPI_Win_unlock_all(shared_win_);   // end the passive epoch
+         MPI_Win_free(&shared_win_);        // collective over node_comm_
+      }
+      shared_win_ = MPI_WIN_NULL;
+   }
+#endif
+}
+
+
+// ----------------------------------------------------------------------
+// load_ — shared body of both ctors
+// ----------------------------------------------------------------------
+
+void DataField3D::load_(const std::string& sidecar_path,
+                        const std::string& field_name)
+{
+   const OOBPolicy oob = oob_policy_;
    if (oob != OOBPolicy::Abort && oob != OOBPolicy::Clamp)
    {
       MFEM_ABORT("DataField3D: unsupported OOBPolicy value "
@@ -321,10 +374,26 @@ DataField3D::DataField3D(const std::string& sidecar_path,
    }
    H5Sclose(sid);
 
-   // Read data.
-   data_.assign(Nx * Ny * Nz, 0.0);
+   // ------------------------------------------------------------------
+   // Read data — mode-dependent storage
+   // (PLAN_sidecar_mpi_shared_memory_2026-07-17.md §4).
+   //   * Owning mode (node_comm_ == MPI_COMM_NULL, and every serial
+   //     build): each rank reads + validates its own full copy, exactly
+   //     the pre-shared-memory behaviour.
+   //   * Shared mode: ONE MPI-3 shared window per node.  Node-local
+   //     rank 0 reads + validates; peers map the same physical pages.
+   // ------------------------------------------------------------------
+   const size_t N = Nx * Ny * Nz;
+   data_len_ = N;
+
+   // Reads the full field into `dst` (converting float64 -> real_t).
+   // Any failure MFEM_ABORTs, which on MPI builds calls MPI_Abort on
+   // the global communicator (general/error.cpp) — so in shared mode a
+   // bad file on the loading rank kills the peers waiting at the
+   // publish barrier instead of hanging them.
+   auto read_field_into = [&](real_t* dst)
    {
-      std::vector<double> tmp(Nx * Ny * Nz);
+      std::vector<double> tmp(N);
       herr_t status = H5Dread(did, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL,
                               H5P_DEFAULT, tmp.data());
       if (status < 0)
@@ -334,42 +403,152 @@ DataField3D::DataField3D(const std::string& sidecar_path,
          MFEM_ABORT("DataField3D: failed to read field '" << field_name
                     << "' data");
       }
-      for (size_t i = 0; i < tmp.size(); ++i)
+      for (size_t i = 0; i < N; ++i)
       {
-         data_[i] = static_cast<real_t>(tmp[i]);
+         dst[i] = static_cast<real_t>(tmp[i]);
       }
+   };
+
+   bool this_rank_validates = true;   // owning mode: every rank
+#ifdef MFEM_USE_MPI
+   if (node_comm_ != MPI_COMM_NULL)
+   {
+      int node_rank = 0;
+      MPI_Comm_rank(node_comm_, &node_rank);
+      const bool loads = (node_rank == 0);
+      this_rank_validates = loads;
+
+      // The loading rank allocates the whole payload; peers allocate a
+      // zero-byte segment and map rank 0's via MPI_Win_shared_query.
+      const MPI_Aint bytes =
+         loads ? static_cast<MPI_Aint>(N * sizeof(real_t)) : 0;
+      real_t* base = nullptr;
+      int err = MPI_Win_allocate_shared(bytes, sizeof(real_t),
+                                        MPI_INFO_NULL, node_comm_,
+                                        &base, &shared_win_);
+      if (err != MPI_SUCCESS)
+      {
+         H5Dclose(did);
+         H5Fclose(file);
+         MFEM_ABORT("DataField3D: MPI_Win_allocate_shared failed (err="
+                    << err << ") for field '" << field_name << "' ("
+                    << static_cast<long long>(N * sizeof(real_t))
+                    << " bytes; is node_comm really node-local?)");
+      }
+      // REVIEW.md R-003: the standard guarantees a non-null base for a
+      // size>0 allocation, but a buggy MPI returning null would SEGV
+      // silently inside the fill below — abort with a name instead.
+      if (loads && base == nullptr)
+      {
+         H5Dclose(did);
+         H5Fclose(file);
+         MFEM_ABORT("DataField3D: MPI_Win_allocate_shared returned a null "
+                    "base pointer for field '" << field_name << "'");
+      }
+      if (!loads)
+      {
+         MPI_Aint qsize = 0;
+         int qdisp = 0;
+         err = MPI_Win_shared_query(shared_win_, 0, &qsize, &qdisp, &base);
+         if (err != MPI_SUCCESS || base == nullptr)
+         {
+            H5Dclose(did);
+            H5Fclose(file);
+            MFEM_ABORT("DataField3D: MPI_Win_shared_query(rank 0) failed "
+                       "(err=" << err << ") for field '" << field_name
+                       << "'");
+         }
+         // REVIEW.md R-003: a disp_unit mismatch would mean the node's
+         // ranks disagree on sizeof(real_t) (mixed-ABI build).
+         if (qdisp != static_cast<int>(sizeof(real_t)))
+         {
+            H5Dclose(did);
+            H5Fclose(file);
+            MFEM_ABORT("DataField3D: shared window disp_unit " << qdisp
+                       << " != sizeof(real_t) " << sizeof(real_t)
+                       << " for field '" << field_name << "'");
+         }
+         if (static_cast<size_t>(qsize) < N * sizeof(real_t))
+         {
+            H5Dclose(did);
+            H5Fclose(file);
+            MFEM_ABORT("DataField3D: shared window for field '"
+                       << field_name << "' is " << static_cast<long long>(qsize)
+                       << " bytes, expected "
+                       << static_cast<long long>(N * sizeof(real_t))
+                       << " — node-local ranks disagree on the grid "
+                       "shape (mixed sidecars?)");
+         }
+      }
+
+      // Passive access epoch, held for the object lifetime (ended by
+      // MPI_Win_unlock_all in the dtor).  MPI_MODE_NOCHECK: no
+      // conflicting locks exist — the payload is write-once (below),
+      // read-only afterwards.
+      MPI_Win_lock_all(MPI_MODE_NOCHECK, shared_win_);
+
+      if (loads) { read_field_into(base); }
+
+      data_ = base;
+   }
+   else
+#endif
+   {
+      // Owning mode — the pre-shared-memory behaviour, byte-identical.
+      data_owned_.assign(N, 0.0);
+      read_field_into(data_owned_.data());
+      data_ = data_owned_.data();
    }
 
    H5Dclose(did);
    H5Fclose(file);
 
    // Post-load value sanity check (defense-in-depth vs. writer guards).
-   for (size_t i = 0; i < data_.size(); ++i)
+   // Owning mode: every rank checks its own copy (as before).  Shared
+   // mode: only the loading rank checks — BEFORE the publish barrier,
+   // so a violation MPI_Aborts the job while peers wait at the barrier
+   // (never a half-published window).
+   if (this_rank_validates)
    {
-      const real_t v = data_[i];
-      if (std::isnan(v))
+      for (size_t i = 0; i < data_len_; ++i)
       {
-         // Decode i back to (i_x, j_y, k_z) for diagnostics.
-         const size_t k = i % Nz;
-         const size_t j = (i / Nz) % Ny;
-         const size_t ii = i / (Ny * Nz);
-         MFEM_ABORT("DataField3D: NaN in field '" << field_name
-                    << "' at flat index " << i << " (i, j, k) = (" << ii
-                    << ", " << j << ", " << k << "). v1 schema forbids "
-                    "NaN; regenerate the sidecar.");
-      }
-      if (v < min_value_ || v > max_value_)
-      {
-         const size_t k = i % Nz;
-         const size_t j = (i / Nz) % Ny;
-         const size_t ii = i / (Ny * Nz);
-         MFEM_ABORT("DataField3D: field '" << field_name
-                    << "' value " << v << " out of declared range ["
-                    << min_value_ << ", " << max_value_
-                    << "] at (i, j, k) = (" << ii << ", " << j << ", "
-                    << k << "). Regenerate the source dataset.");
+         const real_t v = data_[i];
+         if (std::isnan(v))
+         {
+            // Decode i back to (i_x, j_y, k_z) for diagnostics.
+            const size_t k = i % Nz;
+            const size_t j = (i / Nz) % Ny;
+            const size_t ii = i / (Ny * Nz);
+            MFEM_ABORT("DataField3D: NaN in field '" << field_name
+                       << "' at flat index " << i << " (i, j, k) = (" << ii
+                       << ", " << j << ", " << k << "). v1 schema forbids "
+                       "NaN; regenerate the sidecar.");
+         }
+         if (v < min_value_ || v > max_value_)
+         {
+            const size_t k = i % Nz;
+            const size_t j = (i / Nz) % Ny;
+            const size_t ii = i / (Ny * Nz);
+            MFEM_ABORT("DataField3D: field '" << field_name
+                       << "' value " << v << " out of declared range ["
+                       << min_value_ << ", " << max_value_
+                       << "] at (i, j, k) = (" << ii << ", " << j << ", "
+                       << k << "). Regenerate the source dataset.");
+         }
       }
    }
+
+#ifdef MFEM_USE_MPI
+   if (node_comm_ != MPI_COMM_NULL)
+   {
+      // Publish: order the loading rank's stores before every rank's
+      // subsequent loads (MPI-3 unified-model recipe for load/store
+      // access to a shared window: sync / barrier / sync).
+      MPI_Win_sync(shared_win_);
+      MPI_Barrier(node_comm_);
+      MPI_Win_sync(shared_win_);
+   }
+#endif
 }
 
 

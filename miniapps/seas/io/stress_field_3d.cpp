@@ -51,6 +51,26 @@ StressField3D::StressField3D(const std::string& sidecar_path,
    , sigma_yz_(sidecar_path, "sigma_yz", oob)
    , sigma_xz_(sidecar_path, "sigma_xz", oob)
 {
+   init_after_load_();
+}
+
+#ifdef MFEM_USE_MPI
+StressField3D::StressField3D(const std::string& sidecar_path,
+                             OOBPolicy oob,
+                             MPI_Comm node_comm)
+   : sigma_xx_(sidecar_path, "sigma_xx", oob, node_comm)
+   , sigma_yy_(sidecar_path, "sigma_yy", oob, node_comm)
+   , sigma_zz_(sidecar_path, "sigma_zz", oob, node_comm)
+   , sigma_xy_(sidecar_path, "sigma_xy", oob, node_comm)
+   , sigma_yz_(sidecar_path, "sigma_yz", oob, node_comm)
+   , sigma_xz_(sidecar_path, "sigma_xz", oob, node_comm)
+{
+   init_after_load_();
+}
+#endif
+
+void StressField3D::init_after_load_()
+{
    // Pin bbox_ as the strict intersection of all six component
    // bboxes per plan §1 line 1644-1645 (R-903).  Under the
    // schema-v1 contract the six are bit-exact identical (single

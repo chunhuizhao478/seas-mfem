@@ -67,6 +67,22 @@ public:
    StressField3D(const std::string& sidecar_path,
                  OOBPolicy oob = OOBPolicy::Abort);
 
+#ifdef MFEM_USE_MPI
+   /// MPI-3 shared-memory overload
+   /// (PLAN_sidecar_mpi_shared_memory_2026-07-17.md §5 Phase 2):
+   /// forwards ``node_comm`` to all six DataField3D component ctors, so
+   /// the six grids live in six node-shared windows (one physical copy
+   /// per node each) instead of six copies per rank.
+   /// ``MPI_COMM_NULL`` selects the classic per-rank path.  COLLECTIVE
+   /// over ``node_comm`` (see the DataField3D overload's contract).
+   /// The windows are freed when this instance is destroyed — for the
+   /// transient stress projection that is the end of apply_csm_impl,
+   /// exactly the early-free the plan calls for.
+   StressField3D(const std::string& sidecar_path,
+                 OOBPolicy oob,
+                 MPI_Comm node_comm);
+#endif
+
    /// Evaluate the symmetric Cauchy stress tensor at (x, y, z) in
    /// canonical CRS (UTM 11 N, m), returned as a 3x3 dense matrix
    /// in Pa (compression POSITIVE, SEAS internal convention).
@@ -114,6 +130,10 @@ public:
    static const std::string& ComponentName(int component_index);
 
 private:
+   /// Shared ctor tail: pin bbox_ (intersection of the six component
+   /// bboxes) and run AssertConsistentGrid_.  Called by both ctors.
+   void init_after_load_();
+
    /// Verify that all six underlying readers agree on grid axes /
    /// bbox / value range.  Aborts via MFEM_ABORT on mismatch.
    void AssertConsistentGrid_() const;
