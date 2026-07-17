@@ -6,7 +6,12 @@
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=128        # pure-MPI: 128 ranks x 1 core = the WHOLE 128-core node
 #SBATCH --cpus-per-task=1            # MFEM has no OpenMP (SeisSol used 8 ranks x 16 threads instead)
-#SBATCH --mem=249000M               # exclusive node has 256 GB; sidecars ~1.05 GB/rank replicated
+#SBATCH --mem=140000M               # MATCHES the SeisSol deck.  Enabled by --sidecar-shared-mem
+                                     # (PLAN_sidecar_mpi_shared_memory_2026-07-17): the 3 gridded
+                                     # sidecars are ONE MPI-3 shared copy per NODE (~1.4 GB incl.
+                                     # rank-0's transient read buffer), not ~1.05 GB x 128 ranks.
+                                     # If you must run with SAFS_SHARED_MEM=0 (per-rank replication),
+                                     # submit with --mem=249000M instead — the pre-flight enforces this.
 #SBATCH -t 15:00:00
 #SBATCH -o safs_v400_c1_p1_uw.%j.out
 #SBATCH -e safs_v400_c1_p1_uw.%j.out
@@ -39,7 +44,9 @@
 # Overrides (env): SAFS_TFINAL (default: config's 150s), SAFS_CFL, SAFS_RESTART,
 #   SAFS_OUTDIR (qstore output base), SAFS_DIAG (0/1), SAFS_R101 (0/1),
 #   SAFS_DERIV_OPT (default "--deriv-cache --shared-ck-recursion"; set empty to
-#   time the un-optimised ADER path).
+#   time the un-optimised ADER path),
+#   SAFS_SHARED_MEM (default 1 = --sidecar-shared-mem, ONE sidecar copy per node;
+#   set 0 for the legacy per-rank replication — then submit with --mem=249000M).
 # Scale/parity: to leave headroom instead of full core parity, submit with e.g.
 #   sbatch --ntasks-per-node=100 --mem=240000M <this file>
 # =============================================================================
@@ -137,25 +144,70 @@ for _f in "${MESH_LN}" "${VEL_LN}" "${STR_LN}" "${FRI_LN}"; do
     fi
 done
 
-# --- per-rank memory pre-flight (io/data_field_3d.cpp REPLICATES each sidecar on
-#     EVERY rank via a full H5Dread, so the three sidecars are resident per rank,
-#     not distributed).  On-disk float64 size == resident size (no compression).
+# --- sidecar residency mode + binary support pre-flight ----------------------
+# SAFS_SHARED_MEM=1 (default): pass --sidecar-shared-mem, so io/data_field_3d
+# holds ONE MPI-3 shared copy of each gridded sidecar per NODE
+# (PLAN_sidecar_mpi_shared_memory_2026-07-17.md).  =0: legacy per-rank
+# replication (every rank H5Dreads its own full copy).
+SAFS_SHARED_MEM="${SAFS_SHARED_MEM:-1}"
+SHARED_MEM_ARG=""
+if [[ "${SAFS_SHARED_MEM}" == "1" ]]; then
+    SHARED_MEM_ARG="--sidecar-shared-mem"
+    # CRITICAL: the driver's hand-rolled parser SILENTLY IGNORES unknown
+    # flags.  A binary built before the shared-memory feature would ignore
+    # --sidecar-shared-mem, replicate per rank, and OOM at this job's
+    # --mem=140000M sizing 20 minutes in.  Fail HERE instead: the flag
+    # string is a literal in the binary, so a plain binary grep (no
+    # `strings` needed on the compute node) proves support.
+    if ! LC_ALL=C grep -aq -- "--sidecar-shared-mem" ./seas_spatial_dyn_driver; then
+        echo "ERROR: ./seas_spatial_dyn_driver does not know --sidecar-shared-mem"
+        echo "       (built before PLAN_sidecar_mpi_shared_memory_2026-07-17)."
+        echo "       Rebuild on Expanse first:  bash ${SEAS_MFEM_ROOT}/build_expanse.sh"
+        echo "       Or run the legacy mode:    SAFS_SHARED_MEM=0 sbatch --mem=249000M <this file>"
+        echo "       Override with SAFS_SKIP_FLAG_CHECK=1 if you know better."
+        [[ "${SAFS_SKIP_FLAG_CHECK:-0}" == "1" ]] || exit 1
+    fi
+fi
+
+# --- memory pre-flight (mode-aware) ------------------------------------------
+# On-disk float64 size == resident size (uncompressed datasets).
+#   shared mode : the three sidecars are resident ONCE PER NODE (+ the loading
+#                 rank's transient read buffer, <= the largest single field);
+#                 the guard checks the LEFTOVER per-rank compute budget.
+#   legacy mode : sidecars are resident PER RANK (the pre-2026-07-17 math).
 _sidecar_mb=$(du -mL "${VEL_LN}" "${STR_LN}" "${FRI_LN}" | awk '{s+=$1} END {print s}')
 _mem_mb="${SLURM_MEM_PER_NODE:-0}"
 _tpn="${SLURM_NTASKS_PER_NODE:-1}"
 if [[ "${_mem_mb}" -gt 0 && "${_tpn}" -gt 0 ]]; then
-    _per_rank_mb=$(( _mem_mb / _tpn ))
-    _pct=$(( 100 * _sidecar_mb / _per_rank_mb ))
-    echo "Memory:      sidecars ${_sidecar_mb} MB/rank of ${_per_rank_mb} MB/rank budget (${_pct}%)"
-    if [[ "${_pct}" -ge 90 ]]; then
-        echo "ERROR: replicated sidecars need ${_pct}% of the per-rank budget -> WILL OOM."
-        echo "       Use fewer ranks per node with more memory, e.g."
-        echo "         sbatch --ntasks-per-node=64 --mem=249000M <this file>"
-        echo "       Override this guard with SAFS_SKIP_MEM_CHECK=1 if you know better."
-        [[ "${SAFS_SKIP_MEM_CHECK:-0}" == "1" ]] || exit 1
-    elif [[ "${_pct}" -ge 60 ]]; then
-        echo "WARNING: replicated sidecars take ${_pct}% of the per-rank budget; the mesh +"
-        echo "         wave operator + ADER work vectors must fit in the rest."
+    if [[ "${SAFS_SHARED_MEM}" == "1" ]]; then
+        # Largest single field ~= velocity/3 (3 equal fields in the biggest
+        # sidecar) is the transient double buffer on the loading rank.
+        _vel_mb=$(du -mL "${VEL_LN}" | awk '{print $1}')
+        _node_resident_mb=$(( _sidecar_mb + _vel_mb / 3 ))
+        _left_per_rank_mb=$(( (_mem_mb - _node_resident_mb) / _tpn ))
+        echo "Memory:      SHARED sidecars ~${_node_resident_mb} MB/NODE of ${_mem_mb} MB/node;"
+        echo "             leftover ~${_left_per_rank_mb} MB/rank for mesh + wave operator + ADER"
+        if [[ "${_left_per_rank_mb}" -lt 300 ]]; then
+            echo "ERROR: <300 MB/rank left after the shared sidecars -> likely OOM."
+            echo "       Use fewer ranks per node (e.g. --ntasks-per-node=64) or more --mem."
+            echo "       Override this guard with SAFS_SKIP_MEM_CHECK=1 if you know better."
+            [[ "${SAFS_SKIP_MEM_CHECK:-0}" == "1" ]] || exit 1
+        fi
+    else
+        _per_rank_mb=$(( _mem_mb / _tpn ))
+        _pct=$(( 100 * _sidecar_mb / _per_rank_mb ))
+        echo "Memory:      LEGACY replicated sidecars ${_sidecar_mb} MB/rank of ${_per_rank_mb} MB/rank budget (${_pct}%)"
+        if [[ "${_pct}" -ge 90 ]]; then
+            echo "ERROR: replicated sidecars need ${_pct}% of the per-rank budget -> WILL OOM."
+            echo "       SAFS_SHARED_MEM=0 needs the old sizing:"
+            echo "         SAFS_SHARED_MEM=0 sbatch --mem=249000M <this file>"
+            echo "       (or fewer ranks per node: --ntasks-per-node=64)."
+            echo "       Override this guard with SAFS_SKIP_MEM_CHECK=1 if you know better."
+            [[ "${SAFS_SKIP_MEM_CHECK:-0}" == "1" ]] || exit 1
+        elif [[ "${_pct}" -ge 60 ]]; then
+            echo "WARNING: replicated sidecars take ${_pct}% of the per-rank budget; the mesh +"
+            echo "         wave operator + ADER work vectors must fit in the rest."
+        fi
     fi
 fi
 
@@ -184,7 +236,8 @@ mkdir -p "${OUT}"
 
 echo "Git commit:  $(git rev-parse HEAD 2>/dev/null)"
 echo "Cluster:     Expanse (SDSC)   Launcher: srun --mpi=pmi2"
-echo "Size:        compute (lustre), ${SLURM_NNODES:-2}N x ${SLURM_NTASKS_PER_NODE:-128}r = ${SLURM_NTASKS} ranks (pure MPI), ${SLURM_MEM_PER_NODE:-249000}M/node, ${SBATCH_TIMELIMIT:-15:00:00}"
+echo "Size:        compute (lustre), ${SLURM_NNODES:-2}N x ${SLURM_NTASKS_PER_NODE:-128}r = ${SLURM_NTASKS} ranks (pure MPI), ${SLURM_MEM_PER_NODE:-140000}M/node, ${SBATCH_TIMELIMIT:-15:00:00}"
+echo "Sidecars:    residency mode = $([[ "${SAFS_SHARED_MEM}" == "1" ]] && echo 'SHARED (one copy per node, --sidecar-shared-mem)' || echo 'LEGACY (replicated per rank)')"
 echo "EXPERIMENT:  v4_0_0 RSSRW ALT THERMAL CASE1 (coarse), p${ORDER}, PURE UPWIND (Godunov) + ADER (order ${ADER_ORDER})"
 echo "Config:      ${CONFIG_TOML}   (order ${_cfg_order}, ader_order ${_cfg_ader})"
 echo "Inputs:      mesh=$(readlink ${MESH_LN})"
@@ -205,6 +258,7 @@ srun --mpi=pmi2 -n "${SLURM_NTASKS}" --unbuffered stdbuf -oL -eL ./seas_spatial_
     --mixed-flux none \
     --time-integrator ader \
     --ader-order "${ADER_ORDER}" \
+    ${SHARED_MEM_ARG} \
     ${DERIV_OPT} \
     ${TFINAL_ARG} \
     ${CFL_ARG} \
@@ -223,6 +277,17 @@ if grep -qE 'FreeSurf:' "${LOG}"; then
     echo "FreeSurf output: $(grep -m1 -E 'FreeSurf:' "${LOG}")"
 else
     echo "WARNING: no 'FreeSurf:' banner in ${LOG} -- free-surface output may be OFF."
+fi
+# Shared-memory banner check (the parser ignores unknown flags, so verify the
+# EFFECT): the driver prints this line from rank 0 when the mode is active.
+if [[ "${SAFS_SHARED_MEM}" == "1" ]]; then
+    if grep -q 'MPI-3 shared-memory' "${LOG}"; then
+        echo "Sidecar shared-mem: $(grep -m1 'MPI-3 shared-memory' "${LOG}")"
+    else
+        echo "WARNING: no '[sidecar] ... MPI-3 shared-memory' banner in ${LOG} --"
+        echo "         the binary may predate the feature; sidecars were likely"
+        echo "         REPLICATED per rank (OOM risk at this --mem sizing)."
+    fi
 fi
 if [[ ${RC} -ne 0 ]]; then
     echo "driver_rc=${RC} -- see ${LOG} (check [derived] lines + any guard ABORT)."; exit ${RC}

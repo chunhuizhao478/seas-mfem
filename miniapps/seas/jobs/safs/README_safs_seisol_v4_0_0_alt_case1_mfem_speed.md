@@ -68,18 +68,26 @@ to time the un-optimised ADER path.
 
 ## Decisions / deviations from a bit-for-bit SeisSol reproduction (flagged)
 
-1. **Cluster = Expanse (SDSC), 2 exclusive lustre compute nodes, `-t 15:00:00`.**
+1. **Cluster = Expanse (SDSC), 2 exclusive lustre compute nodes, `-t 15:00:00`,
+   `--mem=140000M` (matches the SeisSol deck).**
    Same hardware as the SeisSol baseline (AMD EPYC 7742, `--constraint=lustre`,
    `--account=lbl107`, `--export=ALL`), required for a fair wall-clock comparison.
    SeisSol uses 2N × 8 MPI × 16 OMP = 256 cores (**hybrid**); MFEM is **pure-MPI**
    (no OpenMP in the driver hot path) and uses 2N × 128 ranks = 256 ranks (**full
-   core parity**, `--cpus-per-task=1`). Because the CVM/stress/friction sidecars
-   are replicated **per MPI rank** (OpenMP threads would share one copy; separate
-   ranks each hold their own), pure-MPI at 128 ranks/node needs ~135 GB of sidecar
-   copies — so `--mem=249000M` (the exclusive 256 GB node, free) instead of the
-   SeisSol deck's 140 GB (which sufficed for its 8 ranks/node). For headroom submit
-   with `--ntasks-per-node=64 --mem=249000M` (uses 64/128 cores; the sbatch memory
-   guard also suggests this on an OOM-risk sizing).
+   core parity**, `--cpus-per-task=1`).
+   **Memory (updated 2026-07-17):** the sbatch passes `--sidecar-shared-mem`
+   (`PLAN_sidecar_mpi_shared_memory_2026-07-17.md`, implemented + reviewed), so
+   the CVM/stress/friction sidecars are held in **one MPI-3 shared copy per
+   node** (~1.3 GB incl. the loading rank's transient read buffer) instead of
+   ~1.05 GB × 128 ranks ≈ 135 GB — which is what previously forced
+   `--mem=249000M`. At 140 GB/node that leaves ~1.08 GB/rank for mesh + wave
+   operator + ADER state. The sbatch pre-flight is mode-aware and also verifies
+   the **binary supports the flag** (the driver's parser silently ignores
+   unknown flags — an old binary would replicate and OOM; the guard aborts with
+   a rebuild message instead). Legacy replication remains available via
+   `SAFS_SHARED_MEM=0 sbatch --mem=249000M <file>` (the pre-flight enforces the
+   larger sizing in that mode). **Requires rebuilding the Expanse binary** after
+   pulling the shared-memory feature (`bash build_expanse.sh`).
 2. **10 MPa σ_n strength floor (`sigma_n_strength_floor_pa`).** MFEM-only stabiliser
    with **no SeisSol analogue**. The ALT k=1.65 stress is *not* a freeze500m field,
    so shallow daylighting facets can reach low σ_n; under a pure Godunov flux those
