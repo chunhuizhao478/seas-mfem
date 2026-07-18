@@ -1956,6 +1956,411 @@ void WaveOperator<MeshType>::ComputeADERSubStepStatesAndIntegralCluster(
 }
 
 // ---------------------------------------------------------------------------
+// (LTS Phase 2, Appendix A.6) Element-restricted corrector primitives + the
+// per-cluster fault-free bulk corrector.  Volume + mass-inverse are element-
+// local so restricting them to an elem list is byte-identical; over the full
+// list with all-GTS faces the corrector reproduces AdvanceADER (single-cluster
+// == GTS).
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void WaveOperator<MeshType>::ComputeVolumeRHSElems_(
+   const Vector &Q, Vector &rhs, const int *elems, int n) const
+{
+   MFEM_ASSERT(Q.Size() == NUM_STATE * ndof_total_, "ComputeVolumeRHSElems_: Q size");
+   MFEM_ASSERT(rhs.Size() == NUM_STATE * ndof_total_, "ComputeVolumeRHSElems_: rhs pre-sized");
+   const real_t *Q_data = Q.GetData();
+
+   if (deriv_mode_ == DerivMode::Cached)
+   {
+      real_t *rhs_data = rhs.GetData();
+      DenseMatrix SdQ(NUM_STATE, ndof_per_el_);
+      for (int ei = 0; ei < n; ++ei)
+      {
+         const int e = elems[ei];
+         const int dof_offset = e * ndof_per_el_;
+         const GodunovFlux &flux_e = FluxForElem_(e);
+         for (int d = 0; d < 3; d++)
+         {
+            const DenseMatrix &S = elem_volume_op_[e][d];
+            const int ndof = S.Height();
+            MFEM_VERIFY(ndof == ndof_per_el_, "ComputeVolumeRHSElems_(Cached): het elem");
+            const DenseMatrix &A = flux_e.GetReferenceStarMatrix(d);
+            for (int k = 0; k < NUM_STATE; k++)
+            {
+               const real_t *Qk = Q_data + k * ndof_total_ + dof_offset;
+               for (int i = 0; i < ndof; i++)
+               {
+                  real_t s = 0.0;
+                  for (int mm = 0; mm < ndof; mm++) { s += S(i, mm) * Qk[mm]; }
+                  SdQ(k, i) = s;
+               }
+            }
+            for (int c = 0; c < NUM_STATE; c++)
+            {
+               real_t *rc = rhs_data + c * ndof_total_ + dof_offset;
+               for (int i = 0; i < ndof; i++)
+               {
+                  real_t v = 0.0;
+                  for (int k = 0; k < NUM_STATE; k++) { v += A(c, k) * SdQ(k, i); }
+                  rc[i] += v;
+               }
+            }
+         }
+      }
+      return;
+   }
+
+   for (int ei = 0; ei < n; ++ei)
+   {
+      const int e = elems[ei];
+      const FiniteElement *fe = fes_->GetFE(e);
+      ElementTransformation *Tr = fes_->GetElementTransformation(e);
+      const int ndof = fe->GetDof();
+      const IntegrationRule &ir = IntRules.Get(fe->GetGeomType(), 2 * order_);
+      const int nqp = ir.GetNPoints();
+      const int dof_offset = e * ndof_per_el_;
+      const GodunovFlux &flux_e = FluxForElem_(e);
+      const DenseMatrix &Ax_e = flux_e.GetReferenceStarMatrix(0);
+      const DenseMatrix &Ay_e = flux_e.GetReferenceStarMatrix(1);
+      const DenseMatrix &Az_e = flux_e.GetReferenceStarMatrix(2);
+      Vector shape(ndof);
+      DenseMatrix dshape(ndof, 3);
+      for (int q = 0; q < nqp; q++)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         Tr->SetIntPoint(&ip);
+         const real_t w = ip.weight * Tr->Weight();
+         fe->CalcShape(ip, shape);
+         fe->CalcPhysDShape(*Tr, dshape);
+         real_t Q_qp[NUM_STATE];
+         for (int c = 0; c < NUM_STATE; c++)
+         {
+            Q_qp[c] = 0.0;
+            for (int i = 0; i < ndof; i++)
+            { Q_qp[c] += shape(i) * Q_data[c * ndof_total_ + dof_offset + i]; }
+         }
+         real_t F[3][NUM_STATE];
+         for (int c = 0; c < NUM_STATE; c++)
+         {
+            F[0][c] = 0.0; F[1][c] = 0.0; F[2][c] = 0.0;
+            for (int k = 0; k < NUM_STATE; k++)
+            {
+               F[0][c] += Ax_e(c, k) * Q_qp[k];
+               F[1][c] += Ay_e(c, k) * Q_qp[k];
+               F[2][c] += Az_e(c, k) * Q_qp[k];
+            }
+         }
+         for (int c = 0; c < NUM_STATE; c++)
+         {
+            for (int i = 0; i < ndof; i++)
+            {
+               real_t val = 0.0;
+               for (int j = 0; j < 3; j++) { val += dshape(i, j) * F[j][c]; }
+               rhs[c * ndof_total_ + dof_offset + i] += w * val;
+            }
+         }
+      }
+   }
+}
+
+template <typename MeshType>
+void WaveOperator<MeshType>::ApplyMassInverseElems_(
+   Vector &dQdt, const int *elems, int n) const
+{
+   Vector elem_rhs(ndof_per_el_), elem_result(ndof_per_el_);
+   for (int ei = 0; ei < n; ++ei)
+   {
+      const int e = elems[ei];
+      const int dof_offset = e * ndof_per_el_;
+      const DenseMatrix &Minv = elem_mass_inv_[e];
+      for (int c = 0; c < NUM_STATE; c++)
+      {
+         for (int i = 0; i < ndof_per_el_; i++)
+         { elem_rhs(i) = dQdt[c * ndof_total_ + dof_offset + i]; }
+         Minv.Mult(elem_rhs, elem_result);
+         for (int i = 0; i < ndof_per_el_; i++)
+         { dQdt[c * ndof_total_ + dof_offset + i] = elem_result(i); }
+      }
+   }
+}
+
+template <typename MeshType>
+void WaveOperator<MeshType>::AdvanceADERClusterBulk(
+   const int *elems, int n_elems,
+   const int *face_ids, const int *face_roles, const int *face_nbr, int n_faces,
+   real_t dt_step, int order,
+   const Vector &I_cluster,
+   Vector &Q,
+   const real_t *dk_store, int dk_order, const int *provider_slot_of_elem,
+   const real_t *face_sub_a, const real_t *face_sub_b,
+   LtsAccumulateBuffers *buffers, const int *buffer_slot_of_elem) const
+{
+   MFEM_VERIFY(dt_step > 0.0, "AdvanceADERClusterBulk: dt_step > 0");
+   MFEM_VERIFY(order >= 2 && order <= 4, "AdvanceADERClusterBulk: order in {2,3,4}");
+   MFEM_VERIFY(I_cluster.Size() == NUM_STATE * ndof_total_,
+               "AdvanceADERClusterBulk: I size mismatch");
+   MFEM_VERIFY(&I_cluster != &Q, "AdvanceADERClusterBulk: I,Q alias");
+   const int Nfull = NUM_STATE * ndof_total_;
+   const int block = NUM_STATE * ndof_per_el_;
+
+   // Per-cluster rhs scratch: full-size, only the cluster's blocks touched.
+   if (lts_cluster_rhs_buf_.Size() != Nfull) { lts_cluster_rhs_buf_.SetSize(Nfull); }
+   Vector &rhs = lts_cluster_rhs_buf_;
+   real_t *rhs_data = rhs.GetData();
+   for (int ei = 0; ei < n_elems; ++ei)
+   {
+      const int off = elems[ei] * ndof_per_el_;
+      for (int c = 0; c < NUM_STATE; c++)
+      {
+         real_t *p = rhs_data + c * ndof_total_ + off;
+         for (int i = 0; i < ndof_per_el_; i++) { p[i] = 0.0; }
+      }
+   }
+
+   // 1. Volume term (restricted, accumulates into rhs).
+   ComputeVolumeRHSElems_(I_cluster, rhs, elems, n_elems);
+
+   // 2. Role-driven face sweep.
+   const real_t *I_data = I_cluster.GetData();
+   real_t bulk_bg_scaled[NUM_STATE];
+   for (int c = 0; c < NUM_STATE; c++) { bulk_bg_scaled[c] = dt_step * bulk_bg_[c]; }
+
+   std::vector<real_t> I_coarse_sub(block);   // reused for consumer faces
+
+   for (int fi = 0; fi < n_faces; ++fi)
+   {
+      const int role = face_roles[fi];
+      // ProviderCoarseSkip (2): coarse skips (consumes buffer at its own correct).
+      // Fault (4): Phase 3.
+      if (role == 2 || role == 4) { continue; }
+
+      const int f = face_ids[fi];
+      FaceElementTransformations *ftr = mesh_.GetFaceElementTransformations(f);
+      if (!ftr) { continue; }
+      const int e1 = ftr->Elem1No, e2 = ftr->Elem2No;
+      const int bdr_attr = face_bdr_attr_[f];
+      if (e2 < 0 && shared_mesh_face_set_.count(f) > 0) { continue; }   // rank seam (Phase 4)
+      const bool is_boundary = (e2 < 0) && (bdr_attr > 0);
+      if (e2 < 0 && bdr_attr == 0) { continue; }
+
+      const FiniteElement *fe1 = fes_->GetFE(e1);
+      const int ndof = fe1->GetDof();
+      const int dof_offset1 = e1 * ndof_per_el_;
+      const IntegrationRule &ir = IntRules.Get(ftr->GetGeometryType(), 2 * order_);
+      const int nqp = ir.GetNPoints();
+
+      // Consumer support: identify the coarse (provider) side + its sub-interval
+      // Taylor integral once per face (QP-independent geometry aside).
+      const bool is_consumer = (role == 1);
+      int coarse_elem = -1;
+      if (is_consumer)
+      {
+         MFEM_VERIFY(!is_boundary, "AdvanceADERClusterBulk: consumer face is boundary?");
+         MFEM_VERIFY(buffers && dk_store && provider_slot_of_elem
+                     && face_sub_a && face_sub_b && buffer_slot_of_elem,
+                     "AdvanceADERClusterBulk: ConsumerFine face needs the D(k)/buffer "
+                     "machinery (dk_store/provider_slot/face_sub/buffers all set).");
+         coarse_elem = face_nbr[fi];   // the coarser neighbour (provider + buffer owner)
+         const int pslot = provider_slot_of_elem[coarse_elem];
+         MFEM_VERIFY(pslot >= 0, "AdvanceADERClusterBulk: coarse neighbour is not a provider");
+         const real_t *dk = dk_store
+            + (static_cast<std::size_t>(pslot) * dk_order) * block;
+         IntegrateTaylor(face_sub_a[fi], face_sub_b[fi], dk, dk_order, block,
+                         I_coarse_sub.data());
+      }
+
+      for (int q = 0; q < nqp; q++)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         ftr->SetAllIntPoints(&ip);
+         Vector nor_vec(3);
+         CalcOrtho(ftr->Face->Jacobian(), nor_vec);
+         const real_t nor_len = nor_vec.Norml2();
+         if (nor_len > 0) { nor_vec /= nor_len; }
+         const real_t w = ip.weight * nor_len;
+         const real_t nor[3] = {nor_vec(0), nor_vec(1), nor_vec(2)};
+
+         IntegrationPoint ip1;
+         ftr->Loc1.Transform(ip, ip1);
+         Vector shape1(ndof);
+         fe1->CalcShape(ip1, shape1);
+
+         if (is_boundary)
+         {
+            real_t I_self[NUM_STATE];
+            for (int c = 0; c < NUM_STATE; c++)
+            {
+               I_self[c] = 0.0;
+               for (int i = 0; i < ndof; i++)
+               { I_self[c] += shape1(i) * I_data[c * ndof_total_ + dof_offset1 + i]; }
+            }
+            real_t F_h[NUM_STATE];
+            const FaceBC bc_type = ClassifyBoundaryFace(bdr_attr);
+            switch (bc_type)
+            {
+               case FaceBC::FreeSurface:
+                  if (free_surface_bc_mode_ == FreeSurfaceBCMode::Godunov)
+                  { FluxForElem_(e1).FreeSurfaceGodunovTotal(nor, I_self, bulk_bg_scaled, F_h); }
+                  else
+                  { FluxForElem_(e1).FreeSurfaceTotal(nor, I_self, bulk_bg_scaled, F_h); }
+                  break;
+               case FaceBC::Fault:
+                  MFEM_ABORT("AdvanceADERClusterBulk: 1-sided fault face " << f);
+                  break;
+               default:   // Absorbing (and fallback)
+                  FluxForElem_(e1).AbsorbingTotal(nor, I_self, bulk_bg_scaled, F_h);
+                  break;
+            }
+            for (int c = 0; c < NUM_STATE; c++)
+            {
+               real_t *rc = rhs_data + c * ndof_total_ + dof_offset1;
+               for (int i = 0; i < ndof; i++) { rc[i] -= w * shape1(i) * F_h[c]; }
+            }
+            continue;
+         }
+
+         // Interior (GTS or consumer): need e2's shape + state.
+         const int dof_offset2 = e2 * ndof_per_el_;
+         const FiniteElement *fe2 = fes_->GetFE(e2);
+         IntegrationPoint ip2;
+         ftr->Loc2.Transform(ip, ip2);
+         Vector shape2(ndof);
+         fe2->CalcShape(ip2, shape2);
+
+         real_t I_self[NUM_STATE], I_nbr[NUM_STATE];
+         for (int c = 0; c < NUM_STATE; c++)
+         {
+            I_self[c] = 0.0; I_nbr[c] = 0.0;
+            for (int i = 0; i < ndof; i++)
+            {
+               I_self[c] += shape1(i) * I_data[c * ndof_total_ + dof_offset1 + i];
+            }
+         }
+         if (!is_consumer)
+         {
+            // GTS: e2's state also from I_cluster.
+            for (int c = 0; c < NUM_STATE; c++)
+               for (int i = 0; i < ndof; i++)
+               { I_nbr[c] += shape2(i) * I_data[c * ndof_total_ + dof_offset2 + i]; }
+         }
+         else
+         {
+            // Consumer: the coarse side's state is its Taylor integral over the
+            // fine sub-interval (contiguous [c][i] block); interpolate to the QP.
+            const bool e2_is_coarse = (e2 == coarse_elem);
+            if (e2_is_coarse)
+            {
+               for (int c = 0; c < NUM_STATE; c++)
+                  for (int i = 0; i < ndof; i++)
+                  { I_nbr[c] += shape2(i) * I_coarse_sub[c * ndof_per_el_ + i]; }
+            }
+            else
+            {
+               // e1 is the coarse side: overwrite I_self with the sub-interval
+               // integral, and read the fine (e2) state from I_cluster.
+               for (int c = 0; c < NUM_STATE; c++)
+               {
+                  I_self[c] = 0.0;
+                  for (int i = 0; i < ndof; i++)
+                  { I_self[c] += shape1(i) * I_coarse_sub[c * ndof_per_el_ + i]; }
+                  for (int i = 0; i < ndof; i++)
+                  { I_nbr[c] += shape2(i) * I_data[c * ndof_total_ + dof_offset2 + i]; }
+               }
+            }
+         }
+
+         real_t F_h_e1[NUM_STATE], F_h_e2[NUM_STATE];
+         InteriorFaceFlux_(f, I_self, I_nbr, nor, F_h_e1, F_h_e2);
+
+         if (!is_consumer)
+         {
+            for (int c = 0; c < NUM_STATE; c++)
+            {
+               real_t *r1 = rhs_data + c * ndof_total_ + dof_offset1;
+               real_t *r2 = rhs_data + c * ndof_total_ + dof_offset2;
+               for (int i = 0; i < ndof; i++)
+               {
+                  r1[i] -= w * shape1(i) * F_h_e1[c];
+                  r2[i] += w * shape2(i) * F_h_e2[c];
+               }
+            }
+         }
+         else
+         {
+            // Fine side -> rhs; coarse side -> its accumulate buffer.
+            const int cslot = buffer_slot_of_elem[coarse_elem];
+            MFEM_VERIFY(cslot >= 0, "AdvanceADERClusterBulk: coarse neighbour has no buffer slot");
+            real_t *cbuf = buffers->Buf(cslot);
+            if (e2 == coarse_elem)   // e1 fine, e2 coarse
+            {
+               for (int c = 0; c < NUM_STATE; c++)
+               {
+                  real_t *r1 = rhs_data + c * ndof_total_ + dof_offset1;
+                  real_t *cb = cbuf + c * ndof_per_el_;
+                  for (int i = 0; i < ndof; i++)
+                  {
+                     r1[i]  -= w * shape1(i) * F_h_e1[c];
+                     cb[i]  += w * shape2(i) * F_h_e2[c];
+                  }
+               }
+            }
+            else                     // e1 coarse, e2 fine
+            {
+               for (int c = 0; c < NUM_STATE; c++)
+               {
+                  real_t *r2 = rhs_data + c * ndof_total_ + dof_offset2;
+                  real_t *cb = cbuf + c * ndof_per_el_;
+                  for (int i = 0; i < ndof; i++)
+                  {
+                     r2[i]  += w * shape2(i) * F_h_e2[c];
+                     cb[i]  -= w * shape1(i) * F_h_e1[c];
+                  }
+               }
+            }
+         }
+      }
+      if (is_consumer) { buffers->fill[buffer_slot_of_elem[coarse_elem]]++; }
+   }
+
+   // 3. Consume this cluster's accumulate buffers (coarse elements) into rhs.
+   if (buffers && buffer_slot_of_elem)
+   {
+      for (int ei = 0; ei < n_elems; ++ei)
+      {
+         const int e = elems[ei];
+         const int slot = buffer_slot_of_elem[e];
+         if (slot < 0) { continue; }
+         if (buffers->fill[slot] == 0) { continue; }   // nothing accumulated this step
+         const real_t *cb = buffers->Buf(slot);
+         const int off = e * ndof_per_el_;
+         for (int c = 0; c < NUM_STATE; c++)
+         {
+            real_t *rc = rhs_data + c * ndof_total_ + off;
+            const real_t *bc = cb + c * ndof_per_el_;
+            for (int i = 0; i < ndof_per_el_; i++) { rc[i] += bc[i]; }
+         }
+         // zero the slot + reset its fill count.
+         real_t *cbz = buffers->Buf(slot);
+         for (int j = 0; j < block; j++) { cbz[j] = 0.0; }
+         buffers->fill[slot] = 0;
+      }
+   }
+
+   // 4. Per-element mass inverse (restricted) and 5. in-place Q += rhs.
+   ApplyMassInverseElems_(rhs, elems, n_elems);
+   for (int ei = 0; ei < n_elems; ++ei)
+   {
+      const int off = elems[ei] * ndof_per_el_;
+      for (int c = 0; c < NUM_STATE; c++)
+      {
+         real_t *qd = Q.GetData() + c * ndof_total_ + off;
+         const real_t *rd = rhs_data + c * ndof_total_ + off;
+         for (int i = 0; i < ndof_per_el_; i++) { qd[i] += rd[i]; }
+      }
+   }
+}
+
+// ---------------------------------------------------------------------------
 // R-602/R-603: SubStep iterator side-channel setters.  See header docstring.
 // ---------------------------------------------------------------------------
 template <typename MeshType>

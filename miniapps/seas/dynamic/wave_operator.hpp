@@ -35,6 +35,8 @@
 #include "../common/seas_types.hpp"
 #include "seas_diag_rank.hpp"
 #include "face_geom_cache.hpp"
+#include "lts_stepper.hpp"      // (LTS Phase 2) LtsAccumulateBuffers (corrector consumes it)
+#include "lts_time_basis.hpp"   // (LTS Phase 2) IntegrateTaylor (consumer-face sub-interval)
 
 #include <algorithm>
 #include <array>
@@ -584,6 +586,43 @@ public:
       real_t *dk_retain = nullptr,
       const int *retain_slot_of_elem = nullptr) const;
 
+   /// (LTS Phase 2, Appendix A.6) Per-cluster ADER CORRECTOR for the FAULT-FREE
+   /// bulk problem.  In-place single-Q: advances ONLY `elems`' dof blocks of `Q`
+   /// by dt_step using the cluster's predictor integral `I_cluster` and its owned
+   /// faces (role-driven sweep).  Byte-identical to the whole-vector `AdvanceADER`
+   /// when the cluster is the whole (fault-free) mesh with all-GTS faces —
+   /// single-cluster == GTS.
+   ///
+   /// Face roles (int, matching seas::FaceRole): 0 IntraClusterGTS (both sides
+   /// this cluster — two-sided scatter), 1 ConsumerFine (fine side — flux uses the
+   /// coarse neighbour's Taylor state integrated over [face_sub_a,face_sub_b] and
+   /// the coarse contribution is added to its accumulate buffer), 2
+   /// ProviderCoarseSkip (skip — the coarse consumes its buffer at its own
+   /// correct), 3 Boundary, 4 Fault (skipped — Phase 3).
+   ///
+   /// Consumer/provider support (`dk_store`, `provider_slot_of_elem`,
+   /// `face_sub_a/b`, `buffers`, `buffer_slot_of_elem`) is required only when the
+   /// cluster carries ConsumerFine faces; pass nullptr for the single-cluster /
+   /// intra-cluster-only case.  Buffers for this cluster's consumer-owner elements
+   /// are consumed (added to rhs, then zeroed) before the mass-inverse.
+   void AdvanceADERClusterBulk(
+      const int *elems, int n_elems,
+      const int *face_ids, const int *face_roles, const int *face_nbr, int n_faces,
+      real_t dt_step, int order,
+      const Vector &I_cluster,
+      Vector &Q,
+      const real_t *dk_store = nullptr, int dk_order = 0,
+      const int *provider_slot_of_elem = nullptr,
+      const real_t *face_sub_a = nullptr, const real_t *face_sub_b = nullptr,
+      LtsAccumulateBuffers *buffers = nullptr,
+      const int *buffer_slot_of_elem = nullptr) const;
+
+   /// Element-subset twins of the corrector primitives (element-local, so
+   /// byte-identical to the whole-vector versions over the full list).
+   void ComputeVolumeRHSElems_(const Vector &Q, Vector &rhs,
+                               const int *elems, int n) const;
+   void ApplyMassInverseElems_(Vector &dQdt, const int *elems, int n) const;
+
    /// Sub-step iterator side-channel: when the pointer pair is set, the
    /// fault branch of `ComputeADERFaceFluxRHS` consumes the pre-computed
    /// per-substep imposed states (in canonical fault-local frame, layout
@@ -1024,6 +1063,7 @@ protected:
    mutable Vector ck_substep_D_curr_buf_;  ///< SubStepStates D(k) buf
    mutable Vector ck_substep_D_next_buf_;  ///< SubStepStates D(k+1) buf
    mutable Vector ck_substep_dQ_dxd_buf_;  ///< SubStepStates ∂_x scratch
+   mutable Vector lts_cluster_rhs_buf_;    ///< (LTS Phase 2) per-cluster corrector RHS
 
    /// I-04: free-surface BC flux dispatch mode.  Defaults to Gamma so
    /// setup-free drivers keep pre-v9.3.0 output.

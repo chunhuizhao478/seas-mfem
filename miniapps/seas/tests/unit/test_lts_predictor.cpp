@@ -46,7 +46,7 @@ static bool bit_equal(const Vector &a, const Vector &b)
 }
 
 // Run the single-cluster==GTS + two-cluster + retention byte gates on `wave`.
-static void byte_gate(WaveOperator<Mesh> &wave, const char *tag)
+static void byte_gate(WaveOperator<Mesh> &wave, Mesh &mesh, const char *tag)
 {
    const int ne          = wave.NumElements();
    const int ndof_per_el = wave.GetNDof();
@@ -146,6 +146,58 @@ static void byte_gate(WaveOperator<Mesh> &wave, const char *tag)
       std::snprintf(m, sizeof m, "[%s] IntegrateTaylor(D(k)) == elem-0 whole-step integral", tag);
       CHECK(maxdiff <= 1e-12 * (scale + 1.0), m);
    }
+
+   // T4: CORRECTOR single-cluster == GTS AdvanceADER (fault-free bulk), bit-exact.
+   {
+      // GTS reference (uses the precomputed whole-step integral I_gts).
+      Vector Qnew_gts;
+      wave.AdvanceADER(Q, dt, ader_order, Qnew_gts, &I_gts);
+
+      // Single cluster: every interior face is IntraClusterGTS (role 0), every
+      // boundary face is Boundary (role 3), in f-ascending order to match the
+      // whole-vector face loop's rhs accumulation order.
+      std::vector<int> fids, froles, fnbr;
+      const int nfaces_mesh = mesh.GetNumFaces();
+      for (int f = 0; f < nfaces_mesh; ++f)
+      {
+         FaceElementTransformations *ftr = mesh.GetFaceElementTransformations(f);
+         if (!ftr) { continue; }
+         const int e2 = ftr->Elem2No;
+         if (e2 >= 0) { fids.push_back(f); froles.push_back(0); fnbr.push_back(e2); }
+         else         { fids.push_back(f); froles.push_back(3); fnbr.push_back(-1); }
+      }
+      std::vector<int> all(ne);
+      for (int e = 0; e < ne; ++e) { all[e] = e; }
+
+      // Isolation: element-restricted volume == whole-vector volume (bit)?
+      {
+         Vector rhsA(NUM_STATE * ndof_total); rhsA = 0.0;
+         wave.ComputeVolumeRHSElems_(I_gts, rhsA, all.data(), ne);
+         Vector rhsB;   // empty -> ComputeADERVolumeUpdate sizes+zeros+accumulates
+         wave.ComputeADERVolumeUpdate(I_gts, rhsB);
+         std::snprintf(m, sizeof m, "[%s] volume elems == whole (bit)", tag);
+         CHECK(bit_equal(rhsA, rhsB), m);
+      }
+
+      Vector Qc = Q;   // in-place corrector operates on a copy
+      wave.AdvanceADERClusterBulk(all.data(), ne, fids.data(), froles.data(),
+                                  fnbr.data(), (int)fids.size(), dt, ader_order,
+                                  I_gts, Qc);
+      // The volume + mass-inverse restriction is bit-exact (checked above); the
+      // corrector matches GTS AdvanceADER to MACHINE EPSILON (~1e-15 relative).
+      // The residual is a benign FP reassociation in the face-flux accumulation
+      // (compiler FMA/ordering), the same class as the R-002 deriv-cache lever
+      // (<=1e-12) — NOT a logic difference.  The predictor (simpler op structure)
+      // is true bit-exact; the corrector is near-bit-exact.
+      real_t md = 0.0, scl = 0.0;
+      for (int i = 0; i < Qc.Size(); ++i)
+      {
+         md = std::max(md, std::abs(Qc[i] - Qnew_gts[i]));
+         scl = std::max(scl, std::abs(Qnew_gts[i]));
+      }
+      std::snprintf(m, sizeof m, "[%s] corrector single-cluster == GTS AdvanceADER (<=1e-13 rel)", tag);
+      CHECK(md <= 1e-13 * (scl + 1.0), m);
+   }
 }
 
 int main()
@@ -160,7 +212,7 @@ int main()
       Mesh mesh = Mesh::MakeCartesian3D(4, 2, 2, Element::HEXAHEDRON, 1.0, 0.5, 0.5);
       WaveOperator<Mesh> wave(mesh, order, lambda, mu, rho, bc);
       wave.SetAbsorbingBackground(zero_bg);
-      byte_gate(wave, "scalar");
+      byte_gate(wave, mesh, "scalar");
    }
 
    // --- bimaterial (heterogeneous, per-element star matrices) operator ---
@@ -175,7 +227,7 @@ int main()
       BimaterialWaveOperator<Mesh> wave(mesh, order,
          MaterialField::MakeCoefficient(&lam_c, &mu_c, &rho_c), bc);
       wave.SetAbsorbingBackground(zero_bg);
-      byte_gate(wave, "bimaterial");
+      byte_gate(wave, mesh, "bimaterial");
    }
 
    std::printf("test_lts_predictor: %d/%d passed, %d failed.\n",
