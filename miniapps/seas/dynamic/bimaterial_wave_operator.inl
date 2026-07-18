@@ -1103,6 +1103,42 @@ void BimaterialWaveOperator<MeshType>::ApplyElementJacobian_(
    ApplyJacobianPerElementDOF_(dir, X, Y, sign);
 }
 
+// (LTS Phase 2) Element-subset per-element-star Jacobian apply.  Same
+// per-element FluxForElem_(e).GetReferenceStarMatrix(dir) and the same
+// (c,cp,i) accumulation order as ApplyJacobianPerElementDOF_, restricted to the
+// element list, so over the full list it is bit-identical to the whole-vector
+// override above (the bimaterial single-cluster == GTS gate).
+template <typename MeshType>
+void BimaterialWaveOperator<MeshType>::ApplyElementJacobianElems_(
+   int dir, const Vector &X, Vector &Y, real_t sign, const int *elems, int n) const
+{
+   MFEM_ASSERT(dir >= 0 && dir < 3, "ApplyElementJacobianElems_: bad dir");
+   MFEM_ASSERT(X.Size() == NUM_STATE * this->ndof_total_,
+               "ApplyElementJacobianElems_: X size mismatch");
+   MFEM_ASSERT(Y.Size() == NUM_STATE * this->ndof_total_,
+               "ApplyElementJacobianElems_: Y size mismatch");
+   const real_t *Xd = X.GetData();
+   real_t *Yd = Y.GetData();
+   for (int ei = 0; ei < n; ++ei)
+   {
+      const int e = elems[ei];
+      const DenseMatrix &A = FluxForElem_(e).GetReferenceStarMatrix(dir);
+      const int base = e * this->ndof_per_el_;
+      for (int c = 0; c < NUM_STATE; ++c)
+      {
+         real_t *Yc = Yd + c * this->ndof_total_ + base;
+         for (int cp = 0; cp < NUM_STATE; ++cp)
+         {
+            const real_t a = A(c, cp);
+            if (a == 0.0) { continue; }
+            const real_t w = sign * a;
+            const real_t *Xcp = Xd + cp * this->ndof_total_ + base;
+            for (int i = 0; i < this->ndof_per_el_; ++i) { Yc[i] += w * Xcp[i]; }
+         }
+      }
+   }
+}
+
 // ---------------------------------------------------------------------------
 // Phase 13 ComputeMaxDt override — per-element heterogeneous CFL walk.
 // (The `if (!per_elem_h_.empty())` guard + scalar `h_min_/flux_.GetCp()`

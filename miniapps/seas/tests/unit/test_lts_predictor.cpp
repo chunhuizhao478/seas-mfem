@@ -5,10 +5,15 @@
 // whole-vector ComputeADERSubStepStatesAndIntegral to the BIT when run over the
 // full element list (single cluster == GTS), and two clusters at the SAME dt
 // must partition the work with no block overlap and reproduce GTS bit-for-bit.
-// Also checks the raw D(k) retention ties out with IntegrateTaylor.
+// Run on BOTH the scalar and the bimaterial (per-element star matrix) operators
+// — the bimaterial gate would fail without the ApplyElementJacobianElems_
+// override (it would apply the dead (1,1,1) sentinel star matrix).  Also checks
+// the raw D(k) retention ties out with IntegrateTaylor.
 
 #include "mfem.hpp"
 #include "../../dynamic/wave_operator.hpp"
+#include "../../dynamic/bimaterial_wave_operator.hpp"
+#include "../../dynamic/heterogeneous_material.hpp"
 #include "../../dynamic/wave_state.hpp"
 #include "../../dynamic/lts_time_basis.hpp"
 #include "../../domain/boundary_config.hpp"
@@ -33,7 +38,6 @@ static BoundaryConfig AbsorbingBC()
    return bc;
 }
 
-// Exact-equality over two full-size vectors.
 static bool bit_equal(const Vector &a, const Vector &b)
 {
    if (a.Size() != b.Size()) { return false; }
@@ -41,20 +45,14 @@ static bool bit_equal(const Vector &a, const Vector &b)
    return true;
 }
 
-int main()
+// Run the single-cluster==GTS + two-cluster + retention byte gates on `wave`.
+static void byte_gate(WaveOperator<Mesh> &wave, const char *tag)
 {
-   Mesh mesh = Mesh::MakeCartesian3D(4, 2, 2, Element::HEXAHEDRON, 1.0, 0.5, 0.5);
-   const int order = 1;                 // spatial (P1); ADER order below
-   const real_t lambda = 32.04e9, mu = 32.04e9, rho = 2670.0;
-   BoundaryConfig bc = AbsorbingBC();
-   WaveOperator<Mesh> wave(mesh, order, lambda, mu, rho, bc);
-
-   const int ne         = wave.NumElements();
+   const int ne          = wave.NumElements();
    const int ndof_per_el = wave.GetNDof();
-   const int ndof_total = wave.GetScalarNDof();
-   const int Nfull      = NUM_STATE * ndof_total;
+   const int ndof_total  = wave.GetScalarNDof();
+   const int Nfull       = NUM_STATE * ndof_total;
 
-   // Smooth initial state across all NUM_STATE components.
    Vector Q(Nfull);
    const FiniteElementSpace &fes = wave.GetFESpace();
    for (int e = 0; e < ne; ++e)
@@ -75,92 +73,109 @@ int main()
       }
    }
 
-   const real_t dt = 3.0e-6;
+   const real_t dt = 3.0e-7;
    const int ader_order = 4;
-   std::vector<real_t> tau_nodes(ader_order);
-   for (int o = 0; o < ader_order; ++o)
-   { tau_nodes[o] = dt * (o + 0.5) / ader_order; }
+   std::vector<real_t> tau(ader_order);
+   for (int o = 0; o < ader_order; ++o) { tau[o] = dt * (o + 0.5) / ader_order; }
 
-   // Reference: the whole-vector GTS predictor.
    std::vector<Vector> Qn_gts;
    Vector I_gts;
-   wave.ComputeADERSubStepStatesAndIntegral(Q, dt, ader_order, tau_nodes, Qn_gts, I_gts);
+   wave.ComputeADERSubStepStatesAndIntegral(Q, dt, ader_order, tau, Qn_gts, I_gts);
 
-   // ---- T1: single cluster (all elems ascending) == GTS bit-for-bit ---------
+   char m[96];
+   // T1: single cluster (all elems) == GTS bit-for-bit.
    {
       std::vector<int> all(ne);
       for (int e = 0; e < ne; ++e) { all[e] = e; }
-      std::vector<Vector> Qn_lts;
-      Vector I_lts;
-      wave.ComputeADERSubStepStatesAndIntegralCluster(
-         all.data(), ne, Q, dt, ader_order, tau_nodes, Qn_lts, I_lts);
-      CHECK(I_lts.Size() == Nfull, "T1 I sized full");
-      CHECK(bit_equal(I_lts, I_gts), "T1 single-cluster I == GTS (bit)");
-      bool nodes_ok = (Qn_lts.size() == Qn_gts.size());
-      for (std::size_t o = 0; nodes_ok && o < Qn_lts.size(); ++o)
-      { nodes_ok = bit_equal(Qn_lts[o], Qn_gts[o]); }
-      CHECK(nodes_ok, "T1 single-cluster Q_per_node == GTS (bit)");
+      std::vector<Vector> Qn; Vector I;
+      wave.ComputeADERSubStepStatesAndIntegralCluster(all.data(), ne, Q, dt,
+                                                      ader_order, tau, Qn, I);
+      std::snprintf(m, sizeof m, "[%s] single-cluster I == GTS (bit)", tag);
+      CHECK(bit_equal(I, I_gts), m);
+      bool ok = (Qn.size() == Qn_gts.size());
+      for (std::size_t o = 0; ok && o < Qn.size(); ++o) { ok = bit_equal(Qn[o], Qn_gts[o]); }
+      std::snprintf(m, sizeof m, "[%s] single-cluster Q_per_node == GTS (bit)", tag);
+      CHECK(ok, m);
    }
 
-   // ---- T2: two clusters at the SAME dt partition the work == GTS (bit) ------
+   // T2: two clusters at the SAME dt partition the work == GTS bit-for-bit.
    {
       std::vector<int> A, B;
       for (int e = 0; e < ne; ++e) { (e < ne / 2 ? A : B).push_back(e); }
-      std::vector<Vector> Qn;   // persistent across the two cluster calls
-      Vector I;
-      // First cluster A writes A's blocks; the second (B) writes B's blocks and
-      // must leave A's blocks intact (zero only its own).
-      wave.ComputeADERSubStepStatesAndIntegralCluster(
-         A.data(), (int)A.size(), Q, dt, ader_order, tau_nodes, Qn, I);
-      wave.ComputeADERSubStepStatesAndIntegralCluster(
-         B.data(), (int)B.size(), Q, dt, ader_order, tau_nodes, Qn, I);
-      CHECK(bit_equal(I, I_gts), "T2 two-cluster (same dt) I == GTS (bit)");
+      std::vector<Vector> Qn; Vector I;
+      wave.ComputeADERSubStepStatesAndIntegralCluster(A.data(), (int)A.size(), Q,
+                                                      dt, ader_order, tau, Qn, I);
+      wave.ComputeADERSubStepStatesAndIntegralCluster(B.data(), (int)B.size(), Q,
+                                                      dt, ader_order, tau, Qn, I);
+      std::snprintf(m, sizeof m, "[%s] two-cluster (same dt) I == GTS (bit)", tag);
+      CHECK(bit_equal(I, I_gts), m);
       bool ok = (Qn.size() == Qn_gts.size());
       for (std::size_t o = 0; ok && o < Qn.size(); ++o) { ok = bit_equal(Qn[o], Qn_gts[o]); }
-      CHECK(ok, "T2 two-cluster (same dt) Q_per_node == GTS (bit)");
+      std::snprintf(m, sizeof m, "[%s] two-cluster (same dt) Q_per_node == GTS (bit)", tag);
+      CHECK(ok, m);
    }
 
-   // ---- T3: raw D(k) retention ties out with IntegrateTaylor -----------------
+   // T3: raw D(k) retention ties out with IntegrateTaylor (element 0 -> slot 0).
    {
       std::vector<int> all(ne);
       for (int e = 0; e < ne; ++e) { all[e] = e; }
-      // Provider = element 0 -> slot 0.
-      std::vector<int> slot_of(ne, -1);
-      slot_of[0] = 0;
+      std::vector<int> slot_of(ne, -1); slot_of[0] = 0;
       const int block = NUM_STATE * ndof_per_el;
-      std::vector<real_t> dk(static_cast<std::size_t>(1) * ader_order * block, 0.0);
-      std::vector<Vector> Qn;
-      Vector I;
-      wave.ComputeADERSubStepStatesAndIntegralCluster(
-         all.data(), ne, Q, dt, ader_order, tau_nodes, Qn, I,
-         dk.data(), slot_of.data());
+      std::vector<real_t> dk(static_cast<std::size_t>(ader_order) * block, 0.0);
+      std::vector<Vector> Qn; Vector I;
+      wave.ComputeADERSubStepStatesAndIntegralCluster(all.data(), ne, Q, dt,
+         ader_order, tau, Qn, I, dk.data(), slot_of.data());
 
-      // Retained D(0) == element 0's Q block, gathered contiguously.
       bool d0_ok = true;
       for (int c = 0; c < NUM_STATE; ++c)
          for (int i = 0; i < ndof_per_el; ++i)
-         {
-            const real_t got = dk[c * ndof_per_el + i];             // slot0,k0
-            const real_t exp = Q[c * ndof_total + 0 * ndof_per_el + i];
-            if (got != exp) { d0_ok = false; }
-         }
-      CHECK(d0_ok, "T3 retained D(0) == element-0 Q block (bit)");
+            if (dk[c * ndof_per_el + i] != Q[c * ndof_total + i]) { d0_ok = false; }
+      std::snprintf(m, sizeof m, "[%s] retained D(0) == element-0 Q block (bit)", tag);
+      CHECK(d0_ok, m);
 
-      // IntegrateTaylor(0,dt, slot-0 stack) == element 0's whole-step integral
-      // block (I_gts), to FP tolerance (different factorial factorization).
       std::vector<real_t> out(block, 0.0);
       IntegrateTaylor(0.0, dt, dk.data(), ader_order, block, out.data());
       real_t maxdiff = 0.0, scale = 0.0;
       for (int c = 0; c < NUM_STATE; ++c)
          for (int i = 0; i < ndof_per_el; ++i)
          {
-            const real_t got = out[c * ndof_per_el + i];
-            const real_t exp = I_gts[c * ndof_total + 0 * ndof_per_el + i];
-            maxdiff = std::max(maxdiff, std::abs(got - exp));
+            const real_t exp = I_gts[c * ndof_total + i];
+            maxdiff = std::max(maxdiff, std::abs(out[c * ndof_per_el + i] - exp));
             scale   = std::max(scale, std::abs(exp));
          }
-      CHECK(maxdiff <= 1e-12 * (scale + 1.0),
-            "T3 IntegrateTaylor(0,dt, D(k)) == element-0 whole-step integral");
+      std::snprintf(m, sizeof m, "[%s] IntegrateTaylor(D(k)) == elem-0 whole-step integral", tag);
+      CHECK(maxdiff <= 1e-12 * (scale + 1.0), m);
+   }
+}
+
+int main()
+{
+   const int order = 1;
+   const real_t lambda = 32.04e9, mu = 32.04e9, rho = 2670.0;
+   BoundaryConfig bc = AbsorbingBC();
+   real_t zero_bg[NUM_STATE] = {0};
+
+   // --- scalar (homogeneous) operator ---
+   {
+      Mesh mesh = Mesh::MakeCartesian3D(4, 2, 2, Element::HEXAHEDRON, 1.0, 0.5, 0.5);
+      WaveOperator<Mesh> wave(mesh, order, lambda, mu, rho, bc);
+      wave.SetAbsorbingBackground(zero_bg);
+      byte_gate(wave, "scalar");
+   }
+
+   // --- bimaterial (heterogeneous, per-element star matrices) operator ---
+   // Position-varying moduli make the per-element star matrices genuinely
+   // differ; without the ApplyElementJacobianElems_ override the cluster
+   // predictor would apply the (1,1,1) sentinel and FAIL these gates.
+   {
+      Mesh mesh = Mesh::MakeCartesian3D(4, 2, 2, Element::HEXAHEDRON, 1.0, 0.5, 0.5);
+      FunctionCoefficient lam_c([](const Vector &x){ return 32.04e9 * (1.0 + 0.4 * x(0)); });
+      FunctionCoefficient mu_c ([](const Vector &x){ return 32.04e9 * (1.0 + 0.25 * x(1)); });
+      FunctionCoefficient rho_c([](const Vector &x){ return 2670.0 * (1.0 + 0.2 * x(2)); });
+      BimaterialWaveOperator<Mesh> wave(mesh, order,
+         MaterialField::MakeCoefficient(&lam_c, &mu_c, &rho_c), bc);
+      wave.SetAbsorbingBackground(zero_bg);
+      byte_gate(wave, "bimaterial");
    }
 
    std::printf("test_lts_predictor: %d/%d passed, %d failed.\n",

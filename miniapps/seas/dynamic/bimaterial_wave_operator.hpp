@@ -230,6 +230,14 @@ protected:
    void ApplyElementJacobian_(int dir, const Vector &X, Vector &Y,
                               real_t sign) const override;
 
+   /// (LTS Phase 2) Element-subset twin of the above — per-element star matrices
+   /// restricted to `elems[0..n)`.  MUST override the base (which would apply the
+   /// dead (1,1,1) sentinel `flux_` star matrix on the matrix path).  Bit-
+   /// identical to `ApplyElementJacobian_` over the full list.
+   void ApplyElementJacobianElems_(int dir, const Vector &X, Vector &Y,
+                                   real_t sign, const int *elems,
+                                   int n) const override;
+
    // -----------------------------------------------------------------------
    // (Cross-rank Phase 1) ONE uniform material accessor, read by the flux
    // pool, the shared-face neighbour material, and (Phase 4) the per-side
