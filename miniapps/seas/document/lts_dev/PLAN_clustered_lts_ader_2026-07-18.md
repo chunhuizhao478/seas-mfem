@@ -4,8 +4,9 @@
 **Rev 5:** Phase 0 + part of Phase 1 implemented on `safs-v4_0_0-alt-case1-mfem-speed`
 (local, unpushed); three Phase-1 pieces (fault-QP reorder, serial-mesh clustering,
 LTS-aware partition) **resequenced** to Phases 3/4 where each is first needed and
-first validatable. Phase boundaries updated; normative interfaces (Appendices A/B)
-unchanged. Impl review: `REVIEW_phase01_impl_2026-07-18.md`.
+first validatable. Phase boundaries updated; Appendix A interfaces unchanged;
+Appendix B phase tags corrected to match the move (B.8 split into B.8/B.8b; the
+reorder canary re-tagged Phase 3). Impl review: `REVIEW_phase01_impl_2026-07-18.md`.
 **Rev 4:** added **Part I — The method, explained**: a plain-language tutorial
 (with the equations, the measured cluster histogram, seam/tick diagrams, and
 the beat-SeisSol arithmetic) so the plan is self-contained for a reader who has
@@ -1062,11 +1063,12 @@ existing full-vector forms delegate with (0, N).
 | B.5 | `tests/unit/test_lts_ragged_final.cpp` | 3-cluster np=1 chain, tfinal = 3.5·dt_coarse (coarse truncates; fine's last sub-step truncates): all clusters land exactly on tfinal; consumed buffer == Σ truncated sub-interval integrals to 1e-15; buffers zero after final sync; result vs GTS at truncation order; control tfinal = 4.0·dt_coarse | 2 |
 | B.6 | `tests/unit/test_lts_conservation.cpp` | periodic tet box: ∫ρv_i and ∫σ_ij drift < 1e-12·norm per sync; energy monotone decay; fallback traction-free box: ∫ρv_i only | 2 |
 | B.7 | `tests/unit/test_lts_mixed_neighbor.cpp` | 3-cluster chain where one middle element carries provider+GTS+consumer faces simultaneously; conservation < 1e-12; instrumented single-flux-evaluation count (each boundary face evaluated exactly n_substeps times per coarse step, consumed once per side) | 2 |
-| B.8 | `tests/unit/test_lts_checkpoint_v2.cpp` | V1 + lts=rate2 → named abort; V2 with mutated hash → abort printing stored vs computed; V2 + lts=off → abort; V2 round-trip bit-continues; GTS V1 write byte-identical pre/post change; dof_data on-disk canonical order under reorder | 2 |
+| B.8 | `tests/unit/test_lts_checkpoint_v2.cpp` | V1 + lts=rate2 → named abort; V2 with mutated hash → abort printing stored vs computed; V2 + lts=off → abort; V2 round-trip bit-continues; GTS V1 write byte-identical pre/post change | 2 |
+| B.8b | `tests/unit/test_lts_checkpoint_v2.cpp` (reorder case) | dof_data on-disk canonical order under reorder (needs the Phase-3 permutation table) | **3** |
 | B.9 | `tests/unit/test_lts_friction_range.cpp` | two clusters, ranges advanced with different dt: per-QP (psi, slip, V) equal a standalone per-QP reference advanced with its own dt to 1e-15; I_imp outside range untouched; Σ deltaT == dt_step check fires on mismatch | 3 |
 | B.10 | `tests/unit/test_lts_nucleation_absolute.cpp` | per kind (gradual + compact-circular): absolute form at every GTS sub-step time == telescoped incremental sum to 1e-15·amp; two different time partitions give identical τ_nuc at common times; disjoint range applies == whole-vector apply bit-for-bit | 3 |
 | B.11 | `tests/unit/test_lts_mpi_seam.cpp` (np=2) | 3-cluster chain crossing the rank seam: np=2 == np=1 to 10 digits; ghost slots of non-due clusters NaN-poisoned in debug — no consumption fires; per-tick collective counter == tick-table n_collectives on both ranks | 4 |
-| — | extended existing | `test-ader-tpv102-smoke` (lts=off byte gate, every phase); single-cluster byte gates with `lts_wiggle="off"` pinned incl. truncated-tfinal (2/3); 2×2 lever smoke (2); TPV104-spatial stations byte-identical under lts="rate2"+GTS stepping (1) | — |
+| — | extended existing | `test-ader-tpv102-smoke` (lts=off byte gate, every phase); single-cluster byte gates with `lts_wiggle="off"` pinned incl. truncated-tfinal (2/3); 2×2 lever smoke (2); TPV104-spatial stations byte-identical under lts="rate2"+still-GTS stepping — the reorder canary **(3, step 0)** (was tagged Phase 1 pre-rev-5) | — |
 
 ## Testing Strategy (summary)
 Byte-exact ladder (lts=off; single-cluster==GTS incl. truncated tfinal) →
