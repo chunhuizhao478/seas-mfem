@@ -140,6 +140,99 @@ inline std::vector<LtsTick> BuildTickTable(int num_clusters,
    return table;
 }
 
+// ---------------------------------------------------------------------------
+// Per-cluster storage (Appendix A.5 / A.6).  PHASE 2: the data structures the
+// wave-operator predictor/corrector fill/consume; the tick loop below is what
+// sequences those calls.  All indices are DENSE SLOTS from the Phase-1 layout
+// (LtsLayout::provider_slot_of_elem / buffer_slot_of_elem).
+// ---------------------------------------------------------------------------
+
+/// Raw D(k) derivative stacks retained for PROVIDER (coarse-side) elements so a
+/// finer neighbour can time-integrate them (Appendix A.5).  Storage is
+/// `[slot][k][block]`, block = NUM_STATE * ndof_per_el.  One epoch counter per
+/// slot, bumped every time a predict refreshes that slot; a consumer asserts it
+/// reads the CURRENT epoch (GAP-A3 — no stale D(k) reads).
+struct LtsDkStore
+{
+   int n_slots = 0, order = 0, block = 0;
+   std::vector<mfem::real_t> data;      ///< n_slots * order * block, RAW/unscaled
+   std::vector<long long>    epoch;     ///< n_slots
+
+   void Resize(int n_slots_, int order_, int block_)
+   {
+      n_slots = n_slots_; order = order_; block = block_;
+      data.assign(static_cast<std::size_t>(n_slots) * order * block, mfem::real_t(0));
+      epoch.assign(static_cast<std::size_t>(n_slots), 0);
+   }
+   std::size_t Offset(int slot, int k) const
+   { return (static_cast<std::size_t>(slot) * order + k) * block; }
+   /// Pointer to slot's raw stack (order*block contiguous, D(0) first).
+   mfem::real_t*       Stack(int slot)       { return data.data() + Offset(slot, 0); }
+   const mfem::real_t* Stack(int slot) const { return data.data() + Offset(slot, 0); }
+   void      BumpEpoch(int slot) { ++epoch[static_cast<std::size_t>(slot)]; }
+   long long Epoch(int slot) const { return epoch[static_cast<std::size_t>(slot)]; }
+   std::size_t BytesPerRank() const { return data.size() * sizeof(mfem::real_t); }
+};
+
+/// Pre-M^-1 flux-contribution accumulate buffers, one per consumer-owning
+/// (coarse) element (Appendix A.6 / the Buffer design).  Storage `[slot][block]`.
+/// Fine sub-corrects ADD into a slot (++fill); the coarse correct CONSUMES it
+/// (reads then zeros, fill→0).  Invariant: every buffer is exactly zero at each
+/// sync point (AllZero()).
+struct LtsAccumulateBuffers
+{
+   int n_slots = 0, block = 0;
+   std::vector<mfem::real_t> data;   ///< n_slots * block, pre-M^-1 residual units
+   std::vector<int>          fill;   ///< n_slots; #fine sub-steps accumulated
+
+   void Resize(int n_slots_, int block_)
+   {
+      n_slots = n_slots_; block = block_;
+      data.assign(static_cast<std::size_t>(n_slots) * block, mfem::real_t(0));
+      fill.assign(static_cast<std::size_t>(n_slots), 0);
+   }
+   mfem::real_t*       Buf(int slot)       { return data.data() + static_cast<std::size_t>(slot) * block; }
+   const mfem::real_t* Buf(int slot) const { return data.data() + static_cast<std::size_t>(slot) * block; }
+
+   /// Add a length-`block` contribution into `slot` and count one fine sub-step.
+   void AddInto(int slot, const mfem::real_t* contrib)
+   {
+      mfem::real_t* b = Buf(slot);
+      for (int j = 0; j < block; ++j) { b[j] += contrib[j]; }
+      ++fill[static_cast<std::size_t>(slot)];
+   }
+   /// Copy `slot` into `out` (length `block`), zero the slot, reset its fill, and
+   /// RETURN the fill count that was consumed (for the fill-count invariant).
+   int ConsumeZero(int slot, mfem::real_t* out)
+   {
+      mfem::real_t* b = Buf(slot);
+      for (int j = 0; j < block; ++j) { out[j] = b[j]; b[j] = mfem::real_t(0); }
+      const int f = fill[static_cast<std::size_t>(slot)];
+      fill[static_cast<std::size_t>(slot)] = 0;
+      return f;
+   }
+   bool AllZero() const
+   {
+      for (mfem::real_t v : data) { if (v != mfem::real_t(0)) { return false; } }
+      return true;
+   }
+};
+
+/// Abstract per-cluster stepper.  Phase 2 implements this over the wave operator
+/// (predict = per-cluster CK predictor; correct = per-cluster corrector); tests
+/// implement a mock.  `RunSyncInterval` is the pure, rank-identical tick loop.
+struct ILtsClusterStepper
+{
+   virtual ~ILtsClusterStepper() = default;
+   virtual void Predict(int cluster, mfem::real_t dt_step) = 0;
+   virtual void Correct(int cluster, mfem::real_t dt_step) = 0;
+};
+
+/// Drive ONE sync interval from a precomputed tick table (Normative Scheduling):
+/// per tick, predict every due cluster (any order), then correct every due
+/// cluster FINE→COARSE (the table already sorts `correct_clusters` ascending).
+void RunSyncInterval(const std::vector<LtsTick>& table, ILtsClusterStepper& stepper);
+
 } // namespace seas
 } // namespace mfem
 

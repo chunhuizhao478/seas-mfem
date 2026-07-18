@@ -516,6 +516,11 @@ LTS_LAYOUT_HEADERS                          = dynamic/lts_layout.hpp \
                                               dynamic/lts_stepper.hpp
 LTS_LAYOUT_SRC                              = dynamic/lts_layout.cpp
 TEST_LTS_LAYOUT_SRC                         = tests/unit/test_lts_layout.cpp
+LTS_TIME_BASIS_HEADERS                      = dynamic/lts_time_basis.hpp
+TEST_LTS_TIME_BASIS_SRC                     = tests/unit/test_lts_time_basis.cpp
+LTS_STEPPER_HEADERS                         = dynamic/lts_stepper.hpp
+LTS_STEPPER_SRC                             = dynamic/lts_stepper.cpp
+TEST_LTS_SCHEDULER_SRC                      = tests/unit/test_lts_scheduler.cpp
 
 # Data-projection feature (Phase 3..5).  See document/features_dev/
 # data_projection_feature_plan_v2.md.
@@ -588,6 +593,9 @@ LTS_CLUSTERING_OBJ               = $(LTS_CLUSTERING_SRC:.cpp=.o)
 TEST_LTS_CLUSTERING_OBJ          = $(TEST_LTS_CLUSTERING_SRC:.cpp=.o)
 LTS_LAYOUT_OBJ                   = $(LTS_LAYOUT_SRC:.cpp=.o)
 TEST_LTS_LAYOUT_OBJ              = $(TEST_LTS_LAYOUT_SRC:.cpp=.o)
+TEST_LTS_TIME_BASIS_OBJ         = $(TEST_LTS_TIME_BASIS_SRC:.cpp=.o)
+LTS_STEPPER_OBJ                 = $(LTS_STEPPER_SRC:.cpp=.o)
+TEST_LTS_SCHEDULER_OBJ          = $(TEST_LTS_SCHEDULER_SRC:.cpp=.o)
 DATA_FIELD_3D_OBJ                = $(DATA_FIELD_3D_SRC:.cpp=.o)
 STRESS_FIELD_3D_OBJ              = $(STRESS_FIELD_3D_SRC:.cpp=.o)
 FIELD_COEFFICIENT_OBJ            = $(FIELD_COEFFICIENT_SRC:.cpp=.o)
@@ -1129,6 +1137,18 @@ seas_test_lts_clustering: $(TEST_LTS_CLUSTERING_OBJ) $(LTS_CLUSTERING_OBJ)
 seas_test_lts_layout: $(TEST_LTS_LAYOUT_OBJ) $(LTS_LAYOUT_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_LTS_LAYOUT_OBJ) \
 	    $(LTS_LAYOUT_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Clustered LTS Phase 2: Taylor time-integration unit test (header-only lib).
+seas_test_lts_time_basis: $(TEST_LTS_TIME_BASIS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_LTS_TIME_BASIS_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Clustered LTS Phase 2: tick-loop scheduler unit test (RunSyncInterval + mock).
+seas_test_lts_scheduler: $(TEST_LTS_SCHEDULER_OBJ) $(LTS_STEPPER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_LTS_SCHEDULER_OBJ) \
+	    $(LTS_STEPPER_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Data-projection feature: DataField3D / FieldCoefficient / FieldProjector /
@@ -3135,6 +3155,21 @@ $(TEST_LTS_LAYOUT_OBJ): %.o: $(SRC)%.cpp $(LTS_LAYOUT_HEADERS) \
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+$(TEST_LTS_TIME_BASIS_OBJ): %.o: $(SRC)%.cpp $(LTS_TIME_BASIS_HEADERS) \
+                                 $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(LTS_STEPPER_OBJ): %.o: $(SRC)%.cpp $(LTS_STEPPER_HEADERS) \
+                         $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_LTS_SCHEDULER_OBJ): %.o: $(SRC)%.cpp $(LTS_STEPPER_HEADERS) \
+                                $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
 $(DATA_FIELD_3D_OBJ): %.o: $(SRC)%.cpp $(DATA_FIELD_3D_HEADERS) \
                           $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
@@ -4195,6 +4230,12 @@ test-lts-clustering: seas_test_lts_clustering
 
 test-lts-layout: seas_test_lts_layout
 	./seas_test_lts_layout
+
+test-lts-time-basis: seas_test_lts_time_basis
+	./seas_test_lts_time_basis
+
+test-lts-scheduler: seas_test_lts_scheduler
+	./seas_test_lts_scheduler
 
 test-data-field-3d: seas_test_data_field_3d
 	./seas_test_data_field_3d
