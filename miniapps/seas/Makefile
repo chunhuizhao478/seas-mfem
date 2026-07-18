@@ -2341,7 +2341,9 @@ seas_spatial_dyn_driver: $(SPATIAL_DYN_DRIVER_OBJ) \
                           $(MATERIAL_COEFFICIENTS_OBJ) \
                           $(DATA_FIELD_3D_OBJ) \
                           $(STRESS_FIELD_3D_OBJ) \
-                          $(FIELD_COEFFICIENT_OBJ)
+                          $(FIELD_COEFFICIENT_OBJ) \
+                          $(LTS_CLUSTERING_OBJ) \
+                          $(LTS_LAYOUT_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
 	    $(SPATIAL_DYN_DRIVER_OBJ) \
 	    $(TPV205_SHARED_OBJS) \
@@ -2365,6 +2367,8 @@ seas_spatial_dyn_driver: $(SPATIAL_DYN_DRIVER_OBJ) \
 	    $(DATA_FIELD_3D_OBJ) \
 	    $(STRESS_FIELD_3D_OBJ) \
 	    $(FIELD_COEFFICIENT_OBJ) \
+	    $(LTS_CLUSTERING_OBJ) \
+	    $(LTS_LAYOUT_OBJ) \
 	    $(MFEM_LIBS) $(HDF5_LIBS) $(SEAS_FS_LIB)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 

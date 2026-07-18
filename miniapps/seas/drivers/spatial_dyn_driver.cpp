@@ -50,6 +50,7 @@
 #include "../dynamic/wave_operator.hpp"
 #include "../dynamic/bimaterial_wave_operator.hpp"  // Phase 13: matrix (bimaterial) operator
 #include "../dynamic/lts_clustering.hpp"             // LTS Phase 0: --lts-report clustering
+#include "../dynamic/lts_layout.hpp"                 // LTS Phase 1: run-side layout
 #include "../dynamic/fault_face_flux.hpp"
 #include "../dynamic/friction_solver.hpp"
 #include "../dynamic/tpv205_friction.hpp"
@@ -170,6 +171,79 @@ bool HasFlag(int argc, char *argv[], const char *flag)
       if (std::string(argv[i]) == flag) { return true; }
    }
    return false;
+}
+
+// (LTS Phase 0/1) Clustering inputs derived from a CONSTRUCTED wave operator +
+// its ParMesh: per-local-element CFL dt (only the ratios matter to the cluster
+// assignment; the absolute scale is recovered by the caller when it wants
+// seconds), the local interior fault-face element pairs (forced diff 0), and
+// every local face as an LtsFaceSpec for BuildLtsLayout.  Shared by
+// --lts-report and the run-path layout wiring so the dt / fault-face definition
+// is single-sourced.
+struct LtsMeshInputs
+{
+   std::vector<double>                  dt_e;         // per local element (h_e / c_p,e)
+   std::vector<std::pair<int, int>>     fault_pairs;  // local fault-face elem pairs
+   std::vector<mfem::seas::LtsFaceSpec> faces;        // every local face
+   bool per_elem_material = false;                    // true on the matrix path
+};
+
+LtsMeshInputs BuildLtsMeshInputs(WaveOperator<ParMesh> &wave, ParMesh &pmesh)
+{
+   LtsMeshInputs in;
+   const int neL = pmesh.GetNE();
+   const std::vector<real_t> &hvec = wave.GetPerElementCflLength();
+   const std::vector<std::array<real_t, 3>> &lmr = wave.GetPerElementMaterial();
+   MFEM_VERIFY(static_cast<int>(hvec.size()) == neL,
+               "BuildLtsMeshInputs: per-element CFL length size " << hvec.size()
+               << " != local NE " << neL << " (operator not built?)");
+   in.per_elem_material = !lmr.empty();
+   MFEM_VERIFY(!in.per_elem_material || static_cast<int>(lmr.size()) == neL,
+               "BuildLtsMeshInputs: per-element material size " << lmr.size()
+               << " != local NE " << neL);
+
+   in.dt_e.resize(static_cast<std::size_t>(neL));
+   for (int e = 0; e < neL; ++e)
+   {
+      double cp = 1.0;  // scalar path: uniform c_p cancels out of cluster ratios
+      if (in.per_elem_material)
+      {
+         const double lam = lmr[e][0], mu = lmr[e][1], rho = lmr[e][2];
+         cp = std::sqrt((lam + 2.0 * mu) / rho);
+      }
+      in.dt_e[static_cast<std::size_t>(e)] =
+         static_cast<double>(hvec[e]) / cp;
+   }
+
+   // Fault faces: mark the wave operator's LOCAL interior fault-face indices so
+   // BuildLtsLayout tracks them as diff-0 and BuildLtsClustering forces the pair
+   // into one cluster.
+   std::vector<char> is_fault_face(pmesh.GetNumFaces(), 0);
+   const Array<int> &fif = wave.GetFaultInteriorFaces();
+   for (int i = 0; i < fif.Size(); ++i)
+   {
+      const int f = fif[i];
+      if (f >= 0 && f < pmesh.GetNumFaces()) { is_fault_face[f] = 1; }
+      int e1 = -1, e2 = -1;
+      pmesh.GetFaceElements(f, &e1, &e2);
+      if (e1 >= 0 && e2 >= 0) { in.fault_pairs.emplace_back(e1, e2); }
+   }
+
+   const int nfaces = pmesh.GetNumFaces();
+   in.faces.reserve(static_cast<std::size_t>(nfaces));
+   for (int f = 0; f < nfaces; ++f)
+   {
+      int e1 = -1, e2 = -1;
+      pmesh.GetFaceElements(f, &e1, &e2);
+      if (e1 < 0) { continue; }   // face with no local element (skip)
+      mfem::seas::LtsFaceSpec fs;
+      fs.face_id  = f;
+      fs.elem1    = e1;
+      fs.elem2    = e2;   // < 0 for boundary / rank seam
+      fs.is_fault = (is_fault_face[f] != 0);
+      in.faces.push_back(fs);
+   }
+   return in;
 }
 
 // Map TOML mixed_flux string -> WaveOperator enum.
@@ -1614,6 +1688,84 @@ int main(int argc, char *argv[])
    }
    WaveOperator<ParMesh> &wave = *wave_ptr;
 
+   // -----------------------------------------------------------------
+   // (LTS Phase 1) Compute + carry the clustered-LTS layout on every run.
+   //   Gated on lts != "off": for lts="off" NOTHING here runs, so the driver is
+   //   byte-identical to the pre-LTS global-time-stepping (GTS) path.  Phase 1
+   //   still STEPS GLOBALLY — the layout is built and logged (proving the run
+   //   path constructs it without error), but not yet consumed; Phase 2 promotes
+   //   it to a persistent member and drives the multi-cluster tick loop from it.
+   //
+   //   STAGED (Phase 1b): the DETERMINISTIC serial-mesh clustering (rank 0,
+   //   pre-ParMesh, so cluster ids are independent of the rank count) + the
+   //   LTS-aware METIS partition + the fault-QP reorder are deferred.  They
+   //   depend on building the material BEFORE the ParMesh (it is built after)
+   //   plus a serial<->local element map, and their acceptance gate (rate2
+   //   stations byte-identical under the QP permutation) is only validatable on
+   //   the production meshes (Frontera/Expanse).  Until then the per-rank
+   //   clustering here is exact only at np=1 (the go/no-go + Phase-0 report
+   //   configuration): at np>1 a rank's local mesh can be disconnected and the
+   //   maxdiff fixpoint is per-rank, so the build is skipped with a clear log.
+   // -----------------------------------------------------------------
+   if (cfg.numerics.LtsEnabled())
+   {
+      if (nprocs == 1)
+      {
+         LtsMeshInputs in = BuildLtsMeshInputs(wave, pmesh);
+
+         LtsClusteringOptions opt;
+         opt.nc_cap         = cfg.numerics.lts_nc_cap;
+         opt.merge_loss_tol = cfg.numerics.lts_merge_loss_tol;
+         if (cfg.numerics.lts_wiggle == "scan")
+         {
+            opt.wiggle_scan = true;
+         }
+         else if (cfg.numerics.lts_wiggle == "off")
+         {
+            opt.wiggle_scan  = false;
+            opt.lambda_fixed = 1.0;
+         }
+         else   // validated numeric lambda in (0.5, 1]
+         {
+            opt.wiggle_scan  = false;
+            opt.lambda_fixed =
+               std::strtod(cfg.numerics.lts_wiggle.c_str(), nullptr);
+         }
+
+         const Table &e2e = pmesh.ElementToElementTable();
+         const LtsClustering cl =
+            BuildLtsClustering(in.dt_e, e2e, in.fault_pairs, opt);
+         const LtsLayout layout =
+            BuildLtsLayout(cl.cluster, cl.num_clusters, in.faces);
+
+         if (rank == 0)
+         {
+            const auto hist = cl.cells_per_cluster();
+            std::cout << "[lts] ENABLED (mode=" << cfg.numerics.lts
+                      << "; Phase 1 still steps GTS): Nc = " << cl.num_clusters
+                      << ", lambda = " << cl.lambda
+                      << ", predicted harmonic speedup "
+                      << HarmonicUpdateSpeedup(cl) << "x\n"
+                      << "[lts]   histogram (cells per cluster c=0..):";
+            for (long long h : hist) { std::cout << ' ' << h; }
+            std::cout << "\n[lts]   layout: " << layout.provider_elems.size()
+                      << " provider elems, " << layout.consumer_owner_elems.size()
+                      << " consumer-owner elems, " << layout.num_owned_faces()
+                      << " owned faces, "
+                      << layout.local_fault_faces_per_cluster.size()
+                      << "-cluster fault map\n";
+         }
+      }
+      else if (rank == 0)
+      {
+         std::cout << "[lts] ENABLED (mode=" << cfg.numerics.lts
+                   << ") but np=" << nprocs << " > 1: layout build DEFERRED to "
+                      "the Phase-1b serial-mesh clustering (needed for "
+                      "rank-count-independent cluster ids); running GTS "
+                      "(byte-identical to lts=off).\n";
+      }
+   }
+
    // Lever 1 (ADER hot-path optimization) opt-in.  --deriv-cache precomputes the
    // per-element D_d^e = M_e^{-1} K_d^e and switches ApplySpatialDerivative to a
    // dense mat-vec (the dominant ~2/3 of step time; 4-5x on the macro-step
@@ -2884,51 +3036,22 @@ int main(int argc, char *argv[])
    if (lts_report)
    {
       const int neL = pmesh.GetNE();
-      const std::vector<real_t> &hvec = wave.GetPerElementCflLength();
-      const std::vector<std::array<real_t, 3>> &lmr =
-         wave.GetPerElementMaterial();
-      MFEM_VERIFY(static_cast<int>(hvec.size()) == neL,
-                  "--lts-report: GetPerElementCflLength size " << hvec.size()
-                  << " != local NE " << neL << " (operator not built?)");
-      const bool per_elem_mat = !lmr.empty();
-      MFEM_VERIFY(!per_elem_mat || static_cast<int>(lmr.size()) == neL,
-                  "--lts-report: GetPerElementMaterial size " << lmr.size()
-                  << " != local NE " << neL);
+      LtsMeshInputs in = BuildLtsMeshInputs(wave, pmesh);
+      const bool per_elem_mat = in.per_elem_material;
 
-      // r_e = h_e / c_p,e.  On the scalar path c_p is uniform, so r_e = h_e
-      // (the constant cancels out of every cluster ratio).  Recover the true
-      // per-element dt scale from the already-computed GLOBAL dt_cfl so the
-      // report reflects the run's real timestep WITHOUT the (private)
-      // MixedFluxCflFactor_() constant.  (At np=1, r_min is the global min, so
-      // Kscale is exact; the np>1 warning below flags the per-rank caveat.)
-      std::vector<double> dt_e(static_cast<std::size_t>(neL));
+      // Recover the true per-element dt scale (seconds) from the already-computed
+      // GLOBAL dt_cfl so the report reflects the run's real timestep WITHOUT the
+      // (private) MixedFluxCflFactor_() constant.  BuildLtsMeshInputs returns the
+      // scale-free ratios r_e = h_e / c_p,e; multiply by dt_cfl / min(r_e).  (At
+      // np=1, r_min is the global min so Kscale is exact; the np>1 warning below
+      // flags the per-rank caveat.)
+      std::vector<double> dt_e = in.dt_e;
       double r_min = std::numeric_limits<double>::infinity();
-      for (int e = 0; e < neL; ++e)
-      {
-         double cp = 1.0;
-         if (per_elem_mat)
-         {
-            const double lam = lmr[e][0], mu = lmr[e][1], rho = lmr[e][2];
-            cp = std::sqrt((lam + 2.0 * mu) / rho);
-         }
-         const double r = static_cast<double>(hvec[e]) / cp;
-         dt_e[static_cast<std::size_t>(e)] = r;
-         r_min = std::min(r_min, r);
-      }
+      for (double r : dt_e) { r_min = std::min(r_min, r); }
       const double Kscale = static_cast<double>(dt_cfl) / r_min;
-      for (int e = 0; e < neL; ++e) { dt_e[static_cast<std::size_t>(e)] *= Kscale; }
+      for (double &v : dt_e) { v *= Kscale; }
 
-      // Fault-face element pairs (LOCAL interior fault faces; forced diff=0).
-      std::vector<std::pair<int, int>> fault_pairs;
-      {
-         const Array<int> &fif = wave.GetFaultInteriorFaces();
-         for (int i = 0; i < fif.Size(); ++i)
-         {
-            int e1 = -1, e2 = -1;
-            pmesh.GetFaceElements(fif[i], &e1, &e2);
-            if (e1 >= 0 && e2 >= 0) { fault_pairs.emplace_back(e1, e2); }
-         }
-      }
+      const std::vector<std::pair<int, int>> &fault_pairs = in.fault_pairs;
       const Table &e2e = pmesh.ElementToElementTable();
       const int nc_cap_cli = GetIntArg(argc, argv, "--lts-nc-cap", 6);
 
