@@ -1223,6 +1223,15 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       cfg.numerics.pml_cells       = toml_int (n, "pml_cells",       4);
       cfg.numerics.pml_damp_bottom = toml_bool(n, "pml_damp_bottom", true);
       cfg.numerics.pml_damp_top    = toml_bool(n, "pml_damp_top",    false);
+
+      // Clustered LTS (Phase 1).  Every existing config omits these keys; the
+      // "off" default is byte-identical to the GTS driver.
+      cfg.numerics.lts               = toml_str (n, "lts",                "off");
+      cfg.numerics.lts_nc_cap        = toml_int (n, "lts_nc_cap",         6);
+      cfg.numerics.lts_wiggle        = toml_str (n, "lts_wiggle",         "scan");
+      cfg.numerics.lts_merge_loss_tol = toml_real(n, "lts_merge_loss_tol", 0.05);
+      cfg.numerics.lts_sync_dt       = toml_str (n, "lts_sync_dt",        "auto");
+      cfg.numerics.lts_fault_maxdiff = toml_int (n, "lts_fault_maxdiff",  0);
    }
    MFEM_VERIFY(cfg.numerics.ader_order >= 1,
                "[numerics].ader_order must be >= 1");
@@ -1259,6 +1268,44 @@ SpatialFrictionConfig parse_root(const toml::value& root)
                || cfg.numerics.pml_thickness_m > 0.0,
                "[numerics].pml_thickness_m must be > 0 (or < 0 to derive it "
                "from pml_cells*lc_far_m); got " << cfg.numerics.pml_thickness_m);
+
+   // Clustered LTS validators + config-level guards (Phase 1).  The default
+   // ("off") passes every check; all constraints below apply only when enabled.
+   MFEM_VERIFY(cfg.numerics.lts == "off" || cfg.numerics.lts == "rate2",
+               "[numerics].lts must be \"off\" or \"rate2\"; got '"
+               << cfg.numerics.lts << "'");
+   if (cfg.numerics.LtsEnabled())
+   {
+      // lts_nc_cap: >=1 caps the cluster count via cost-gated auto-merge; <=0
+      // disables the merge (RAW clustering).  No sign restriction.
+      // lts_wiggle: "scan" | "off" | a numeric lambda in (0.5, 1].
+      const std::string& w = cfg.numerics.lts_wiggle;
+      if (w != "scan" && w != "off")
+      {
+         char* end = nullptr;
+         const double lam = std::strtod(w.c_str(), &end);
+         MFEM_VERIFY(end != w.c_str() && end != nullptr && *end == '\0'
+                     && lam > 0.5 && lam <= 1.0,
+                     "[numerics].lts_wiggle must be \"scan\", \"off\", or a "
+                     "number in (0.5, 1]; got '" << w << "'");
+      }
+      MFEM_VERIFY(cfg.numerics.lts_merge_loss_tol >= 0.0,
+                  "[numerics].lts_merge_loss_tol must be >= 0; got "
+                  << cfg.numerics.lts_merge_loss_tol);
+      MFEM_VERIFY(cfg.numerics.lts_fault_maxdiff == 0,
+                  "[numerics].lts_fault_maxdiff: only 0 (fault faces locked to a "
+                  "single cluster) is supported in v1; got "
+                  << cfg.numerics.lts_fault_maxdiff);
+      // lts is an ADER + pure-upwind feature.  The final integrator is a CLI
+      // override (checked in the driver after the merge), so here we reject only
+      // the config-level incompatibility: clustered LTS couples clusters through
+      // the ADER Taylor predictor and is defined for the pure Godunov flux only.
+      MFEM_VERIFY(cfg.numerics.mixed_flux == "none",
+                  "[numerics].lts=\"" << cfg.numerics.lts << "\" requires "
+                  "mixed_flux=\"none\" (clustered LTS is defined for the pure "
+                  "upwind/Godunov flux only); got mixed_flux=\""
+                  << cfg.numerics.mixed_flux << "\".");
+   }
 
    if (root.contains("time"))
    {

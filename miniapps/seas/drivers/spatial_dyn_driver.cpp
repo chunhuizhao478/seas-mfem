@@ -1141,6 +1141,17 @@ int main(int argc, char *argv[])
                "integrator.  Set --time-integrator rk4|rk45, or use "
                "mixed_flux=\"none\" under ADER.");
 
+   // (LTS Phase 1) Clustered LTS couples clusters through the ADER Taylor
+   // predictor, so it is ADER-only.  This is the post-CLI-merge companion to the
+   // parser's config-level guard (which rejects lts + mixed_flux): the final
+   // integrator is only known after the --time-integrator override is applied.
+   MFEM_VERIFY(!(cfg.numerics.LtsEnabled() && is_rk),
+               "spatial_dyn_driver: [numerics].lts=\"" << cfg.numerics.lts
+               << "\" requires the ADER integrator (clustered LTS couples "
+               "clusters through the ADER Taylor predictor); got "
+               "time_integrator=" << (is_rk ? "rk4|rk45" : "ader")
+               << ".  Use --time-integrator ader or set lts=\"off\".");
+
    // σ_n strength floor banner string (sliver-blowup plan 2026-05-26):
    // "DISABLED" for the negative sentinel, else the value in MPa.
    std::string sigma_n_floor_banner;

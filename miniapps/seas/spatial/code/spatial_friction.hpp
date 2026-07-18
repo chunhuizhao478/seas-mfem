@@ -164,6 +164,19 @@ struct NumericsSpec
    int    pml_cells       = 4;      // far-field cells in the derived thickness
    bool   pml_damp_bottom = true;   // damp z_min wall (FaceZLo)
    bool   pml_damp_top    = false;  // damp z_max wall (FaceZHi) — false for a half-space
+
+   // Clustered LTS (PLAN_clustered_lts_ader_2026-07-18.md, Phase 1).  Default
+   // "off" is byte-identical to the pre-LTS global-time-stepping (GTS) driver:
+   // every LTS branch is gated on `lts != "off"`.
+   std::string lts               = "off";   // "off" | "rate2"
+   int         lts_nc_cap        = 6;        // auto-merge cluster-count cap (<=0 disables merge)
+   std::string lts_wiggle        = "scan";   // "scan" | numeric lambda in (0.5,1] | "off"
+   real_t      lts_merge_loss_tol = 0.05;    // accept a merge while cost <= (1+tol)*uncapped
+   std::string lts_sync_dt       = "auto";   // "auto" (dt_base*2^(Nc-1)) | numeric seconds
+   int         lts_fault_maxdiff = 0;        // cluster-diff allowed across a fault face (0 = locked)
+
+   /// True iff clustered LTS is requested (any mode other than "off").
+   bool LtsEnabled() const { return lts != "off"; }
 };
 
 struct TimeSpec

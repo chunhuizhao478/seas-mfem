@@ -512,6 +512,10 @@ TEST_R003_ANTIPLANE_DIAG_SIZING_SRC        = tests/unit/test_R003_antiplane_diag
 LTS_CLUSTERING_HEADERS                      = dynamic/lts_clustering.hpp
 LTS_CLUSTERING_SRC                          = dynamic/lts_clustering.cpp
 TEST_LTS_CLUSTERING_SRC                     = tests/unit/test_lts_clustering.cpp
+LTS_LAYOUT_HEADERS                          = dynamic/lts_layout.hpp \
+                                              dynamic/lts_stepper.hpp
+LTS_LAYOUT_SRC                              = dynamic/lts_layout.cpp
+TEST_LTS_LAYOUT_SRC                         = tests/unit/test_lts_layout.cpp
 
 # Data-projection feature (Phase 3..5).  See document/features_dev/
 # data_projection_feature_plan_v2.md.
@@ -582,6 +586,8 @@ SEAS_FS_LIB := $(shell \
 # Object files
 LTS_CLUSTERING_OBJ               = $(LTS_CLUSTERING_SRC:.cpp=.o)
 TEST_LTS_CLUSTERING_OBJ          = $(TEST_LTS_CLUSTERING_SRC:.cpp=.o)
+LTS_LAYOUT_OBJ                   = $(LTS_LAYOUT_SRC:.cpp=.o)
+TEST_LTS_LAYOUT_OBJ              = $(TEST_LTS_LAYOUT_SRC:.cpp=.o)
 DATA_FIELD_3D_OBJ                = $(DATA_FIELD_3D_SRC:.cpp=.o)
 STRESS_FIELD_3D_OBJ              = $(STRESS_FIELD_3D_SRC:.cpp=.o)
 FIELD_COEFFICIENT_OBJ            = $(FIELD_COEFFICIENT_SRC:.cpp=.o)
@@ -1117,6 +1123,12 @@ SEAS_INCLUDES = $(if $(SRC),-I$(MFEM_DIR))
 seas_test_lts_clustering: $(TEST_LTS_CLUSTERING_OBJ) $(LTS_CLUSTERING_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_LTS_CLUSTERING_OBJ) \
 	    $(LTS_CLUSTERING_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Clustered LTS Phase 1: run-side layout + tick-table unit test.
+seas_test_lts_layout: $(TEST_LTS_LAYOUT_OBJ) $(LTS_LAYOUT_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_LTS_LAYOUT_OBJ) \
+	    $(LTS_LAYOUT_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Data-projection feature: DataField3D / FieldCoefficient / FieldProjector /
@@ -3109,6 +3121,16 @@ $(TEST_LTS_CLUSTERING_OBJ): %.o: $(SRC)%.cpp $(LTS_CLUSTERING_HEADERS) \
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+$(LTS_LAYOUT_OBJ): %.o: $(SRC)%.cpp $(LTS_LAYOUT_HEADERS) \
+                        $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_LTS_LAYOUT_OBJ): %.o: $(SRC)%.cpp $(LTS_LAYOUT_HEADERS) \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
 $(DATA_FIELD_3D_OBJ): %.o: $(SRC)%.cpp $(DATA_FIELD_3D_HEADERS) \
                           $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
@@ -4166,6 +4188,9 @@ test-data-projection: test-data-field-3d test-stress-field-3d test-field-project
 
 test-lts-clustering: seas_test_lts_clustering
 	./seas_test_lts_clustering
+
+test-lts-layout: seas_test_lts_layout
+	./seas_test_lts_layout
 
 test-data-field-3d: seas_test_data_field_3d
 	./seas_test_data_field_3d
