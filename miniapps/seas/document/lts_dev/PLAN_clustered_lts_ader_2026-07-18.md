@@ -1,6 +1,11 @@
 # Implementation Plan: Clustered Local Time Stepping (LTS) for the ADER path of seas_spatial_dyn_driver
 
-**Date:** 2026-07-18 (rev 4) · **Status:** PROPOSED (grounded + adversarially reviewed, not implemented)
+**Date:** 2026-07-18 (rev 5) · **Status:** IN PROGRESS — Phase 0 DONE, Phase 1 PART-DONE + resequenced (see "Implementation status & phase resequencing")
+**Rev 5:** Phase 0 + part of Phase 1 implemented on `safs-v4_0_0-alt-case1-mfem-speed`
+(local, unpushed); three Phase-1 pieces (fault-QP reorder, serial-mesh clustering,
+LTS-aware partition) **resequenced** to Phases 3/4 where each is first needed and
+first validatable. Phase boundaries updated; normative interfaces (Appendices A/B)
+unchanged. Impl review: `REVIEW_phase01_impl_2026-07-18.md`.
 **Rev 4:** added **Part I — The method, explained**: a plain-language tutorial
 (with the equations, the measured cluster histogram, seam/tick diagrams, and
 the beat-SeisSol arithmetic) so the plan is self-contained for a reader who has
@@ -73,6 +78,63 @@ TPV gold decks explicitly pinned to global stepping.
   implementation agent's contract — nothing there is optional.
 - Skim the per-phase **"In one sentence"** lines for the arc.
 - The **Glossary** defines every shorthand.
+
+---
+
+# Implementation status & phase resequencing (2026-07-18)
+
+**Read this before the phases.** Phase 0 and part of Phase 1 are implemented; three
+Phase-1 pieces were **resequenced** to the phase where each is first *needed* and
+first *validatable*. Nothing was dropped — the work moved to its natural home, and
+the moved requirements now live under Phases 3 and 4 below. Branch:
+`safs-v4_0_0-alt-case1-mfem-speed` (local, unpushed). Impl review record:
+`REVIEW_phase01_impl_2026-07-18.md`.
+
+## Shipped and locally validated
+- **Phase 0 (complete):** `dynamic/lts_clustering.{hpp,cpp}` (A.1) +
+  `test_lts_clustering` (4043/4043); `--lts-report` hook + per-element CFL
+  accessors; `lts="off"` byte-exact confirmed (TPV102 ADER smoke + wave-op suites).
+- **Phase 1 (part):** `dynamic/lts_layout.{hpp,cpp}` + tick table
+  `dynamic/lts_stepper.hpp` (A.2/A.3) + `test_lts_layout` (87/87); `[numerics].lts*`
+  config + validators + guards; run-path clustering + layout wiring, gated on
+  `lts != "off"`, built at np==1, still stepping GTS.
+
+## The three deferred pieces are ONE coupled unit
+The **fault-QP reorder**, the **serial-mesh (rank-0) clustering**, and the
+**LTS-aware METIS partition** were NOT landed in Phase 1 because they share a
+dependency chain:
+- The reorder needs the cluster ids **at wave-operator construction** (before the
+  fault-DOF layout is fixed).
+- Deterministic, **rank-count-independent** ids need clustering on the SERIAL mesh
+  on rank 0 (a per-rank fixpoint disagrees at seams).
+- The METIS partition must choose `part_data` **before the ParMesh** — which needs
+  the material sampled before the ParMesh, but today the material is built *after*
+  it (`spatial_dyn_driver.cpp:~1502` vs the `ParMesh` ctor at `:1310`).
+
+Two of the three (serial clustering, partition) are meaningful **only at np>1**.
+The plan already runs np=1 through Phases 2–3 and first goes MPI in Phase 4, so
+the np>1 machinery belongs in Phase 4 — not Phase 1.
+
+## The corrected sequence
+| Deferred piece | Old home | New home | Why there |
+| --- | --- | --- | --- |
+| Fault-QP reorder | Phase 1 | **Phase 3, step 0** | First consumer is the per-cluster friction range-sweep; its byte gate (TPV104-spatial stations identical under the permutation) is an np=1 permutation-invariance test — largely local. Needs cluster ids at operator-construction time, obtained by clustering in the np=1 window *between* material construction and operator construction (no material-before-ParMesh refactor required at np=1). |
+| Serial-mesh clustering | Phase 1 | **Phase 4** | Sole purpose is rank-count-independent ids; first exercised by the np=2==np=1 gate. |
+| LTS-aware METIS partition (+ material-before-ParMesh) | Phase 1 | **Phase 4** | `part_data` is an np>1 concern; the "single-cluster byte gate *given the LTS partition*" lives in Phase 4. |
+
+## Net effect on the arc
+- **Phase 2 is unblocked** — it consumes exactly the layout already shipped and
+  can start now at np=1.
+- **Phase 3 gains a step 0** — the reorder — plus a re-inserted **early canary**:
+  the old Phase-1 gate ("lts=rate2 + still-GTS stepping, TPV104-spatial stations
+  byte-identical") runs BEFORE the friction range-sweep, so a reorder bug and a
+  stepper bug cannot mask each other.
+- **Phase 4 gains the pre-ParMesh clustering pipeline** — serial clustering +
+  partition + the material-before-ParMesh refactor + cross-rank maxdiff.
+- **Estimates do not inflate** — the reorder's time moves Phase 1 → Phase 3; the
+  partition/serial-clustering time moves Phase 1 → Phase 4. Total ≈ unchanged.
+- **Determinism** — until serial clustering lands (Phase 4), cluster ids are
+  per-rank and correct only at np=1, which is exactly the regime of Phases 2–3.
 
 ---
 
@@ -563,7 +625,7 @@ premultiplied payloads).
   here; it is deleted. Provider-role assignment derives purely from face
   cluster differences.
 
-## Phase 0: Cluster report & go/no-go
+## Phase 0: Cluster report & go/no-go  — ✅ DONE (2026-07-18)
 
 **In one sentence:** Before writing stepping code, measure the cluster
 histogram and predicted speedup for each target mesh with our own dt formula,
@@ -593,11 +655,18 @@ and verify against SeisSol's log on the shared mesh.
 
 **Estimate:** 3–5 days. Depends on: nothing. Required by: all later phases.
 
-## Phase 1: Clustering wired into the run path (still GTS)
+## Phase 1: Clustering wired into the run path (still GTS)  — ◑ PART-DONE + RESEQUENCED (2026-07-18)
 
-**In one sentence:** The driver computes and carries the cluster layout, the
-reordering, and the LTS-aware partition on every run, while still stepping
-globally.
+**In one sentence:** The driver computes and carries the cluster layout on every
+run (at np=1), while still stepping globally.
+
+> **Resequenced.** The layout + tick table + config + run-path wiring shipped.
+> The three np>1 / operator-construction-coupled pieces — the **serial-mesh
+> clustering**, the **LTS-aware METIS partition**, and the **fault-QP reorder** —
+> **moved out** (see "Implementation status & phase resequencing" above): the
+> reorder to **Phase 3, step 0**; serial clustering + partition to **Phase 4**.
+> Their normative requirements are struck through below and restated in their new
+> phases.
 
 ### Files to Create
 - `dynamic/lts_layout.hpp/.cpp` — run-side layout (Appendix A.2): per-rank
@@ -615,42 +684,43 @@ globally.
   ("scan"|numeric λ|"off", default "scan"), `lts_merge_loss_tol` (default
   0.05), `lts_sync_dt` (default "auto"), `lts_fault_maxdiff` (default 0).
   Guards: reject lts≠off with rk/mixed-flux; lts≠off implies fault-locality
-  and fused-CK (Constraints).
-- `drivers/spatial_dyn_driver.cpp` — serial-mesh clustering before ParMesh;
-  partition spec (P-009): rank 0 builds the element graph
-  (`Mesh::ElementToElementTable`), union-find-merges each fault-face element
-  pair (as `fault_locality_partition.hpp`), calls `METIS_PartGraphKway` with
-  `ncon = num_clusters` (vwgt[v·ncon+c] = cellCost if cluster(v)==c else 0),
-  ubvec = 1.05 per constraint; on METIS failure or
-  `lts_partition_weights="scalar"`, single-constraint fallback
-  vwgt = cellCost·2^(maxC−c). Result injected as `part_data` at `:1289`.
-  (The METIS call lives in a companion `.cpp` — the `metis.h ::real_t`
-  collision documented in the fault-weighted-partition plan.)
-- **Fault-QP reorder — single source of truth (P-006):** the cluster-
-  contiguous sort (by (cluster, global face id); per-face QP blocks intact)
-  is applied in ONE place: the wave operator's fault-face list at
-  construction, BEFORE `SetFaultDOFData`, station `Open`, nucleation-object
-  construction, impedance/resolver seeding, and the first ParaView write —
-  everything downstream derives from it. `fault_coords` follows the same
-  order. Checkpoints serialize `dof_data` in CANONICAL (pre-LTS) order in
-  both formats via the permutation table (this is the permutation's sole
-  consumer; on-disk order is layout-independent). Assert
-  `n_shared_fault_qps == 0` whenever the reorder is active (D-2 invariant).
-  Diag prints that name DOF indices are understood to change meaning; log
-  tooling must not assume stable ids.
+  and fused-CK (Constraints).  **(DONE.)**
+- `drivers/spatial_dyn_driver.cpp` — run-path clustering + `BuildLtsLayout`
+  wiring, gated on `lts != "off"`, computed at **np==1**, still GTS. **(DONE.)**
+- ~~`drivers/spatial_dyn_driver.cpp` — serial-mesh clustering before ParMesh;
+  partition spec (P-009): rank 0 builds the element graph … `METIS_PartGraphKway`
+  with `ncon = num_clusters` … companion `.cpp` (`metis.h ::real_t` collision).~~
+  → **MOVED to Phase 4** (np>1 concern; needs material-before-ParMesh). Full
+  spec restated there.
+- ~~**Fault-QP reorder — single source of truth (P-006):** cluster-contiguous
+  sort of the wave operator's fault-face list at construction, BEFORE
+  `SetFaultDOFData` / station `Open` / nucleation / impedance-resolver seeding /
+  first ParaView write; `fault_coords` follows; checkpoints serialize `dof_data`
+  in canonical order via the permutation table; assert `n_shared_fault_qps==0`.~~
+  → **MOVED to Phase 3, step 0** (first consumer is the friction range-sweep;
+  gate is np=1 permutation-invariance). Full spec restated there.
 
-### Acceptance Criteria
-- [ ] `lts="off"` byte-identical (`test-ader-tpv102-smoke` + SAFS smoke).
-- [ ] `lts="rate2"` (still GTS stepping) np∈{1,2,10}: identical cluster histograms, run completes; **TPV104-spatial station `.dat` files byte-identical to `lts="off"`** (catches any missed reorder consumer, P-006) and fault VTKHDF fields identical up to the known row permutation.
-- [ ] `test_lts_clustering` incl. λ/merge cases (Appendix B.1); `test_lts_layout` (B.2).
+### Acceptance Criteria (resequenced — what Phase 1 now delivers)
+- [x] `lts="off"` byte-identical (`test-ader-tpv102-smoke` 4/4; wave-op suites 25/25 + 52/52).
+- [x] `test_lts_clustering` incl. λ/merge cases (B.1, 4043/4043); `test_lts_layout` (B.2, 87/87).
+- [x] `lts="rate2"` at **np==1** builds + logs the cluster histogram and layout; still steps GTS (output byte-identical to `lts="off"`).
+- [ ] **→ Phase 3:** `lts="rate2"` TPV104-spatial stations byte-identical to `lts="off"` under the known permutation (requires the reorder — moved).
+- [ ] **→ Phase 4:** np∈{2,10} identical cluster histograms across ranks (requires serial clustering — moved).
 
-**Estimate:** ~1.5 weeks.
+**Estimate:** ~1.5 weeks — **~1 wk delivered; the reorder (~0.5 wk) is now
+Phase-3 step 0 and the partition/serial-clustering (~few days) is now Phase 4.**
 
-## Phase 2: Multi-cluster stepping, bulk only (np=1)
+## Phase 2: Multi-cluster stepping, bulk only (np=1)  — ▶ NEXT (unblocked)
 
 **In one sentence:** Elements advance at their cluster's rate on one rank for a
 fault-free problem, with cluster-boundary coupling by Taylor-integration, per
 the Normative Scheduling and Buffer sections.
+
+> **Unblocked by the resequencing.** Phase 2 is bulk-only and np=1, so it needs
+> NONE of the deferred trio — it consumes exactly the layout Phase 1 shipped. One
+> caveat: the Checkpoint-V2 hash specifies "serial-mesh element order"; at np=1 use
+> the local element order as a documented stand-in and re-base the hash on true
+> serial order when serial clustering lands (Phase 4).
 
 ### Files to Create
 - `dynamic/lts_stepper.hpp/.cpp` — the tick loop (Normative Scheduling;
@@ -691,7 +761,10 @@ the Normative Scheduling and Buffer sections.
   order (int32 LE each), then the IEEE-754 bit patterns of dt_base and λ.
   Reader: V1 file + lts≠off → refuse (named abort); V2 + lts=off → refuse;
   V2 hash mismatch → refuse printing stored vs computed. GTS runs continue to
-  write V1 byte-identically. `dof_data` on disk in canonical order (Phase 1).
+  write V1 byte-identically. `dof_data` on disk in canonical order — the
+  permutation table for that lands with the reorder in **Phase 3 step 0**; Phase 2
+  is bulk-only (no fault `dof_data`), and the hash's "serial-mesh element order"
+  uses the np=1 local-order stand-in until serial clustering lands (Phase 4).
 
 ### Acceptance Criteria
 - [ ] `test_lts_time_basis` (B.3), `test_lts_scheduler` (B.4 — golden tick tables + epoch/zero-at-sync property checks).
@@ -710,6 +783,34 @@ the Normative Scheduling and Buffer sections.
 **In one sentence:** Fault faces advance at their cluster's rate — per-cluster
 friction sweeps over cluster-contiguous QP ranges, nucleation via the per-kind
 absolute forms.
+
+### Step 0 — Fault-QP reorder + early canary (MOVED from Phase 1, P-006)
+
+Do this FIRST, in isolation, and validate it with the still-GTS canary gate
+BEFORE wiring any range-sweep — so a reorder bug and a stepper bug cannot mask
+each other.
+
+- **`dynamic/wave_operator.{hpp,inl}` (+ `bimaterial_wave_operator.inl`):** apply
+  the cluster-contiguous sort (by `(cluster, global face id)`, per-face QP blocks
+  intact) to the wave operator's fault-face list at construction, gated on
+  `lts != "off"`, BEFORE `SetFaultDOFData`. Everything downstream derives from
+  this ONE ordering: station `Open`, nucleation-object construction, impedance/
+  resolver seeding, `fault_coords`, and the first ParaView write. Assert
+  `n_shared_fault_qps == 0` whenever the reorder is active (D-2 invariant).
+- **Cluster ids at construction time (np=1):** cluster in the driver window
+  BETWEEN material construction (`spatial_dyn_driver.cpp:~1502`) and operator
+  construction (`~1569`), and pass the ids into the operator ctor. This needs NO
+  material-before-ParMesh refactor at np=1 (that refactor is Phase 4).
+- **Checkpoints:** serialize `dof_data` in CANONICAL (pre-LTS) order in both
+  formats via the permutation table (the permutation's sole consumer; on-disk
+  order stays layout-independent). Diag prints that name DOF indices note the ids
+  now change meaning; log tooling must not assume stable ids.
+- **Canary acceptance (the re-inserted Phase-1 gate):** with the reorder active
+  but stepping STILL GTS, `lts="rate2"` TPV104-spatial station `.dat` files are
+  **byte-identical** to `lts="off"`, and fault VTKHDF fields identical up to the
+  known row permutation. This is an np=1 permutation-invariance test — runnable
+  locally on a small fault fixture; it catches any missed reorder consumer (P-006)
+  before the range-sweep below can hide it.
 
 ### Files to Modify
 - `dynamic/friction_substep_iterator.{hpp,cpp}` — range-based
@@ -747,6 +848,34 @@ absolute forms.
 **In one sentence:** Every rank executes the same tick schedule, collectives
 are counted and gated globally, and parity with single-rank LTS is the gate —
 first with the simple exchange (4a), then the EDGE payloads (4b).
+
+### Step 0 — Pre-ParMesh clustering pipeline (MOVED from Phase 1)
+
+The np>1 machinery lands here, where rank-count-independent cluster ids first
+matter (the np=2==np=1 gate) and where the LTS partition is first exercised.
+Land this BEFORE 4a.
+
+- **Material-before-ParMesh refactor:** construct (or make serially evaluable) the
+  `MaterialField` before the `ParMesh` ctor (`spatial_dyn_driver.cpp:1310`), so
+  rank 0 can compute per-element `dt_e = h_e / c_p,e` on the SERIAL mesh. Keep the
+  existing post-ParMesh material path byte-identical for `lts="off"`.
+- **Serial-mesh clustering (rank 0):** run `BuildLtsClustering` on the serial mesh
+  (connected ⇒ contiguous ids), giving deterministic, rank-count-independent ids;
+  broadcast/scatter to ranks; the local ids that Phase 1 computed per-rank at np=1
+  are replaced by this authoritative serial result.
+- **LTS-aware partition (P-009):** rank 0 builds the element graph
+  (`Mesh::ElementToElementTable`), union-find-merges each fault-face element pair
+  (as `fault_locality_partition.hpp`), calls `METIS_PartGraphKway` with
+  `ncon = num_clusters` (`vwgt[v·ncon+c] = cellCost if cluster(v)==c else 0`),
+  `ubvec = 1.05` per constraint; on METIS failure or
+  `lts_partition_weights="scalar"`, single-constraint fallback
+  `vwgt = cellCost·2^(maxC−c)`. Inject as `part_data` at the `ParMesh` ctor. The
+  METIS call lives in a companion `.cpp` (the `metis.h ::real_t` collision — see
+  the fault-weighted-partition plan).
+- **Cross-rank maxdiff:** the serial fixpoint already gives global maxdiff≤1; the
+  scatter preserves it, so no per-rank re-clustering (which would disagree at
+  seams). Re-base the Checkpoint-V2 hash on the true serial-mesh element order
+  (replacing Phase 2's np=1 local-order stand-in).
 
 ### Detailed Requirements
 1. **4a:** full ghost-field exchange per due tick, per the Matched-collectives
@@ -953,10 +1082,11 @@ B.7/B.11 are the load-bearing correctness tests for the LTS core.
 | Risk (plain language) | Severity | Mitigation |
 |---|---|---|
 | Wrong sub-interval / buffer fill / truncated-step scaling ⇒ silent non-conservation | HIGH | Normative scheduler + buffer lifecycle with asserted invariants; B.4/B.5/B.6/B.7; current-step-dt threading (P-004) |
-| Fault-QP reorder misses a consumer ⇒ silently scrambled friction | HIGH | Single-source reorder rule + 8-consumer inventory (P-006); stations byte-identical gate in Phase 1 |
+| Fault-QP reorder misses a consumer ⇒ silently scrambled friction | HIGH | Single-source reorder rule + 8-consumer inventory (P-006); stations byte-identical **canary gate at Phase 3 step 0** (still-GTS, np=1 permutation-invariance) — re-inserted after the reorder moved out of Phase 1 |
+| Reorder moved out of Phase 1 loses its early canary ⇒ a reorder bug hides behind a stepper bug in Phase 3 | MED | Phase 3 does the reorder FIRST, in isolation, validated by the still-GTS stations gate BEFORE any range-sweep is wired |
 | Collective-count mismatch ⇒ np≥10 hang | HIGH | Global gating rule + per-tick counter asserts + ghost poisoning (P-007); collective audit table deliverable |
 | D(k) memory on big meshes | MED | Providers only (thin inter-cluster shell); sized+logged vs deriv-cache budget; named abort over threshold |
-| LTS load imbalance eats the speedup | MED | Multi-constraint METIS weights (Phase 1); Phase-5 A/B quantifies |
+| LTS load imbalance eats the speedup | MED | Multi-constraint METIS weights (**Phase 4 step 0**, moved from Phase 1); Phase-5 A/B quantifies |
 | Default flip changes TPV104-spatial science | MED | D-5 two-stage flip + pinning + re-goldening in one commit |
 | λ-scan/merge bugs mis-cluster silently | MED | Production-path CFL assert inside BuildLtsClustering; B.1 λ/merge cases; raw mode preserved for the SeisSol cross-check |
 | Checkpoint incompatibilities mid-campaign | MED | V2 magic + FNV-1a layout hash (λ, dt_base included) + refusal paths; B.8 |
