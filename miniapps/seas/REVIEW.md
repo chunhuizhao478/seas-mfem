@@ -1,289 +1,227 @@
-# Code Review: 2026-07-17 — MPI-3 shared-memory sidecar windows (Phases 0–2)
+# Plan Review: 2026-07-18 — PLAN_clustered_lts_ader (rev 2), adversarial audit
 
-> Reviews the implemented code against
-> `document/code_optimization_dev/PLAN_sidecar_mpi_shared_memory_2026-07-17.md`.
-> The previous review (RK45+LSW, 2026-05-29) is archived at
-> `REVIEW_rk45_lsw_impl_2026-05-29.md`.
+> Reviews the LTS implementation PLAN (not code). Two independent adversarial
+> reviewers (implementability lens; numerics/MPI-traps lens) + the maintainer's
+> own pass. Both reviewers verified the plan's file:line claims against the repo
+> (all anchors correct); the defects are in what the plan leaves implicit or
+> states inconsistently. Previous review archived at
+> `REVIEW_sidecar_shared_mem_2026-07-17.md`.
 
 ## Review Scope
-- Plan: `document/code_optimization_dev/PLAN_sidecar_mpi_shared_memory_2026-07-17.md`
-- Files reviewed: `io/data_field_3d.{hpp,cpp}`, `io/stress_field_3d.{hpp,cpp}`,
-  `spatial/code/spatial_velocity.{hpp,cpp}`, `spatial/code/spatial_stress.{hpp,cpp}`,
-  `drivers/spatial_dyn_driver.cpp` (flag/guard/3 call sites),
-  `tests/unit/test_data_field_3d_shared_mem.cpp`, `Makefile` (test wiring)
-- Domain context: `miniapps/seas/CLAUDE.md` (no-refactor/no-TODO rules, MPI patterns),
-  `general/error.cpp:182` (MFEM_ABORT → global MPI_Abort, verified),
-  driver MPIContext comment (`MPI_Comm_free`-after-finalize abort hazard)
-- Verification performed during review: re-read all final hunks; recompiled
-  `io/data_field_3d.o` with warnings visible (none); ran
-  `make test-data-field-3d-shared-mem` (np=2: 12/12, np=4: 24/24) and the five
-  regression targets (all pass); **ran a purpose-built probe** that destroys a
-  shared-mode `DataField3D` AFTER `MPI_Finalize` (the driver's real lifetime) —
-  exit 0, no crash.
+- Plan: `document/lts_dev/PLAN_clustered_lts_ader_2026-07-18.md` (rev 2)
+- Companion: `document/lts_dev/ANALYSIS_lts_method_selection_2026-07-18.md`
+- Repo verification: `drivers/spatial_dyn_driver.cpp`, `dynamic/wave_operator.inl`,
+  `dynamic/friction_substep_iterator.*`, `dynamic/spatial_nucleation.*`,
+  `io/tpv104_checkpoint.hpp`, `spatial/code/spatial_friction.hpp`
+- Convergent findings from both reviewers are merged; IDs P-001…P-024.
 
-## Findings
+## Findings (consolidated; severity ▸ id ▸ title)
 
-### [R-001] [MODERATE] [io/data_field_3d.cpp:~DataField3D] — Whole-run windows are never freed before MPI_Finalize (plan §7 wording unachievable; guard is correct but untested in-tree)
+### CRITICAL — scheduler & coupling correctness (the interlocking core)
 
-**Category:** DEVIATION / ASSUMPTION
+**[P-001] The tick-loop pseudocode is wrong in both readings.** With
+`due_clusters(tick) = {c : tick % 2^c == 0}` used for BOTH predict and correct,
+a coarse `correct(c)` at tick 0 consumes an accumulate buffer holding 1 of 2^Δ
+fine contributions (silent non-conservation from step one); the alternative
+reading never corrects the last step of any cluster. BOTH reviewers found this
+independently. Neither headline gate (lts=off byte; single-cluster==GTS)
+catches it. **Fix:** predict due at `tick % 2^c == 0` (opens the step); correct
+due at `(tick+1) % 2^c == 0` OR `tick+1 == ticks_per_sync` (closes the step),
+corrects ordered FINE→COARSE within the tick; epoch-counter assert (buffer fill
+count == number of fine sub-steps of the closing coarse step); buffers exactly
+zero at every sync. New `test_lts_scheduler` with golden tick tables.
 
-**Description:**
-Plan §7's mitigation says "ensure sidecar readers are destroyed before
-`MPI_Finalize`". That is NOT achievable for the two long-lived owners:
-`vel_bundle` and `rs_sidecar` (+ the resolver's captured `shared_ptr` copies)
-are main-scope locals, and the driver calls `MPI_Finalize()`
-(`drivers/spatial_dyn_driver.cpp:4006` and the dry-run exit) before main's
-locals unwind. They also cannot be `reset()` earlier: the R-008 lifetime
-contract requires `vel_bundle` to outlive `wave_ptr`, which itself outlives
-finalize. The implementation therefore skips `MPI_Win_unlock_all`/`MPI_Win_free`
-when `MPI_Finalized()` is true. Per the MPI standard, finalizing with live
-windows is formally erroneous; OpenMPI tolerates it (session-dir cleanup), and
-the review probe confirms no crash — but the in-tree test suite never exercises
-this exact path (the unit test's readers are all scoped and freed pre-finalize).
+**[P-002] Two incompatible accumulate-buffer designs; "anti-symmetric" is
+physically wrong.** Glossary describes SeisSol's state-buffer (fine sums ITS
+OWN time-integrals; coarse still visits the face); Phase 2 describes a
+flux-contribution buffer (coarse skips the face). Different owner, units,
+consumption. And "anti-symmetric coarse-side contribution" is false on
+bimaterial faces (A± differ per side) and under different test bases. **Fix:**
+choose the flux-contribution design (matches D-7 EDGE premultiplied payloads):
+buffer is per CONSUMER (coarse) element, NUM_STATE×ndof_per_el, **pre-M⁻¹
+residual units**, filled by the fine side evaluating the coarse side's own
+Godunov flux tested with the coarse basis; consumed-then-zeroed inside the
+coarse correct, before its M⁻¹. Delete "anti-symmetric". Role-driven face sweep
+(an element can simultaneously carry provider/GTS/consumer faces — sweep per
+face role; buffer added exactly once per coarse step; per-element storage is
+well-defined because maxdiff≤1 ⇒ all finer neighbors are exactly c−1). The
+transplanted SeisSol "fifth rule" has NO REFERENT in this design (our buffer is
+not the fine cell's state buffer) — deleted, replaced by the role table.
 
-**Trigger:**
-Any production run with `--sidecar-shared-mem`: material (3 windows) and
-friction (2+) windows are alive at `MPI_Finalize`; their dtors run after.
+**[P-003] Sync semantics self-contradictory; ragged-interval contract missing.**
+Glossary says truncate-at-sync; Phase 1 default sync = coarsest dt; the risk
+table says "sync at max(coarsest dt, requested cadence)" — a third rule that
+would make EVERY interval ragged for every cluster (1 s cadence is not a
+multiple of ~42 ms) and, with the V_max-adaptive cadence, data-dependent.
+**Fix:** one rule: the sync grid advances by dt_base·2^(Nc−1) ("auto");
+truncation occurs ONLY on the final interval before tfinal; outputs are
+evaluated AT sync points (the adaptive cadence selects which syncs write, fed
+by the per-sync REDUCED V_max so all ranks agree); a numeric `lts_sync_dt` is
+snapped down to a multiple of the coarsest dt with a log line. Risk-table
+sentence deleted. Ragged-final-cycle test (tfinal = 3.5·dt_coarse) with
+interval-sum and fill-count asserts.
 
-**Actual behavior:**
-Dtor detects `MPI_Finalized` and skips the collective free; OS reclaims the
-shm segment at process exit. Verified by probe (exit 0). The transient stress
-windows (6) are freed properly inside `apply_csm_impl`.
+**[P-004] Truncated-step dt at the corrector's dt sites.** "takes the
+per-cluster dt of the owning element's cluster" is wrong on truncated steps:
+the friction side channel scales by the ACTUAL step (`accum_scale =
+weight·dt_macro`, verified), so a corrector using nominal dt_c mis-scales
+`I_imp/dt` and `Q_imp·dt` by up to ~2× on the last step. **Fix:** every dt
+read takes the CURRENT step length `dt_step(c,tick)` threaded as one argument
+from the tick loop; no site recomputes it. Cheap byte gate: single-cluster LTS
+with tfinal=3.5·dt vs GTS (which already truncates at tfinal).
 
-**Expected behavior:**
-Same runtime behavior, but (a) the guard path must be covered by a permanent
-regression test, and (b) plan §7 must state the real mitigation (guarded skip)
-instead of the false "destroyed before finalize" claim.
+**[P-005] t_origin formula + FP residual steps.** "a deterministic function of
+the tick index" is asserted but never given, and holds only if origins reset at
+every sync and all times come from closed forms. **Fix (normative):**
+`t_origin(c,tick) = t_s + dt_c·floor(tick/2^c)`; `t(tick) = t_s + tick·dt_0`
+(multiplication, never `t += dt`); fine sub-interval `[a,b]` with
+`b = min(t(tick)+dt_fine, t_s+T_s) − t_origin` — then `b ≤` the coarse's
+current step ≤ dt_c is PROVABLE. Assert tracked-vs-formula ≤1e-12·dt_c at
+every consumption. Residual steps < 1e-10·dt_c merge into the preceding step
+(decided from the closed-form schedule, identical on all ranks).
 
-**Suggested fix:**
-1. Add the probe as a permanent single-rank test file
-   `tests/unit/test_data_field_3d_shared_mem_finalize.cpp` (fixture writer +
-   `new DataField3D(path, "F", Abort, MPI_COMM_SELF)` → `MPI_Finalize()` →
-   `delete` → print OK), with target:
-```diff
- test-data-field-3d-shared-mem: seas_test_data_field_3d_shared_mem
- 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_data_field_3d_shared_mem
- 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_data_field_3d_shared_mem
-+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_data_field_3d_shared_mem_finalize
-```
-2. In plan §7, replace the row "Window lifetime vs MPI_Finalize | … ensure
-   sidecar readers are destroyed before MPI_Finalize …" with the actual
-   mechanism: "long-lived readers outlive finalize by design; dtor skips the
-   collective free under `MPI_Finalized()` (probe-tested); transient stress
-   windows free normally."
+**[P-006] The cluster-contiguous reorder has ≥8 consumers; the plan names 2.**
+Missing: the wave operator's canonical fault-QP index `dof_idx` (THE source of
+truth for `substep_I_imp_*` and `Q±` traces — reorder dof_data without it and
+every friction read is scrambled silently), `fault_coords`, the
+interior-then-shared split invariant, index-keyed nucleation caches, the
+ParaView fault writer geometry/fields, checkpoint payload order, impedance/
+resolver seeding, diag DOF ids. Also an internal contradiction: V1-under-LTS
+refusal vs "permutation table for checkpoint compatibility". **Fix:** the sort
+happens in ONE place (the wave operator's fault-face list at construction,
+before SetFaultDOFData/stations/nucleation/PV); everything derives. Checkpoints
+serialize in CANONICAL (pre-LTS) order via the permutation in BOTH formats
+(this is the permutation's consumer; V1-under-LTS still refused). Assert
+`n_shared_fault_qps == 0` when the reorder is active (D-2). Acceptance: with
+lts="rate2" under GTS stepping, station .dat files byte-identical to lts="off".
 
-**Test case:**
-```cpp
-// tests/unit/test_data_field_3d_shared_mem_finalize.cpp (np=1)
-int main(int argc, char** argv) {
-   MPI_Init(&argc, &argv);
-   write_min_fixture(path);                       // 2x2x2 grid, field "F"=2.0
-   auto* f = new mfem::seas::DataField3D(path, "F",
-                mfem::seas::OOBPolicy::Abort, MPI_COMM_SELF);
-   if (f->Evaluate(0.5,0.5,0.5) != 2.0) { return 1; }
-   MPI_Finalize();
-   delete f;                                      // must not crash (guard path)
-   std::puts("dtor-after-finalize OK");
-   return 0;
-}
-```
-(Ran during review as an ad-hoc probe: prints `eval=2`, `dtor-after-finalize
-OK`, exit 0.)
+**[P-007] Per-tick collective schedule undercounted and ungated.** Reality
+today: O + 9 collectives per macro step (O predictor-substep exchanges in
+`EvaluateBulkAtFaultQPsCanonical` + 9 per-component corrector exchanges), not
+"one exchange". The not-due-cluster rank rule is unstated — a rank whose shared
+faces all sit in not-due clusters must STILL participate; gating on rank-local
+data reproduces the R-1600 hang class. **Fix (normative rule):** collectives
+gate exclusively on (a) the global tick table and (b) serial-mesh cluster
+metadata (global per-cluster element/fault counts). Per tick:
+`n_x = Σ_{c∈due} [9 + (cluster c has fault faces GLOBALLY ? O : 0)]`,
+precomputed into the tick table, asserted by a per-tick debug counter on every
+rank. Under D-2, shared fault QPs are globally zero ⇒ the predictor-substep
+exchange is dropped GLOBALLY (config-level fact; `no_exchange` mode asserted
+safe by fault locality). Debug mode NaN-poisons ghost slots of non-due
+clusters' elements before consumption; np=2 3-cluster rank-seam test.
 
----
+**[P-008] λ-wiggle cost model is vacuous as written; binning FP hazard.**
+Without RE-BINNING against λ-scaled edges, Σ cost/(2^c·λ·dt_min) is monotone in
+λ ⇒ the scan always returns λ=1. And `floor(log2(...))` is an FP determinism
+hazard violating the plan's own deterministic-clustering constraint; the
+bin-edge acceptance line ("joins the LOWER cluster") contradicts the binning
+formula. **Fix:** normative binning `c(λ) = max{c : λ·2^c·dt_min ≤ dt_e}` via
+the integer comparison loop (never floor/log2); cost evaluated after the
+maxdiff fixpoint per λ candidate; the CFL assert `dt_cluster(e) ≤ dt_e` moves
+INSIDE BuildLtsClustering (production path, not just the report tool), reusing
+the identical comparison expression; bin-edge test corrected (dt_e at a lower
+edge joins THAT cluster, dt_cluster == dt_e, boundary inclusive); auto-merge
+direction invariant (merge only reassigns to smaller c). λ/merge unit tests.
 
-### [R-002] [MODERATE] [tests/unit/test_data_field_3d_shared_mem.cpp] — No coverage of the shared-mode FAILURE path (loading-rank validation abort must kill all node ranks, not hang them)
+**[P-009] Phase-0 signature contradicts D-6-rev2; SeisSol cross-check
+ill-defined under λ; exchange version labels clash; D-1 experiment missing
+from Phase 5; the Phase-1 addendum is orphaned.** (Rev-2 amendments recorded as
+decisions but never propagated into phase contracts.) **Fix:** full
+`LtsClusteringOptions` interface (rate, max_clusters, wiggle_scan, nc_cap=6,
+merge_loss_tol=0.05, cell_cost) + result fields (lambda, modeled_cost);
+SeisSol cross-check runs in RAW mode (λ=1, no cap) with both histograms
+printed — acceptance applies to raw, go/no-go to production; Phase 4 split
+into 4a (full-field exchange, parity gate) / 4b (EDGE 3-buffer, byte-compared
+vs 4a; **Phase-5 performance measured on 4b**); D-1 relaxation added as
+Phase-5 Req 5 (gated, non-blocking, `lts_fault_maxdiff=1`); addendum folded
+into Phase 1 with the concrete METIS spec (ncon=num_clusters unit-weight
+constraints, ubvec 1.05, union-find fault merge composed first, fallback
+scalar weights).
 
-**Category:** EDGE_CASE (test gap)
+**[P-010] Q/Q_new double-buffer dies under LTS.** One vector holds elements at
+different time levels; per-cluster correct must update only its elements
+in place. **Fix:** normative single-`Q` in-place contract +
+`AdvanceADERCluster` signature (cluster ref, dt_step, order, Q in-place,
+I_cluster, accumulate buffers consumed+zeroed, D(k) store read-only); order:
+volume+faces+buffer-add → per-element M⁻¹ (exact per cluster) → `Q +=`.
 
-**Description:**
-The load-bearing safety claim of the design — "a NaN/out-of-range/H5Dread
-failure on node-rank-0 MPI_Aborts the whole job while peers wait at the publish
-barrier" — is argued from `general/error.cpp:182` but never tested. The
-per-rank reader has fork()-based abort tests (`test_data_field_3d.cpp`); the
-shared-mode reader has none. fork() inside an MPI process is not reliable, so
-the same idiom cannot be reused directly.
+**[P-011] D-3 wires the wrong nucleation function and stomps other clusters.**
+The acceptance configs use `gradual_overstress_compact_circular`, whose
+absolute form is a DIFFERENT function; and the absolute appliers write the
+whole fault vector. **Fix:** route ALL kinds through their absolute forms via
+INucleationMethod (gradual → ApplyGradualOverstressAbsolute; compact-circular
+→ ApplyGradualOverstressCompactCircularAbsolute; instantaneous already
+one-shot); add range overloads `(…, qp_begin, qp_end)`; each cluster applies
+its own range at its own stage times, pinned to the GTS sub-step convention;
+telescoping/partition-independence unit test.
 
-**Trigger:**
-A sidecar with a NaN or out-of-range cell (or truncated dataset) loaded with
-`--sidecar-shared-mem` on np≥2. Expected: whole job aborts promptly. A
-regression that broke the abort-before-barrier ordering (e.g. moving
-validation after the publish barrier, or an MFEM build where MFEM_ABORT does
-not reach MPI_Abort) would instead hang every non-root rank at
-`MPI_Barrier(node_comm_)` — a wall-clock-eating deadlock on a cluster.
+**[P-012] Conservation harness physically ill-defined.** "periodic/absorbing
+box" — conservation does not hold with absorbing boundaries; energy is never
+conserved under upwind flux. **Fix:** periodic Cartesian tet box
+(`Mesh::MakePeriodic`): ∫ρv_i (3) and ∫σ_ij (6) are exact invariants (interior
+upwind fluxes telescope), drift <1e-12×initial-norm per sync; energy monotone
+decay only. Fallback: traction-free box, ∫ρv_i only.
 
-**Actual behavior:**
-Untested; correctness rests on code reading only.
+### MODERATE
 
-**Expected behavior:**
-An automated np=2 test proves: bad fixture → nonzero exit for the whole
-`mpirun`, within a timeout (no hang).
+**[P-013]** Missing signatures/layouts: per-cluster predictor (writes into
+full-size vectors zeroing ONLY the cluster's dof blocks — the existing
+routine's whole-vector zeroing must not be reused), D(k) store (RAW unscaled
+coefficients, layout `[slot][k][comp][i]`, provider_slot_of_elem built in
+Phase 1, epoch counter), `IntegrateTaylor(a,b,stack)→out[NUM_STATE][ndof]`
+(a,b relative to the provider's last PREDICT time — the expansion point; rename
+index `c`→`comp`), `LtsTick{predict_clusters, correct_clusters, dt_actual}`,
+per-cluster friction `Advance(range…)` semantics (global indexing, base
+pointers + (begin,end), I_imp outside the range untouched,
+`SetSubStepFaultImposedStates(range,…)`, per-range ImposedGuard).
+**[P-014]** "optionally RETAIN D(k)" — retention is MANDATORY for provider
+elements when lts≠off (compiled-but-untaken on GTS ⇒ byte-exact).
+**[P-015]** Provider/consumer ELEMENT sets + slot maps assigned to Phase 1.
+**[P-016]** LTS × levers: lts≠off implies fused (shared-CK) predictor
+semantics regardless of the flag (logged); deriv-cache/face-cache compose;
+2×2 lever smoke to 1e-15.
+**[P-017]** Post-flip guard contradiction: `lts≠off` IMPLIES the fault-locality
+partition automatically (flag becomes a no-op alias); vacuous on fault-free
+meshes.
+**[P-018]** Checkpoint V2: 64-bit FNV-1a over (rate, num_clusters, cluster-id
+sequence in serial-mesh order, IEEE bits of dt_base and λ); GTS keeps writing
+V1 byte-identically; V2+lts=off refused in v1; refusal-path unit tests.
+**[P-019]** R-101 rekey: run at every sync with t_sync ≤ T_nuc of the ACTIVE
+kind (drop %100); under D-2 it is vacuous — repurpose as a locality tripwire
+(assert zero shared fault faces) with the np=2==np=1 per-sync fault-state
+checksum as the real cross-rank gate.
+**[P-020]** GAP registry + the "five rank-global fault structures" enumerated
+(dof_data; fault_coords; Q_pointwise±; I_imp±_flat; the deltaT/weights/
+tau_nodes schedule); "GAP: ParaView trigger" resolved (per-sync max of
+slip_rate_substep_max feeds the regime detector; granularity coarsens to
+sync — accepted).
+**[P-021]** Unit-test matrix consolidated as a normative appendix (scheduler
+goldens; ragged-final-cycle; nucleation telescoping; checkpoint refusals;
+conservation harness; λ-scan/auto-merge; bin edges; truncated-tfinal byte
+gate; mixed-neighbor 3-cluster; ghost-poison np=2 seam; 2×2 levers; stations
+byte-identical reorder gate).
 
-**Suggested fix:**
-Add a hidden self-test mode to the existing test binary and drive it from the
-Makefile with a bounded, negated invocation:
-```diff
- # in tests/unit/test_data_field_3d_shared_mem.cpp main(), before fixtures:
-+   if (argc > 1 && std::string(argv[1]) == "--nan-fixture-abort-child")
-+   {
-+      // rank 0 writes a fixture whose "F" contains a NaN cell; ALL ranks
-+      // then construct shared-mode readers.  EXPECTED: global abort.
-+      std::string p = make_tmp_path("nanchild");
-+      if (g_world_rank == 0) { write_nan_fixture(p); }
-+      p = bcast_path(p, MPI_COMM_WORLD);
-+      MPI_Barrier(MPI_COMM_WORLD);
-+      DataField3D bad(p, "F", OOBPolicy::Abort, node_comm);   // aborts here
-+      return 0;   // NOT reached
-+   }
-```
-```diff
- test-data-field-3d-shared-mem: seas_test_data_field_3d_shared_mem
- 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_data_field_3d_shared_mem
- 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_data_field_3d_shared_mem
-+	@echo "--- expecting ABORT (NaN fixture, shared mode) ---"
-+	! timeout 60 $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 \
-+	    ./seas_test_data_field_3d_shared_mem --nan-fixture-abort-child \
-+	    > /dev/null 2>&1
-```
-(`! timeout 60 …` asserts nonzero exit AND bounds a hang at 60 s. On macOS
-without `timeout`, use `gtimeout` from coreutils or guard with
-`command -v timeout`; fall back to the un-timed `!` form.)
-
-**Test case:** the Makefile stanza above IS the test (asserts abort, bounds
-hang).
-
----
-
-### [R-003] [LOW] [io/data_field_3d.cpp:load_] — Missing defensive checks: loading rank's `base` null, and `disp_unit` from shared_query unchecked
-
-**Category:** ASSUMPTION
-
-**Description:**
-After `MPI_Win_allocate_shared` returns `MPI_SUCCESS` on the loading rank,
-`base` is assumed non-null (standard-guaranteed for size>0, but a null deref
-here would be a silent SEGV inside the converted writes). On peers, the
-returned `qdisp` (disp_unit) is ignored; a mismatch would indicate a
-heterogeneous build.
-
-**Trigger:**
-Buggy/exotic MPI implementation; mixed-ABI node. Not reachable on OpenMPI 4.x.
-
-**Actual behavior:** no check.
-
-**Expected behavior:** abort with a precise message.
-
-**Suggested fix:**
-```diff
-       if (err != MPI_SUCCESS)
-       {
-          ...
-       }
-+      if (loads && base == nullptr)
-+      {
-+         H5Dclose(did);
-+         H5Fclose(file);
-+         MFEM_ABORT("DataField3D: MPI_Win_allocate_shared returned a null "
-+                    "base pointer for field '" << field_name << "'");
-+      }
-       if (!loads)
-       {
-          MPI_Aint qsize = 0;
-          int qdisp = 0;
-          err = MPI_Win_shared_query(shared_win_, 0, &qsize, &qdisp, &base);
-          ...
-+         if (qdisp != static_cast<int>(sizeof(real_t)))
-+         {
-+            H5Dclose(did);
-+            H5Fclose(file);
-+            MFEM_ABORT("DataField3D: shared window disp_unit " << qdisp
-+                       << " != sizeof(real_t) " << sizeof(real_t)
-+                       << " for field '" << field_name << "'");
-+         }
-```
-
-**Test case:** not demonstrable on a conforming MPI (defensive only) — hence LOW.
-
----
-
-### [R-004] [LOW] [tests/unit/test_data_field_3d_shared_mem.cpp:27-42] — `std::array` used without `#include <array>`
-
-**Category:** QUALITY
-
-**Description:**
-`sample_points()` returns `std::vector<std::array<real_t, 3>>` but the file
-never includes `<array>`; it compiles via transitive inclusion from
-`data_field_3d.hpp` (which includes `<array>`), so a future header cleanup
-there would break this test.
-
-**Trigger:** header hygiene change in an included header.
-
-**Actual behavior:** compiles by luck of transitivity.
-
-**Expected behavior:** self-sufficient includes.
-
-**Suggested fix:**
-```diff
- #include <cmath>
-+#include <array>
- #include <cstdio>
-```
-
-**Test case:** n/a (compile-time; LOW).
-
----
-
-## Fix round 1 (2026-07-17, /code-fix) — ALL FINDINGS RESOLVED
-- **R-001 FIXED**: permanent np=1 regression
-  `tests/unit/test_data_field_3d_shared_mem_finalize.cpp` added + wired into
-  `test-data-field-3d-shared-mem`; plan §7 row reworded to the real mechanism
-  (Finalized-guard skip; R-008 ordering forbids early reset).  Run: prints
-  `dtor-after-finalize OK`, exit 0.
-- **R-002 FIXED**: `--nan-fixture-abort-child` mode added to the shared-mem
-  test (clean-exit-0 on a BROKEN guard so the negated Makefile check trips);
-  Makefile stanza asserts nonzero mpirun exit AND distinguishes a hang
-  (timeout/gtimeout exit 124 → FAIL) from the expected abort.  Run:
-  `OK: aborted as expected (mpirun exit 1)`.
-- **R-003 FIXED**: `loads && base == nullptr` abort after
-  `MPI_Win_allocate_shared`; `qdisp != sizeof(real_t)` abort after
-  `MPI_Win_shared_query` (both with field-named messages).
-- **R-004 FIXED**: `#include <array>` added.
-- Post-fix verification: shared-mem target green (np=2 12/12, np=4 24/24,
-  finalize OK, NaN-abort OK); full classic suite unchanged (data-projection
-  ALL PASSED, prestress 12/12, friction-sidecar 40/40, velocity-bundle 6/6,
-  safs-params 25/25); driver relinks.
+### LOW
+**[P-022]** Byte gates pin `lts_wiggle="off"`; np>1 single-cluster gate
+compares GTS *given the LTS partition* (legal degree of freedom — say so).
+**[P-023]** Step-keyed consumer inventory (V_max print, receivers, R-101
+nonfatal print, downstream log parsers) listed with new sync-keyed cadences;
+NaN detection latency note + optional collective-free per-tick local isfinite.
+**[P-024]** Wording: "last correction time" → "last predict time (= the
+expansion point)"; header claim "Phases 1/4 amended" corrected; D(k) retention
+copies out during the recursion (the ping-pong scratch is shared across
+cluster invocations — no lazy aliasing).
 
 ## Summary
-- Critical issues: 0
-- Moderate issues: 2 (R-001 deviation/coverage, R-002 failure-path coverage)
-- Low issues: 2 (R-003 defensive checks, R-004 include hygiene)
-- Plan compliance: FULL for the implemented scope (Phases 0–2 + §6 gates;
-  Phase 3 explicitly deferred to Expanse per the plan's own gating — plan
-  status line updated accordingly). One §7 mitigation was reworded in code
-  (Finalized-guard instead of impossible destroy-before-finalize) — flagged as
-  R-001 rather than silently accepted.
-- Verdict: **PASS WITH FIXES** — apply R-001/R-002 (coverage + doc wording)
-  and the two LOW patches; no algorithmic changes required.
-
-## Positive verification performed (not findings)
-- Flag OFF ⇒ classic path: all five pre-existing sidecar test targets pass
-  unchanged (data-projection roll-up, project-fault-prestress 12/12,
-  spatial-friction-sidecar 40/40, spatial-velocity-bundle 6/6,
-  compute-safs-params 25/25).
-- Shared ⇒ per-rank bit-identity + cross-rank payload identity: np=2 12/12,
-  np=4 24/24 (the corner sweep samples EVERY stored cell, so the §6(b)
-  "checksum" requirement is fully covered, not sampled).
-- Collective-ordering audit: all three loaders are config-driven and execute
-  in identical order on every rank (velocity → stress → friction); node-comm
-  collectives complete before the next world collective; no interleaving
-  deadlock found.
-- Copy/move safety: `DataField3D` copy deleted; no in-repo code copies or
-  moves it (StressField3D members constructed in place; bundles hold
-  `unique_ptr`); every consumer (driver, 2 standalone projector tools, all
-  test binaries) recompiles and links.
-- dtor-after-finalize probe: exit 0 (see R-001).
+- Critical: 12 (P-001…P-012) — concentrated in the scheduler/coupling core and
+  the rev-2 propagation gaps; both reviewers converged independently on P-001.
+- Moderate: 9 (P-013…P-021) · Low: 3 (P-022…P-024)
+- Plan compliance (rev-2 self-consistency): PARTIAL — amendments recorded as
+  decisions but not propagated into phase contracts.
+- Verdict: **FAIL as rev 2 — must fix before implementation.** All findings
+  are addressed in **rev 3** (same file), which adds a normative Interfaces
+  appendix and a Unit-Test Matrix appendix.
 
 ## Unreviewed Areas
-- On-cluster behavior (Lustre HDF5 metadata storm at 128 ranks/node, OpenMPI
-  4.1.x on Expanse, real ~253 MB windows) — Phase 3 scope, needs the cluster.
-- Serial (non-MPI) MFEM build of the io/ files: code paths are `#ifdef`-clean
-  by inspection, but no serial build exists in this environment to compile.
+- The Phase-7 p-drop stub (deliberately a pointer to its own future plan).
+- Phase-6 flip mechanics beyond the guard interaction (P-017).
