@@ -257,6 +257,71 @@ points — the same solver, the same sub-step structure, just per cluster. Since
 97% of fault faces live in clusters 4–5, friction runs ~16–32× less often than
 today while remaining exactly as resolved *relative to its own local physics*.
 
+## I.3b Common questions about the seam
+
+**Q1 — "So the coarse side takes results computed by the fine side?"**
+Half right — the direction matters, and it is different for the two things
+that cross the seam. First recall: in DG, elements never touch each other's
+solutions; they interact ONLY through face fluxes. So "taking the neighbor's
+result" can only ever mean "taking the flux through our shared face."
+
+- **Coarse → fine: a FORECAST flows, and the fine side does the computing.**
+  While the fine cluster sub-steps, the coarse element is asleep — it has no
+  fresh results to give. What it has is its predictor polynomial Q_coarse(τ),
+  its forecast over the whole big step. The fine side integrates that forecast
+  over each of its own sub-intervals and evaluates the flux itself.
+- **Fine → coarse: COMPUTED FLUX RESULTS flow — yes, the coarse takes them.**
+  The coarse element eventually needs the seam flux integrated over its whole
+  step, and the fine side has already computed exactly those fluxes (once per
+  sub-interval, with time-consistent data on both sides — it is the only party
+  that ever had both). Each fine sub-step deposits the coarse element's share
+  into the coarse element's in-tray (accumulate buffer); the coarse correction
+  just adds the in-tray. It never visits the face itself.
+
+Slogan: **predictions flow downhill (coarse→fine); computed fluxes flow uphill
+(fine→coarse); states never cross the fence at all.** Evaluating each seam
+flux exactly once and letting BOTH sides consume that same evaluation is also
+what makes conservation exact — two independently computed versions would
+disagree slightly and leak momentum at every seam.
+
+**Q2 — "Why does the fine side need the coarse forecast at all?"**
+Because a face flux is a two-sided quantity at a single instant:
+F(τ) = F(Q_fine(τ), Q_coarse(τ)). The fine side knows its own Q_fine(τ) — it
+is live. But the coarse element's STORED state is frozen at the start of its
+big step; halfway through, it is stale by up to 2^Δ fine steps. The coarse
+element is not actually sitting still during its step — its solution evolves
+the whole time, and the forecast polynomial is precisely the description of
+that evolution.
+
+Picture a P-wave traveling from the coarse side, reaching the seam midway
+through the coarse element's big step:
+
+```
+                    coarse (one big step)     │     fine (4 sub-steps)
+  wave →→→→→→→→→→→→→→→→ ⟍                    │
+                          ⟍  arrives at the  │
+                            ⟍ face at ½·dt_c  │
+```
+
+With the forecast, fine sub-step 3 evaluates Q_coarse(½dt_c) — the polynomial
+contains the wave's arrival — and the wave flows into the fine region on time,
+at full order. With the frozen state, the wave would not exist at the seam
+until the coarse element's NEXT step: delayed, staircase-distorted, and the
+scheme drops to first order exactly at every cluster boundary. There is no
+third option: the fine side cannot wait for the coarse to compute more often
+(that IS global stepping), and it cannot extrapolate the coarse's interior
+dynamics from its own data.
+
+The reassuring part: **this is not a new approximation.** Even under today's
+global stepping, no ADER face flux is ever computed from frozen states — the
+method is predictor–corrector by construction, and every flux everywhere is
+already built from both elements' predicted time evolutions. LTS adds exactly
+one twist: the forecast is integrated over a sub-interval [a,b] instead of the
+whole step — and since it is a polynomial, that slice is algebraically exact
+(the (b^{k+1}−a^{k+1})/(k+1)! formula). Same ingredient, sliced thinner; no
+new error term at the seam, which is why LTS-ADER preserves the scheme's full
+convergence order.
+
 ## I.4 Why this can beat SeisSol, not just match it
 
 Wall-clock time factorizes as
