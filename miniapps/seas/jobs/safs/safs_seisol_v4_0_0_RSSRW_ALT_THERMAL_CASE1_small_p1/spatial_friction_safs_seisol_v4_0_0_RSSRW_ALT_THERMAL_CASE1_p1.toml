@@ -106,6 +106,14 @@ mixed_flux      = "none"                   # pure Godunov upwind (no central cor
 interior_flux   = "matrix"                 # heterogeneous CVM
 time_integrator = "ader"
 cfl             = 0.5                       # = SeisSol CFL
+# SeisSol-EQUIVALENT dt (benchmark decision 2026-07-18): with safety = 1.0 the
+# driver's per-cell CFL formula is EXACTLY SeisSol's — verified numerically on
+# this mesh (p3 prints dt_cfl(safety=1) = 4.12183e-5 s; the SeisSol log's
+# "Minimum timestep" is 41.2181 us).  The conservative default 3.0 made every
+# run 3x slower than the SeisSol baseline and is DISALLOWED for these speed
+# cases: the sbatch asserts this key AND passes --cfl-dg-safety 1.0 (no env
+# fallback exists).
+cfl_dg_safety   = 1.0
 use_pml         = false
 
 [time]

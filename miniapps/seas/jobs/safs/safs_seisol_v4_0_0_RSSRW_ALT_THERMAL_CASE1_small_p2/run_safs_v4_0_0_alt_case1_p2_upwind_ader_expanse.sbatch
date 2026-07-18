@@ -145,6 +145,16 @@ _cfg_ader="$(grep -E '^ader_order[[:space:]]*=' "${CONFIG_TOML}" | head -1 | sed
 if [[ "${_cfg_ader}" != "${ADER_ORDER}" ]]; then
     echo "ERROR: ${CONFIG_TOML} sets ader_order=${_cfg_ader}, expected ${ADER_ORDER} (=order+1)."; exit 1
 fi
+# cfl_dg_safety pre-flight: 1.0 (SeisSol-EQUIVALENT dt) is THE ONLY valid value
+# for these speed cases (decision 2026-07-18) — the conservative default 3.0
+# made every run 3x slower than the SeisSol baseline and is DISALLOWED.  The
+# formula identity is verified: at safety=1 the driver reproduces SeisSol's
+# per-cell dt on this mesh to 5 digits (p3: 4.12183e-5 s vs 41.2181 us).
+# There is deliberately NO env override; the srun line also passes
+# --cfl-dg-safety 1.0 explicitly (belt and braces).
+grep -qE '^[[:space:]]*cfl_dg_safety[[:space:]]*=[[:space:]]*1\.0' "${CONFIG_TOML}" \
+    || { echo "ERROR: ${CONFIG_TOML} must set cfl_dg_safety = 1.0 (SeisSol-equivalent dt;"
+         echo "       the 3.0 fallback is disallowed for the speed benchmark)."; exit 1; }
 
 # Inputs are folder-local symlinks; -e follows them, so a dangling link (sidecar
 # not yet scp'd to its canonical target) fails here rather than 20 min in.
@@ -299,7 +309,7 @@ echo "Inputs:      mesh=$(readlink ${MESH_LN})"
 echo "             vel =$(readlink ${VEL_LN})"
 echo "             str =$(readlink ${STR_LN})"
 echo "             fri =$(readlink ${FRI_LN})"
-echo "Numerics:    --mixed-flux none --time-integrator ader --ader-order ${ADER_ORDER}   perf: ${DERIV_OPT:-<none>}"
+echo "Numerics:    --mixed-flux none --time-integrator ader --ader-order ${ADER_ORDER} --cfl-dg-safety 1.0 (SeisSol-equivalent dt; 3.0 disallowed)   perf: ${DERIV_OPT:-<none>}"
 echo "tfinal:      ${SAFS_TFINAL:-<config 150s>}   CFL: ${SAFS_CFL:-<config 0.5>}"
 echo "Output dir:  ${OUT}"
 echo "SPEED METRIC: after the run, read the per-step timing from ${LOG}"
@@ -313,6 +323,7 @@ srun --mpi=pmi2 -n "${SLURM_NTASKS}" --unbuffered stdbuf -oL -eL ./seas_spatial_
     --mixed-flux none \
     --time-integrator ader \
     --ader-order "${ADER_ORDER}" \
+    --cfl-dg-safety 1.0 \
     ${SHARED_MEM_ARG} \
     ${DERIV_OPT} \
     ${TFINAL_ARG} \
@@ -333,6 +344,17 @@ if grep -qE 'FreeSurf:' "${LOG}"; then
 else
     echo "WARNING: no 'FreeSurf:' banner in ${LOG} -- free-surface output may be OFF."
 fi
+# cfl_dg_safety EFFECT check: the [time] line must report safety = 1 (the
+# SeisSol-equivalent dt).  A "cfl_dg_safety = 3" here would mean the flag was
+# dropped/ignored and the run silently did 3x the steps — flag it loudly.
+if grep -q 'cfl_dg_safety = 1 ' "${LOG}"; then
+    echo "dt check:    $(grep -m1 -E '^\[time\] dt ' "${LOG}")  (cfl_dg_safety = 1, SeisSol-equivalent)"
+elif grep -q 'cfl_dg_safety' "${LOG}"; then
+    echo "ERROR: the run did NOT use cfl_dg_safety = 1.0:"
+    grep -m1 'cfl_dg_safety' "${LOG}"
+    echo "       This run's timing is 3x-inflated — do not use it for the benchmark."
+fi
+
 # Shared-memory banner check (the parser ignores unknown flags, so verify the
 # EFFECT): the driver prints this line from rank 0 when the mode is active.
 if [[ "${SAFS_SHARED_MEM}" == "1" ]]; then
