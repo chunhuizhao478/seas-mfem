@@ -1,6 +1,6 @@
 # Implementation Plan: Clustered Local Time Stepping (LTS) for the ADER path of seas_spatial_dyn_driver
 
-**Date:** 2026-07-18 (rev 5) · **Status:** IN PROGRESS — Phase 0 DONE, Phase 1 PART-DONE + resequenced (see "Implementation status & phase resequencing")
+**Date:** 2026-07-18 (rev 5) · **Status:** IN PROGRESS — Phase 0 DONE, Phase 1 PART-DONE + resequenced, Phase 2 IN PROGRESS (foundation + predictor byte-validated; corrector remaining)
 **Rev 5:** Phase 0 + part of Phase 1 implemented on `safs-v4_0_0-alt-case1-mfem-speed`
 (local, unpushed); three Phase-1 pieces (fault-QP reorder, serial-mesh clustering,
 LTS-aware partition) **resequenced** to Phases 3/4 where each is first needed and
@@ -711,11 +711,28 @@ run (at np=1), while still stepping globally.
 **Estimate:** ~1.5 weeks — **~1 wk delivered; the reorder (~0.5 wk) is now
 Phase-3 step 0 and the partition/serial-clustering (~few days) is now Phase 4.**
 
-## Phase 2: Multi-cluster stepping, bulk only (np=1)  — ▶ NEXT (unblocked)
+## Phase 2: Multi-cluster stepping, bulk only (np=1)  — ◑ IN PROGRESS (foundation + predictor done)
 
 **In one sentence:** Elements advance at their cluster's rate on one rank for a
 fault-free problem, with cluster-boundary coupling by Taylor-integration, per
 the Normative Scheduling and Buffer sections.
+
+> **Progress (2026-07-18).** DONE + locally byte-validated: `lts_time_basis.hpp`
+> (`IntegrateTaylor`, A.4 — test B.3 11/11); `lts_stepper.{hpp,cpp}` storage
+> (`LtsDkStore`, `LtsAccumulateBuffers`) + the pure tick loop `RunSyncInterval`
+> (A.6 data + Normative Scheduling — test B.4 31/31); and the **per-cluster ADER
+> predictor** `ComputeADERSubStepStatesAndIntegralCluster` (A.5) with
+> element-restricted CK kernels (`ApplySpatialDerivativeElems_`,
+> `ApplyElementJacobianElems_` + its BimaterialWaveOperator override) and D(k)
+> retention — `test_lts_predictor` 12/12, **single-cluster == GTS bit-for-bit on
+> BOTH the scalar and the heterogeneous bimaterial operator**. Reviewed
+> (adversarial, 11 raw → 1 confirmed → fixed: the bimaterial star-matrix override).
+> REMAINING: the per-cluster **corrector** `AdvanceADERCluster` (A.6 — the
+> role-driven face sweep + accumulate buffers + consumer-face `IntegrateTaylor`;
+> requires restricting the ~200-line multi-path `ComputeADERFaceFluxRHS`), the
+> driver sync-interval loop, Checkpoint V2, and tests B.5/B.6/B.7/B.8. The
+> predictor (the CK-recursion element-restriction — the mathematically hardest
+> half) landed first; the corrector's face-flux restriction is the remaining core.
 
 > **Unblocked by the resequencing.** Phase 2 is bulk-only and np=1, so it needs
 > NONE of the deferred trio — it consumes exactly the layout Phase 1 shipped. One
