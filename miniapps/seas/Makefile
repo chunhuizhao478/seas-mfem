@@ -508,6 +508,11 @@ TEST_R002_DRIVER_INIT_TOTAL_Q_SRC          = tests/unit/test_R002_driver_init_to
 # +face_tracer combinations don't OOB.
 TEST_R003_ANTIPLANE_DIAG_SIZING_SRC        = tests/unit/test_R003_antiplane_diagnostics_sizing.cpp
 
+# Clustered LTS (Phase 0/1).  See document/lts_dev/PLAN_clustered_lts_ader_2026-07-18.md.
+LTS_CLUSTERING_HEADERS                      = dynamic/lts_clustering.hpp
+LTS_CLUSTERING_SRC                          = dynamic/lts_clustering.cpp
+TEST_LTS_CLUSTERING_SRC                     = tests/unit/test_lts_clustering.cpp
+
 # Data-projection feature (Phase 3..5).  See document/features_dev/
 # data_projection_feature_plan_v2.md.
 DATA_FIELD_3D_HEADERS                       = io/data_field_3d.hpp
@@ -575,6 +580,8 @@ SEAS_FS_LIB := $(shell \
    rm -rf $$tmp 2>/dev/null)
 
 # Object files
+LTS_CLUSTERING_OBJ               = $(LTS_CLUSTERING_SRC:.cpp=.o)
+TEST_LTS_CLUSTERING_OBJ          = $(TEST_LTS_CLUSTERING_SRC:.cpp=.o)
 DATA_FIELD_3D_OBJ                = $(DATA_FIELD_3D_SRC:.cpp=.o)
 STRESS_FIELD_3D_OBJ              = $(STRESS_FIELD_3D_SRC:.cpp=.o)
 FIELD_COEFFICIENT_OBJ            = $(FIELD_COEFFICIENT_SRC:.cpp=.o)
@@ -1104,6 +1111,13 @@ all: $(MINIAPPS)
 %.o: %.cpp
 
 SEAS_INCLUDES = $(if $(SRC),-I$(MFEM_DIR))
+
+# Clustered LTS Phase 0: pure clustering unit test (no MPI, no HDF5 of its own,
+# but libmfem links HDF5 so $(HDF5_LIBS) is required).
+seas_test_lts_clustering: $(TEST_LTS_CLUSTERING_OBJ) $(LTS_CLUSTERING_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_LTS_CLUSTERING_OBJ) \
+	    $(LTS_CLUSTERING_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Data-projection feature: DataField3D / FieldCoefficient / FieldProjector /
 # MaterialField unit tests (Phase 3..5 of plan v2).
@@ -3085,6 +3099,16 @@ seas_generate_mesh: $(GENERATE_MESH_OBJ)
 # Data-projection feature object rules (need HDF5 include flags for
 # the .cpp side; MaterialField is header-only and so its test only
 # depends on MFEM headers).
+$(LTS_CLUSTERING_OBJ): %.o: $(SRC)%.cpp $(LTS_CLUSTERING_HEADERS) \
+                            $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_LTS_CLUSTERING_OBJ): %.o: $(SRC)%.cpp $(LTS_CLUSTERING_HEADERS) \
+                                 $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
 $(DATA_FIELD_3D_OBJ): %.o: $(SRC)%.cpp $(DATA_FIELD_3D_HEADERS) \
                           $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
@@ -4139,6 +4163,9 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
 
 test-data-projection: test-data-field-3d test-stress-field-3d test-field-projector test-heterogeneous-material
 	@echo "data-projection feature: all C++ unit tests passed."
+
+test-lts-clustering: seas_test_lts_clustering
+	./seas_test_lts_clustering
 
 test-data-field-3d: seas_test_data_field_3d
 	./seas_test_data_field_3d
