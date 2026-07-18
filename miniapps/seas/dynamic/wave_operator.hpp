@@ -558,6 +558,32 @@ public:
       std::vector<Vector> &Q_per_node,
       Vector &I) const;
 
+   /// (LTS Phase 2, Appendix A.5) Per-cluster ADER predictor: the same CK
+   /// recursion as `ComputeADERSubStepStatesAndIntegral`, but restricted to the
+   /// element subset `elems[0..n_elems)`.  Writes ONLY those elements' dof blocks
+   /// of `Q_per_node`/`I` (the caller keeps the full-size vectors persistent
+   /// across cluster invocations).  Because the CK kernels are element-local
+   /// block-diagonal, running over the FULL element list (single cluster) is
+   /// BYTE-IDENTICAL to `ComputeADERSubStepStatesAndIntegral` at a fixed
+   /// DerivMode — the single-cluster == GTS gate.
+   ///
+   /// D(k) retention (MANDATORY for providers): if `dk_retain != nullptr`, for
+   /// every element `e` with `retain_slot_of_elem[e] >= 0` the raw (unscaled)
+   /// D(0..order-1) blocks of `e` are copied CONTIGUOUSLY into
+   /// `dk_retain[(slot*order + k)*block + j]`, block = NUM_STATE*GetNDof(),
+   /// j the flattened (component, local-dof) index — the layout `IntegrateTaylor`
+   /// consumes.  Pass nullptr (single cluster / no finer neighbours) to skip.
+   void ComputeADERSubStepStatesAndIntegralCluster(
+      const int *elems, int n_elems,
+      const Vector &Q,
+      real_t dt,
+      int order,
+      const std::vector<real_t> &tau_nodes,
+      std::vector<Vector> &Q_per_node,
+      Vector &I,
+      real_t *dk_retain = nullptr,
+      const int *retain_slot_of_elem = nullptr) const;
+
    /// Sub-step iterator side-channel: when the pointer pair is set, the
    /// fault branch of `ComputeADERFaceFluxRHS` consumes the pre-computed
    /// per-substep imposed states (in canonical fault-local frame, layout
@@ -1071,6 +1097,18 @@ protected:
    /// matrices (`ApplyJacobianPerElementDOF_`).
    virtual void ApplyElementJacobian_(int dir, const Vector &X, Vector &Y,
                                       real_t sign) const;
+
+   /// (LTS Phase 2) Element-subset variants of the two CK kernels, restricted to
+   /// `elems[0..n)`.  Element-local block-diagonal, so over the FULL list they
+   /// are byte-identical to the whole-vector kernels (same per-element ops).
+   /// The spatial derivative is material-independent (geometry + mass-inverse),
+   /// hence NON-virtual; the Jacobian's star matrix is material-dependent, hence
+   /// virtual (BimaterialWaveOperator overrides with per-element star matrices).
+   void ApplySpatialDerivativeElems_(int dir, const Vector &Q, Vector &dQ_dxdir,
+                                     const int *elems, int n) const;
+   virtual void ApplyElementJacobianElems_(int dir, const Vector &X, Vector &Y,
+                                           real_t sign, const int *elems,
+                                           int n) const;
 
    // Phase 13: the per-element Jacobian apply, the flux-pool builder, the
    // cross-rank neighbour-material exchange, and the per-face flux-matrix

@@ -1692,6 +1692,270 @@ void WaveOperator<MeshType>::ComputeADERSubStepStatesAndIntegral(
 }
 
 // ---------------------------------------------------------------------------
+// (LTS Phase 2, Appendix A.5) Element-subset CK kernels + per-cluster predictor.
+// Over the FULL element list these are byte-identical to the whole-vector
+// versions above (same element-local ops in the same per-(component,dof) order),
+// so the single-cluster LTS path == GTS to the bit.
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void WaveOperator<MeshType>::ApplySpatialDerivativeElems_(
+   int dir, const Vector &Q, Vector &dQ_dxdir, const int *elems, int n) const
+{
+   MFEM_ASSERT(dir >= 0 && dir < 3, "ApplySpatialDerivativeElems_: bad dir");
+   MFEM_ASSERT(Q.Size() == NUM_STATE * ndof_total_,
+               "ApplySpatialDerivativeElems_: Q size mismatch");
+   MFEM_ASSERT(dQ_dxdir.Size() == NUM_STATE * ndof_total_,
+               "ApplySpatialDerivativeElems_: dQ must be pre-sized "
+               "(caller owns the persistent scratch)");
+   if (n == 0) { return; }
+   const real_t *Q_data = Q.GetData();
+   real_t *dQ_data = dQ_dxdir.GetData();
+
+   if (deriv_mode_ == DerivMode::Cached)
+   {
+      MFEM_VERIFY(static_cast<int>(elem_deriv_op_.size()) == ne_,
+                  "ApplySpatialDerivativeElems_(Cached): cache size mismatch");
+      for (int ei = 0; ei < n; ++ei)
+      {
+         const int e = elems[ei];
+         const DenseMatrix &D = elem_deriv_op_[e][dir];
+         const int ndof = D.Height();
+         MFEM_VERIFY(ndof == ndof_per_el_,
+                     "ApplySpatialDerivativeElems_(Cached): heterogeneous elem");
+         const int dof_offset = e * ndof_per_el_;
+         for (int c = 0; c < NUM_STATE; c++)
+         {
+            const real_t *Qc  = Q_data  + c * ndof_total_ + dof_offset;
+            real_t       *dQc = dQ_data + c * ndof_total_ + dof_offset;
+            for (int i = 0; i < ndof; i++)
+            {
+               real_t s = 0.0;
+               for (int j = 0; j < ndof; j++) { s += D(i, j) * Qc[j]; }
+               dQc[i] = s;
+            }
+         }
+      }
+      return;
+   }
+
+   DenseMatrix KdQ(NUM_STATE, ndof_per_el_);
+   for (int ei = 0; ei < n; ++ei)
+   {
+      const int e = elems[ei];
+      const FiniteElement *fe = fes_->GetFE(e);
+      ElementTransformation *Tr = fes_->GetElementTransformation(e);
+      const int ndof = fe->GetDof();
+      MFEM_VERIFY(ndof == ndof_per_el_,
+                  "ApplySpatialDerivativeElems_: heterogeneous elem");
+      const IntegrationRule &ir = IntRules.Get(fe->GetGeomType(), 2 * order_);
+      const int nqp = ir.GetNPoints();
+      const int dof_offset = e * ndof_per_el_;
+
+      Vector shape(ndof);
+      DenseMatrix dshape(ndof, 3);
+      KdQ = 0.0;
+      for (int q = 0; q < nqp; q++)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         Tr->SetIntPoint(&ip);
+         const real_t w = ip.weight * Tr->Weight();
+         fe->CalcShape(ip, shape);
+         fe->CalcPhysDShape(*Tr, dshape);
+         real_t dQdir_qp[NUM_STATE];
+         for (int c = 0; c < NUM_STATE; c++)
+         {
+            real_t s = 0.0;
+            const real_t *Qc = Q_data + c * ndof_total_ + dof_offset;
+            for (int j = 0; j < ndof; j++) { s += dshape(j, dir) * Qc[j]; }
+            dQdir_qp[c] = s;
+         }
+         for (int c = 0; c < NUM_STATE; c++)
+         {
+            const real_t wd = w * dQdir_qp[c];
+            for (int i = 0; i < ndof; i++) { KdQ(c, i) += shape(i) * wd; }
+         }
+      }
+      const DenseMatrix &M_inv = elem_mass_inv_[e];
+      for (int c = 0; c < NUM_STATE; c++)
+      {
+         real_t *dQc = dQ_data + c * ndof_total_ + dof_offset;
+         for (int i = 0; i < ndof; i++)
+         {
+            real_t val = 0.0;
+            for (int j = 0; j < ndof; j++) { val += M_inv(i, j) * KdQ(c, j); }
+            dQc[i] = val;
+         }
+      }
+   }
+}
+
+template <typename MeshType>
+void WaveOperator<MeshType>::ApplyElementJacobianElems_(
+   int dir, const Vector &X, Vector &Y, real_t sign, const int *elems, int n) const
+{
+   // Scalar body: the single reference star matrix, restricted to the element
+   // list's DOF ranges.  Per-(component,dof) accumulation order matches
+   // ApplyJacobianPerDOF exactly, so it is bit-identical over the full list.
+   const DenseMatrix &A = flux_.GetReferenceStarMatrix(dir);
+   const real_t *Xd = X.GetData();
+   real_t *Yd = Y.GetData();
+   for (int ei = 0; ei < n; ++ei)
+   {
+      const int dof_offset = elems[ei] * ndof_per_el_;
+      for (int c = 0; c < NUM_STATE; c++)
+      {
+         real_t *Yc = Yd + c * ndof_total_ + dof_offset;
+         for (int cp = 0; cp < NUM_STATE; cp++)
+         {
+            const real_t a = A(c, cp);
+            if (a == 0.0) { continue; }
+            const real_t w = sign * a;
+            const real_t *Xcp = Xd + cp * ndof_total_ + dof_offset;
+            for (int i = 0; i < ndof_per_el_; i++) { Yc[i] += w * Xcp[i]; }
+         }
+      }
+   }
+}
+
+template <typename MeshType>
+void WaveOperator<MeshType>::ComputeADERSubStepStatesAndIntegralCluster(
+   const int *elems, int n_elems,
+   const Vector &Q, real_t dt, int order,
+   const std::vector<real_t> &tau_nodes,
+   std::vector<Vector> &Q_per_node, Vector &I,
+   real_t *dk_retain, const int *retain_slot_of_elem) const
+{
+   MFEM_VERIFY(order >= 2 && order <= 4,
+               "ComputeADERSubStepStatesAndIntegralCluster: order in {2,3,4}");
+   MFEM_VERIFY(dt > 0.0, "ComputeADERSubStepStatesAndIntegralCluster: dt > 0");
+   MFEM_VERIFY(Q.Size() == NUM_STATE * ndof_total_,
+               "ComputeADERSubStepStatesAndIntegralCluster: Q size mismatch");
+   MFEM_VERIFY(&Q != &I, "ComputeADERSubStepStatesAndIntegralCluster: Q,I alias");
+   const int O_nodes = static_cast<int>(tau_nodes.size());
+   MFEM_VERIFY(O_nodes >= 1, "ComputeADERSubStepStatesAndIntegralCluster: tau_nodes empty");
+   for (int o = 0; o < O_nodes; o++)
+   {
+      MFEM_VERIFY(std::isfinite(tau_nodes[o]) && tau_nodes[o] >= 0.0
+                  && tau_nodes[o] <= dt,
+                  "ComputeADERSubStepStatesAndIntegralCluster: tau_nodes["
+                  << o << "] out of [0,dt]");
+   }
+
+   const int Nfull = NUM_STATE * ndof_total_;
+   const int block = NUM_STATE * ndof_per_el_;
+
+   // Cluster-block helpers (operate ONLY on elems' dof blocks; the full-size
+   // vectors keep other clusters' data untouched).
+   auto blk_zero = [&](Vector &V)
+   {
+      real_t *d = V.GetData();
+      for (int ei = 0; ei < n_elems; ++ei)
+      {
+         const int off = elems[ei] * ndof_per_el_;
+         for (int c = 0; c < NUM_STATE; c++)
+         {
+            real_t *p = d + c * ndof_total_ + off;
+            for (int i = 0; i < ndof_per_el_; i++) { p[i] = 0.0; }
+         }
+      }
+   };
+   auto blk_copy = [&](Vector &dst, const Vector &src)
+   {
+      real_t *d = dst.GetData(); const real_t *s = src.GetData();
+      for (int ei = 0; ei < n_elems; ++ei)
+      {
+         const int off = elems[ei] * ndof_per_el_;
+         for (int c = 0; c < NUM_STATE; c++)
+         {
+            const int b = c * ndof_total_ + off;
+            for (int i = 0; i < ndof_per_el_; i++) { d[b + i] = s[b + i]; }
+         }
+      }
+   };
+   auto blk_axpy = [&](Vector &dst, real_t a, const Vector &src)
+   {
+      real_t *d = dst.GetData(); const real_t *s = src.GetData();
+      for (int ei = 0; ei < n_elems; ++ei)
+      {
+         const int off = elems[ei] * ndof_per_el_;
+         for (int c = 0; c < NUM_STATE; c++)
+         {
+            const int b = c * ndof_total_ + off;
+            for (int i = 0; i < ndof_per_el_; i++) { d[b + i] += a * s[b + i]; }
+         }
+      }
+   };
+   // Retain D(k) (raw, contiguous per element) for provider elements.
+   auto retain = [&](const Vector &V, int k)
+   {
+      if (dk_retain == nullptr) { return; }
+      const real_t *d = V.GetData();
+      for (int ei = 0; ei < n_elems; ++ei)
+      {
+         const int e = elems[ei];
+         const int slot = retain_slot_of_elem ? retain_slot_of_elem[e] : -1;
+         if (slot < 0) { continue; }
+         real_t *dst = dk_retain
+            + (static_cast<std::size_t>(slot) * order + k) * block;
+         const int off = e * ndof_per_el_;
+         for (int c = 0; c < NUM_STATE; c++)
+         {
+            const real_t *p = d + c * ndof_total_ + off;
+            real_t *qd = dst + c * ndof_per_el_;
+            for (int i = 0; i < ndof_per_el_; i++) { qd[i] = p[i]; }
+         }
+      }
+   };
+
+   // Size outputs full (no-op if already sized); zero ONLY the cluster's blocks.
+   I.SetSize(Nfull);
+   blk_zero(I);
+   Q_per_node.resize(O_nodes);
+   for (int o = 0; o < O_nodes; o++)
+   {
+      Q_per_node[o].SetSize(Nfull);
+      blk_zero(Q_per_node[o]);
+   }
+   if (ndof_total_ == 0 || n_elems == 0) { return; }
+
+   // Shared ping-pong scratch (whole-vector sized; only cluster blocks touched).
+   if (ck_substep_D_curr_buf_.Size() != Nfull) { ck_substep_D_curr_buf_.SetSize(Nfull); }
+   if (ck_substep_D_next_buf_.Size() != Nfull) { ck_substep_D_next_buf_.SetSize(Nfull); }
+   if (ck_substep_dQ_dxd_buf_.Size() != Nfull) { ck_substep_dQ_dxd_buf_.SetSize(Nfull); }
+   Vector &D_curr = ck_substep_D_curr_buf_;
+   Vector &D_next = ck_substep_D_next_buf_;
+   Vector &dQ_dxd = ck_substep_dQ_dxd_buf_;
+   blk_copy(D_curr, Q);            // D(0) = Q on the cluster's blocks
+   retain(D_curr, 0);             // retain D(0) for providers
+
+   // k = 0 terms (each output with its OWN weight, R-003).
+   for (int o = 0; o < O_nodes; o++) { blk_axpy(Q_per_node[o], 1.0, D_curr); }
+   real_t facI = dt;
+   blk_axpy(I, facI, D_curr);
+
+   std::vector<real_t> facS(O_nodes, 1.0);
+   for (int k = 0; k < order - 1; k++)
+   {
+      blk_zero(D_next);
+      for (int d = 0; d < 3; d++)
+      {
+         ApplySpatialDerivativeElems_(d, D_curr, dQ_dxd, elems, n_elems);
+         ApplyElementJacobianElems_(d, dQ_dxd, D_next, /*sign=*/-1.0, elems, n_elems);
+      }
+      const real_t denomS = static_cast<real_t>(k + 1);
+      for (int o = 0; o < O_nodes; o++)
+      {
+         facS[o] *= tau_nodes[o] / denomS;
+         blk_axpy(Q_per_node[o], facS[o], D_next);
+      }
+      facI *= dt / static_cast<real_t>(k + 2);
+      blk_axpy(I, facI, D_next);
+      retain(D_next, k + 1);      // retain D(k+1) for providers
+      mfem::Swap(D_curr, D_next);
+   }
+}
+
+// ---------------------------------------------------------------------------
 // R-602/R-603: SubStep iterator side-channel setters.  See header docstring.
 // ---------------------------------------------------------------------------
 template <typename MeshType>
