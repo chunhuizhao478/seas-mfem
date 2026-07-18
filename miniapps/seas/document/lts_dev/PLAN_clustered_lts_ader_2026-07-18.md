@@ -1,6 +1,10 @@
 # Implementation Plan: Clustered Local Time Stepping (LTS) for the ADER path of seas_spatial_dyn_driver
 
-**Date:** 2026-07-18 (rev 3) · **Status:** PROPOSED (grounded + adversarially reviewed, not implemented)
+**Date:** 2026-07-18 (rev 4) · **Status:** PROPOSED (grounded + adversarially reviewed, not implemented)
+**Rev 4:** added **Part I — The method, explained**: a plain-language tutorial
+(with the equations, the measured cluster histogram, seam/tick diagrams, and
+the beat-SeisSol arithmetic) so the plan is self-contained for a reader who has
+seen none of the analysis documents.
 **Grounding:** two multi-agent investigations over this repo and the local SeisSol
 source, adversarially verified; quantitative motivation in
 `../code_optimization_dev/ANALYSIS_mfem_vs_seissol_speed_2026-07-18.md`; method
@@ -24,8 +28,8 @@ new normative appendices: **A. Interfaces** and **B. Unit-test matrix**.
 
 **The problem.** Our dynamic-rupture driver advances every element of the mesh
 with one shared time step, set by the single worst element. On the SAFS regional
-meshes the allowed step sizes span a factor of about one thousand, so more than
-99% of all element updates are wasted work. Measured on the coarse SAF-ALT
+meshes the allowed step sizes span a factor of about one thousand, so ~97% of
+all element updates are wasted work. Measured on the coarse SAF-ALT
 benchmark: SeisSol finishes 150 simulated seconds in under five hours while our
 driver would need days — and our code is actually *faster per element update*
 than SeisSol. The entire gap is scheduling.
@@ -61,11 +65,249 @@ means default for this driver's SAFS production configs after validation, with
 TPV gold decks explicitly pinned to global stepping.
 
 ## How to read this plan
-- The **Summary** above is the whole idea.
+- The **Summary** above is the whole idea in five paragraphs.
+- **Part I — The method, explained** (next section) is the tutorial: what LTS
+  is, how it works in THIS code, and why we expect to beat SeisSol — plain
+  language, with the equations and diagrams. Read it once before the phases.
 - **Normative sections** (Scheduling, Buffer design, Appendices A/B) are the
   implementation agent's contract — nothing there is optional.
 - Skim the per-phase **"In one sentence"** lines for the arc.
 - The **Glossary** defines every shorthand.
+
+---
+
+# Part I — The method, explained
+
+*(Plain language. Every number below is measured or verified — sources:
+`../code_optimization_dev/ANALYSIS_mfem_vs_seissol_speed_2026-07-18.md` and
+`ANALYSIS_lts_method_selection_2026-07-18.md`.)*
+
+## I.1 Why global time stepping wastes ~97% of our work
+
+Every explicit wave solver must respect a per-element stability limit (the CFL
+condition). For our ADER-DG tetrahedra, the largest stable time step of element
+*e* is
+
+```
+             1        2·r_e                       6·V_e
+dt_e = cfl · ────── · ──────    with   2·r_e  =  ───────   (insphere diameter)
+             2N+1     c_p,e                        A_e
+```
+
+where N is the polynomial order, V_e the element volume, A_e its total face
+area, and c_p,e = √((λ+2µ)/ρ) the P-wave speed at the element. Small element ⇒
+small dt; slow rock ⇒ bigger dt. **This is verified to be exactly SeisSol's
+formula**: at `cfl_dg_safety = 1` our driver prints dt_cfl(p3) = 4.12183e-5 s
+on the benchmark mesh, and SeisSol's log for the same mesh prints "Minimum
+timestep: 41.2181 µs" — agreement to five digits, same critical element, same
+material pairing.
+
+A regional fault model is *inherently* multiscale: ~100–200 m elements resolve
+the fault geometry, kilometre-scale elements fill the far field, and a few
+slivers from the CAD-forced fault surfaces go down to ~14 m. Here is the
+benchmark mesh (1,319,294 tets), binned by allowed dt into powers of two
+(measured from the SeisSol log; the dt values shown are for order 4 — our p1
+values are 7/3 larger but the *ratios*, and hence the bins, are identical):
+
+```
+cluster   allowed dt      cells     share of mesh
+   0        41 µs           123     ▏  0.01%   ← these 123 slivers set the global dt
+   1        82 µs           822     ▏  0.06%
+   2       165 µs         3,346     ▏  0.25%
+   3       330 µs        13,917     ▍  1.1%
+   4      0.66 ms       171,472     █████        13.0%
+   5      1.32 ms       487,273     ██████████████  36.9%
+   6      2.64 ms       192,506     █████▌       14.6%
+   7      5.28 ms        87,246     ██▌           6.6%
+   8     10.6  ms       312,888     █████████    23.7%
+   9     21.1  ms        49,565     █▌            3.8%
+  10     42.2  ms           136     ▏  0.01%
+```
+
+**Global time stepping (GTS, today)** advances *all* 1.32M elements at the
+41 µs of those 123 slivers. Total element-updates for 150 simulated seconds:
+
+```
+GTS:   N_elem · T/dt_min  =  1,319,294 · (150 s / 41.2 µs)  ≈  4.80·10¹²
+```
+
+But each element only *needs* T/dt_e updates. If cluster c steps at
+dt_min·2^c, the necessary work is
+
+```
+LTS:   Σ_c  cells_c · T/(dt_min·2^c)  =  (150/41.2 µs) · Σ_c cells_c/2^c
+    =  3.64·10⁶ · 34,063  ≈  1.24·10¹¹        ⇒  4.80·10¹² / 1.24·10¹¹ = 38.7×
+```
+
+**38.7× of our element updates are pure waste** — elements updated 30–1000×
+more often than their own physics requires. (SeisSol's log prints "speedup
+111.85", but that is an arithmetic-mean statistic; the honest workload number
+is this harmonic 38.7×.) The same sum over the fault-face column gives 22.0×
+for fault work — smaller, because 97% of fault faces sit in the fine clusters
+4–5.
+
+And the punchline that makes this worth doing: we measured that our code
+performs element updates **1.354× faster than SeisSol** (9.89 vs 7.31 million
+updates/s on identical 256 cores). Our code was never slow — it was only ever
+*scheduled* badly. LTS is a scheduler fix.
+
+## I.2 The one lucky fact: our predictor already computes what LTS needs
+
+The only hard problem in LTS is the *seams*: where a fast cluster touches a
+slow one, the two sides live at different moments in time, yet every face flux
+must be computed from both sides consistently — and conservatively.
+
+Here our ADER discretization pays off. Each macro step begins with the
+Cauchy–Kovalevskaya (CK) predictor: for the elastic system
+∂_t Q + A_x∂_x Q + A_y∂_y Q + A_z∂_z Q = 0 (Q = the 9 stress+velocity fields),
+each element locally converts spatial derivatives into time derivatives,
+
+```
+D(0) = Q(t_n),        D(k+1) = − Σ_d  A_d · ∂_d D(k)      (element-local recursion)
+```
+
+and thereby owns a small polynomial **in time** — a short "movie" of its own
+next step:
+
+```
+Q_e(τ) = Σ_k  (τ^k / k!) · D(k),        valid for τ ∈ [0, dt_e]
+```
+
+This polynomial is *the complete answer to "what is this element doing during
+its step?"* — which is exactly the question a neighbor at a different time
+level needs answered. Any time-slice of the flux data can be produced by
+integrating it exactly:
+
+```
+ b                              b^{k+1} − a^{k+1}
+∫ Q_e(τ) dτ   =   Σ_k  D(k) · ───────────────────        (exact, closed form)
+ a                                  (k+1)!
+```
+
+Today we build Q_e(τ), use it once, and **throw the coefficients away**
+(they live in reusable scratch buffers). The entire LTS coupling mechanism is:
+*keep them* — for the ~thin shell of elements that border a finer cluster —
+and let the fine side integrate its coarse neighbor's polynomial over exactly
+the sub-interval it needs. No interpolation error, no new discretization: the
+seam coupling is algebraically exact in time.
+
+## I.3 One coarse step, in pictures
+
+Two clusters; the coarse (c=1) steps once while the fine (c=0) steps twice:
+
+```
+ time
+  ↑            COARSE element                    FINE element
+2dt₀ ─┤  ← both sides arrive here together (sync of this pair)
+      │   correct: adds its accumulate      correct sub-step 2:
+      │   buffer (= the two deposited          flux uses ∫ Q_coarse(τ)dτ over [dt₀,2dt₀]
+      │   flux integrals), applies M⁻¹,        → deposits coarse's share → buffer
+ dt₀ ─┤   Q += …                            correct sub-step 1:
+      │        ▲                               flux uses ∫ Q_coarse(τ)dτ over [0,dt₀]
+      │        │  Q_coarse(τ) = Σ τᵏ/k!·D(k)   → deposits coarse's share → buffer
+  0  ─┤   predict (builds D(k), RETAINED)   predict
+```
+
+Walkthrough:
+1. **Both predict at τ=0.** The coarse element's D(k) stack is retained (it is
+   a "provider"); the fine one's is used as usual.
+2. **Fine sub-step 1** computes the seam-face flux using its own state and the
+   coarse polynomial integrated over [0, dt₀] — *both sides of the flux are at
+   consistent times.* It applies its own share of the flux to itself,
+   and deposits the **coarse element's share** into that element's
+   *accumulate buffer* (the coarse element is asleep; the buffer is its
+   in-tray).
+3. **Fine sub-step 2** does the same over [dt₀, 2dt₀].
+4. **Coarse correct** wakes up once: instead of visiting the seam face, it
+   empties its in-tray — which now holds exactly the face-flux integral over
+   its whole step — applies its mass inverse, and advances.
+
+**Conservation is exact by construction:** each seam flux is evaluated ONCE
+per fine sub-interval, and both sides consume *that same* integral — whatever
+momentum leaves one side enters the other, to machine precision. (Getting the
+in-tray bookkeeping right — filled *before* it is emptied, emptied exactly
+once, zero at every sync — is the part our adversarial review found subtly
+wrong in rev 2 and is now specified normatively with its own unit tests.)
+
+For many clusters the pattern nests. One **sync interval** = one step of the
+coarsest cluster; inside it runs a fixed **tick table** (tick = one finest
+step). Three clusters:
+
+```
+tick            0        1        2        3      ← 4 ticks = one sync interval
+cluster 0:    P C      P C      P C      P C      (4 steps of dt₀)
+cluster 1:    P         C       P         C       (2 steps of 2·dt₀)
+cluster 2:    P                           C       (1 step of 4·dt₀)
+
+P = predict (opens a step; due when  tick mod 2^c == 0)
+C = correct (closes a step; due when (tick+1) mod 2^c == 0), finest first
+```
+
+At every sync point all clusters are at the same time: outputs, V_max
+reductions, checkpoints happen there and only there. Every MPI rank walks the
+*same* table — even ranks with nothing to do this tick — so the number of MPI
+calls per tick is identical everywhere by construction. That property is what
+protects us from the matched-collective deadlocks this codebase has been
+burned by before.
+
+**The fault** needs no special coupling trick at all: both elements of every
+fault face are forced into the same cluster, so the rate-and-state friction
+solve simply runs at that cluster's rate over that cluster's block of fault
+points — the same solver, the same sub-step structure, just per cluster. Since
+97% of fault faces live in clusters 4–5, friction runs ~16–32× less often than
+today while remaining exactly as resolved *relative to its own local physics*.
+
+## I.4 Why this can beat SeisSol, not just match it
+
+Wall-clock time factorizes as
+
+```
+T_wall  =  (number of element updates)  ×  (cost per update)  ÷  (parallel efficiency)
+```
+
+SeisSol's entire advantage on this benchmark is the first factor. We already
+win the second (1.354× faster per update, measured). The plan attacks the
+first factor with the same clustering — and then goes further on four axes:
+
+| Lever | Gain | Why SeisSol doesn't have it |
+|---|---|---|
+| λ-wiggle: rescale all bin edges by λ∈(0.5,1] so a fat population just above an edge drops into the next-coarser cluster | +17.5% shown on LOH.3 (EDGE) | exists only as an experimental flag |
+| Cluster cap (~5–6) + cost-model auto-merge | keeps batches big — this is also the published fix for GPU LTS (SeisSol's GPU LTS collapsed to ~1.3× without it) | experimental flag |
+| Flux-premultiplied 3-buffer seam exchange (send the flux-projected payload, not raw coefficient stacks) | 1.26–1.48× over SeisSol's LTS comm; 94–95% of the theoretical speedup realized at scale (EDGE, IPDPS 2022) | EDGE-only, never merged |
+| **Far-field order drop (Phase 7):** clusters ≥6 — 642,341 cells, 49% of the mesh, only 2,509 fault faces (1.6%; fault-adjacent elements are EXCLUDED from the drop and keep p3) — run p1 in the far field | ~1.16× fewer update-costs + large memory-bandwidth relief | **structurally impossible**: SeisSol's polynomial order is fixed at compile time; MFEM controls its own element layout |
+
+Putting the measured numbers together for the p1 benchmark
+(sim-seconds per wall-hour, 2 nodes / 256 cores):
+
+```
+GTS, safety=3  (measured, jobs 522287xx)      0.87   ▏
+GTS, safety=1  (deployed 2026-07-18)          2.6    ▍
+SeisSol o4 + LTS (measured, job 52042189)    31.8    ███████
+MFEM p1 + LTS  (projected ceiling)         ~100      ██████████████████████
+   = 0.87 × 3 (safety) × 38.7 (LTS)  =  31.8 × 7/3 (order dt) × 1.354 (per-update)
+MFEM p1 + LTS, EDGE-realized (94–95%)       ~95      █████████████████████
++ far-field p-drop (Phase 7)               ~110      ████████████████████████
+```
+
+The two identities in the middle line are the same number computed two
+independent ways — that closure (within 8%) is what makes the projection
+trustworthy rather than hopeful. The formal acceptance gate claims only ≥15×
+over the safety-1 GTS baseline, leaving honest room for cluster-management
+overhead and load imbalance.
+
+## I.5 Where we deliberately differ from SeisSol (engineering choices)
+
+| Aspect | SeisSol | This plan | Why |
+|---|---|---|---|
+| Scheduler | asynchronous actor model, mailbox messages between cluster actors | deterministic tick table, identical on every rank | actors exist to overlap MPI; we buy correctness and reproducibility first — overlap is a v2 optimization if profiles demand it |
+| Cross-rank fault | fault faces may straddle ranks (dedicated copy-layer DR machinery) | fault faces forced rank-interior (fault-locality partition implied by LTS) | deletes an entire hazard class (our historical R-1601/R-101 shared-fault defects) instead of managing it |
+| Seam buffer semantics | fine element's own state-integral buffer; coarse still evaluates the face flux | flux-contribution in-tray on the coarse element; fine side does the work for both | matches the premultiplied-payload exchange; one flux evaluation per sub-interval = conservation by construction |
+| Predictor variants | separate GTS/LTS kernels | one fused CK predictor (our existing `--shared-ck-recursion` path) with retained coefficients for providers | least new numerics; byte-exact GTS fallback preserved |
+| Partition weights | scalar cost ~ 2^-cluster | multi-constraint (one balance constraint per cluster level), scalar fallback | published stronger scheme (Rietmann); extends our existing partition plan |
+| Order | global, compile-time | per-element (two order classes, Phase 7) | the axis SeisSol cannot follow |
+
+---
+
 
 ## Glossary
 
