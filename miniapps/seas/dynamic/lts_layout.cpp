@@ -81,6 +81,15 @@ LtsLayout BuildLtsLayout(const std::vector<int>&         cluster,
                   << " out of range [0," << ne << ").");
       const int c1 = cluster[e1];
 
+      // REVIEW L-6: a fault face MUST be 2-sided (rank-interior) in v1.  Fail
+      // loud rather than silently demoting a shared/rank-seam fault face to a
+      // Boundary bulk face below — cross-rank fault faces are a Phase-4 concern
+      // (D-2: fault faces are rank-interior for now).
+      MFEM_VERIFY(!(f.is_fault && f.elem2 < 0),
+                  "BuildLtsLayout: fault face " << f.face_id << " has no local "
+                  "neighbour (elem2 < 0).  Shared/rank-seam fault faces are not "
+                  "supported until Phase 4 (fault faces must be rank-interior).");
+
       if (f.elem2 < 0)
       {
          // Boundary / rank seam: owned by e1's cluster, no neighbour.

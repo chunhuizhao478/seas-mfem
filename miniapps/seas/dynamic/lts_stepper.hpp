@@ -84,6 +84,12 @@ inline std::vector<LtsTick> BuildTickTable(int num_clusters,
                                            const LtsGlobalMeta& meta)
 {
    MFEM_VERIFY(num_clusters >= 1, "BuildTickTable: num_clusters must be >= 1.");
+   // REVIEW L-3: the step period is 1LL<<c with c up to num_clusters-1; guard
+   // against signed-shift UB.  (Nc is capped at max_clusters=32 upstream, but
+   // this makes the tick-loop's own precondition explicit.)
+   MFEM_VERIFY(num_clusters <= 62,
+               "BuildTickTable: num_clusters " << num_clusters
+               << " > 62 would overflow the 1LL<<c step period.");
    MFEM_VERIFY(dt_base > mfem::real_t(0), "BuildTickTable: dt_base must be > 0.");
    MFEM_VERIFY(T_actual > mfem::real_t(0), "BuildTickTable: T_actual must be > 0.");
    MFEM_VERIFY(static_cast<int>(meta.global_fault_faces.size()) >= num_clusters,

@@ -3035,75 +3035,90 @@ int main(int argc, char *argv[])
    // -----------------------------------------------------------------
    if (lts_report)
    {
-      const int neL = pmesh.GetNE();
-      LtsMeshInputs in = BuildLtsMeshInputs(wave, pmesh);
-      const bool per_elem_mat = in.per_elem_material;
-
-      // Recover the true per-element dt scale (seconds) from the already-computed
-      // GLOBAL dt_cfl so the report reflects the run's real timestep WITHOUT the
-      // (private) MixedFluxCflFactor_() constant.  BuildLtsMeshInputs returns the
-      // scale-free ratios r_e = h_e / c_p,e; multiply by dt_cfl / min(r_e).  (At
-      // np=1, r_min is the global min so Kscale is exact; the np>1 warning below
-      // flags the per-rank caveat.)
-      std::vector<double> dt_e = in.dt_e;
-      double r_min = std::numeric_limits<double>::infinity();
-      for (double r : dt_e) { r_min = std::min(r_min, r); }
-      const double Kscale = static_cast<double>(dt_cfl) / r_min;
-      for (double &v : dt_e) { v *= Kscale; }
-
-      const std::vector<std::pair<int, int>> &fault_pairs = in.fault_pairs;
-      const Table &e2e = pmesh.ElementToElementTable();
-      const int nc_cap_cli = GetIntArg(argc, argv, "--lts-nc-cap", 6);
-
-      auto print_report = [&](const char *tag, const LtsClustering &cl)
+      // REVIEW D-1: the report clusters THIS rank's LOCAL mesh, but at np>1 a
+      // METIS subdomain can be disconnected — an all-coarse island with no
+      // adjacency path to the rank's finest element bins to cluster>=2, leaving a
+      // gap in the used ids, and BuildLtsClustering's contiguity assert (which
+      // holds only for a connected mesh) would MFEM_ABORT with a misleading
+      // "maxdiff bug".  So run the clustering ONLY at np==1 (where the single
+      // SAFS body is connected and the histogram is also the GLOBAL, SeisSol-
+      // comparable one); at np>1 tell the user to rerun serially and skip.  This
+      // mirrors the run-path block's nprocs==1 guard.
+      if (nprocs > 1)
       {
-         const auto hist = cl.cells_per_cluster();
-         std::cout << "[lts-report] " << tag << ": Nc = " << cl.num_clusters
-                   << ", lambda = " << cl.lambda
-                   << ", dt_base = " << cl.dt_base << " s\n"
-                   << "[lts-report]   histogram (cells per cluster c=0..):";
-         for (long long h : hist) { std::cout << ' ' << h; }
-         std::cout << "\n[lts-report]   element-update speedup: harmonic "
-                   << HarmonicUpdateSpeedup(cl)
-                   << "x (honest workload ratio), arithmetic-mean "
-                   << ArithmeticMeanSpeedup(cl)
-                   << "x (SeisSol-printed form)\n";
-      };
-
-      if (nprocs > 1 && rank == 0)
-      {
-         std::cout << "[lts-report] WARNING: running on " << nprocs
-                   << " ranks — the histogram below is PER-RANK (rank 0's local "
-                      "mesh).  Run with np=1 to reproduce SeisSol's GLOBAL "
-                      "cluster counts.\n";
+         if (rank == 0)
+         {
+            std::cout << "[lts-report] SKIPPED: running on " << nprocs
+                      << " ranks.  The report clusters each rank's LOCAL mesh, "
+                         "which at np>1 can be disconnected (a graceful global "
+                         "histogram needs the Phase-1b serial clustering).  "
+                         "Rerun with np=1 to reproduce SeisSol's GLOBAL cluster "
+                         "counts.\n";
+         }
       }
-
-      // RAW mode: lambda = 1, no wiggle, no merge — SeisSol's exact algorithm.
-      LtsClusteringOptions raw_opt;
-      raw_opt.wiggle_scan  = false;
-      raw_opt.lambda_fixed = 1.0;
-      raw_opt.nc_cap       = 0;   // <= 0 disables the auto-merge
-      const LtsClustering raw =
-         BuildLtsClustering(dt_e, e2e, fault_pairs, raw_opt);
-
-      // PRODUCTION mode: lambda-scan + Nc-cap auto-merge (the run defaults).
-      LtsClusteringOptions prod_opt;
-      prod_opt.wiggle_scan    = true;
-      prod_opt.nc_cap         = nc_cap_cli;
-      prod_opt.merge_loss_tol = 0.05;
-      const LtsClustering prod =
-         BuildLtsClustering(dt_e, e2e, fault_pairs, prod_opt);
-
-      if (rank == 0)
+      else
       {
-         std::cout << "[lts-report] local NE = " << neL
-                   << ", fault-face pairs = " << fault_pairs.size()
-                   << ", material path = "
-                   << (per_elem_mat ? "matrix (per-element c_p)"
-                                    : "scalar (uniform c_p)")
-                   << ", dt_cfl = " << dt_cfl << " s\n";
-         print_report("RAW (SeisSol algorithm: lambda=1, no merge)", raw);
-         print_report("PRODUCTION (lambda-scan + Nc-cap merge)", prod);
+         const int neL = pmesh.GetNE();
+         LtsMeshInputs in = BuildLtsMeshInputs(wave, pmesh);
+         const bool per_elem_mat = in.per_elem_material;
+
+         // Recover the true per-element dt scale (seconds) from the already-
+         // computed dt_cfl so the report reflects the run's real timestep WITHOUT
+         // the (private) MixedFluxCflFactor_() constant.  BuildLtsMeshInputs
+         // returns the scale-free ratios r_e = h_e / c_p,e; multiply by
+         // dt_cfl / min(r_e) (exact at np==1, where r_min is the global min).
+         std::vector<double> dt_e = in.dt_e;
+         double r_min = std::numeric_limits<double>::infinity();
+         for (double r : dt_e) { r_min = std::min(r_min, r); }
+         const double Kscale = static_cast<double>(dt_cfl) / r_min;
+         for (double &v : dt_e) { v *= Kscale; }
+
+         const std::vector<std::pair<int, int>> &fault_pairs = in.fault_pairs;
+         const Table &e2e = pmesh.ElementToElementTable();
+         const int nc_cap_cli = GetIntArg(argc, argv, "--lts-nc-cap", 6);
+
+         auto print_report = [&](const char *tag, const LtsClustering &cl)
+         {
+            const auto hist = cl.cells_per_cluster();
+            std::cout << "[lts-report] " << tag << ": Nc = " << cl.num_clusters
+                      << ", lambda = " << cl.lambda
+                      << ", dt_base = " << cl.dt_base << " s\n"
+                      << "[lts-report]   histogram (cells per cluster c=0..):";
+            for (long long h : hist) { std::cout << ' ' << h; }
+            std::cout << "\n[lts-report]   element-update speedup: harmonic "
+                      << HarmonicUpdateSpeedup(cl)
+                      << "x (honest workload ratio), arithmetic-mean "
+                      << ArithmeticMeanSpeedup(cl)
+                      << "x (SeisSol-printed form)\n";
+         };
+
+         // RAW mode: lambda = 1, no wiggle, no merge — SeisSol's exact algorithm.
+         LtsClusteringOptions raw_opt;
+         raw_opt.wiggle_scan  = false;
+         raw_opt.lambda_fixed = 1.0;
+         raw_opt.nc_cap       = 0;   // <= 0 disables the auto-merge
+         const LtsClustering raw =
+            BuildLtsClustering(dt_e, e2e, fault_pairs, raw_opt);
+
+         // PRODUCTION mode: lambda-scan + Nc-cap auto-merge (the run defaults).
+         LtsClusteringOptions prod_opt;
+         prod_opt.wiggle_scan    = true;
+         prod_opt.nc_cap         = nc_cap_cli;
+         prod_opt.merge_loss_tol = 0.05;
+         const LtsClustering prod =
+            BuildLtsClustering(dt_e, e2e, fault_pairs, prod_opt);
+
+         if (rank == 0)
+         {
+            std::cout << "[lts-report] local NE = " << neL
+                      << ", fault-face pairs = " << fault_pairs.size()
+                      << ", material path = "
+                      << (per_elem_mat ? "matrix (per-element c_p)"
+                                       : "scalar (uniform c_p)")
+                      << ", dt_cfl = " << dt_cfl << " s\n";
+            print_report("RAW (SeisSol algorithm: lambda=1, no merge)", raw);
+            print_report("PRODUCTION (lambda-scan + Nc-cap merge)", prod);
+         }
       }
    }
 

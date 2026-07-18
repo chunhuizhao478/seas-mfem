@@ -199,6 +199,51 @@ int main()
       CHECK(r_raw2.cluster == r_unc.cluster, "T7 nc_cap<=0 reproduces uncapped bit-for-bit");
    }
 
+   // ---- T8 (REVIEW C-2): the COST GATE binds before nc_cap, and the gate is
+   //      cumulative-vs-baseline, not per-step.  A 4-cluster chain with a fine
+   //      cluster 0 dominating the cost: 200 cells dt=1 (c0), 8 dt=2 (c1),
+   //      8 dt=4 (c2), 8 dt=8 (c3).  dt_base=1, so
+   //        baseline B = 200 + 8/2 + 8/4 + 8/8 = 207.
+   //      Merging the top level doubles those cells' cost contribution:
+   //        merge c3->c2 : +8/8 = +1  -> cost 208
+   //        merge c2->c1 : +16/4 = +4 -> cost 212
+   //      With tol = 0.01 (budget = 1.01*207 = 209.07): merge 1 is accepted
+   //      (208 <= 209.07) but merge 2 is rejected against the FIXED baseline
+   //      (212 > 209.07) even though nc_cap = 1 asks to collapse further.  So the
+   //      cost gate stops at Nc = 3.  A PER-STEP gate (compare to the previous
+   //      cost 208) would give 212/208 = 1.019 > 1.01 and ALSO reject here — but
+   //      the invariant that DISTINGUISHES them is that the FINAL cost must stay
+   //      <= (1+tol)*BASELINE, which a per-step gate can violate on a longer
+   //      escalating chain; we assert that invariant plus the early stop.
+   {
+      std::vector<double> dt;
+      std::vector<std::vector<int>> adj;
+      auto push_block = [&](int count, double dtv)
+      { for (int k = 0; k < count; ++k) { dt.push_back(dtv); } };
+      push_block(200, 1.0); push_block(8, 2.0); push_block(8, 4.0); push_block(8, 8.0);
+      const int n = static_cast<int>(dt.size());   // 224
+      adj = chain_adj(n);                            // connected, consecutive clusters
+      mfem::Table tab = make_table(adj);
+
+      LtsClusteringOptions unc; unc.wiggle_scan = false; unc.lambda_fixed = 1.0; unc.nc_cap = 0;
+      auto r_unc = BuildLtsClustering(dt, tab, {}, unc);
+      CHECK(r_unc.num_clusters == 4, "T8 uncapped -> 4 clusters");
+      CHECK(std::abs(r_unc.modeled_cost - 207.0) < 1e-9, "T8 baseline cost == 207");
+
+      LtsClusteringOptions capped = unc;
+      capped.nc_cap = 1; capped.merge_loss_tol = 0.01;   // ask to collapse to 1
+      auto r_cap = BuildLtsClustering(dt, tab, {}, capped);
+      // Cost gate stops the merge at Nc=3, NOT the nc_cap=1 target.
+      CHECK(r_cap.num_clusters == 3, "T8 cost gate binds before nc_cap (Nc=3, not 1)");
+      CHECK(r_cap.num_clusters > capped.nc_cap, "T8 final Nc exceeds nc_cap (cost-limited)");
+      // The load-bearing invariant: final cost within (1+tol)*BASELINE (a per-step
+      // gate can silently overshoot this on an escalating chain).
+      CHECK(r_cap.modeled_cost <= (1.0 + capped.merge_loss_tol) * r_unc.modeled_cost,
+            "T8 final cost within (1+tol)*baseline");
+      CHECK(std::abs(r_cap.modeled_cost - 208.0) < 1e-9, "T8 exactly one merge accepted (cost 208)");
+      CHECK(max_neighbor_diff(r_cap.cluster, adj) <= 1, "T8 maxdiff preserved");
+   }
+
    // ---- speedup statistics on the SeisSol benchmark histogram -------------
    {
       // Reconstruct a layout with the known SeisSol cell counts and check the
