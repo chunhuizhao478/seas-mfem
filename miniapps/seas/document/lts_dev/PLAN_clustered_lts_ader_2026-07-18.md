@@ -1,9 +1,18 @@
 # Implementation Plan: Clustered Local Time Stepping (LTS) for the ADER path of seas_spatial_dyn_driver
 
-**Date:** 2026-07-18 · **Status:** PROPOSED (grounded, not implemented)
+**Date:** 2026-07-18 (rev 2, same day) · **Status:** PROPOSED (grounded, not implemented)
 **Grounding:** two multi-agent investigations (2026-07-18) over this repo and the
 local SeisSol source (v1.3.1-2135-gdc6db6513), adversarially verified; the
 quantitative motivation is `../code_optimization_dev/ANALYSIS_mfem_vs_seissol_speed_2026-07-18.md`.
+**Rev 2:** the method choice was stress-tested against ALL alternative LTS/multirate
+families (elementwise ADER, leapfrog/Newmark-LTS, AB-multirate, MRI-GARK,
+locally-implicit/IMEX, tent-pitching, p-adaptivity) by a 9-agent literature +
+repo-fit + judge-panel study — see `ANALYSIS_lts_method_selection_2026-07-18.md`
+in this folder. Verdict (3 independent judges, unanimous): clustered rate-2
+ADER-LTS wins, UPGRADED with the EDGE-2022 package (λ-wiggle, Nc-cap+auto-merge,
+flux-premultiplied 3-buffer exchange) and a staged far-field p-drop that SeisSol
+structurally cannot copy. Decisions D-1/D-6 and Phases 1/4 amended accordingly;
+Phase 7 added.
 
 ## Summary — read this first
 
@@ -127,12 +136,13 @@ explicit-partition injection point (`spatial_dyn_driver.cpp:1268-1293`).
 
 | ID | Decision | Chosen default | Alternative rejected because |
 |---|---|---|---|
-| D-1 | Fault faces under LTS | **Per-cluster fault machinery** (SeisSol-style: each fault face lives at its own — post-clamp — cluster rate) | Forcing all fault faces to the minimum fault cluster costs 5.8×10¹¹ face-updates on the ALT mesh — 4.7× MORE than the entire LTS element budget. Not viable. |
+| D-1 | Fault faces under LTS | **Per-cluster fault machinery** (SeisSol-style: each fault face lives at its own — post-clamp — cluster rate). DR faces force BOTH sides same-cluster in v1 (the published Uphoff SC'17 rule); relaxing to maxdiff≤1 ACROSS the fault is a named Phase-5 experiment (beyond published work; potential publication). | Forcing all fault faces to the minimum fault cluster costs 5.8×10¹¹ face-updates on the ALT mesh — 4.7× MORE than the entire LTS element budget. Not viable. |
 | D-2 | Shared (cross-rank) fault faces | **Require `--partition-fault-locality` for LTS v1** | Extending the consume path per-cluster across ranks couples LTS to the R-1601 promotion; sequencing both at once doubles risk. v2 may lift this. |
 | D-3 | Nucleation under LTS | **Switch the LTS path to the idempotent absolute form** `ApplyGradualOverstressAbsolute` (SET τ_nuc=S(t)·amp; RK-proven, time-partition-independent) | Per-cluster incremental telescoping duplicates state and invites drift; the absolute form is gated LTS-only so GTS stays byte-identical. |
 | D-4 | Scheduler | **Deterministic recursive tick schedule** (fine-to-coarse within each tick), not SeisSol's async actor model, in v1 | Actors exist to overlap MPI; v1 buys correctness first. The tick loop preserves matched collectives trivially. Actor/overlap is a v2 optimization. |
 | D-5 | Default flip | **Two-stage:** (i) land opt-in (`[numerics].lts = "off"|"rate2"`, default off); (ii) after Phase-5 acceptance, set `lts="rate2"` in the SAFS production/speed configs AND flip the parser default, simultaneously pinning `lts="off"` in every TPV-spatial config + re-goldening the TPV104-spatial smoke | A one-shot default flip silently changes TPV104-spatial production trajectories (they run this driver). |
-| D-6 | Wiggle factor / auto-merge | **Not in v1** (rate-2, plain binning; `max_clusters` clamp only) | Optimizations of a mechanism that must first exist. |
+| D-6 | Wiggle factor / auto-merge | **REVERSED (rev 2): λ-wiggle grid search + Nc-cap (≈5–6) with cost-model auto-merge are IN v1** (Breuer & Heinecke IPDPS 2022; EDGE realized 94–95% of theoretical LTS speedup with them, +17.5% from λ alone) | They are not polish: the Nc cap is the published fix for GPU-LTS collapse (SeisSol GPU: ~1.3× without it) and directly serves our element-local forall GPU design; both are preprocessing-time features, cheap to carry from Phase 0 onward. |
+| D-7 | Exchange payload (rev 2) | **EDGE-style fixed 3-buffer, flux-premultiplied exchange** as the Phase-4 target (send flux-projected payloads, static per-level schedule); v0 stepping stone = full ghost-field exchange per due-tick | EDGE beat SeisSol's own LTS comm by 1.26–1.48× with this; the static schedule is exactly our matched-collective contract. |
 
 ## Phase 0: Cluster report & go/no-go
 
@@ -419,6 +429,16 @@ case and accept only if ≥15× over the GTS safety=1 baseline.
 
 **Estimate:** ~1 week (mostly cluster time).
 
+## Phase 1 addendum (rev 2)
+Phase 1's clustering gains two requirements from the method study:
+- the λ-wiggle grid search (λ∈(0.5,1], step 0.01, minimize the modeled update
+  cost Σ cellCost/2^c/(λ·dt_min)) and the Nc-cap + auto-merge (lower the max
+  cluster while cost ≤ (1+loss)·baseline) run inside `BuildLtsClustering`; the
+  Phase-0 report prints the λ-scan curve and the chosen (λ, Nc);
+- partition weights upgrade to **multi-constraint** (one METIS balance
+  constraint per cluster level, Rietmann-style), with the scalar 2^(maxC−c)
+  weight as fallback.
+
 ## Phase 6: Default flip (D-5)
 
 **In one sentence:** After acceptance, LTS becomes the default for this driver
@@ -465,5 +485,26 @@ while every non-SAFS config that must keep its old trajectory pins `lts="off"`.
 | The deterministic tick schedule leaves MPI idle time SeisSol's actors would overlap | LOW (v1) | Accepted for v1 correctness; actor/overlap is the named v2 axis |
 | Sync cadence erodes speedup (outputs force fine alignment) | LOW | Outputs already ≥1 s cadence vs coarsest dt ~42 ms; sync at max(coarsest dt, requested cadence) |
 
+## Phase 7 (post-flip, rev 2): far-field p-drop — the SeisSol-impossible multiplier
+
+**In one sentence:** Run the far-field clusters (≥6: 642k cells, zero fault
+faces) at p1 while the fault region keeps p3, via a driver-level two-order-class
+DOF layout — an axis SeisSol's compile-time fixed order structurally cannot copy.
+
+Facts from the method study: MFEM's native variable-order FESpaces do NOT cover
+our conforming tet ParMesh (nonconforming-mesh requirement; parallel hp is
+quad/hex-scoped), but the driver owns its flat `[c·ndof_total + e·ndof_per_el + i]`
+layout, so two order classes with prefix-sum offsets + per-class kernel batches
++ Dumbser's max-degree zero-padded interface flux rule are buildable in-driver
+(multi-week, mechanical; ~40+ offset sites in `wave_operator.inl`). Ideal gain
+~1.16× in update counts (clusters ≥6 are 14.7% of clustered cost) plus
+memory-bandwidth relief; the friction machinery is untouched (fault region
+stays p3). Gated by its own plan document when Phase 6 lands. Future
+generalization: hp / damage-zone order boosting (CDBM).
+
 **Total effort estimate: ~7–10 weeks** of focused work (Phases 0–5), plus the
-flip. The go/no-go after Phase 0 costs only days and de-risks the rest.
+flip; Phase 7 is a separately-planned follow-on. The go/no-go after Phase 0
+costs only days and de-risks the rest. Realistic payoff (rev 2, from the method
+study): ~35× realized element-update reduction for the backbone (94–95%
+EDGE-demonstrated realization of the 38.73× ideal), ~45× with Phase 7 —
+projected 1.2–1.5× faster than SeisSol o4 on the shared benchmark mesh.
