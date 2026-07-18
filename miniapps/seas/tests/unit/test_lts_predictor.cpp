@@ -16,6 +16,7 @@
 #include "../../dynamic/heterogeneous_material.hpp"
 #include "../../dynamic/wave_state.hpp"
 #include "../../dynamic/lts_time_basis.hpp"
+#include "../../dynamic/lts_stepper.hpp"   // RunSyncInterval + BuildTickTable (e2e)
 #include "../../domain/boundary_config.hpp"
 
 #include <cmath>
@@ -200,6 +201,91 @@ static void byte_gate(WaveOperator<Mesh> &wave, Mesh &mesh, const char *tag)
    }
 }
 
+// Concrete per-cluster stepper wiring the wave operator's predictor + corrector,
+// driven by the pure tick loop RunSyncInterval.  Single-cluster => elems=all,
+// faces all GTS/Boundary, no providers/consumers.
+struct WaveOpClusterStepper : ILtsClusterStepper
+{
+   WaveOperator<Mesh> &wave;
+   const std::vector<int> &elems, &fids, &froles, &fnbr;
+   Vector &Q;
+   int order;
+   std::vector<Vector> Qn;   // predictor sub-step scratch
+   Vector I;                 // predictor whole-step integral
+
+   WaveOpClusterStepper(WaveOperator<Mesh> &w, const std::vector<int> &el,
+                        const std::vector<int> &fi, const std::vector<int> &fr,
+                        const std::vector<int> &fn, Vector &q, int ord)
+      : wave(w), elems(el), fids(fi), froles(fr), fnbr(fn), Q(q), order(ord) {}
+
+   void Predict(int, real_t dt_step) override
+   {
+      std::vector<real_t> tau(order);
+      for (int o = 0; o < order; ++o) { tau[o] = dt_step * (o + 0.5) / order; }
+      wave.ComputeADERSubStepStatesAndIntegralCluster(
+         elems.data(), (int)elems.size(), Q, dt_step, order, tau, Qn, I);
+   }
+   void Correct(int, real_t dt_step) override
+   {
+      wave.AdvanceADERClusterBulk(elems.data(), (int)elems.size(), fids.data(),
+         froles.data(), fnbr.data(), (int)fids.size(), dt_step, order, I, Q);
+   }
+};
+
+// End-to-end: run K single-cluster LTS sync intervals (tick loop -> predict +
+// correct) and K GTS AdvanceADER steps; the trajectories agree to ~machine eps.
+static void step_e2e(WaveOperator<Mesh> &wave, Mesh &mesh, const char *tag)
+{
+   const int ne = wave.NumElements(), ndof_per_el = wave.GetNDof();
+   const int ndof_total = wave.GetScalarNDof(), Nfull = NUM_STATE * ndof_total;
+   const int ader_order = 4, K = 6;
+   const real_t dt = 3.0e-7;
+
+   Vector Q0(Nfull);
+   const FiniteElementSpace &fes = wave.GetFESpace();
+   for (int e = 0; e < ne; ++e)
+   {
+      const FiniteElement *fe = fes.GetFE(e);
+      ElementTransformation *Tr = fes.GetElementTransformation(e);
+      DenseMatrix coords; Tr->Transform(fe->GetNodes(), coords);
+      const int off = e * ndof_per_el;
+      for (int i = 0; i < ndof_per_el; ++i)
+         for (int c = 0; c < NUM_STATE; ++c)
+            Q0[c * ndof_total + off + i] =
+               std::cos(1.1 * coords(0, i) + 0.2 * c) * std::sin(0.7 * coords(1, i));
+   }
+
+   // GTS reference: K AdvanceADER steps.
+   Vector Qgts = Q0, Qtmp(Nfull);
+   for (int s = 0; s < K; ++s) { wave.AdvanceADER(Qgts, dt, ader_order, Qtmp); Qgts = Qtmp; }
+
+   // LTS single cluster: all elems, all faces GTS/Boundary.
+   std::vector<int> elems(ne); for (int e = 0; e < ne; ++e) { elems[e] = e; }
+   std::vector<int> fids, froles, fnbr;
+   for (int f = 0; f < mesh.GetNumFaces(); ++f)
+   {
+      FaceElementTransformations *ftr = mesh.GetFaceElementTransformations(f);
+      if (!ftr) { continue; }
+      const int e2 = ftr->Elem2No;
+      fids.push_back(f); froles.push_back(e2 >= 0 ? 0 : 3); fnbr.push_back(e2 >= 0 ? e2 : -1);
+   }
+   Vector Qlts = Q0;
+   WaveOpClusterStepper stepper(wave, elems, fids, froles, fnbr, Qlts, ader_order);
+   LtsGlobalMeta meta; meta.global_elems.assign(1, ne); meta.global_fault_faces.assign(1, 0);
+   for (int s = 0; s < K; ++s)   // Nc=1 => T_s = dt_base, one tick per sync interval
+   {
+      auto tab = BuildTickTable(1, dt, dt, ader_order, meta);
+      RunSyncInterval(tab, stepper);
+   }
+
+   real_t md = 0.0, scl = 0.0;
+   for (int i = 0; i < Nfull; ++i)
+   { md = std::max(md, std::abs(Qlts[i] - Qgts[i])); scl = std::max(scl, std::abs(Qgts[i])); }
+   char m[96];
+   std::snprintf(m, sizeof m, "[%s] e2e single-cluster LTS (K=%d steps) == GTS (<=1e-11 rel)", tag, K);
+   CHECK(md <= 1e-11 * (scl + 1.0), m);
+}
+
 int main()
 {
    const int order = 1;
@@ -213,6 +299,7 @@ int main()
       WaveOperator<Mesh> wave(mesh, order, lambda, mu, rho, bc);
       wave.SetAbsorbingBackground(zero_bg);
       byte_gate(wave, mesh, "scalar");
+      step_e2e(wave, mesh, "scalar");
    }
 
    // --- bimaterial (heterogeneous, per-element star matrices) operator ---
