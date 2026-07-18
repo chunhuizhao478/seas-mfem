@@ -46,7 +46,24 @@
 #   SAFS_DERIV_OPT (default "--deriv-cache --shared-ck-recursion"; set empty to
 #   time the un-optimised ADER path),
 #   SAFS_SHARED_MEM (default 1 = --sidecar-shared-mem, ONE sidecar copy per node;
-#   set 0 for the legacy per-rank replication — then submit with --mem=249000M).
+#   set 0 for the legacy per-rank replication — then submit with --mem=249000M),
+#   SAFS_CALI (default 1 = Caliper per-component time breakdown; 0 = off for a
+#   strictly instrumentation-free wall-clock), SAFS_CALI_CONFIG (full CALI_CONFIG
+#   override).
+#
+# CALIPER (per-component time breakdown; cf. the ..._caliper_... reference job):
+#   The solver is instrumented with MFEM_PERF_SCOPE regions — on the ADER path:
+#     seas::spatial_dyn::step, ComputeADERSubStepStates[AndIntegral] (CK
+#     predictor -> ApplySpatialDerivative), seas::spatial_dyn::friction_substep,
+#     AdvanceADER (corrector), ComputeVolumeRHS / ComputeFaceFluxRHS /
+#     ComputeSharedFaceFluxRHS, ComputeMaxDt.
+#   Caliper is driven ENTIRELY by the CALI_CONFIG env var (no driver flag).
+#   REQUIRES a Caliper-enabled binary:  USE_CALIPER=YES bash build_expanse.sh
+#   (USE_CALIPER defaults to NO -> regions compiled out).  Unlike the dedicated
+#   profiling job, a missing libcaliper does NOT abort here — the speed run
+#   proceeds unprofiled with a WARNING (this job's primary product is the
+#   wall-clock; the breakdown is the diagnosis layer).  In the region report,
+#   Max >> Avg across ranks = LOAD IMBALANCE (expected: fault on few ranks).
 # Scale/parity: to leave headroom instead of full core parity, submit with e.g.
 #   sbatch --ntasks-per-node=100 --mem=240000M <this file>
 # =============================================================================
@@ -94,7 +111,8 @@ if [[ ! -f "${SEAS_MFEM_ROOT}/miniapps/seas/Makefile" ]]; then
 fi
 
 # --- runtime shared libs (from build_expanse.sh's from-source deps) ----------
-export LD_LIBRARY_PATH="${SEAS_MFEM_ROOT}/extern/hdf5/install/lib:${SEAS_MFEM_ROOT}/extern/zfp/install/lib64:${SEAS_MFEM_ROOT}/extern/zfp/install/lib:${SEAS_MFEM_ROOT}/extern/petsc/install/lib:${LD_LIBRARY_PATH}"
+# libcaliper.so first (harmless if the build has no Caliper), then hdf5/zfp/petsc.
+export LD_LIBRARY_PATH="${SEAS_MFEM_ROOT}/extern/caliper/install/lib64:${SEAS_MFEM_ROOT}/extern/caliper/install/lib:${SEAS_MFEM_ROOT}/extern/hdf5/install/lib:${SEAS_MFEM_ROOT}/extern/zfp/install/lib64:${SEAS_MFEM_ROOT}/extern/zfp/install/lib:${SEAS_MFEM_ROOT}/extern/petsc/install/lib:${LD_LIBRARY_PATH}"
 export HDF5_PLUGIN_PATH="${SEAS_MFEM_ROOT}/extern/h5z-zfp/install/plugin"
 # HDF5 POSIX file locking FAILS on Lustre (errno 524) and can kill the sidecar
 # H5Dread (and any HDF5 output).  Matches the SeisSol deck's runtime env.
@@ -234,10 +252,47 @@ LOG_DIR="${SEAS_MFEM_ROOT}/miniapps/seas/jobs/safs/safs_seisol_v4_0_0_RSSRW_ALT_
 LOG="${LOG_DIR}/run_p3_upwind_ader_${SLURM_JOB_ID}.log"
 mkdir -p "${OUT}"
 
+# --- Caliper per-component time breakdown (SAFS_CALI=1 default) ---------------
+# Two channels (same recipe as the ..._caliper_... reference job):
+#   runtime-report : per-region table — exclusive + inclusive time, call counts,
+#                    per-region MPI time, Min/Avg/Max across ranks (Max >> Avg
+#                    = load imbalance).  THE "which part eats the time" answer.
+#   spot           : per-rank .cali for Python Hatchet/Thicket / LLNL Spot UI
+#                    (which RANKS are slow; deep dive).
+# SOFT DEGRADE: if the binary is not linked against libcaliper (built without
+# USE_CALIPER=YES), the regions are compiled out — we WARN and run unprofiled
+# rather than kill the speed run.  SAFS_CALI=0 disables profiling entirely
+# (strictly instrumentation-free wall-clock).
+SAFS_CALI="${SAFS_CALI:-1}"
+CALI_REGION_TXT="${LOG%.log}.cali-region-report.txt"
+CALI_SPOT="${LOG%.log}.cali"
+CALI_ACTIVE=0
+if [[ "${SAFS_CALI}" == "1" ]]; then
+    if ldd ./seas_spatial_dyn_driver 2>/dev/null | grep -qi 'libcaliper'; then
+        export CALI_CONFIG="${SAFS_CALI_CONFIG:-runtime-report(calc.inclusive,region.count,profile.mpi,max_column_width=60,output=${CALI_REGION_TXT}),spot(output=${CALI_SPOT})}"
+        CALI_ACTIVE=1
+    else
+        echo "WARNING: SAFS_CALI=1 but ./seas_spatial_dyn_driver is NOT linked against"
+        echo "         libcaliper (built with USE_CALIPER=NO) -> the MFEM_PERF_SCOPE"
+        echo "         regions are compiled out; running UNPROFILED."
+        echo "         For the per-component breakdown rebuild with:"
+        echo "           USE_CALIPER=YES bash ${SEAS_MFEM_ROOT}/build_expanse.sh"
+        unset CALI_CONFIG
+    fi
+else
+    unset CALI_CONFIG
+fi
+
 echo "Git commit:  $(git rev-parse HEAD 2>/dev/null)"
 echo "Cluster:     Expanse (SDSC)   Launcher: srun --mpi=pmi2"
 echo "Size:        compute (lustre), ${SLURM_NNODES:-2}N x ${SLURM_NTASKS_PER_NODE:-128}r = ${SLURM_NTASKS} ranks (pure MPI), ${SLURM_MEM_PER_NODE:-140000}M/node, ${SBATCH_TIMELIMIT:-15:00:00}"
 echo "Sidecars:    residency mode = $([[ "${SAFS_SHARED_MEM}" == "1" ]] && echo 'SHARED (one copy per node, --sidecar-shared-mem)' || echo 'LEGACY (replicated per rank)')"
+if [[ "${CALI_ACTIVE}" == "1" ]]; then
+    echo "Caliper:     ON  $(ldd ./seas_spatial_dyn_driver 2>/dev/null | grep -m1 -i libcaliper | awk '{print $1" -> "$3}')"
+    echo "CALI_CONFIG: ${CALI_CONFIG}"
+else
+    echo "Caliper:     OFF ($([[ "${SAFS_CALI}" == "1" ]] && echo 'binary lacks libcaliper' || echo 'SAFS_CALI=0'))"
+fi
 echo "EXPERIMENT:  v4_0_0 RSSRW ALT THERMAL CASE1 (coarse), p${ORDER}, PURE UPWIND (Godunov) + ADER (order ${ADER_ORDER})"
 echo "Config:      ${CONFIG_TOML}   (order ${_cfg_order}, ader_order ${_cfg_ader})"
 echo "Inputs:      mesh=$(readlink ${MESH_LN})"
@@ -288,6 +343,21 @@ if [[ "${SAFS_SHARED_MEM}" == "1" ]]; then
         echo "         the binary may predate the feature; sidecars were likely"
         echo "         REPLICATED per rank (OOM risk at this --mem sizing)."
     fi
+fi
+
+# --- Caliper outputs ----------------------------------------------------------
+if [[ "${CALI_ACTIVE}" == "1" ]]; then
+    echo ""
+    echo "=== Caliper per-component breakdown ==="
+    if [[ -f "${CALI_REGION_TXT}" ]]; then
+        echo "region report -> ${CALI_REGION_TXT}   (Max>>Avg across ranks = imbalance)"
+        echo "--- instrumented regions (head) ---"
+        head -40 "${CALI_REGION_TXT}"
+    else
+        echo "WARNING: ${CALI_REGION_TXT} not written — Caliper channel failed; CALI messages:"
+        grep -iE 'cali|caliper' "${LOG}" | head
+    fi
+    [[ -f "${CALI_SPOT}" ]] && echo "spot/.cali    -> ${CALI_SPOT}   (Hatchet/Thicket or Spot UI: per-rank detail)"
 fi
 if [[ ${RC} -ne 0 ]]; then
     echo "driver_rc=${RC} -- see ${LOG} (check [derived] lines + any guard ABORT)."; exit ${RC}
