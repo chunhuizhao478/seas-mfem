@@ -206,6 +206,23 @@ public:
    /// unchanged (`cfl_factor * cfl * h_min_ / flux_.GetCp()`).
    virtual real_t ComputeMaxDt(real_t cfl) const;
 
+   /// (LTS Phase 0) Per-element CFL length h_e used by the clustering report.
+   /// Base = the scalar path's retained ctor value `per_elem_cfl_h_` (size ne_).
+   /// `BimaterialWaveOperator` overrides this with its per-element `per_elem_h_`.
+   virtual const std::vector<real_t> &GetPerElementCflLength() const
+   { return per_elem_cfl_h_; }
+
+   /// (LTS Phase 0) Per-element {lambda, mu, rho} for the per-element wave speed
+   /// c_p,e = sqrt((lambda+2mu)/rho).  Base returns EMPTY: the scalar path has a
+   /// single uniform material, so the report uses `flux_.GetCp()` (a global
+   /// constant that cancels out of the cluster ratios).  `BimaterialWaveOperator`
+   /// overrides this with its per-element `per_elem_lmr_`.
+   virtual const std::vector<std::array<real_t, 3>> &GetPerElementMaterial() const
+   {
+      static const std::vector<std::array<real_t, 3>> empty;
+      return empty;
+   }
+
    /// Phase 14.4: select the CFL stability region used by `ComputeMaxDt`'s
    /// `cfl_mixed_flux_factor` switch.  Default `false` ⇒ the ADER de-rating
    /// factors {None 1.0, Adjacent 0.9, AllContinuous 0.4} — byte-identical to
@@ -927,6 +944,14 @@ protected:
    int fault_overint_k_ = 0;
 
    real_t h_min_;
+   /// (LTS Phase 0) Per-element CFL length h_e (inscribed diameter), the same
+   /// per-element quantity the ctor already reduced into `h_min_`, now retained
+   /// so `--lts-report` can cluster on it.  Byte-exact-neutral: this is the
+   /// unchanged ctor loop value, merely stored.  On the SCALAR-material path the
+   /// wave speed is uniform (`flux_.GetCp()`), so the report drives clustering on
+   /// h_e alone; `BimaterialWaveOperator` overrides the accessors with its own
+   /// per-element h/material arrays.
+   std::vector<real_t> per_elem_cfl_h_;
    std::vector<int> face_bdr_attr_;
 
    PMLLayer *pml_layer_ = nullptr;

@@ -110,11 +110,14 @@ public:
    bool UsesGodunovFluxPool() const override
    { return owned_flux_pool_.get() != nullptr; }
 
-   /// Test-only accessors (moved verbatim from `WaveOperator`; consumed by
-   /// `test_phaseh_wave_operator_constant_parity` and `test_wave_operator`).
-   const std::vector<std::array<real_t, 3>> &GetPerElementMaterial() const
+   /// Per-element CFL data (production: also consumed by the LTS Phase-0
+   /// `--lts-report` clustering, plus `test_phaseh_wave_operator_constant_parity`
+   /// and `test_wave_operator`).  Override the base uniform-material accessors
+   /// with this class's true per-element heterogeneous arrays, so a driver
+   /// holding a base `WaveOperator&` sees the matrix-path values via dispatch.
+   const std::vector<std::array<real_t, 3>> &GetPerElementMaterial() const override
    { return per_elem_lmr_; }
-   const std::vector<real_t> &GetPerElementCflLength() const
+   const std::vector<real_t> &GetPerElementCflLength() const override
    { return per_elem_h_; }
    const std::unordered_map<int, std::array<real_t, 3>> &
    GetSharedFaceNeighbourMaterial() const

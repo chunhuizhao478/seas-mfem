@@ -63,6 +63,9 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
    // Tet: 6*Vol / total_face_area (exact inscribed diameter for any tet).
    //   Face areas computed from vertex cross products, no MFEM face API needed.
    h_min_ = std::numeric_limits<real_t>::max();
+   // (LTS Phase 0) retain the per-element h_e — same value as before, now stored
+   // for --lts-report clustering.  Byte-exact-neutral (h_min_ still the min).
+   per_elem_cfl_h_.assign(static_cast<std::size_t>(ne_), real_t(0));
    for (int e = 0; e < ne_; e++)
    {
       real_t vol = mesh_.GetElementVolume(e);
@@ -100,6 +103,7 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
       {
          h = std::pow(vol, 1.0 / mesh_.Dimension());
       }
+      per_elem_cfl_h_[static_cast<std::size_t>(e)] = h;
       h_min_ = std::min(h_min_, h);
    }
 
