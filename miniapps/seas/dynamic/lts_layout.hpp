@@ -163,6 +163,35 @@ inline std::uint64_t LtsLayoutHash(int rate, int num_clusters,
    return h;
 }
 
+/// (Checkpoint V2) The restart accept/refuse decision.  A GTS run writes V1; an
+/// LTS run writes V2 (magic + layout hash).  The reader must REFUSE any
+/// mismatch rather than silently continue an incompatible run.
+enum class LtsCheckpointDecision
+{
+   Accept,               ///< compatible — resume
+   RefuseV1WithLts,      ///< a V1 (GTS) checkpoint cannot resume an lts != off run
+   RefuseV2WithoutLts,   ///< a V2 (LTS) checkpoint cannot resume an lts == off run
+   RefuseHashMismatch    ///< V2 + lts, but the recomputed layout hash differs
+};
+
+/// Decide whether a checkpoint of the given `file_version` (1 or 2) with
+/// `stored_hash` may resume a run with the given `lts_enabled` and freshly
+/// `computed_hash`.  Pure; the driver maps a non-Accept result to a named abort.
+inline LtsCheckpointDecision LtsCheckpointCheck(int file_version, bool lts_enabled,
+                                                std::uint64_t stored_hash,
+                                                std::uint64_t computed_hash)
+{
+   if (file_version == 1)
+   {
+      return lts_enabled ? LtsCheckpointDecision::RefuseV1WithLts
+                         : LtsCheckpointDecision::Accept;
+   }
+   // file_version == 2 (LTS checkpoint)
+   if (!lts_enabled) { return LtsCheckpointDecision::RefuseV2WithoutLts; }
+   return (stored_hash == computed_hash) ? LtsCheckpointDecision::Accept
+                                         : LtsCheckpointDecision::RefuseHashMismatch;
+}
+
 } // namespace seas
 } // namespace mfem
 

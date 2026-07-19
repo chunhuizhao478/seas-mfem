@@ -51,6 +51,8 @@
 #include "../dynamic/bimaterial_wave_operator.hpp"  // Phase 13: matrix (bimaterial) operator
 #include "../dynamic/lts_clustering.hpp"             // LTS Phase 0: --lts-report clustering
 #include "../dynamic/lts_layout.hpp"                 // LTS Phase 1: run-side layout
+#include "../dynamic/lts_bulk_stepper.hpp"           // LTS Phase 2: sync-interval stepper
+#include <cstdint>
 #include "../dynamic/fault_face_flux.hpp"
 #include "../dynamic/friction_solver.hpp"
 #include "../dynamic/tpv205_friction.hpp"
@@ -3591,6 +3593,22 @@ int main(int argc, char *argv[])
 #endif
          return 5;
       }
+      // (Checkpoint V2) An lts != off run must NOT resume a V1 (GTS) checkpoint —
+      // the LTS trajectory differs from global stepping.  Current checkpoints are
+      // V1; a V2 (LTS) checkpoint carries the layout hash and is validated against
+      // the recomputed one (LtsCheckpointCheck).  Today only V1 exists, so
+      // lts + restart maps to RefuseV1WithLts.
+      if (cfg.numerics.LtsEnabled())
+      {
+         const LtsCheckpointDecision decision =
+            LtsCheckpointCheck(/*file_version=*/1, /*lts_enabled=*/true, 0, 0);
+         MFEM_VERIFY(decision == LtsCheckpointDecision::Accept,
+                     "spatial_dyn: refusing restart — lts=\"" << cfg.numerics.lts
+                     << "\" cannot resume a V1 (GTS) checkpoint (different "
+                     "trajectory).  V2 (LTS) checkpoints, written by LTS runs and "
+                     "validated by the layout hash, are the Phase-3 production "
+                     "path (LTS stepping is currently fault-free bulk only).");
+      }
       if (!driver_tag.empty() && driver_tag != "spatial_dyn")
       {
          if (rank == 0)
@@ -3942,7 +3960,91 @@ int main(int argc, char *argv[])
    // checkpoint at L1262 records the actual step the loop reached,
    // not `nsteps` unconditionally.
    int last_completed_step = step0;
-   for (int step = step0; step < nsteps; ++step)
+
+   // -----------------------------------------------------------------
+   // 20a. (LTS Phase 2) Clustered sync-interval loop — FAULT-FREE bulk only.
+   //   Entirely gated on lts != "off", so lts="off" runs the unchanged GTS
+   //   per-step loop below (byte-identical).  The production SAFS driver
+   //   interleaves fault sub-stepping with the bulk corrector every step, so
+   //   fault-LTS is Phase 3; this path REQUIRES a fault-free config and np=1
+   //   (the serial-mesh clustering for np>1 determinism is Phase 1b).  The
+   //   stepping engine (predictor/corrector/multi-rate coupling) is unit-
+   //   validated (test_lts_predictor / test_lts_layout); this is its wiring.
+   // -----------------------------------------------------------------
+   const bool lts_stepping = cfg.numerics.LtsEnabled();
+   if (lts_stepping)
+   {
+      MFEM_VERIFY(nprocs == 1,
+                  "spatial_dyn: lts=\"rate2\" stepping requires np=1 (Phase-1b "
+                  "serial clustering for np>1 determinism not yet landed).");
+      MFEM_VERIFY(bc.fault_attr == 0 || num_fault_total == 0,
+                  "spatial_dyn: lts=\"rate2\" stepping is FAULT-FREE (Phase 2, "
+                  "bulk only); this config carries a fault, and fault-LTS is "
+                  "Phase 3.  Use lts=\"off\" for fault runs.");
+
+      LtsMeshInputs in = BuildLtsMeshInputs(wave, pmesh);
+      LtsClusteringOptions opt;
+      opt.nc_cap         = cfg.numerics.lts_nc_cap;
+      opt.merge_loss_tol = cfg.numerics.lts_merge_loss_tol;
+      if (cfg.numerics.lts_wiggle == "scan") { opt.wiggle_scan = true; }
+      else if (cfg.numerics.lts_wiggle == "off")
+      { opt.wiggle_scan = false; opt.lambda_fixed = 1.0; }
+      else
+      { opt.wiggle_scan = false; opt.lambda_fixed = std::strtod(cfg.numerics.lts_wiggle.c_str(), nullptr); }
+
+      const Table &e2e = pmesh.ElementToElementTable();
+      const LtsClustering cl = BuildLtsClustering(in.dt_e, e2e, in.fault_pairs, opt);
+      const LtsLayout layout = BuildLtsLayout(cl.cluster, cl.num_clusters, in.faces);
+      const LtsGlobalMeta meta = ReduceGlobalMeta(layout, nullptr);   // serial (np=1)
+
+      // Fine-cluster dt in seconds = lambda * dt_cfl (dt_cfl is the min stable
+      // dt over the mesh — the fine cluster's dt; cluster c steps at dt_base*2^c,
+      // CFL-safe by the GAP-A1 clustering guarantee).
+      const real_t dt_base = cl.lambda * dt_cfl;
+      const real_t T_s = dt_base * static_cast<real_t>(1LL << (cl.num_clusters - 1));
+      const std::uint64_t layout_hash =
+         LtsLayoutHash(opt.rate, cl.num_clusters, cl.cluster, dt_base, cl.lambda);
+
+      LtsBulkSyncStepper<ParMesh> stepper(wave, layout, cl.cluster, Q,
+                                          cfg.numerics.ader_order, dt_base);
+      if (rank == 0)
+      {
+         std::cout << "[lts] STEPPING (rate2, fault-free bulk): Nc = "
+                   << cl.num_clusters << ", dt_base = " << dt_base
+                   << " s, T_sync = " << T_s << " s, predicted harmonic speedup "
+                   << HarmonicUpdateSpeedup(cl) << "x, layout_hash = 0x"
+                   << std::hex << layout_hash << std::dec << "\n";
+      }
+
+      real_t t_lts = t;
+      int sync = 0;
+      while (t_lts < cfg.time.tfinal - 1e-12 * T_s)
+      {
+         const real_t T_actual = std::min(T_s, cfg.time.tfinal - t_lts);
+         if (T_actual <= 0.0) { break; }
+         auto tab = BuildTickTable(cl.num_clusters, dt_base, T_actual,
+                                   cfg.numerics.ader_order, meta);
+         stepper.SetSyncInterval(t_lts, T_actual);
+         wave.SetTime(t_lts);
+         RunSyncInterval(tab, stepper);
+         MFEM_VERIFY(stepper.BuffersZero(),
+                     "spatial_dyn: LTS accumulate buffers non-zero at sync point "
+                     << sync << " (buffer lifecycle bug — invariant ii).");
+         t_lts += T_actual;
+         ++sync;
+         if (rank == 0 && (sync % 100 == 0))
+         { std::cout << "[lts] sync " << sync << ", t = " << t_lts << " s\n"; }
+      }
+      t = t_lts;
+      last_completed_step = sync;
+      if (rank == 0)
+      {
+         std::cout << "[lts] done: " << sync << " sync intervals, t = " << t
+                   << " s (fault-free bulk; outputs/checkpoint below)\n";
+      }
+   }
+
+   for (int step = step0; step < nsteps && !lts_stepping; ++step)
    {
       MFEM_PERF_SCOPE("seas::spatial_dyn::step");
       const real_t dt_step = std::min(dt_now, cfg.time.tfinal - t);

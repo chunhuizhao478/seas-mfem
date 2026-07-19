@@ -323,6 +323,22 @@ static void test_layout_hash()
    CHECK(LtsLayoutHash(2, 1, empty, 1.0, 1.0) != base);
 }
 
+// ---------------------------------------------------------------------------
+// T7: Checkpoint-V2 accept/refuse decision (B.8 refusal paths).
+// ---------------------------------------------------------------------------
+static void test_checkpoint_decision()
+{
+   using D = LtsCheckpointDecision;
+   const std::uint64_t h = 0xABCDEF0123456789ULL;
+   // V1 (GTS) checkpoint.
+   CHECK(LtsCheckpointCheck(1, /*lts*/false, 0, 0) == D::Accept);          // GTS resumes GTS
+   CHECK(LtsCheckpointCheck(1, /*lts*/true,  0, 0) == D::RefuseV1WithLts); // V1 + lts -> refuse
+   // V2 (LTS) checkpoint.
+   CHECK(LtsCheckpointCheck(2, /*lts*/false, h, h) == D::RefuseV2WithoutLts); // V2 + off -> refuse
+   CHECK(LtsCheckpointCheck(2, /*lts*/true,  h, h) == D::Accept);             // hash match -> resume
+   CHECK(LtsCheckpointCheck(2, /*lts*/true,  h, h + 1) == D::RefuseHashMismatch); // mismatch -> refuse
+}
+
 int main()
 {
    test_chain_roles();
@@ -331,6 +347,7 @@ int main()
    test_tick_table();
    test_tick_table_ragged();
    test_layout_hash();
+   test_checkpoint_decision();
 
    std::printf("test_lts_layout: %d/%d passed, %d failed.\n",
                g_checks - g_fails, g_checks, g_fails);
