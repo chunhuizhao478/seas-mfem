@@ -711,7 +711,7 @@ run (at np=1), while still stepping globally.
 **Estimate:** ~1.5 weeks — **~1 wk delivered; the reorder (~0.5 wk) is now
 Phase-3 step 0 and the partition/serial-clustering (~few days) is now Phase 4.**
 
-## Phase 2: Multi-cluster stepping, bulk only (np=1)  — ◑ IN PROGRESS (foundation + predictor done)
+## Phase 2: Multi-cluster stepping, bulk only (np=1)  — ✅ DONE (fault-free bulk; fault half = Phase 3)
 
 **In one sentence:** Elements advance at their cluster's rate on one rank for a
 fault-free problem, with cluster-boundary coupling by Taylor-integration, per
@@ -750,16 +750,27 @@ the Normative Scheduling and Buffer sections.
 > - Reviewed twice (adversarial): fixed the bimaterial star-matrix override + the
 >   accumulate-buffer fill-counts-sub-steps semantics (C-1).
 >
-> REMAINING for full Phase 2 — the two integration pieces are coupled to the
-> Phase-3 fault corrector and to each other: (1) the **driver main-loop wiring**
-> (`spatial_dyn_driver.cpp` interleaves fault sub-stepping with the bulk corrector
-> per step, so replacing the step loop with the sync loop needs the Phase-3 fault
-> half; `LtsBulkSyncStepper` is ready to drop into a fault-free path); (2) the
-> full **Checkpoint-V2 read/write wiring + refusal paths** (B.8 — only meaningful
-> once the driver writes LTS checkpoints). The mathematical + algorithmic core
-> (CK element-restriction + Taylor-coupled role-driven face sweep + multi-rate
-> schedule) is complete and reproduces GTS single-cluster + is validated
-> multi-rate.
+> **Driver + checkpoint wiring landed (2026-07-18).**
+> - **Driver sync-interval loop** (`spatial_dyn_driver.cpp` §20a): fully gated on
+>   `lts != "off"` (GTS path byte-identical), builds the clustering + layout +
+>   `LtsBulkSyncStepper`, steps sync-by-sync (`BuildTickTable`+`RunSyncInterval`),
+>   asserts buffers-zero at each sync.  REQUIRES fault-free + np=1 with a named
+>   abort otherwise (the production driver interleaves fault sub-stepping with the
+>   bulk corrector, so fault-LTS is Phase 3; np>1 needs the Phase-1b serial
+>   clustering).  `dt_base = λ·dt_cfl`.  Compiles + links.
+> - **Checkpoint V2:** `LtsLayoutHash` (FNV-1a, golden-pinned) + `LtsCheckpointCheck`
+>   (V1+lts / V2+off / hash-mismatch → refuse), wired into the driver restart (an
+>   LTS run refuses a V1/GTS checkpoint).
+> - Reviewed a THIRD time (driver/checkpoint): fixed DL-1 (sync-count vs step-count
+>   in the final-checkpoint gate → skip V1 checkpoint under LTS), DL-2 (honest
+>   rank-0 note that per-sync output is not yet emitted), CK-2 (golden pin).
+>
+> Phase-2 CAVEAT (honest scope): the LTS **run path cannot execute the production
+> SAFS meshes yet** — they carry faults, and fault-LTS is Phase 3.  The remaining
+> Phase-2/3-boundary items (per-sync output cadence, the Checkpoint-V2 *write*,
+> and the fault corrector that lets LTS run production) land in Phase 3.  The
+> complete bulk stepping engine + its driver wiring are done and validated
+> (single-cluster == GTS bit/machine-exact; multi-rate consistent + fine-refining).
 
 > **Unblocked by the resequencing.** Phase 2 is bulk-only and np=1, so it needs
 > NONE of the deferred trio — it consumes exactly the layout Phase 1 shipped. One
