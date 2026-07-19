@@ -1171,6 +1171,17 @@ seas_test_lts_predictor: $(TEST_LTS_PREDICTOR_OBJ) $(WAVE_OPERATOR_OBJ) \
 	    $(LTS_STEPPER_OBJ) $(LTS_LAYOUT_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
+# Clustered LTS Phase 3: friction range-based Advance (B.9).
+seas_test_lts_friction_range: $(TEST_LTS_FRICTION_RANGE_OBJ) \
+    $(FRICTION_SUBSTEP_ITERATOR_OBJ) $(TPV205_SUBSTEP_ITERATOR_OBJ) \
+    $(TPV102_SUBSTEP_ITERATOR_OBJ) dynamic/tpv104_substep_iterator.o \
+    $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_LTS_FRICTION_RANGE_OBJ) \
+	    $(FRICTION_SUBSTEP_ITERATOR_OBJ) $(TPV205_SUBSTEP_ITERATOR_OBJ) \
+	    $(TPV102_SUBSTEP_ITERATOR_OBJ) dynamic/tpv104_substep_iterator.o \
+	    $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
 # Clustered LTS Phase 3: nucleation absolute-form range overloads (B.10).
 seas_test_lts_nucleation_absolute: $(TEST_LTS_NUCLEATION_ABSOLUTE_OBJ) \
     $(SPATIAL_NUCLEATION_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) \

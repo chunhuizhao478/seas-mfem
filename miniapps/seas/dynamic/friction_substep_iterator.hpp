@@ -96,6 +96,16 @@ protected:
    ///                real_t dt_sub, real_t t_sub_end, bool last_sub_step,
    ///                real_t* Q_imp_p, real_t* Q_imp_m);
    ///
+   /// LTS Phase 3 (A.7): the per-QP loop and the `I_imp_*_flat` memset are both
+   /// restricted to the half-open cluster-contiguous global-QP range
+   /// `[qp_begin, qp_end)`.  `dof_data` / `fault_coords` / `Q*_per_substep`
+   /// remain GLOBALLY indexed (their sizes = total local fault QPs), and
+   /// `I_imp_*_flat` are the GLOBAL base pointers — indices outside the range
+   /// are left byte-untouched (not even zeroed), so a caller may advance
+   /// disjoint ranges into one global buffer.  The whole-vector callers pass
+   /// `(0, dof_data.size())`, which reproduces the pre-LTS full-vector memset +
+   /// loop bit-for-bit.
+   ///
    /// Header-defined (template); instantiated per call site in the .cpp.
    template <class StepFn>
    void RunSubSteps_(
@@ -109,6 +119,8 @@ protected:
       real_t *I_imp_plus_flat,
       real_t *I_imp_minus_flat,
       const std::function<void(real_t, real_t)> &nuc_callback,
+      std::size_t qp_begin,
+      std::size_t qp_end,
       StepFn &&step_fn)
    {
       const std::string who_s(who);
@@ -169,6 +181,15 @@ protected:
             + std::to_string(fault_coords.size()));
       }
 
+      // LTS Phase 3 (A.7): the range is over the cluster-contiguous GLOBAL QP
+      // order; require a well-formed sub-range of [0, n).
+      if (qp_begin > qp_end || qp_end > static_cast<std::size_t>(n))
+      {
+         throw std::runtime_error(
+            who_s + ": bad QP range [" + std::to_string(qp_begin) + ", "
+            + std::to_string(qp_end) + ") for n = " + std::to_string(n));
+      }
+
       const size_t expected_words =
          static_cast<size_t>(NUM_STATE) * static_cast<size_t>(n);
       for (int o = 0; o < O; ++o)
@@ -200,9 +221,16 @@ protected:
             + std::to_string(dt_macro));
       }
 
-      const size_t nwords = expected_words;
-      std::memset(I_imp_plus_flat,  0, nwords * sizeof(real_t));
-      std::memset(I_imp_minus_flat, 0, nwords * sizeof(real_t));
+      // LTS Phase 3 (A.7): zero ONLY the range slice of the (global) I_imp base
+      // pointers; indices outside [qp_begin, qp_end) are left byte-untouched so
+      // disjoint per-cluster ranges may accumulate into one global buffer.  For
+      // the whole-vector callers (0, n) this is the pre-LTS full-buffer memset.
+      const size_t range_off =
+         qp_begin * static_cast<size_t>(NUM_STATE);
+      const size_t range_words =
+         (qp_end - qp_begin) * static_cast<size_t>(NUM_STATE);
+      std::memset(I_imp_plus_flat  + range_off, 0, range_words * sizeof(real_t));
+      std::memset(I_imp_minus_flat + range_off, 0, range_words * sizeof(real_t));
 
       real_t Q_imp_plus[NUM_STATE];
       real_t Q_imp_minus[NUM_STATE];
@@ -224,8 +252,9 @@ protected:
          const real_t *Qp_o = Qp_per_substep[o].data();
          const real_t *Qm_o = Qm_per_substep[o].data();
 
-         for (int i = 0; i < n; ++i)
+         for (std::size_t iu = qp_begin; iu < qp_end; ++iu)
          {
+            const int i = static_cast<int>(iu);
             DOFData &d = dof_data[i];
             const real_t *Qp_i = Qp_o + static_cast<ptrdiff_t>(i) * NUM_STATE;
             const real_t *Qm_i = Qm_o + static_cast<ptrdiff_t>(i) * NUM_STATE;
@@ -300,10 +329,51 @@ public:
                 const std::function<void(real_t, real_t)> &nuc_callback)
       override;
 
+   /// LTS Phase 3 (A.7) range overload — see IFrictionIterator::Advance(range).
+   void Advance(std::size_t qp_begin, std::size_t qp_end,
+                std::vector<DOFData> &dof_data,
+                const std::vector<Vector> &fault_coords,
+                const std::vector<std::vector<real_t>> &Q_pointwise_plus,
+                const std::vector<std::vector<real_t>> &Q_pointwise_minus,
+                real_t dt_step,
+                real_t t_step_start,
+                real_t *I_imp_plus_flat,
+                real_t *I_imp_minus_flat,
+                const std::function<void(real_t, real_t)> &nuc_callback)
+      override;
+
    FaultFrictionLaw WaveOpLaw() const override
    { return FaultFrictionLaw::RateAndState; }
 
 private:
+   /// The single per-QP rate-state step body, shared by the whole-vector and
+   /// the LTS range `Advance` so the two paths cannot diverge:
+   ///   ComputeStageState(method) -> slip accumulation -> ψ-update (policy)
+   ///   -> BuildImposedState -> WriteBackState on the last sub-step.
+   /// `i` is the GLOBAL fault-QP index (indexes the per-QP `extra_` side-channel).
+   void StepOneQP_(int i, DOFData &d,
+                   const real_t *Qp_i, const real_t *Qm_i,
+                   real_t dt_sub, bool last_sub_step,
+                   real_t *Q_imp_plus, real_t *Q_imp_minus)
+   {
+      EvalStageState s;
+      flux_.ComputeStageState(d, Qp_i, Qm_i, s, method_);
+
+      // Per-sub-step slip accumulation in both fault-tangent components.
+      d.slip1 += s.V1 * dt_sub;
+      d.slip2 += s.V2 * dt_sub;
+
+      // The ONLY point of variation between aging and SRW.
+      d.psi = StatePolicy::UpdatePsi(law_, d, s.V_abs, dt_sub, extra_, i);
+
+      flux_.BuildImposedState(d, s, Qp_i, Qm_i, Q_imp_plus, Q_imp_minus);
+
+      if (last_sub_step)
+      {
+         flux_.WriteBackState(d, s);
+      }
+   }
+
    FaultFaceFlux          &flux_;
    Law                     law_;     ///< owned by value (see class doc)
    FrictionSolver::Method  method_;
@@ -335,6 +405,19 @@ public:
                 const std::vector<std::vector<real_t>> &Q_pointwise_minus,
                 real_t dt_macro,
                 real_t t_macro_start,
+                real_t *I_imp_plus_flat,
+                real_t *I_imp_minus_flat,
+                const std::function<void(real_t, real_t)> &nuc_callback)
+      override;
+
+   /// LTS Phase 3 (A.7) range overload — see IFrictionIterator::Advance(range).
+   void Advance(std::size_t qp_begin, std::size_t qp_end,
+                std::vector<DOFData> &dof_data,
+                const std::vector<Vector> &fault_coords,
+                const std::vector<std::vector<real_t>> &Q_pointwise_plus,
+                const std::vector<std::vector<real_t>> &Q_pointwise_minus,
+                real_t dt_step,
+                real_t t_step_start,
                 real_t *I_imp_plus_flat,
                 real_t *I_imp_minus_flat,
                 const std::function<void(real_t, real_t)> &nuc_callback)

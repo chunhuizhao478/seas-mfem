@@ -131,27 +131,14 @@ void RateStateSubStepIterator<StatePolicy>::Advance(
       "RateStateSubStepIterator::Advance",
       dof_data, fault_coords, Q_pointwise_plus, Q_pointwise_minus,
       dt_macro, t_macro_start, I_imp_plus_flat, I_imp_minus_flat, nuc_callback,
+      static_cast<std::size_t>(0), dof_data.size(),
       [this](int /*o*/, int /*O*/, int i, DOFData &d,
              const real_t *Qp_i, const real_t *Qm_i,
              real_t dt_sub, real_t /*t_sub_end*/, bool last_sub_step,
              real_t *Q_imp_plus, real_t *Q_imp_minus)
       {
-         EvalStageState s;
-         flux_.ComputeStageState(d, Qp_i, Qm_i, s, method_);
-
-         // Per-sub-step slip accumulation in both fault-tangent components.
-         d.slip1 += s.V1 * dt_sub;
-         d.slip2 += s.V2 * dt_sub;
-
-         // The ONLY point of variation between aging and SRW.
-         d.psi = StatePolicy::UpdatePsi(law_, d, s.V_abs, dt_sub, extra_, i);
-
-         flux_.BuildImposedState(d, s, Qp_i, Qm_i, Q_imp_plus, Q_imp_minus);
-
-         if (last_sub_step)
-         {
-            flux_.WriteBackState(d, s);
-         }
+         StepOneQP_(i, d, Qp_i, Qm_i, dt_sub, last_sub_step,
+                    Q_imp_plus, Q_imp_minus);
       });
 
    // Phase 3: project the net Δψ over this macro step onto the degree-N space,
@@ -184,6 +171,51 @@ void RateStateSubStepIterator<StatePolicy>::Advance(
          { dof_data[b + q].psi = psi_before[b + q] + proj[q]; }
       }
    }
+}
+
+// ---------------------------------------------------------------------------
+// RateStateSubStepIterator<StatePolicy>::Advance — LTS Phase 3 (A.7) range
+// overload.  Same per-QP physics (StepOneQP_) as the whole-vector form, but the
+// per-QP loop and the I_imp memset are restricted to [qp_begin, qp_end).  The
+// secular Δψ resample is NOT supported on the LTS range path (it projects over
+// WHOLE per-face QP blocks of the global vector); guard that it is inactive.
+// ---------------------------------------------------------------------------
+template <class StatePolicy>
+void RateStateSubStepIterator<StatePolicy>::Advance(
+   std::size_t qp_begin, std::size_t qp_end,
+   std::vector<DOFData> &dof_data,
+   const std::vector<Vector> &fault_coords,
+   const std::vector<std::vector<real_t>> &Q_pointwise_plus,
+   const std::vector<std::vector<real_t>> &Q_pointwise_minus,
+   real_t dt_step,
+   real_t t_step_start,
+   real_t *I_imp_plus_flat,
+   real_t *I_imp_minus_flat,
+   const std::function<void(real_t, real_t)> &nuc_callback)
+{
+   StatePolicy::ValidateExtra(extra_, static_cast<int>(dof_data.size()));
+
+   const bool do_resample = resample_enabled_ && resample_R_ != nullptr
+                            && resample_nbf_per_face_ > 0 && !dof_data.empty();
+   MFEM_VERIFY(!do_resample,
+               "RateStateSubStepIterator::Advance(range): the secular Δψ "
+               "resample is not supported on the LTS range path (it projects "
+               "over whole per-face QP blocks of the global vector); disable "
+               "--fault-resample under lts.");
+
+   RunSubSteps_(
+      "RateStateSubStepIterator::Advance(range)",
+      dof_data, fault_coords, Q_pointwise_plus, Q_pointwise_minus,
+      dt_step, t_step_start, I_imp_plus_flat, I_imp_minus_flat, nuc_callback,
+      qp_begin, qp_end,
+      [this](int /*o*/, int /*O*/, int i, DOFData &d,
+             const real_t *Qp_i, const real_t *Qm_i,
+             real_t dt_sub, real_t /*t_sub_end*/, bool last_sub_step,
+             real_t *Q_imp_plus, real_t *Q_imp_minus)
+      {
+         StepOneQP_(i, d, Qp_i, Qm_i, dt_sub, last_sub_step,
+                    Q_imp_plus, Q_imp_minus);
+      });
 }
 
 // Explicit instantiations — both rate-and-state policies.
@@ -311,6 +343,7 @@ void LinearSlipWeakeningIterator::Advance(
       "LinearSlipWeakeningIterator::Advance",
       dof_data, fault_coords, Q_pointwise_plus, Q_pointwise_minus,
       dt_macro, t_macro_start, I_imp_plus_flat, I_imp_minus_flat, nuc_callback,
+      static_cast<std::size_t>(0), dof_data.size(),
       [this, &fault_coords, &dslip_mag, do_resample](
          int o, int O, int i, DOFData &d,
          const real_t *Qp_i, const real_t *Qm_i,
@@ -415,6 +448,53 @@ void LinearSlipWeakeningIterator::Advance(
          }
       }
    }
+}
+
+// ---------------------------------------------------------------------------
+// LinearSlipWeakeningIterator::Advance — LTS Phase 3 (A.7) range overload.
+// Same per-QP physics (StepOneQP_) + the two unconditional LSW diag writes as
+// the whole-vector form, restricted to [qp_begin, qp_end).  The env-gated
+// [SLIP] trace (diagnostic-only, mutates no DOFData) and the secular
+// slip-magnitude resample (whole-per-face-block projection) are NOT run on the
+// LTS range path; guard that the resample is inactive.
+// ---------------------------------------------------------------------------
+void LinearSlipWeakeningIterator::Advance(
+   std::size_t qp_begin, std::size_t qp_end,
+   std::vector<DOFData> &dof_data,
+   const std::vector<Vector> &fault_coords,
+   const std::vector<std::vector<real_t>> &Q_pointwise_plus,
+   const std::vector<std::vector<real_t>> &Q_pointwise_minus,
+   real_t dt_step,
+   real_t t_step_start,
+   real_t *I_imp_plus_flat,
+   real_t *I_imp_minus_flat,
+   const std::function<void(real_t, real_t)> &nuc_callback)
+{
+   const bool do_resample = resample_enabled_ && resample_R_ != nullptr
+                            && resample_nbf_per_face_ > 0 && !dof_data.empty();
+   MFEM_VERIFY(!do_resample,
+               "LinearSlipWeakeningIterator::Advance(range): the secular "
+               "slip-magnitude resample is not supported on the LTS range path "
+               "(it projects over whole per-face QP blocks of the global "
+               "vector); disable --fault-resample under lts.");
+
+   RunSubSteps_(
+      "LinearSlipWeakeningIterator::Advance(range)",
+      dof_data, fault_coords, Q_pointwise_plus, Q_pointwise_minus,
+      dt_step, t_step_start, I_imp_plus_flat, I_imp_minus_flat, nuc_callback,
+      qp_begin, qp_end,
+      [this](int /*o*/, int /*O*/, int /*i*/, DOFData &d,
+             const real_t *Qp_i, const real_t *Qm_i,
+             real_t dt_sub, real_t /*t_sub_end*/, bool last_sub_step,
+             real_t *Q_imp_plus, real_t *Q_imp_minus)
+      {
+         EvalStageState s;
+         StepOneQP_(d, Qp_i, Qm_i, dt_sub, last_sub_step, s,
+                    Q_imp_plus, Q_imp_minus);
+         // LSW-only unconditional diag writes (tpv205:413/417).
+         d.slip_rate_substep_max = std::max(d.slip_rate_substep_max, s.V_abs);
+         d.sigma_n_substep_min   = std::min(d.sigma_n_substep_min, s.sigma_n_total);
+      });
 }
 
 } // namespace seas

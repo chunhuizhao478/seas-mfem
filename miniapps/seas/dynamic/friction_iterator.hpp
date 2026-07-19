@@ -37,6 +37,7 @@
 #include "../friction/state_evolution.hpp"        // AgingLawPsi
 #include "../spatial/code/spatial_friction.hpp"   // spatial::RateStateBlock
 
+#include <cstddef>
 #include <functional>
 #include <stdexcept>
 #include <utility>
@@ -80,6 +81,37 @@ public:
       real_t *I_imp_plus_flat,
       real_t *I_imp_minus_flat,
       const std::function<void(real_t, real_t)> &nuc_callback) = 0;
+
+   /// LTS Phase 3 (A.7) RANGE overload: advance ONLY the cluster-contiguous
+   /// global-QP half-open range `[qp_begin, qp_end)` through one cluster step of
+   /// length `dt_step`.  `dof_data` / `fault_coords` / `Q_pointwise_*` stay
+   /// GLOBALLY indexed (their sizes = total local fault QPs); the range selects
+   /// which QPs are solved this call.  `I_imp_*_flat` are the GLOBAL base
+   /// pointers — only the `[qp_begin, qp_end)` slice (NUM_STATE words per QP) is
+   /// zeroed+written; indices outside the range are byte-untouched, so a driver
+   /// may accumulate disjoint per-cluster ranges into one global buffer.
+   /// `nuc_callback` is a RANGE-apply callback (it forces only `[qp_begin,
+   /// qp_end)` via the absolute range overloads).  The whole-vector `Advance`
+   /// above is equivalent to this with `(0, dof_data.size())`.  Default THROWS:
+   /// only the unified `SubStepIteratorBase` iterators (production LTS path)
+   /// implement it; the deprecated Phase-2 adapters do not.
+   virtual void Advance(
+      std::size_t /*qp_begin*/, std::size_t /*qp_end*/,
+      std::vector<DOFData> & /*dof_data*/,
+      const std::vector<Vector> & /*fault_coords*/,
+      const std::vector<std::vector<real_t>> & /*Q_pointwise_plus*/,
+      const std::vector<std::vector<real_t>> & /*Q_pointwise_minus*/,
+      real_t /*dt_step*/,
+      real_t /*t_step_start*/,
+      real_t * /*I_imp_plus_flat*/,
+      real_t * /*I_imp_minus_flat*/,
+      const std::function<void(real_t, real_t)> & /*nuc_callback*/)
+   {
+      throw std::runtime_error(
+         "IFrictionIterator: range Advance (LTS Phase 3) is only supported by "
+         "the unified SubStepIteratorBase iterators (RateState / LSW); this "
+         "adapter does not implement it.");
+   }
 
    /// Diagnostic [SLIP] is_shared hook (forwarded; no-op for TPV102).
    virtual void SetDiagNumLocalFaultQPs(int n) = 0;
