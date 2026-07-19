@@ -51,6 +51,7 @@
 #include "../dynamic/bimaterial_wave_operator.hpp"  // Phase 13: matrix (bimaterial) operator
 #include "../dynamic/lts_clustering.hpp"             // LTS Phase 0: --lts-report clustering
 #include "../dynamic/lts_layout.hpp"                 // LTS Phase 1: run-side layout
+#include "../dynamic/lts_partition.hpp"              // LTS Phase 4 Step 0: cluster-weighted METIS partition
 #include "../dynamic/lts_bulk_stepper.hpp"           // LTS Phase 2: sync-interval stepper
 #include <cstdint>
 #include "../dynamic/fault_face_flux.hpp"
@@ -262,7 +263,9 @@ LtsMeshInputs BuildLtsMeshInputs(WaveOperator<ParMesh> &wave, ParMesh &pmesh)
 // operator's per_elem_lmr_ EvalAt-at-centroid.  `fault_attr <= 0` => no fault
 // faces.  Runs on the ParMesh at np==1 (where local == global element order);
 // the deterministic serial-mesh version is the np>1 half of this step.
-LtsMeshInputs BuildLtsMeshInputsFromMaterial(ParMesh &pmesh,
+// Takes a base `Mesh&` so it serves BOTH the local ParMesh (np=1 reorder
+// activation) AND the SERIAL mesh (np>1 serial clustering, Phase 4 Step 0).
+LtsMeshInputs BuildLtsMeshInputsFromMaterial(Mesh &pmesh,
                                              const MaterialField &material,
                                              int fault_attr)
 {
@@ -359,6 +362,47 @@ LtsMeshInputs BuildLtsMeshInputsFromMaterial(ParMesh &pmesh,
       in.faces.push_back(fs);
    }
    return in;
+}
+
+// (LTS Phase 4 Step 0) Build a symmetric, self-loop-free CSR element-adjacency
+// (for METIS) from a mesh's element-to-element table.
+void BuildLtsCsrFromMesh(Mesh &mesh, std::vector<int> &xadj,
+                         std::vector<int> &adjncy)
+{
+   const Table &e2e = mesh.ElementToElementTable();
+   const int n = e2e.Size();
+   const int *I = e2e.GetI();
+   const int *J = e2e.GetJ();
+   xadj.assign(static_cast<std::size_t>(n) + 1, 0);
+   adjncy.clear();
+   adjncy.reserve(static_cast<std::size_t>(I[n]));
+   for (int e = 0; e < n; ++e)
+   {
+      for (int k = I[e]; k < I[e + 1]; ++k)
+      {
+         const int nb = J[k];
+         if (nb != e && nb >= 0) { adjncy.push_back(nb); }   // drop self-loops
+      }
+      xadj[static_cast<std::size_t>(e) + 1] = static_cast<int>(adjncy.size());
+   }
+}
+
+// (LTS Phase 4 Step 0) Populate an LtsClusteringOptions from the [numerics]
+// config (single-sourced; used by every clustering call site).
+LtsClusteringOptions MakeLtsClusteringOptions(int nc_cap, double merge_loss_tol,
+                                              const std::string &wiggle)
+{
+   LtsClusteringOptions opt;
+   opt.nc_cap         = nc_cap;
+   opt.merge_loss_tol = merge_loss_tol;
+   if (wiggle == "scan") { opt.wiggle_scan = true; }
+   else if (wiggle == "off") { opt.wiggle_scan = false; opt.lambda_fixed = 1.0; }
+   else
+   {
+      opt.wiggle_scan  = false;
+      opt.lambda_fixed = std::strtod(wiggle.c_str(), nullptr);
+   }
+   return opt;
 }
 
 // Map TOML mixed_flux string -> WaveOperator enum.
@@ -1509,6 +1553,123 @@ int main(int argc, char *argv[])
       }
       part_data = fl_part.GetData();
    }
+
+   // === (LTS Phase 4 Step 0) Serial-mesh clustering + LTS-aware partition ====
+   // Rank 0 clusters the SERIAL mesh (material evaluated on smesh BEFORE the
+   // ParMesh — the "material-before-ParMesh" requirement; all spatial-driver
+   // material modes are coordinate-evaluable) and broadcasts the rank-count-
+   // INDEPENDENT cluster ids.  At np>1 it also builds the cluster-weighted LTS
+   // partition (P-009) and injects it as `part_data` (overriding fault-locality,
+   // which the LTS partition already enforces via its fault-lock).  Gated
+   // lts != "off": for lts="off" nothing here runs (byte-identical).  These
+   // outlive the ParMesh ctor (serial_cluster + lts_part_vec are reused after it
+   // to map serial->local cluster ids and to re-base the checkpoint hash).
+   std::vector<int> serial_cluster;    // per SERIAL-element cluster id
+   LtsClustering    serial_cl;
+   const int        serial_ne = smesh.GetNE();
+   std::vector<int> lts_part_vec;      // LTS partition (int*, must outlive ctor)
+   bool             serial_lts_ready = false;
+   if (cfg.numerics.LtsEnabled())
+   {
+      serial_cluster.assign(static_cast<std::size_t>(serial_ne), 0);
+      int nc = 1; double lam = 1.0, dtb = 0.0, modeled = 0.0;
+      if (nprocs > 1) { lts_part_vec.assign(static_cast<std::size_t>(serial_ne), 0); }
+      if (rank == 0)
+      {
+         // Serial material on smesh (wrappers local to this scope; smat borrows
+         // them and is consumed by BuildLtsMeshInputsFromMaterial below).
+         std::unique_ptr<DepthProfile1DMaterial>          s_depth;
+         std::unique_ptr<HalfspaceAcrossFaultMaterial>    s_half;
+         std::unique_ptr<spatial::SpatialVelocityBundle>  s_vel;
+         MaterialField smat = MaterialField::MakeConstant(
+            cfg.material_fallback.lambda, cfg.material_fallback.mu,
+            cfg.material_fallback.rho);
+         const bool sc_sidecar =
+            cfg.velocity.use_sidecar && !no_sidecar_material
+            && cfg.material.kind != spatial::MaterialKind::DepthProfile1D;
+         if (cfg.material.kind == spatial::MaterialKind::DepthProfile1D)
+         {
+            s_depth = MakeDepthProfile1DMaterial(cfg.material.profile_layers,
+                                                 cfg.material.depth_axis);
+            smat = s_depth->field;
+         }
+         else if (cfg.material.kind == spatial::MaterialKind::HalfspaceAcrossFault)
+         {
+            const auto &hs = cfg.material.halfspace;
+            s_half = MakeHalfspaceAcrossFaultMaterial(
+               hs.vp_near, hs.vs_near, hs.rho_near,
+               hs.vp_far,  hs.vs_far,  hs.rho_far, hs.x0, hs.normal);
+            smat = s_half->field;
+         }
+         else if (sc_sidecar)
+         {
+            s_vel = std::make_unique<spatial::SpatialVelocityBundle>(
+               spatial::LoadSpatialVelocityBundle(cfg.velocity, smesh));
+            smat = s_vel->MakeMaterialField();
+         }
+
+         LtsMeshInputs in =
+            BuildLtsMeshInputsFromMaterial(smesh, smat, cfg.boundary.fault_attr);
+         const LtsClusteringOptions opt = MakeLtsClusteringOptions(
+            cfg.numerics.lts_nc_cap, cfg.numerics.lts_merge_loss_tol,
+            cfg.numerics.lts_wiggle);
+         serial_cl = BuildLtsClustering(in.dt_e, smesh.ElementToElementTable(),
+                                        in.fault_pairs, opt);
+         serial_cluster = serial_cl.cluster;
+         nc = serial_cl.num_clusters; lam = serial_cl.lambda;
+         dtb = serial_cl.dt_base; modeled = serial_cl.modeled_cost;
+
+         if (nprocs > 1)
+         {
+            std::vector<int> xadj, adjncy;
+            BuildLtsCsrFromMesh(smesh, xadj, adjncy);
+            LtsPartitionOptions popt;
+            try
+            {
+               BuildLtsAwarePartition(serial_ne, xadj, adjncy, serial_cluster,
+                                      nc, nprocs, nullptr, in.fault_pairs, popt,
+                                      lts_part_vec);
+            }
+            catch (const std::exception &ex)
+            {
+               std::cerr << "[lts] LTS-aware partition failed (" << ex.what()
+                         << "); falling back to MFEM's default partition.\n";
+               lts_part_vec.clear();
+            }
+         }
+      }
+#ifdef MFEM_USE_MPI
+      if (nprocs > 1)
+      {
+         MPI_Bcast(serial_cluster.data(), serial_ne, MPI_INT, 0, comm);
+         int nc_b = nc; MPI_Bcast(&nc_b, 1, MPI_INT, 0, comm); nc = nc_b;
+         double d3[3] = {lam, dtb, modeled};
+         MPI_Bcast(d3, 3, MPI_DOUBLE, 0, comm);
+         lam = d3[0]; dtb = d3[1]; modeled = d3[2];
+         int have_part = (rank == 0)
+            ? (static_cast<int>(lts_part_vec.size()) == serial_ne) : 0;
+         MPI_Bcast(&have_part, 1, MPI_INT, 0, comm);
+         if (have_part)
+         {
+            if (static_cast<int>(lts_part_vec.size()) != serial_ne)
+            { lts_part_vec.assign(static_cast<std::size_t>(serial_ne), 0); }
+            MPI_Bcast(lts_part_vec.data(), serial_ne, MPI_INT, 0, comm);
+            part_data = lts_part_vec.data();   // override fault-locality
+            if (rank == 0)
+            {
+               std::cout << "[lts] LTS-aware partition injected (Nc=" << nc
+                         << ", np=" << nprocs << ")\n";
+            }
+         }
+         else { lts_part_vec.clear(); }        // fell back -> MFEM default below
+      }
+#endif
+      serial_cl.cluster = serial_cluster;
+      serial_cl.num_clusters = nc; serial_cl.lambda = lam;
+      serial_cl.dt_base = dtb; serial_cl.modeled_cost = modeled;
+      serial_lts_ready = true;
+   }
+
    ParMesh pmesh(comm, smesh, part_data);
 #else
 #  error "spatial_dyn_driver requires MFEM_USE_MPI=YES."
@@ -1770,43 +1931,40 @@ int main(int argc, char *argv[])
                "O=ader_order); use fault_iterator=\"substep\".");
 
    // -----------------------------------------------------------------
-   // (LTS Phase 4 Step 0 / Phase 3 P-006) Build the clustered-LTS layout BEFORE
-   // the wave operator, so the per-element cluster ids can be passed into the
-   // ctor to reorder the fault-face list into cluster-contiguous order (P-006).
-   // Sourced from (pmesh, material) directly — operator-independent — producing
-   // the SAME cluster ids the operator-sourced BuildLtsMeshInputs would (identical
-   // dt_e binning), and reused by the Phase-1 log + the LTS stepping loop below
-   // (single-sourced clustering).  Gated lts != "off" AND np==1 (deterministic
-   // serial-mesh clustering for np>1 is the remaining half of Step 0); for
-   // lts="off" NOTHING here runs => byte-identical to the pre-LTS GTS path.
+   // (LTS Phase 4 Step 0 / Phase 3 P-006) Map the SERIAL cluster ids (computed
+   // before the ParMesh) to LOCAL element order, so they can be passed into the
+   // operator ctor to reorder the fault-face list (P-006) and drive the layout.
+   // MFEM's ParMesh ctor assigns local elements in ascending serial-element order
+   // among those with partitioning[e]==rank (pmesh.cpp), so walking the serial
+   // elements in order and picking part[e]==rank reproduces the local order.  At
+   // np=1 (part all-0 / null) local == serial — identical to the operator-sourced
+   // per-pmesh clustering it replaces.  For lts="off" nothing runs (byte-exact).
+   // `lts_cl` carries the SERIAL cluster ids so the checkpoint layout hash is
+   // rank-count-independent; `lts_cluster_id` / `lts_layout` are LOCAL.
    // -----------------------------------------------------------------
-   std::vector<int> lts_cluster_id;    // per-element cluster ids; empty => no reorder
-   LtsClustering    lts_cl;            // valid iff lts_layout_ready
+   std::vector<int> lts_cluster_id;    // per-LOCAL-element cluster id; empty => no reorder
+   LtsClustering    lts_cl;            // = serial_cl (SERIAL ids; num_clusters/lambda)
    LtsLayout        lts_layout;
    LtsGlobalMeta    lts_meta;
    bool             lts_layout_ready = false;
-   if (cfg.numerics.LtsEnabled() && nprocs == 1)
+   if (cfg.numerics.LtsEnabled() && serial_lts_ready)
    {
-      LtsMeshInputs in =
-         BuildLtsMeshInputsFromMaterial(pmesh, material, bc.fault_attr);
-
-      LtsClusteringOptions opt;
-      opt.nc_cap         = cfg.numerics.lts_nc_cap;
-      opt.merge_loss_tol = cfg.numerics.lts_merge_loss_tol;
-      if (cfg.numerics.lts_wiggle == "scan") { opt.wiggle_scan = true; }
-      else if (cfg.numerics.lts_wiggle == "off")
-      { opt.wiggle_scan = false; opt.lambda_fixed = 1.0; }
-      else
+      lts_cluster_id.reserve(static_cast<std::size_t>(pmesh.GetNE()));
+      for (int e = 0; e < serial_ne; ++e)
       {
-         opt.wiggle_scan  = false;
-         opt.lambda_fixed = std::strtod(cfg.numerics.lts_wiggle.c_str(), nullptr);
+         const int r = (part_data != nullptr) ? part_data[e] : 0;
+         if (r == rank) { lts_cluster_id.push_back(serial_cluster[e]); }
       }
-
-      const Table &e2e = pmesh.ElementToElementTable();
-      lts_cl     = BuildLtsClustering(in.dt_e, e2e, in.fault_pairs, opt);
-      lts_layout = BuildLtsLayout(lts_cl.cluster, lts_cl.num_clusters, in.faces);
-      lts_meta   = ReduceGlobalMeta(lts_layout, nullptr);   // serial (np=1)
-      lts_cluster_id   = lts_cl.cluster;
+      MFEM_VERIFY(static_cast<int>(lts_cluster_id.size()) == pmesh.GetNE(),
+                  "spatial_dyn: serial->local cluster map size "
+                  << lts_cluster_id.size() << " != local NE " << pmesh.GetNE()
+                  << " (partition / element-ordering mismatch).");
+      // Local layout (faces / fault pairs on pmesh) from the LOCAL cluster ids.
+      LtsMeshInputs lin =
+         BuildLtsMeshInputsFromMaterial(pmesh, material, bc.fault_attr);
+      lts_cl     = serial_cl;   // SERIAL ids + num_clusters/lambda/dt_base (hash)
+      lts_layout = BuildLtsLayout(lts_cluster_id, serial_cl.num_clusters, lin.faces);
+      lts_meta   = ReduceGlobalMeta(lts_layout, nullptr);   // np=1 stepping; Phase 4 = cross-rank
       lts_layout_ready = true;
    }
    const std::vector<int> *lts_cluster_ptr =
@@ -4263,10 +4421,13 @@ int main(int argc, char *argv[])
       // CFL-safe by the GAP-A1 clustering guarantee).
       const real_t dt_base = cl.lambda * dt_cfl;
       const real_t T_s = dt_base * static_cast<real_t>(1LL << (cl.num_clusters - 1));
+      // The hash uses the SERIAL cluster ids (cl.cluster, rank-independent); the
+      // stepper needs the LOCAL ids (lts_cluster_id).  This block is np==1 only
+      // (see lts_stepping), where the two coincide.
       const std::uint64_t layout_hash =
          LtsLayoutHash(opt.rate, cl.num_clusters, cl.cluster, dt_base, cl.lambda);
 
-      LtsBulkSyncStepper<ParMesh> stepper(wave, layout, cl.cluster, Q,
+      LtsBulkSyncStepper<ParMesh> stepper(wave, layout, lts_cluster_id, Q,
                                           cfg.numerics.ader_order, dt_base);
       if (rank == 0)
       {
