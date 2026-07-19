@@ -26,6 +26,7 @@
 #include "../../dynamic/friction_substep_iterator.hpp"
 #include "../../dynamic/wave_state.hpp"            // QIndex (VZ)
 #include "../../friction/state_evolution.hpp"      // AgingLawPsi
+#include "../../friction/slip_law_srw_psi.hpp"     // SlipLawSRWPsi (SRW sub-case)
 
 #include <cmath>
 #include <cstdio>
@@ -221,12 +222,82 @@ int main()
                               std::abs(Im[static_cast<size_t>(i) * NUM_STATE + c] - im1[c]));
       }
    }
-   CHECK(maxdiff_dof <= 1e-15, "ranged per-QP DOFData != standalone reference");
-   CHECK(maxdiff_I   <= 1e-15, "ranged per-QP I_imp != standalone reference");
+   // R-008: the per-QP friction solve is identical-order arithmetic, so the
+   // ranged and standalone results are BIT-for-bit equal (not merely ~1e-15).
+   CHECK(maxdiff_dof == 0.0, "ranged per-QP DOFData != standalone reference (bit-exact)");
+   CHECK(maxdiff_I   == 0.0, "ranged per-QP I_imp != standalone reference (bit-exact)");
 
    // Non-triviality: the fixture must actually solve (psi moved or slip built).
    CHECK(dof[0].psi != MakeAgingDOF(0).psi || std::abs(dof[0].slip2) > 0.0,
          "fixture is vacuous (no friction/state solve happened)");
+
+   // ---------------------------------------------------------------------
+   // R-001: SRW sub-case.  The one range-body operation that depends on the
+   // GLOBAL fault-QP index (not `iu - qp_begin`) is the SRW ψ-update's
+   // V_w side-channel `(*Vw)(i)`.  A per-QP-VARYING V_w makes a local-vs-global
+   // mis-index observable: range B's first QP would read V_w[0] instead of
+   // V_w[k].  The aging path above cannot catch it (aging ignores the index).
+   // ---------------------------------------------------------------------
+   {
+      const real_t a0 = 0.008, bb = 0.012, V0s = 1.0e-6, f0s = 0.6;
+      const real_t muW = 0.1, Vwd = 0.1;
+      const auto srw_method = FrictionSolver::Method::NewtonRaphsonStable;
+
+      mfem::Vector Vw(N);
+      for (int i = 0; i < N; ++i) { Vw(i) = 0.1 + 0.02 * i; }   // varies per QP
+
+      auto make_srw_dof = [&](int i)
+      {
+         DOFData d;
+         d.Zp_plus = kZp; d.Zp_minus = kZp;
+         d.Zs_plus = kZs; d.Zs_minus = kZs;
+         d.eta_p = 0.5 * kZp; d.eta_s = 0.5 * kZs;
+         d.sigma_n0 = 50.0e6; d.tau1_0 = 0.0;
+         d.tau2_0 = 29.38e6 + i * 1.0e6;
+         d.a = 0.008 + i * 1.0e-4; d.b = 0.012; d.Dc = 0.40;
+         d.psi = 0.564 + i * 0.01;
+         return d;
+      };
+
+      // Ranged: one SRW iterator, GLOBAL V_w, two ranges at different dt.
+      std::vector<DOFData> sdof(N);
+      for (int i = 0; i < N; ++i) { sdof[i] = make_srw_dof(i); }
+      std::vector<real_t> sIp(flat, 0.0), sIm(flat, 0.0);
+      SlipLawSRWPsi slaw(a0, bb, V0s, f0s, muW, Vwd); slaw.SetProductionMode();
+      RateStateSlipLawSrwIterator sit(flux, std::move(slaw), srw_method, &Vw);
+      sit.SetSubSteps(deltaT_A, w_A);
+      sit.Advance(0, k, sdof, coords, Qp, Qm, dt_A, t0, sIp.data(), sIm.data(),
+                  noop_nuc);
+      sit.SetSubSteps(deltaT_B, w_B);
+      sit.Advance(k, N, sdof, coords, Qp, Qm, dt_B, t0, sIp.data(), sIm.data(),
+                  noop_nuc);
+
+      // Reference: per-QP standalone with a SINGLE-element V_w = {Vw(i)} — so a
+      // global-index bug (reading V_w[local]) diverges from this reference.
+      real_t sdiff = 0.0;
+      for (int i = 0; i < N; ++i)
+      {
+         const bool inA = (static_cast<std::size_t>(i) < k);
+         const real_t dt_i = inA ? dt_A : dt_B;
+         const std::vector<real_t> &dT = inA ? deltaT_A : deltaT_B;
+         const std::vector<real_t> &wt = inA ? w_A : w_B;
+         std::vector<DOFData> d1(1, make_srw_dof(i));
+         std::vector<Vector> c1(1, coords[i]);
+         std::vector<std::vector<real_t>> qp1 = SliceQP(Qp, i, O);
+         std::vector<std::vector<real_t>> qm1 = SliceQP(Qm, i, O);
+         std::vector<real_t> ip1(NUM_STATE, 0.0), im1(NUM_STATE, 0.0);
+         mfem::Vector Vw1(1); Vw1(0) = Vw(i);
+         SlipLawSRWPsi slaw1(a0, bb, V0s, f0s, muW, Vwd); slaw1.SetProductionMode();
+         RateStateSlipLawSrwIterator ref1(flux, std::move(slaw1), srw_method, &Vw1);
+         ref1.SetSubSteps(dT, wt);
+         ref1.Advance(d1, c1, qp1, qm1, dt_i, t0, ip1.data(), im1.data(), noop_nuc);
+         sdiff = std::max(sdiff, DofDiff(sdof[i], d1[0]));
+      }
+      CHECK(sdiff == 0.0,
+            "SRW ranged per-QP != standalone reference (global V_w index)");
+      CHECK(sdof[0].psi != make_srw_dof(0).psi || std::abs(sdof[0].slip2) > 0.0,
+            "SRW fixture is vacuous");
+   }
 
    // ---------------------------------------------------------------------
    // (3) Σ deltaT == dt_step guard fires on mismatch.

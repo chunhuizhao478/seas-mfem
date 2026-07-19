@@ -792,6 +792,36 @@ public:
    /// True when the interior fault-face list was reordered for LTS.
    bool FaultFacesReordered() const
    { return !fault_face_canonical_perm_.empty(); }
+
+   /// LTS Phase 3 (P-006): the fault-face canonical permutation expanded to
+   /// per-QP granularity — the form the checkpoint's `dof_canonical_perm`
+   /// requires (length `GetNumTotalFaultQPs()`, one entry per fault QP).
+   /// `qp_perm[i*nbf + q] = face_perm[i]*nbf + q`, so QP `i*nbf+q` in memory
+   /// came from canonical position `face_perm[i]*nbf + q`.  Returns EMPTY when
+   /// the fault faces were not reordered (LTS off).  Assumes the D-2 layout
+   /// (interior QPs first, no shared fault QPs) — asserts it.  Call AFTER
+   /// `SetFaultDOFData` (needs `nbf_per_face_`).
+   std::vector<int> GetFaultQpCanonicalPerm() const
+   {
+      std::vector<int> qp;
+      if (fault_face_canonical_perm_.empty()) { return qp; }  // not reordered
+      MFEM_VERIFY(nbf_per_face_ > 0,
+                  "GetFaultQpCanonicalPerm: nbf_per_face_ is 0 — call after "
+                  "SetFaultDOFData so the per-face QP count is known.");
+      MFEM_VERIFY(fault_shared_faces_.Size() == 0,
+                  "GetFaultQpCanonicalPerm: assumes no shared fault QPs (D-2); "
+                  "got " << fault_shared_faces_.Size() << " shared fault faces.");
+      const int nbf = nbf_per_face_;
+      qp.resize(fault_face_canonical_perm_.size() * static_cast<std::size_t>(nbf));
+      for (std::size_t i = 0; i < fault_face_canonical_perm_.size(); ++i)
+      {
+         for (int q = 0; q < nbf; ++q)
+         {
+            qp[i * nbf + q] = fault_face_canonical_perm_[i] * nbf + q;
+         }
+      }
+      return qp;
+   }
    int GetNumLocalFaultQPs() const
    { return fault_interior_faces_.Size() * nbf_per_face_; }
    int GetNumSharedFaultQPs() const

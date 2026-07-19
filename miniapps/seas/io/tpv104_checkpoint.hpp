@@ -391,6 +391,22 @@ inline bool ReadTpv104CheckpointV2Impl(const std::string &prefix,
    MFEM_VERIFY(!reordered || static_cast<int>(dof_canonical_perm->size()) == nd,
                "ReadTpv104CheckpointV2: dof_canonical_perm size "
                << dof_canonical_perm->size() << " != dof_data_size " << nd);
+   // REVIEW R-004: mirror the WRITE guard — validate a genuine bijection
+   // (range AND no duplicates), not just per-element range.  A duplicate would
+   // otherwise pass the range check below and SILENTLY scatter wrong (drop one
+   // canonical record, double-read another) with no abort.
+   if (reordered)
+   {
+      std::vector<char> seen(nd, 0);
+      for (int mem = 0; mem < nd; ++mem)
+      {
+         const int c = (*dof_canonical_perm)[mem];
+         MFEM_VERIFY(c >= 0 && c < nd && !seen[c],
+                     "ReadTpv104CheckpointV2: dof_canonical_perm is not a "
+                     "permutation of [0, " << nd << ")");
+         seen[c] = 1;
+      }
+   }
    // Read the canonical-order records, then scatter to in-memory order:
    // dof_data[mem].dyn = disk[perm[mem]].dyn.  Only the 9 dynamic fields are
    // read; the static fields the caller pre-seeded are left untouched.

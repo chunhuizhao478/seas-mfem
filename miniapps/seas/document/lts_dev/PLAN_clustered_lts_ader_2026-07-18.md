@@ -842,11 +842,45 @@ the Normative Scheduling and Buffer sections.
 
 **Estimate:** 3 weeks (the core).
 
-## Phase 3: Fault (dynamic rupture) under LTS (np=1)
+## Phase 3: Fault (dynamic rupture) under LTS (np=1)  — ◑ PRIMITIVES DONE + unit-validated (2026-07-19); driver assembly + physics Frontera-staged
 
 **In one sentence:** Fault faces advance at their cluster's rate — per-cluster
 friction sweeps over cluster-contiguous QP ranges, nucleation via the per-kind
 absolute forms.
+
+**Status (2026-07-19, local branch `safs-v4_0_0-alt-case1-mfem-speed`, unpushed).**
+The four locally-validatable Phase-3 PRIMITIVES are implemented + unit-tested:
+- **Fault-QP reorder (Step 0, P-006)** — `WaveOperator`/`BimaterialWaveOperator`
+  ctors take an optional `const std::vector<int>* lts_cluster_id`; when non-null
+  the interior fault-face list is stable-sorted by `(cluster, mesh-face-id)` at
+  construction (before FaultBasis / elem1_on_plus / per-QP basis / DOFData
+  offsets / fault_coords / nucleation / stations / ParaView are built), with
+  D-1/D-2 asserts and the canonical-permutation table `fault_face_canonical_perm_`
+  (`GetFaultFaceCanonicalPerm`/`FaultFacesReordered`). `test_lts_fault_reorder`
+  14/0. Default null ⇒ byte-exact (predictor 28→31/31, wave-op 25/25, const-parity 52/52).
+- **Checkpoint canonical order (P-006)** — V2 write/read take an optional per-QP
+  canonical perm; `DOFData` serialized in canonical (layout-independent) order.
+  B.8b in `test_lts_predictor` (31/31).
+- **Friction range Advance (A.7)** — `IFrictionIterator::Advance(qp_begin,qp_end,…)`
+  + `RunSubSteps_` range; whole-vector delegates with `(0,n)` (parity 36/36).
+  `test_lts_friction_range` 8/0 (B.9).
+- **Nucleation range overloads (D-3)** — absolute appliers gain `(qp_begin,qp_end)`;
+  full-vector delegates with `(0,N)`. `test_lts_nucleation_absolute` 59/0 (B.10);
+  regression `test_spatial_nucleation` 73/73.
+
+**Frontera-staged (NOT in this local session):** the DRIVER assembly is a single
+coupled unit whose acceptance is production-mesh-only — (a) computing cluster ids
+BEFORE the operator ctor to activate the reorder needs per-element material,
+which for the SAFS sidecar (`MaterialField::Mode::GridFunction`) is only cleanly
+available post-operator — i.e. it rides on the material-before-ParMesh path this
+plan stages to **Phase 4**; and (b) the fault-half interleave (per fault-bearing
+due cluster: tau_nodes on `[0,dt_step]`, `EvaluateBulkAtFaultQPsCanonical`
+restricted to the cluster's faces, the range friction `Advance`, per-sync
+`slip_rate_substep_max` reduction, R-101 tripwire) has NO local acceptance gate —
+its checks (single-cluster==GTS-with-fault, TPV104-spatial 1%, SAFS breakout 2%,
+even the still-GTS reorder canary) are all production-mesh runs, Frontera-only
+per the no-local-reproducer constraint. All PRIMITIVES the interleave consumes
+are done + unit-validated above.
 
 ### Step 0 — Fault-QP reorder + early canary (MOVED from Phase 1, P-006)
 

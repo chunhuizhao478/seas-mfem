@@ -26,6 +26,7 @@
 #include "fault_face_flux.hpp"     // DOFData
 #include "spatial_nucleation.hpp"  // resolved per-DOF param types + apply fns
 
+#include <cstddef>
 #include <utility>
 #include <vector>
 
@@ -53,6 +54,24 @@ public:
    /// `SmoothStep(t)·F(r)·Δτ`; static / one-shot kinds set their
    /// time-independent value and ignore `t`.
    virtual void ApplyAbsolute(std::vector<DOFData>& dof, real_t t) = 0;
+
+   /// LTS Phase 3 (D-3) — RANGE form of `ApplyAbsolute`: force ONLY the
+   /// cluster-contiguous global-QP range `[qp_begin, qp_end)` at stage time
+   /// `t`, leaving other clusters' `tau_nuc` untouched.  Under LTS each cluster
+   /// applies its own range at its own stage times, and the absolute (idempotent)
+   /// form means re-application does not double-count.  The default supports the
+   /// FULL range only (delegates to the whole-vector form); each kind overrides
+   /// with its range-aware applier.  This is the method the per-cluster fault
+   /// sweep's nucleation callback routes through (D-3: "via INucleationMethod").
+   virtual void ApplyAbsolute(std::vector<DOFData>& dof, real_t t,
+                              std::size_t qp_begin, std::size_t qp_end)
+   {
+      MFEM_VERIFY(qp_begin == 0 && qp_end == dof.size(),
+                  "INucleationMethod::ApplyAbsolute(range): this nucleation "
+                  "kind does not support per-cluster (partial) ranges under "
+                  "LTS; only the concrete kinds that override this do.");
+      ApplyAbsolute(dof, t);
+   }
    virtual void ApplyOnce(std::vector<DOFData>& dof) { (void)dof; }
    virtual bool IsPerSubStep() const = 0;
    virtual ~INucleationMethod() = default;
@@ -68,6 +87,10 @@ public:
    /// Pre-stress already lives in `tau_pre_`; nothing time-varying to set.
    void ApplyAbsolute(std::vector<DOFData>& dof, real_t t) override
    { (void)dof; (void)t; }
+   /// No-op for ANY range (nothing time-varying to force).
+   void ApplyAbsolute(std::vector<DOFData>& dof, real_t t,
+                      std::size_t qp_begin, std::size_t qp_end) override
+   { (void)dof; (void)t; (void)qp_begin; (void)qp_end; }
    bool IsPerSubStep() const override { return false; }
 };
 
@@ -88,6 +111,13 @@ public:
    void ApplyAbsolute(std::vector<DOFData>& dof, real_t t) override
    {
       spatial::ApplyGradualOverstressAbsolute(dof, params_, T_nuc_s_, t);
+   }
+   /// LTS (D-3): force only `[qp_begin, qp_end)` via the range overload.
+   void ApplyAbsolute(std::vector<DOFData>& dof, real_t t,
+                      std::size_t qp_begin, std::size_t qp_end) override
+   {
+      spatial::ApplyGradualOverstressAbsolute(dof, params_, T_nuc_s_, t,
+                                              qp_begin, qp_end);
    }
    bool IsPerSubStep() const override { return true; }
 
@@ -119,6 +149,13 @@ public:
    {
       spatial::ApplyGradualOverstressCompactCircularAbsolute(
          dof, params_, T_nuc_s_, t);
+   }
+   /// LTS (D-3): force only `[qp_begin, qp_end)` via the range overload.
+   void ApplyAbsolute(std::vector<DOFData>& dof, real_t t,
+                      std::size_t qp_begin, std::size_t qp_end) override
+   {
+      spatial::ApplyGradualOverstressCompactCircularAbsolute(
+         dof, params_, T_nuc_s_, t, qp_begin, qp_end);
    }
    bool IsPerSubStep() const override { return true; }
 
@@ -160,6 +197,30 @@ public:
       for (int i = 0; i < n; ++i)
       {
          dof[i].tau2_nuc = params_.amplitude_strike(i);
+      }
+   }
+
+   /// LTS (D-3): SET the absolute (time-independent) patch value only on
+   /// `[qp_begin, qp_end)`.  (Under LTS the one-shot patch would normally be
+   /// applied once pre-first-sync via `ApplyOnce`; the range form is provided
+   /// for completeness so every kind honors the `INucleationMethod` range
+   /// contract.)
+   void ApplyAbsolute(std::vector<DOFData>& dof, real_t t,
+                      std::size_t qp_begin, std::size_t qp_end) override
+   {
+      (void)t;
+      if (params_.amplitude_strike.Size() == 0) { return; }
+      const std::size_t n = dof.size();
+      MFEM_VERIFY(static_cast<std::size_t>(params_.amplitude_strike.Size()) == n,
+                  "InstantaneousOverstressCircular::ApplyAbsolute(range): "
+                  "amplitude_strike size (" << params_.amplitude_strike.Size()
+                  << ") != dof.size() (" << n << ")");
+      MFEM_VERIFY(qp_begin <= qp_end && qp_end <= n,
+                  "InstantaneousOverstressCircular::ApplyAbsolute(range): bad "
+                  "range [" << qp_begin << ", " << qp_end << ") for n = " << n);
+      for (std::size_t i = qp_begin; i < qp_end; ++i)
+      {
+         dof[i].tau2_nuc = params_.amplitude_strike(static_cast<int>(i));
       }
    }
 

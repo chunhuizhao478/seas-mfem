@@ -17,6 +17,7 @@
 //       left byte-untouched.
 
 #include "../../dynamic/spatial_nucleation.hpp"
+#include "../../dynamic/nucleation_method.hpp"   // INucleationMethod range routing (D-3)
 
 #include <cmath>
 #include <cstdio>
@@ -238,6 +239,58 @@ int main()
          const real_t exp2 = in ? S * p.amplitude_strike(i) : 0.0;
          CHECK(d[i].tau1_nuc == exp1 && d[i].tau2_nuc == exp2,
                "gradual range: mid-vector range wrote the wrong indices");
+      }
+   }
+
+   // ---------------------------------------------------------------------
+   // T7 (R-002) — D-3 contract: the range ApplyAbsolute routes through
+   // INucleationMethod.  The gradual strategy objects' range ApplyAbsolute must
+   // equal the free-function range result bit-for-bit, and the base-class
+   // full-range default must delegate to the whole-vector form.
+   // ---------------------------------------------------------------------
+   {
+      const real_t tstar = 0.83;
+      const std::size_t b = 2, e = 5;
+
+      // Gaussian gradual.
+      {
+         const GradualOverstressPerDOFParams p = make_gradual(n);
+         GaussianGradualOverstress method(p, T_nuc);   // copies params
+         std::vector<DOFData> via_iface = zeros(n), via_free = zeros(n);
+         method.ApplyAbsolute(via_iface, tstar, b, e);
+         ApplyGradualOverstressAbsolute(via_free, p, T_nuc, tstar, b, e);
+         real_t md = 0.0;
+         for (int i = 0; i < n; ++i)
+         {
+            md = std::max(md, std::abs(via_iface[i].tau1_nuc - via_free[i].tau1_nuc));
+            md = std::max(md, std::abs(via_iface[i].tau2_nuc - via_free[i].tau2_nuc));
+         }
+         CHECK(md == 0.0, "gaussian: INucleationMethod range == free-function range");
+
+         // Base full-range default delegates to the whole-vector form.
+         std::vector<DOFData> full_range = zeros(n), whole = zeros(n);
+         method.ApplyAbsolute(full_range, tstar, 0, n);
+         method.ApplyAbsolute(whole, tstar);
+         real_t md2 = 0.0;
+         for (int i = 0; i < n; ++i)
+         {
+            md2 = std::max(md2, std::abs(full_range[i].tau1_nuc - whole[i].tau1_nuc));
+            md2 = std::max(md2, std::abs(full_range[i].tau2_nuc - whole[i].tau2_nuc));
+         }
+         CHECK(md2 == 0.0, "gaussian: range (0,N) == whole-vector ApplyAbsolute");
+      }
+
+      // Compact-circular gradual.
+      {
+         const CompactCircularPerDOFParams p = make_compact(n);
+         CompactCircularGradualOverstress method(p, T_nuc);
+         std::vector<DOFData> via_iface = zeros(n), via_free = zeros(n);
+         method.ApplyAbsolute(via_iface, tstar, b, e);
+         ApplyGradualOverstressCompactCircularAbsolute(via_free, p, T_nuc, tstar, b, e);
+         real_t md = 0.0;
+         for (int i = 0; i < n; ++i)
+         { md = std::max(md, std::abs(via_iface[i].tau2_nuc - via_free[i].tau2_nuc)); }
+         CHECK(md == 0.0, "compact: INucleationMethod range == free-function range");
       }
    }
 

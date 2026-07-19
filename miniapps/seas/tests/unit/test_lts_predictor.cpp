@@ -599,17 +599,28 @@ static void checkpoint_v2_canonical_reorder()
          p, tr, dtr, syncr, lm, hr, Qr, 8, dd, 0, 1, &tag, nullptr);
       return dd;
    };
+   // Compare ALL 9 serialized dynamic fields (R-007: a field-swap isolated to
+   // slip_rate/V1/tau1_nuc must not slip through).
+   auto dyn_diff = [](const DOFData &a, const DOFData &b)
+   {
+      real_t m = 0.0;
+      m = std::max(m, std::abs(a.psi         - b.psi));
+      m = std::max(m, std::abs(a.slip_rate   - b.slip_rate));
+      m = std::max(m, std::abs(a.V1          - b.V1));
+      m = std::max(m, std::abs(a.V2          - b.V2));
+      m = std::max(m, std::abs(a.slip1       - b.slip1));
+      m = std::max(m, std::abs(a.slip2       - b.slip2));
+      m = std::max(m, std::abs(a.tau1_nuc    - b.tau1_nuc));
+      m = std::max(m, std::abs(a.tau2_nuc    - b.tau2_nuc));
+      m = std::max(m, std::abs(a.sigma_n_nuc - b.sigma_n_nuc));
+      return m;
+   };
+
    const std::vector<DOFData> onDiskA = read_identity(pA);
    const std::vector<DOFData> onDiskB = read_identity(pB);
    // On-disk order is canonical & layout-independent: A == B field-for-field.
    real_t md_ab = 0.0;
-   for (int c = 0; c < N; ++c)
-   {
-      md_ab = std::max(md_ab, std::abs(onDiskA[c].psi - onDiskB[c].psi));
-      md_ab = std::max(md_ab, std::abs(onDiskA[c].slip1 - onDiskB[c].slip1));
-      md_ab = std::max(md_ab, std::abs(onDiskA[c].V2 - onDiskB[c].V2));
-      md_ab = std::max(md_ab, std::abs(onDiskA[c].sigma_n_nuc - onDiskB[c].sigma_n_nuc));
-   }
+   for (int c = 0; c < N; ++c) { md_ab = std::max(md_ab, dyn_diff(onDiskA[c], onDiskB[c])); }
    CHECK(md_ab == 0.0,
          "[ckpt] reordered+perm write == canonical write on disk (layout-indep)");
    // On-disk canonical order equals the true canonical state.
@@ -625,12 +636,8 @@ static void checkpoint_v2_canonical_reorder()
          pA, tr, dtr, syncr, lm, hr, Qr, 8, rt, 0, 1, &tag, &perm);
       real_t md = 0.0;
       for (int mem = 0; mem < N; ++mem)
-      {
-         md = std::max(md, std::abs(rt[mem].psi - in_mem[mem].psi));
-         md = std::max(md, std::abs(rt[mem].slip2 - in_mem[mem].slip2));
-         md = std::max(md, std::abs(rt[mem].tau2_nuc - in_mem[mem].tau2_nuc));
-      }
-      CHECK(md == 0.0, "[ckpt] read-with-perm recovers in-memory arrangement");
+      { md = std::max(md, dyn_diff(rt[mem], in_mem[mem])); }
+      CHECK(md == 0.0, "[ckpt] read-with-perm recovers in-memory arrangement (all 9 fields)");
    }
 
    // (The non-permutation guard — a duplicate/out-of-range perm entry — aborts

@@ -1228,6 +1228,19 @@ int main(int argc, char *argv[])
                "time_integrator=" << (is_rk ? "rk4|rk45" : "ader")
                << ".  Use --time-integrator ader or set lts=\"off\".");
 
+   // (LTS Phase 3, REVIEW R-006) The secular fault-resample projects the
+   // per-macro-step Δψ / Δ|slip| over WHOLE per-face QP blocks of the GLOBAL
+   // fault vector; the per-cluster LTS friction sweep advances one contiguous
+   // QP range at a time, so the two are incompatible in v1.  Reject the
+   // combination at parse time (a clean setup error) rather than letting the
+   // range Advance abort mid-sweep from deep inside the fault loop.
+   MFEM_VERIFY(!(cfg.numerics.LtsEnabled() && cli_fault_resample),
+               "spatial_dyn_driver: [numerics].lts=\"" << cfg.numerics.lts
+               << "\" is incompatible with --fault-resample (the secular "
+               "resample projects over whole per-face QP blocks of the global "
+               "fault vector, which the per-cluster LTS range sweep does not "
+               "support in v1).  Drop --fault-resample or set lts=\"off\".");
+
    // σ_n strength floor banner string (sliver-blowup plan 2026-05-26):
    // "DISABLED" for the negative sentinel, else the value in MPa.
    std::string sigma_n_floor_banner;

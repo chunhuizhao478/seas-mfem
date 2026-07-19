@@ -491,7 +491,12 @@ void LinearSlipWeakeningIterator::Advance(
          EvalStageState s;
          StepOneQP_(d, Qp_i, Qm_i, dt_sub, last_sub_step, s,
                     Q_imp_plus, Q_imp_minus);
-         // LSW-only unconditional diag writes (tpv205:413/417).
+         // LSW-only unconditional diag writes (tpv205:413/417).  REVIEW R-010:
+         // these accumulate over IN-RANGE QPs only.  The Phase-4 LTS driver MUST
+         // reset slip_rate_substep_max/sigma_n_substep_min at RANGE granularity
+         // (or once for all clusters before advancing any) — a whole-vector
+         // reset before each cluster's range advance would re-zero the maxima of
+         // already-advanced clusters this sync.  Diagnostic output only.
          d.slip_rate_substep_max = std::max(d.slip_rate_substep_max, s.V_abs);
          d.sigma_n_substep_min   = std::min(d.sigma_n_substep_min, s.sigma_n_total);
       });

@@ -331,10 +331,13 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
    // sides same-cluster under D-1); the canonical (pre-reorder) position of each
    // face is recorded for layout-independent checkpoint serialization.
    fault_face_canonical_perm_.clear();
-   if (lts_cluster_id != nullptr && fault_interior_faces_.Size() > 0)
+   if (lts_cluster_id != nullptr)
    {
-      const int nfi = fault_interior_faces_.Size();
-      const int ne  = mesh_.GetNE();
+      const int ne = mesh_.GetNE();
+      // REVIEW R-005: the cluster-size and D-2 invariants run whenever LTS is
+      // active, NOT only when this rank owns interior fault faces — a rank with
+      // zero interior but ≥1 SHARED fault face is exactly the D-2 violation the
+      // assert must catch (only the SORT below needs a non-empty list).
       MFEM_VERIFY(static_cast<int>(lts_cluster_id->size()) == ne,
                   "LTS fault reorder: cluster-id vector size "
                   << lts_cluster_id->size() << " != mesh NE " << ne);
@@ -344,48 +347,57 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
                   "fault-locality partitioning (D-2), got "
                   << fault_shared_faces_.Size());
 
-      // Cluster of each interior fault face = cluster of its owning element(s).
-      std::vector<int> face_cluster(nfi);
-      for (int i = 0; i < nfi; ++i)
+      if (fault_interior_faces_.Size() > 0)
       {
-         const int f = fault_interior_faces_[i];
-         auto *ftr = mesh_.GetInteriorFaceTransformations(f);
-         MFEM_VERIFY(ftr != nullptr,
-                     "LTS fault reorder: interior fault face " << f
-                     << " has no two-sided transformation.");
-         const int e1 = ftr->Elem1No, e2 = ftr->Elem2No;
-         MFEM_VERIFY(e1 >= 0 && e1 < ne && e2 >= 0 && e2 < ne,
-                     "LTS fault reorder: fault face " << f
-                     << " element index out of range.");
-         MFEM_VERIFY((*lts_cluster_id)[e1] == (*lts_cluster_id)[e2],
-                     "LTS fault reorder: DR face " << f
-                     << " straddles clusters " << (*lts_cluster_id)[e1]
-                     << " and " << (*lts_cluster_id)[e2]
-                     << " — v1 forces both sides same-cluster (D-1).");
-         face_cluster[i] = (*lts_cluster_id)[e1];
-      }
+         const int nfi = fault_interior_faces_.Size();
+         // Cluster of each interior fault face = cluster of its owning element(s).
+         std::vector<int> face_cluster(nfi);
+         for (int i = 0; i < nfi; ++i)
+         {
+            const int f = fault_interior_faces_[i];
+            auto *ftr = mesh_.GetInteriorFaceTransformations(f);
+            MFEM_VERIFY(ftr != nullptr,
+                        "LTS fault reorder: interior fault face " << f
+                        << " has no two-sided transformation.");
+            const int e1 = ftr->Elem1No, e2 = ftr->Elem2No;
+            MFEM_VERIFY(e1 >= 0 && e1 < ne && e2 >= 0 && e2 < ne,
+                        "LTS fault reorder: fault face " << f
+                        << " element index out of range.");
+            MFEM_VERIFY((*lts_cluster_id)[e1] == (*lts_cluster_id)[e2],
+                        "LTS fault reorder: DR face " << f
+                        << " straddles clusters " << (*lts_cluster_id)[e1]
+                        << " and " << (*lts_cluster_id)[e2]
+                        << " — v1 forces both sides same-cluster (D-1).");
+            face_cluster[i] = (*lts_cluster_id)[e1];
+         }
 
-      // Stable sort of slot indices by (cluster, mesh-face-id).
-      std::vector<int> perm(nfi);
-      for (int i = 0; i < nfi; ++i) { perm[i] = i; }
-      std::stable_sort(perm.begin(), perm.end(),
-                       [&](int a, int b)
-      {
-         if (face_cluster[a] != face_cluster[b])
-         { return face_cluster[a] < face_cluster[b]; }
-         return fault_interior_faces_[a] < fault_interior_faces_[b];
-      });
+         // Stable sort of slot indices by (cluster, mesh-face-id).
+         // REVIEW R-009: the tiebreak is the LOCAL mesh face index.  At np=1
+         // (the only regime through Phase 3) local == global and is unique, so
+         // this is a deterministic strict-weak ordering.  Phase 4 (np>1) must
+         // revisit: local face ids differ across ranks — though D-2 (no shared
+         // fault faces) keeps each rank's fault ordering self-contained.
+         std::vector<int> perm(nfi);
+         for (int i = 0; i < nfi; ++i) { perm[i] = i; }
+         std::stable_sort(perm.begin(), perm.end(),
+                          [&](int a, int b)
+         {
+            if (face_cluster[a] != face_cluster[b])
+            { return face_cluster[a] < face_cluster[b]; }
+            return fault_interior_faces_[a] < fault_interior_faces_[b];
+         });
 
-      // Apply the permutation; record the canonical (pre-reorder) position of
-      // the face now at each new slot.
-      Array<int> reordered(nfi);
-      fault_face_canonical_perm_.resize(nfi);
-      for (int i = 0; i < nfi; ++i)
-      {
-         reordered[i] = fault_interior_faces_[perm[i]];
-         fault_face_canonical_perm_[i] = perm[i];
+         // Apply the permutation; record the canonical (pre-reorder) position of
+         // the face now at each new slot.
+         Array<int> reordered(nfi);
+         fault_face_canonical_perm_.resize(nfi);
+         for (int i = 0; i < nfi; ++i)
+         {
+            reordered[i] = fault_interior_faces_[perm[i]];
+            fault_face_canonical_perm_[i] = perm[i];
+         }
+         fault_interior_faces_ = reordered;
       }
-      fault_interior_faces_ = reordered;
    }
    // === end LTS fault reorder ===============================================
 
