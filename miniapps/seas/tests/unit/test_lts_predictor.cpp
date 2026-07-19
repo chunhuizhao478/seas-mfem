@@ -18,6 +18,7 @@
 #include "../../dynamic/lts_time_basis.hpp"
 #include "../../dynamic/lts_stepper.hpp"   // RunSyncInterval + BuildTickTable (e2e)
 #include "../../dynamic/lts_layout.hpp"    // BuildLtsLayout (multi-cluster path)
+#include "../../dynamic/lts_bulk_stepper.hpp"  // LtsBulkSyncStepper (real multi-rate)
 #include "../../domain/boundary_config.hpp"
 
 #include <cmath>
@@ -420,6 +421,105 @@ static void multicluster_degenerate(WaveOperator<Mesh> &wave, Mesh &mesh, const 
    CHECK(md <= 1e-11 * (scl + 1.0), m);
 }
 
+// REAL multi-rate: 2-cluster LTS with the coarse cluster stepping at 2*dt (fine
+// at dt, consumer sub-intervals [0,dt] then [dt,2dt] from the closed-form
+// schedule) vs GTS at the fine dt.  Consistent ADER-4 schemes agree to
+// truncation order; a WRONG consumer [a,b] would give an O(1) coupling error, so
+// this discriminates the schedule.  Also asserts invariant (ii) (buffers zero at
+// every sync point) via the driver-core stepper LtsBulkSyncStepper.
+static void multirate_conservation(WaveOperator<Mesh> &wave, Mesh &mesh, const char *tag)
+{
+   using namespace mfem::seas;
+   const int ne = wave.NumElements(), ndof_per_el = wave.GetNDof();
+   const int ndof_total = wave.GetScalarNDof(), Nfull = NUM_STATE * ndof_total;
+   const int order = 4;
+   const real_t dt = 3.0e-7;   // 2*dt well within CFL for this box
+   const int n_sync = 3;       // 3 coarse steps = 6 fine steps
+
+   Vector Q0(Nfull);
+   const FiniteElementSpace &fes = wave.GetFESpace();
+   for (int e = 0; e < ne; ++e)
+   {
+      const FiniteElement *fe = fes.GetFE(e);
+      ElementTransformation *Tr = fes.GetElementTransformation(e);
+      DenseMatrix coords; Tr->Transform(fe->GetNodes(), coords);
+      const int off = e * ndof_per_el;
+      for (int i = 0; i < ndof_per_el; ++i)
+         for (int c = 0; c < NUM_STATE; ++c)
+            Q0[c * ndof_total + off + i] =
+               std::sin(0.8 * coords(0, i) + 0.1 * c) * std::cos(0.6 * coords(1, i));
+   }
+   char m[110];
+
+   // GTS reference at the FINE dt (2*n_sync steps).
+   Vector Qgts = Q0, Qtmp;
+   for (int s = 0; s < 2 * n_sync; ++s) { wave.AdvanceADER(Qgts, dt, order, Qtmp); Qgts = Qtmp; }
+   // GTS at the COARSE 2*dt (all elems) — the pure time-step-accuracy baseline
+   // the multi-rate scheme must not do WORSE than (it refines the fine half).
+   Vector Q2dt = Q0, Qt2;
+   for (int s = 0; s < n_sync; ++s) { wave.AdvanceADER(Q2dt, 2.0 * dt, order, Qt2); Q2dt = Qt2; }
+
+   // 2-cluster layout (0 fine, 1 coarse) by contiguous index; guard maxdiff<=1.
+   std::vector<int> cluster(ne, 0);
+   for (int e = ne / 2; e < ne; ++e) { cluster[e] = 1; }
+   std::vector<LtsFaceSpec> faces;
+   bool maxdiff_ok = true;
+   for (int f = 0; f < mesh.GetNumFaces(); ++f)
+   {
+      FaceElementTransformations *ftr = mesh.GetFaceElementTransformations(f);
+      if (!ftr) { continue; }
+      LtsFaceSpec fs; fs.face_id = f; fs.elem1 = ftr->Elem1No; fs.elem2 = ftr->Elem2No; fs.is_fault = false;
+      faces.push_back(fs);
+      if (fs.elem2 >= 0 && std::abs(cluster[fs.elem1] - cluster[fs.elem2]) > 1) { maxdiff_ok = false; }
+   }
+   if (!maxdiff_ok)
+   { std::snprintf(m, sizeof m, "[%s] multirate: SKIP (maxdiff)", tag); CHECK(true, m); return; }
+   LtsLayout L = BuildLtsLayout(cluster, 2, faces);
+
+   LtsGlobalMeta meta; meta.global_elems.assign(2, ne / 2); meta.global_fault_faces.assign(2, 0);
+   Vector Qlts = Q0;
+   LtsBulkSyncStepper<Mesh> stepper(wave, L, cluster, Qlts, order, dt);
+   const real_t T_s = dt * 2.0;   // Nc=2 => coarsest dt = 2*dt
+   bool buffers_ok = true;
+   for (int s = 0; s < n_sync; ++s)
+   {
+      auto tab = BuildTickTable(2, dt, T_s, order, meta);
+      stepper.SetSyncInterval(s * T_s, T_s);
+      RunSyncInterval(tab, stepper);
+      if (!stepper.BuffersZero()) { buffers_ok = false; }
+   }
+   std::snprintf(m, sizeof m, "[%s] multirate: buffers zero at every sync (inv ii)", tag);
+   CHECK(buffers_ok, m);
+
+   // Error of LTS vs GTS(dt) and of GTS(2dt) vs GTS(dt), split by region.
+   real_t scl = 0.0;
+   real_t lts_tot = 0.0, lts_fine = 0.0, g2_tot = 0.0, g2_fine = 0.0;
+   for (int c = 0; c < NUM_STATE; ++c)
+      for (int e = 0; e < ne; ++e)
+         for (int i = 0; i < ndof_per_el; ++i)
+         {
+            const int idx = c * ndof_total + e * ndof_per_el + i;
+            scl = std::max(scl, std::abs(Qgts[idx]));
+            const real_t dl = std::abs(Qlts[idx] - Qgts[idx]);
+            const real_t d2 = std::abs(Q2dt[idx] - Qgts[idx]);
+            lts_tot = std::max(lts_tot, dl); g2_tot = std::max(g2_tot, d2);
+            if (cluster[e] == 0) { lts_fine = std::max(lts_fine, dl); g2_fine = std::max(g2_fine, d2); }
+         }
+   std::printf("    [%s] multirate diag: LTS/GTSdt rel=%.3e (fine=%.3e), GTS2dt/GTSdt rel=%.3e (fine=%.3e)\n",
+               tag, lts_tot/(scl+1e-300), lts_fine/(scl+1e-300), g2_tot/(scl+1e-300), g2_fine/(scl+1e-300));
+
+   // Correctness (the closed-form [a,b] coupling is exercised here):
+   //  (a) GLOBAL: LTS is no worse than the pure coarse-2dt scheme (a wrong [a,b]
+   //      would DIVERGE from GTS(2dt) and blow this up).
+   std::snprintf(m, sizeof m, "[%s] multirate: LTS error <= GTS(2dt) error (consistent, not diverging)", tag);
+   CHECK(lts_tot <= 1.05 * g2_tot + 1e-9 * scl, m);
+   //  (b) FINE region: LTS (fine at dt) is STRICTLY better than GTS(2dt) there —
+   //      the fine refinement + coupling actually improved the fine solution.
+   std::snprintf(m, sizeof m, "[%s] multirate: fine region strictly refined vs GTS(2dt) (%.2e < %.2e)",
+                 tag, lts_fine/(scl+1e-300), g2_fine/(scl+1e-300));
+   CHECK(lts_fine < 0.5 * g2_fine, m);
+}
+
 int main()
 {
    const int order = 1;
@@ -435,6 +535,7 @@ int main()
       byte_gate(wave, mesh, "scalar");
       step_e2e(wave, mesh, "scalar");
       multicluster_degenerate(wave, mesh, "scalar");
+      multirate_conservation(wave, mesh, "scalar");
    }
 
    // --- bimaterial (heterogeneous, per-element star matrices) operator ---

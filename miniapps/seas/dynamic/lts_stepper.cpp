@@ -18,8 +18,11 @@ namespace seas
 
 void RunSyncInterval(const std::vector<LtsTick>& table, ILtsClusterStepper& stepper)
 {
-   for (const LtsTick& tk : table)
+   for (std::size_t t = 0; t < table.size(); ++t)
    {
+      const LtsTick& tk = table[t];
+      stepper.BeginTick(static_cast<int>(t));
+
       // Predict opens each due cluster's step at this tick (element-local; any
       // order — no cross-cluster dependence in the predictor).
       for (int c : tk.predict_clusters) { stepper.Predict(c, tk.dt_step[c]); }

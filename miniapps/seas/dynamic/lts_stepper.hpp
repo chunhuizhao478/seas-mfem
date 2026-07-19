@@ -224,6 +224,10 @@ struct LtsAccumulateBuffers
 struct ILtsClusterStepper
 {
    virtual ~ILtsClusterStepper() = default;
+   /// Called by RunSyncInterval at the START of each tick (default no-op).  The
+   /// multi-rate bulk stepper uses `tick` to derive the consumer-face
+   /// sub-interval [a,b] = [t(tick)-t_origin, ...] from the closed-form schedule.
+   virtual void BeginTick(int /*tick*/) {}
    virtual void Predict(int cluster, mfem::real_t dt_step) = 0;
    virtual void Correct(int cluster, mfem::real_t dt_step) = 0;
 };
