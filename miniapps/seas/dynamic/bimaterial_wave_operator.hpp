@@ -100,9 +100,13 @@ public:
    /// fault-bearing parity test (the tripwire).  After base construction it
    /// builds the per-element pool, the per-element CFL cache, the cross-rank
    /// neighbour map, and the per-face bi-material flux matrices.
+   /// `lts_cluster_id` (LTS Phase 3, P-006): forwarded to the base ctor to
+   /// reorder the interior fault-face list into cluster-contiguous order.
+   /// Default `nullptr` ⇒ no reorder (byte-identical to the pre-LTS path).
    BimaterialWaveOperator(MeshType &mesh, int order,
                           const MaterialField &material,
-                          const BoundaryConfig &bc);
+                          const BoundaryConfig &bc,
+                          const std::vector<int> *lts_cluster_id = nullptr);
 
    ~BimaterialWaveOperator() override = default;
 

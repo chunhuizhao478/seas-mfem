@@ -31,8 +31,9 @@
 template <typename MeshType>
 BimaterialWaveOperator<MeshType>::BimaterialWaveOperator(
    MeshType &mesh, int order, const MaterialField &material,
-   const BoundaryConfig &bc)
-   : Base(mesh, order, real_t(1.0), real_t(1.0), real_t(1.0), bc)
+   const BoundaryConfig &bc,
+   const std::vector<int> *lts_cluster_id)
+   : Base(mesh, order, real_t(1.0), real_t(1.0), real_t(1.0), bc, lts_cluster_id)
 {
    // (Cross-rank Phase 1) All three material representations are accepted:
    // every material read routes through MaterialAtLocal_/MaterialAtNbr_, whose

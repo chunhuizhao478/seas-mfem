@@ -132,9 +132,17 @@ public:
    /// REMOVED from this scalar class and lives on the separate subclass
    /// `BimaterialWaveOperator<MeshType>` (dynamic/bimaterial_wave_operator.hpp).
    /// `WaveOperator` is now bi-material-free.
+   /// `lts_cluster_id` (LTS Phase 3, P-006): when non-null (⇔ `lts != "off"`),
+   /// the per-ELEMENT cluster ids (size `mesh.GetNE()`) used to reorder the
+   /// interior fault-face list into cluster-contiguous order at construction —
+   /// so each cluster's fault QPs form one contiguous global range for the
+   /// per-cluster friction sweep.  Default `nullptr` ⇒ NO reorder ⇒ the fault
+   /// stack is built in canonical mesh-iteration order, byte-identical to the
+   /// pre-LTS path.  The pointer is consumed at construction only (not stored).
    WaveOperator(MeshType &mesh, int order,
                 real_t lambda, real_t mu, real_t rho,
-                const BoundaryConfig &bc);
+                const BoundaryConfig &bc,
+                const std::vector<int> *lts_cluster_id = nullptr);
 
    ~WaveOperator() override;
 
@@ -771,6 +779,19 @@ public:
    const Array<int> &GetFaultInteriorFaces() const { return fault_interior_faces_; }
    const Array<int> &GetFaultSharedFaces() const { return fault_shared_faces_; }
    int GetNbfPerFace() const { return nbf_per_face_; }
+
+   /// LTS Phase 3 (P-006): the fault-face canonical permutation.  When the
+   /// cluster-contiguous reorder is active, `perm[new_slot]` is the CANONICAL
+   /// (pre-reorder, mesh-iteration) position of the interior fault face now at
+   /// `new_slot`.  Empty ⇔ no reorder (LTS off) ⇔ identity.  Checkpoints use it
+   /// to serialize per-fault-QP `DOFData` in canonical (layout-independent)
+   /// order: the on-disk order stays the same whether or not LTS reordered the
+   /// in-memory fault stack.  Length = number of interior fault faces.
+   const std::vector<int> &GetFaultFaceCanonicalPerm() const
+   { return fault_face_canonical_perm_; }
+   /// True when the interior fault-face list was reordered for LTS.
+   bool FaultFacesReordered() const
+   { return !fault_face_canonical_perm_.empty(); }
    int GetNumLocalFaultQPs() const
    { return fault_interior_faces_.Size() * nbf_per_face_; }
    int GetNumSharedFaultQPs() const
@@ -1271,6 +1292,10 @@ protected:
    // See GetFaultInteriorFaces / GetFaultSharedFaces for layout contract.
    Array<int> fault_interior_faces_;     ///< mesh face indices, 2-sided & non-shared
    Array<int> fault_shared_faces_;       ///< shared-face indices (sf), ParMesh only
+   /// LTS Phase 3 (P-006): canonical (pre-reorder) position of the interior
+   /// fault face now at each slot; empty ⇔ no LTS reorder.  See
+   /// GetFaultFaceCanonicalPerm().
+   std::vector<int> fault_face_canonical_perm_;
    int nbf_per_face_ = 0;                ///< QPs per fault face (set by SetFaultDOFData)
 
    /// R-801 fix: mesh face index → position in fault_interior_faces_ (=

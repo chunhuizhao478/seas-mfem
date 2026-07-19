@@ -23,7 +23,8 @@
 template <typename MeshType>
 WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
                                      real_t lambda, real_t mu, real_t rho,
-                                     const BoundaryConfig &bc)
+                                     const BoundaryConfig &bc,
+                                     const std::vector<int> *lts_cluster_id)
    : TimeDependentOperator(0),
      mesh_(mesh),
      order_(order),
@@ -315,6 +316,78 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
       }
 #endif
    }
+
+   // === LTS Phase 3 (P-006): cluster-contiguous interior fault-face reorder ==
+   // When LTS is active (lts_cluster_id != nullptr ⇔ lts != "off"), sort the
+   // interior fault-face list so faces of the same cluster form one contiguous
+   // block.  The per-cluster friction sweep then advances each cluster's fault
+   // QPs over a single [qp_begin, qp_end) range.  This is the ONE reorder point:
+   // fault_interior_face_to_basis_idx_ (below), the FaultBasis, elem1_on_plus,
+   // the per-QP basis, DOFData offsets (SetFaultDOFData), fault_coords, the
+   // nucleation resolver, station Open, and ParaView are ALL built afterwards
+   // by walking fault_interior_faces_ IN ORDER, so this single permutation makes
+   // the whole fault stack cluster-contiguous.  Sort key = (cluster, mesh-face-
+   // id): fully deterministic.  A face's cluster = its element's cluster (both
+   // sides same-cluster under D-1); the canonical (pre-reorder) position of each
+   // face is recorded for layout-independent checkpoint serialization.
+   fault_face_canonical_perm_.clear();
+   if (lts_cluster_id != nullptr && fault_interior_faces_.Size() > 0)
+   {
+      const int nfi = fault_interior_faces_.Size();
+      const int ne  = mesh_.GetNE();
+      MFEM_VERIFY(static_cast<int>(lts_cluster_id->size()) == ne,
+                  "LTS fault reorder: cluster-id vector size "
+                  << lts_cluster_id->size() << " != mesh NE " << ne);
+      // D-2: lts implies fault-locality ⇒ no shared (cross-rank) fault faces.
+      MFEM_VERIFY(fault_shared_faces_.Size() == 0,
+                  "LTS fault reorder: expected zero shared fault faces under "
+                  "fault-locality partitioning (D-2), got "
+                  << fault_shared_faces_.Size());
+
+      // Cluster of each interior fault face = cluster of its owning element(s).
+      std::vector<int> face_cluster(nfi);
+      for (int i = 0; i < nfi; ++i)
+      {
+         const int f = fault_interior_faces_[i];
+         auto *ftr = mesh_.GetInteriorFaceTransformations(f);
+         MFEM_VERIFY(ftr != nullptr,
+                     "LTS fault reorder: interior fault face " << f
+                     << " has no two-sided transformation.");
+         const int e1 = ftr->Elem1No, e2 = ftr->Elem2No;
+         MFEM_VERIFY(e1 >= 0 && e1 < ne && e2 >= 0 && e2 < ne,
+                     "LTS fault reorder: fault face " << f
+                     << " element index out of range.");
+         MFEM_VERIFY((*lts_cluster_id)[e1] == (*lts_cluster_id)[e2],
+                     "LTS fault reorder: DR face " << f
+                     << " straddles clusters " << (*lts_cluster_id)[e1]
+                     << " and " << (*lts_cluster_id)[e2]
+                     << " — v1 forces both sides same-cluster (D-1).");
+         face_cluster[i] = (*lts_cluster_id)[e1];
+      }
+
+      // Stable sort of slot indices by (cluster, mesh-face-id).
+      std::vector<int> perm(nfi);
+      for (int i = 0; i < nfi; ++i) { perm[i] = i; }
+      std::stable_sort(perm.begin(), perm.end(),
+                       [&](int a, int b)
+      {
+         if (face_cluster[a] != face_cluster[b])
+         { return face_cluster[a] < face_cluster[b]; }
+         return fault_interior_faces_[a] < fault_interior_faces_[b];
+      });
+
+      // Apply the permutation; record the canonical (pre-reorder) position of
+      // the face now at each new slot.
+      Array<int> reordered(nfi);
+      fault_face_canonical_perm_.resize(nfi);
+      for (int i = 0; i < nfi; ++i)
+      {
+         reordered[i] = fault_interior_faces_[perm[i]];
+         fault_face_canonical_perm_[i] = perm[i];
+      }
+      fault_interior_faces_ = reordered;
+   }
+   // === end LTS fault reorder ===============================================
 
    // R-801 fix: build mesh_face_idx → FaultBasis index map for interior
    // fault faces.  FaultBasis stores per-face data as [interior_faces...,

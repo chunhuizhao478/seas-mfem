@@ -525,6 +525,7 @@ TEST_LTS_PREDICTOR_SRC                      = tests/unit/test_lts_predictor.cpp
 # Clustered LTS Phase 3 (fault under LTS).
 TEST_LTS_NUCLEATION_ABSOLUTE_SRC            = tests/unit/test_lts_nucleation_absolute.cpp
 TEST_LTS_FRICTION_RANGE_SRC                 = tests/unit/test_lts_friction_range.cpp
+TEST_LTS_FAULT_REORDER_SRC                  = tests/unit/test_lts_fault_reorder.cpp
 
 # Data-projection feature (Phase 3..5).  See document/features_dev/
 # data_projection_feature_plan_v2.md.
@@ -603,6 +604,7 @@ TEST_LTS_SCHEDULER_OBJ          = $(TEST_LTS_SCHEDULER_SRC:.cpp=.o)
 TEST_LTS_PREDICTOR_OBJ          = $(TEST_LTS_PREDICTOR_SRC:.cpp=.o)
 TEST_LTS_NUCLEATION_ABSOLUTE_OBJ = $(TEST_LTS_NUCLEATION_ABSOLUTE_SRC:.cpp=.o)
 TEST_LTS_FRICTION_RANGE_OBJ      = $(TEST_LTS_FRICTION_RANGE_SRC:.cpp=.o)
+TEST_LTS_FAULT_REORDER_OBJ       = $(TEST_LTS_FAULT_REORDER_SRC:.cpp=.o)
 DATA_FIELD_3D_OBJ                = $(DATA_FIELD_3D_SRC:.cpp=.o)
 STRESS_FIELD_3D_OBJ              = $(STRESS_FIELD_3D_SRC:.cpp=.o)
 FIELD_COEFFICIENT_OBJ            = $(FIELD_COEFFICIENT_SRC:.cpp=.o)
@@ -1169,6 +1171,18 @@ seas_test_lts_predictor: $(TEST_LTS_PREDICTOR_OBJ) $(WAVE_OPERATOR_OBJ) \
 	    $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) \
 	    $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
 	    $(LTS_STEPPER_OBJ) $(LTS_LAYOUT_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Clustered LTS Phase 3: fault-face cluster-contiguous reorder (P-006 gate).
+seas_test_lts_fault_reorder: $(TEST_LTS_FAULT_REORDER_OBJ) $(WAVE_OPERATOR_OBJ) \
+    $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(GODUNOV_FLUX_POOL_OBJ) \
+    $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) \
+    $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_LTS_FAULT_REORDER_OBJ) \
+	    $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(GODUNOV_FLUX_POOL_OBJ) \
+	    $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Clustered LTS Phase 3: friction range-based Advance (B.9).
@@ -3227,6 +3241,11 @@ $(TEST_LTS_FRICTION_RANGE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+$(TEST_LTS_FAULT_REORDER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
 $(DATA_FIELD_3D_OBJ): %.o: $(SRC)%.cpp $(DATA_FIELD_3D_HEADERS) \
                           $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
@@ -4302,6 +4321,9 @@ test-lts-nucleation-absolute: seas_test_lts_nucleation_absolute
 
 test-lts-friction-range: seas_test_lts_friction_range
 	./seas_test_lts_friction_range
+
+test-lts-fault-reorder: seas_test_lts_fault_reorder
+	./seas_test_lts_fault_reorder
 
 test-data-field-3d: seas_test_data_field_3d
 	./seas_test_data_field_3d
