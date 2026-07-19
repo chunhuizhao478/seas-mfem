@@ -17,6 +17,7 @@
 #include "../../dynamic/wave_state.hpp"
 #include "../../dynamic/lts_time_basis.hpp"
 #include "../../dynamic/lts_stepper.hpp"   // RunSyncInterval + BuildTickTable (e2e)
+#include "../../dynamic/lts_layout.hpp"    // BuildLtsLayout (multi-cluster path)
 #include "../../domain/boundary_config.hpp"
 
 #include <cmath>
@@ -286,6 +287,139 @@ static void step_e2e(WaveOperator<Mesh> &wave, Mesh &mesh, const char *tag)
    CHECK(md <= 1e-11 * (scl + 1.0), m);
 }
 
+// Degenerate 2-cluster validation of the consumer/provider/buffer path: split the
+// mesh into two clusters (ids 0 fine, 1 coarse) via BuildLtsLayout, but DRIVE both
+// at the same dt with [0,dt] consumer sub-intervals.  IntegrateTaylor(D_coarse,
+// 0, dt) == the coarse's whole-step integral, so the coupling reduces to GTS: the
+// result must match AdvanceADER to machine epsilon while exercising D(k)
+// retention, the consumer-face flux, and the accumulate-buffer fill/consume.
+static void multicluster_degenerate(WaveOperator<Mesh> &wave, Mesh &mesh, const char *tag)
+{
+   using namespace mfem::seas;
+   const int ne = wave.NumElements(), ndof_per_el = wave.GetNDof();
+   const int ndof_total = wave.GetScalarNDof(), Nfull = NUM_STATE * ndof_total;
+   const int block = NUM_STATE * ndof_per_el;
+   const int order = 4;
+   const real_t dt = 3.0e-7;
+
+   Vector Q(Nfull);
+   const FiniteElementSpace &fes = wave.GetFESpace();
+   for (int e = 0; e < ne; ++e)
+   {
+      const FiniteElement *fe = fes.GetFE(e);
+      ElementTransformation *Tr = fes.GetElementTransformation(e);
+      DenseMatrix coords; Tr->Transform(fe->GetNodes(), coords);
+      const int off = e * ndof_per_el;
+      for (int i = 0; i < ndof_per_el; ++i)
+         for (int c = 0; c < NUM_STATE; ++c)
+            Q[c * ndof_total + off + i] = std::sin(0.9 * coords(0, i) + 0.15 * c);
+   }
+   char m[110];
+
+   // GTS reference.
+   Vector Qgts;
+   wave.AdvanceADER(Q, dt, order, Qgts);
+
+   // Cluster ids that satisfy maxdiff<=1: a contiguous split by element index
+   // (0..h-1 -> cluster 0, h..ne-1 -> cluster 1).  If the induced layout has no
+   // ConsumerFine faces (clusters not adjacent), skip — nothing to validate.
+   std::vector<int> cluster(ne, 0);
+   for (int e = ne / 2; e < ne; ++e) { cluster[e] = 1; }
+
+   std::vector<LtsFaceSpec> faces;
+   for (int f = 0; f < mesh.GetNumFaces(); ++f)
+   {
+      FaceElementTransformations *ftr = mesh.GetFaceElementTransformations(f);
+      if (!ftr) { continue; }
+      LtsFaceSpec fs; fs.face_id = f; fs.elem1 = ftr->Elem1No;
+      fs.elem2 = ftr->Elem2No; fs.is_fault = false;
+      faces.push_back(fs);
+   }
+   // Guard the maxdiff<=1 precondition (a contiguous index split can violate it
+   // on an unstructured numbering; on this Cartesian mesh it holds).
+   bool maxdiff_ok = true;
+   for (const auto &fs : faces)
+      if (fs.elem2 >= 0 && std::abs(cluster[fs.elem1] - cluster[fs.elem2]) > 1) { maxdiff_ok = false; }
+   if (!maxdiff_ok)
+   {
+      std::snprintf(m, sizeof m, "[%s] multicluster: SKIP (index split violates maxdiff)", tag);
+      CHECK(true, m); return;
+   }
+   LtsLayout L = BuildLtsLayout(cluster, 2, faces);
+
+   int n_consumer = 0;
+   for (const auto &cl : L.clusters)
+      for (FaceRole r : cl.faces) if (r == FaceRole::ConsumerFine) { ++n_consumer; }
+   if (n_consumer == 0)
+   {
+      std::snprintf(m, sizeof m, "[%s] multicluster: SKIP (no consumer faces)", tag);
+      CHECK(true, m); return;
+   }
+
+   LtsDkStore dk; dk.Resize((int)L.provider_elems.size(), order, block);
+   LtsAccumulateBuffers buf; buf.Resize((int)L.consumer_owner_elems.size(), block);
+
+   std::vector<real_t> tau(order);
+   for (int o = 0; o < order; ++o) { tau[o] = dt * (o + 0.5) / order; }
+   std::vector<Vector> Qn;
+   Vector I0, I1;
+
+   // Predict fine (cluster 0) and coarse (cluster 1, retaining D(k) for providers).
+   wave.ComputeADERSubStepStatesAndIntegralCluster(
+      L.clusters[0].elems.data(), (int)L.clusters[0].elems.size(), Q, dt, order,
+      tau, Qn, I0);
+   wave.ComputeADERSubStepStatesAndIntegralCluster(
+      L.clusters[1].elems.data(), (int)L.clusters[1].elems.size(), Q, dt, order,
+      tau, Qn, I1, dk.data.data(), L.provider_slot_of_elem.data());
+
+   // Per-cluster owned-face arrays + degenerate consumer sub-interval [0, dt].
+   auto face_arrays = [&](int c, std::vector<int> &fids, std::vector<int> &fr,
+                          std::vector<int> &fn, std::vector<real_t> &sa,
+                          std::vector<real_t> &sb)
+   {
+      const LtsCluster &cl = L.clusters[c];
+      for (std::size_t i = 0; i < cl.face_ids.size(); ++i)
+      {
+         fids.push_back(cl.face_ids[i]);
+         fr.push_back((int)cl.faces[i]);
+         fn.push_back(cl.face_nbr[i]);
+         sa.push_back(0.0); sb.push_back(dt);
+      }
+   };
+
+   Vector Qc = Q;   // in-place
+   // Correct FINE (cluster 0) then COARSE (cluster 1).
+   {
+      std::vector<int> fids, fr, fn; std::vector<real_t> sa, sb;
+      face_arrays(0, fids, fr, fn, sa, sb);
+      wave.AdvanceADERClusterBulk(L.clusters[0].elems.data(),
+         (int)L.clusters[0].elems.size(), fids.data(), fr.data(), fn.data(),
+         (int)fids.size(), dt, order, I0, Qc, dk.data.data(), order,
+         L.provider_slot_of_elem.data(), sa.data(), sb.data(), &buf,
+         L.buffer_slot_of_elem.data());
+   }
+   {
+      std::vector<int> fids, fr, fn; std::vector<real_t> sa, sb;
+      face_arrays(1, fids, fr, fn, sa, sb);
+      wave.AdvanceADERClusterBulk(L.clusters[1].elems.data(),
+         (int)L.clusters[1].elems.size(), fids.data(), fr.data(), fn.data(),
+         (int)fids.size(), dt, order, I1, Qc, dk.data.data(), order,
+         L.provider_slot_of_elem.data(), sa.data(), sb.data(), &buf,
+         L.buffer_slot_of_elem.data());
+   }
+
+   // Buffers must be empty after the coarse consume (invariant ii).
+   std::snprintf(m, sizeof m, "[%s] multicluster: buffers zero after consume", tag);
+   CHECK(buf.AllZero(), m);
+
+   real_t md = 0.0, scl = 0.0;
+   for (int i = 0; i < Nfull; ++i)
+   { md = std::max(md, std::abs(Qc[i] - Qgts[i])); scl = std::max(scl, std::abs(Qgts[i])); }
+   std::snprintf(m, sizeof m, "[%s] degenerate 2-cluster (dt,[0,dt]) == GTS (<=1e-11 rel), %d consumer faces",
+                 tag, n_consumer);
+   CHECK(md <= 1e-11 * (scl + 1.0), m);
+}
+
 int main()
 {
    const int order = 1;
@@ -300,6 +434,7 @@ int main()
       wave.SetAbsorbingBackground(zero_bg);
       byte_gate(wave, mesh, "scalar");
       step_e2e(wave, mesh, "scalar");
+      multicluster_degenerate(wave, mesh, "scalar");
    }
 
    // --- bimaterial (heterogeneous, per-element star matrices) operator ---
