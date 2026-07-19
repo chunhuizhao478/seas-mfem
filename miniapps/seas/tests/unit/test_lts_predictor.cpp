@@ -554,9 +554,97 @@ static void checkpoint_v2_roundtrip()
    std::remove((std::string(prefix) + "_checkpoint_r0.txt").c_str());
 }
 
+// Checkpoint-V2 canonical-order serialization under the fault reorder (B.8b,
+// LTS P-006): with a non-identity fault-QP permutation, DOFData is written in
+// CANONICAL (layout-independent) order — so a reordered in-memory arrangement +
+// its perm produces the SAME on-disk bytes as the canonically-ordered state
+// with no perm — and reading with the perm recovers the in-memory arrangement.
+static void checkpoint_v2_canonical_reorder()
+{
+   const int N = 6;
+   // perm[mem] = canonical (on-disk) position of in-memory QP mem.
+   const std::vector<int> perm = {3, 0, 5, 1, 4, 2};
+
+   // Distinct dynamic state indexed by CANONICAL position.
+   auto canon_dof = [](int c)
+   {
+      DOFData d;
+      d.psi = 0.1 + c; d.slip_rate = 1.0 + c; d.V1 = 10.0 + c; d.V2 = 20.0 + c;
+      d.slip1 = 30.0 + c; d.slip2 = 40.0 + c; d.tau1_nuc = 50.0 + c;
+      d.tau2_nuc = 60.0 + c; d.sigma_n_nuc = 70.0 + c;
+      return d;
+   };
+   std::vector<DOFData> canonical(N), in_mem(N);
+   for (int c = 0; c < N; ++c) { canonical[c] = canon_dof(c); }
+   for (int mem = 0; mem < N; ++mem) { in_mem[mem] = canon_dof(perm[mem]); }
+
+   Vector Qw(8); for (int i = 0; i < 8; ++i) { Qw[i] = 0.5 * i; }
+   const real_t t = 2.0e-3, dt = 1.0e-6; const int sync = 7;
+   const std::uint64_t hash = 0xdeadbeefULL;
+
+   const char *pA = "test_lts_ckpt_reorder_A";
+   const char *pB = "test_lts_ckpt_reorder_B";
+   // A: reordered in-memory + perm -> canonical on disk.
+   mfem::seas::internal::WriteTpv104CheckpointV2Impl(
+      pA, t, dt, sync, 1, hash, Qw, in_mem, 0, 1, "spatial_dyn", &perm);
+   // B: canonical in-memory, no perm -> canonical on disk (reference).
+   mfem::seas::internal::WriteTpv104CheckpointV2Impl(
+      pB, t, dt, sync, 1, hash, Qw, canonical, 0, 1, "spatial_dyn", nullptr);
+
+   auto read_identity = [&](const char *p)
+   {
+      real_t tr = 0, dtr = 0; int syncr = 0, lm = 0; std::uint64_t hr = 0;
+      Vector Qr; std::vector<DOFData> dd(N); std::string tag;
+      mfem::seas::internal::ReadTpv104CheckpointV2Impl(
+         p, tr, dtr, syncr, lm, hr, Qr, 8, dd, 0, 1, &tag, nullptr);
+      return dd;
+   };
+   const std::vector<DOFData> onDiskA = read_identity(pA);
+   const std::vector<DOFData> onDiskB = read_identity(pB);
+   // On-disk order is canonical & layout-independent: A == B field-for-field.
+   real_t md_ab = 0.0;
+   for (int c = 0; c < N; ++c)
+   {
+      md_ab = std::max(md_ab, std::abs(onDiskA[c].psi - onDiskB[c].psi));
+      md_ab = std::max(md_ab, std::abs(onDiskA[c].slip1 - onDiskB[c].slip1));
+      md_ab = std::max(md_ab, std::abs(onDiskA[c].V2 - onDiskB[c].V2));
+      md_ab = std::max(md_ab, std::abs(onDiskA[c].sigma_n_nuc - onDiskB[c].sigma_n_nuc));
+   }
+   CHECK(md_ab == 0.0,
+         "[ckpt] reordered+perm write == canonical write on disk (layout-indep)");
+   // On-disk canonical order equals the true canonical state.
+   CHECK(onDiskA[2].psi == canon_dof(2).psi
+         && onDiskA[5].slip1 == canon_dof(5).slip1,
+         "[ckpt] on-disk record at canonical position == canonical state");
+
+   // Read A WITH perm -> recovers the in-memory arrangement exactly.
+   {
+      real_t tr = 0, dtr = 0; int syncr = 0, lm = 0; std::uint64_t hr = 0;
+      Vector Qr; std::vector<DOFData> rt(N); std::string tag;
+      mfem::seas::internal::ReadTpv104CheckpointV2Impl(
+         pA, tr, dtr, syncr, lm, hr, Qr, 8, rt, 0, 1, &tag, &perm);
+      real_t md = 0.0;
+      for (int mem = 0; mem < N; ++mem)
+      {
+         md = std::max(md, std::abs(rt[mem].psi - in_mem[mem].psi));
+         md = std::max(md, std::abs(rt[mem].slip2 - in_mem[mem].slip2));
+         md = std::max(md, std::abs(rt[mem].tau2_nuc - in_mem[mem].tau2_nuc));
+      }
+      CHECK(md == 0.0, "[ckpt] read-with-perm recovers in-memory arrangement");
+   }
+
+   // (The non-permutation guard — a duplicate/out-of-range perm entry — aborts
+   // the write via MFEM_VERIFY in production; a process-abort is not unit-
+   // testable here since this MFEM build has MFEM_USE_EXCEPTIONS=NO.)
+
+   std::remove((std::string(pA) + "_checkpoint_r0.txt").c_str());
+   std::remove((std::string(pB) + "_checkpoint_r0.txt").c_str());
+}
+
 int main()
 {
    checkpoint_v2_roundtrip();
+   checkpoint_v2_canonical_reorder();
    const int order = 1;
    const real_t lambda = 32.04e9, mu = 32.04e9, rho = 2670.0;
    BoundaryConfig bc = AbsorbingBC();

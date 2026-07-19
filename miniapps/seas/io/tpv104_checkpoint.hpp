@@ -262,13 +262,23 @@ inline bool ReadTpv104CheckpointImpl(const std::string &prefix,
 // clustering, so a restart whose recomputed layout differs is REFUSED).
 // dof_data is empty on the fault-free bulk path.
 // ---------------------------------------------------------------------------
+// `dof_canonical_perm` (LTS Phase 3, P-006): when non-empty, the per-fault-QP
+// CANONICAL permutation — `perm[mem]` is the on-disk (canonical, pre-reorder)
+// position of the in-memory fault QP `mem`.  `DOFData` is then serialized in
+// CANONICAL order so the on-disk layout is independent of whether LTS reordered
+// the in-memory fault stack (a restart at a different cluster count / lts mode
+// reads the same bytes into its own order).  Empty ⇒ raw in-memory order
+// (byte-identical to pre-P3), which is correct for the fault-free bulk path and
+// for GTS.  Size (when non-empty) MUST equal dof_data.size().
 inline void WriteTpv104CheckpointV2Impl(const std::string &prefix,
                                         real_t t, real_t dt, int sync_step,
                                         int lts_mode, std::uint64_t layout_hash,
                                         const Vector &Q,
                                         const std::vector<DOFData> &dof_data,
                                         int rank, int size,
-                                        const std::string &driver_tag = "")
+                                        const std::string &driver_tag = "",
+                                        const std::vector<int> *dof_canonical_perm
+                                           = nullptr)
 {
    MFEM_VERIFY(driver_tag.empty()
                || (driver_tag.size() <= 31
@@ -290,9 +300,30 @@ inline void WriteTpv104CheckpointV2Impl(const std::string &prefix,
    for (int i = 0; i < Q.Size(); ++i) { out << Q(i) << "\n"; }
    const int nd = static_cast<int>(dof_data.size());
    out << "dof_data_size " << nd << "\n";
-   for (int i = 0; i < nd; ++i)
+   // LTS P-006: emit in canonical (on-disk) order.  `inv[canonical] = in-memory`
+   // is the inverse of `dof_canonical_perm[in-memory] = canonical`.
+   const bool reordered =
+      dof_canonical_perm != nullptr && !dof_canonical_perm->empty();
+   MFEM_VERIFY(!reordered || static_cast<int>(dof_canonical_perm->size()) == nd,
+               "WriteTpv104CheckpointV2: dof_canonical_perm size "
+               << dof_canonical_perm->size() << " != dof_data_size " << nd);
+   std::vector<int> inv;
+   if (reordered)
    {
-      const DOFData &d = dof_data[i];
+      inv.assign(nd, -1);
+      for (int mem = 0; mem < nd; ++mem)
+      {
+         const int c = (*dof_canonical_perm)[mem];
+         MFEM_VERIFY(c >= 0 && c < nd && inv[c] == -1,
+                     "WriteTpv104CheckpointV2: dof_canonical_perm is not a "
+                     "permutation of [0, " << nd << ")");
+         inv[c] = mem;
+      }
+   }
+   for (int c = 0; c < nd; ++c)
+   {
+      const int mem = reordered ? inv[c] : c;
+      const DOFData &d = dof_data[mem];
       out << d.psi << "\n" << d.slip_rate << "\n" << d.V1 << "\n" << d.V2 << "\n"
           << d.slip1 << "\n" << d.slip2 << "\n" << d.tau1_nuc << "\n"
           << d.tau2_nuc << "\n" << d.sigma_n_nuc << "\n";
@@ -312,13 +343,19 @@ inline int PeekTpv104CheckpointVersion(const std::string &prefix, int rank)
    return 0;
 }
 
+// `dof_canonical_perm` (LTS Phase 3, P-006): mirror of the write path — when
+// non-empty, `perm[mem]` is the on-disk (canonical) position of in-memory fault
+// QP `mem`; the on-disk records are read in canonical order and scattered back
+// to in-memory order.  Empty ⇒ raw in-memory order (byte-identical to pre-P3).
 inline bool ReadTpv104CheckpointV2Impl(const std::string &prefix,
                                        real_t &t, real_t &dt, int &sync_step,
                                        int &lts_mode, std::uint64_t &layout_hash,
                                        Vector &Q, int expected_Q_size,
                                        std::vector<DOFData> &dof_data,
                                        int rank, int size,
-                                       std::string *driver_tag = nullptr)
+                                       std::string *driver_tag = nullptr,
+                                       const std::vector<int> *dof_canonical_perm
+                                          = nullptr)
 {
    const std::string filename = Tpv104CheckpointFilename(prefix, rank);
    std::ifstream in(filename);
@@ -349,11 +386,34 @@ inline bool ReadTpv104CheckpointV2Impl(const std::string &prefix,
    int nd = 0; read_tag("dof_data_size"); in >> nd;
    MFEM_VERIFY(static_cast<int>(dof_data.size()) == nd,
                "V2 checkpoint dof_data_size mismatch: " << nd << " != " << dof_data.size());
-   for (int i = 0; i < nd; ++i)
+   const bool reordered =
+      dof_canonical_perm != nullptr && !dof_canonical_perm->empty();
+   MFEM_VERIFY(!reordered || static_cast<int>(dof_canonical_perm->size()) == nd,
+               "ReadTpv104CheckpointV2: dof_canonical_perm size "
+               << dof_canonical_perm->size() << " != dof_data_size " << nd);
+   // Read the canonical-order records, then scatter to in-memory order:
+   // dof_data[mem].dyn = disk[perm[mem]].dyn.  Only the 9 dynamic fields are
+   // read; the static fields the caller pre-seeded are left untouched.
+   struct DynRec { real_t psi, slip_rate, V1, V2, slip1, slip2,
+                          tau1_nuc, tau2_nuc, sigma_n_nuc; };
+   std::vector<DynRec> disk(nd);
+   for (int c = 0; c < nd; ++c)
    {
-      DOFData &d = dof_data[i];
-      in >> d.psi >> d.slip_rate >> d.V1 >> d.V2 >> d.slip1 >> d.slip2
-         >> d.tau1_nuc >> d.tau2_nuc >> d.sigma_n_nuc;
+      DynRec &r = disk[c];
+      in >> r.psi >> r.slip_rate >> r.V1 >> r.V2 >> r.slip1 >> r.slip2
+         >> r.tau1_nuc >> r.tau2_nuc >> r.sigma_n_nuc;
+   }
+   for (int mem = 0; mem < nd; ++mem)
+   {
+      const int c = reordered ? (*dof_canonical_perm)[mem] : mem;
+      MFEM_VERIFY(c >= 0 && c < nd,
+                  "ReadTpv104CheckpointV2: canonical index " << c
+                  << " out of range [0, " << nd << ")");
+      DOFData &d = dof_data[mem];
+      const DynRec &r = disk[c];
+      d.psi = r.psi; d.slip_rate = r.slip_rate; d.V1 = r.V1; d.V2 = r.V2;
+      d.slip1 = r.slip1; d.slip2 = r.slip2; d.tau1_nuc = r.tau1_nuc;
+      d.tau2_nuc = r.tau2_nuc; d.sigma_n_nuc = r.sigma_n_nuc;
    }
    MFEM_VERIFY(!in.fail(), "V2 checkpoint stream error in " << filename);
    if (driver_tag) { driver_tag->clear(); }
