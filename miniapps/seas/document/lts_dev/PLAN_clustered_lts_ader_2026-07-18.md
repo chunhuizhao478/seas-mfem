@@ -735,19 +735,31 @@ the Normative Scheduling and Buffer sections.
 >   reproduces `AdvanceADER` to machine epsilon — 4 consumer faces + 4 provider
 >   elems live, exercising D(k) retention, the ConsumerFine `IntegrateTaylor`
 >   flux, buffer fill/consume, ProviderCoarseSkip, and buffers-zero-at-sync.
+> - **REAL multi-rate** (coarse cluster at 2·dt, fine at dt with sub-intervals
+>   `[0,dt]`/`[dt,2dt]` from the closed-form `[a,b]` schedule): consistent with
+>   GTS (error ≤ GTS-at-2dt) and strictly refines the fine region — the multi-rate
+>   coupling is validated (a wrong `[a,b]` diverges).
+> - **`LtsBulkSyncStepper`** (`dynamic/lts_bulk_stepper.hpp`): the reusable
+>   fault-free multi-rate stepper that manages per-cluster integrals, the D(k)
+>   store, the buffers, and the closed-form consumer sub-intervals — **this is the
+>   core of the driver's sync-interval loop**.
+> - **Checkpoint-V2 layout hash** `LtsLayoutHash` (FNV-1a, cross-platform
+>   deterministic) + test — the restart layout-match core.
 > - **End-to-end** `RunSyncInterval` wiring predict+correct: single-cluster LTS
->   over 6 steps == GTS. All in `test_lts_predictor` (19/19).
+>   over 6 steps == GTS. `test_lts_predictor` 22/22, `test_lts_layout` 96/96.
 > - Reviewed twice (adversarial): fixed the bimaterial star-matrix override + the
 >   accumulate-buffer fill-counts-sub-steps semantics (C-1).
 >
-> REMAINING for full Phase 2: the **driver sync-interval loop** (wire the core
-> into `spatial_dyn_driver.cpp` — note the driver always carries a fault, so a
-> fault-free bulk run needs a fault-free config; the fault half is Phase 3), the
-> **multi-cluster conservation tests** (B.5 ragged / B.6 periodic-box / B.7
-> mixed-neighbour — these exercise + validate the consumer/buffer path, which the
-> single-cluster gates do not), and **Checkpoint V2**. The mathematically hard
-> core (CK-recursion element-restriction + the role-driven Taylor-coupled face
-> sweep) is complete and reproduces GTS.
+> REMAINING for full Phase 2 — the two integration pieces are coupled to the
+> Phase-3 fault corrector and to each other: (1) the **driver main-loop wiring**
+> (`spatial_dyn_driver.cpp` interleaves fault sub-stepping with the bulk corrector
+> per step, so replacing the step loop with the sync loop needs the Phase-3 fault
+> half; `LtsBulkSyncStepper` is ready to drop into a fault-free path); (2) the
+> full **Checkpoint-V2 read/write wiring + refusal paths** (B.8 — only meaningful
+> once the driver writes LTS checkpoints). The mathematical + algorithmic core
+> (CK element-restriction + Taylor-coupled role-driven face sweep + multi-rate
+> schedule) is complete and reproduces GTS single-cluster + is validated
+> multi-rate.
 
 > **Unblocked by the resequencing.** Phase 2 is bulk-only and np=1, so it needs
 > NONE of the deferred trio — it consumes exactly the layout Phase 1 shipped. One
