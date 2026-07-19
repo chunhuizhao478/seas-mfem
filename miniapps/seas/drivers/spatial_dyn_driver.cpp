@@ -248,6 +248,106 @@ LtsMeshInputs BuildLtsMeshInputs(WaveOperator<ParMesh> &wave, ParMesh &pmesh)
    return in;
 }
 
+// (LTS Phase 4 Step 0) Operator-INDEPENDENT clustering inputs, sourced from the
+// mesh geometry + the MaterialField directly — so the cluster ids can be
+// computed BEFORE the wave operator is constructed and passed into its ctor for
+// the fault-QP reorder (Phase 3, P-006).  Produces the SAME per-element dt_e
+// binning as BuildLtsMeshInputs above:
+//   dt_e = h_e / c_p,e,  h_e = insphere diameter (tets) / vol^{1/dim},
+//   c_p,e = sqrt((lambda + 2 mu) / rho) evaluated at the element centroid.
+// For Mode::Constant (the scalar-flux path) c_p is uniform, so — like the
+// operator-sourced builder's cp=1 — it leaves the cluster binning unchanged
+// (the assignment is invariant to a uniform scale of dt_e); for Mode::Coefficient
+// (the matrix/bimaterial path) c_p is the true per-element value, matching the
+// operator's per_elem_lmr_ EvalAt-at-centroid.  `fault_attr <= 0` => no fault
+// faces.  Runs on the ParMesh at np==1 (where local == global element order);
+// the deterministic serial-mesh version is the np>1 half of this step.
+LtsMeshInputs BuildLtsMeshInputsFromMaterial(ParMesh &pmesh,
+                                             const MaterialField &material,
+                                             int fault_attr)
+{
+   LtsMeshInputs in;
+   const int neL = pmesh.GetNE();
+   in.per_elem_material = (material.mode != MaterialField::Mode::Constant);
+   in.dt_e.resize(static_cast<std::size_t>(neL));
+
+   for (int e = 0; e < neL; ++e)
+   {
+      const real_t vol = pmesh.GetElementVolume(e);
+      const Geometry::Type gtype = pmesh.GetElementBaseGeometry(e);
+      real_t h;
+      if (gtype == Geometry::TETRAHEDRON)
+      {
+         Array<int> vert; pmesh.GetElementVertices(e, vert);
+         Vector v0(pmesh.GetVertex(vert[0]), 3), v1(pmesh.GetVertex(vert[1]), 3);
+         Vector v2(pmesh.GetVertex(vert[2]), 3), v3(pmesh.GetVertex(vert[3]), 3);
+         auto tri_area = [](const Vector &a, const Vector &b,
+                            const Vector &c) -> real_t {
+            real_t e1[3] = {b(0)-a(0), b(1)-a(1), b(2)-a(2)};
+            real_t e2[3] = {c(0)-a(0), c(1)-a(1), c(2)-a(2)};
+            real_t cx = e1[1]*e2[2] - e1[2]*e2[1];
+            real_t cy = e1[2]*e2[0] - e1[0]*e2[2];
+            real_t cz = e1[0]*e2[1] - e1[1]*e2[0];
+            return 0.5 * std::sqrt(cx*cx + cy*cy + cz*cz);
+         };
+         const real_t A = tri_area(v0,v1,v2) + tri_area(v0,v2,v3)
+                        + tri_area(v0,v3,v1) + tri_area(v1,v2,v3);
+         h = (A > 0) ? 6.0 * vol / A : std::pow(vol, 1.0/3.0);
+      }
+      else
+      {
+         h = std::pow(vol, 1.0 / pmesh.Dimension());
+      }
+
+      double cp = 1.0;
+      if (in.per_elem_material)
+      {
+         ElementTransformation *T = pmesh.GetElementTransformation(e);
+         const IntegrationPoint &ip = Geometries.GetCenter(gtype);
+         real_t lam = 0, mu = 0, rho = 0;
+         material.EvalAt(e, *T, ip, lam, mu, rho);
+         MFEM_VERIFY(rho > 0.0 && (lam + 2.0*mu) > 0.0,
+                     "BuildLtsMeshInputsFromMaterial: non-physical material at "
+                     "element " << e << " (rho=" << rho << ", lambda+2mu="
+                     << (lam + 2.0*mu) << ").");
+         cp = std::sqrt((static_cast<double>(lam) + 2.0*mu) / rho);
+      }
+      in.dt_e[static_cast<std::size_t>(e)] = static_cast<double>(h) / cp;
+   }
+
+   // Fault faces from the mesh boundary (fault_attr); both elements of each
+   // 2-sided fault face form a fault pair (forced diff-0 by BuildLtsClustering).
+   std::vector<char> is_fault_face(pmesh.GetNumFaces(), 0);
+   if (fault_attr > 0)
+   {
+      for (int b = 0; b < pmesh.GetNBE(); ++b)
+      {
+         if (pmesh.GetBdrAttribute(b) != fault_attr) { continue; }
+         const int f = pmesh.GetBdrElementFaceIndex(b);
+         if (f < 0 || f >= pmesh.GetNumFaces()) { continue; }
+         int e1 = -1, e2 = -1;
+         pmesh.GetFaceElements(f, &e1, &e2);
+         if (e1 >= 0 && e2 >= 0)
+         { is_fault_face[f] = 1; in.fault_pairs.emplace_back(e1, e2); }
+      }
+   }
+   const int nfaces = pmesh.GetNumFaces();
+   in.faces.reserve(static_cast<std::size_t>(nfaces));
+   for (int f = 0; f < nfaces; ++f)
+   {
+      int e1 = -1, e2 = -1;
+      pmesh.GetFaceElements(f, &e1, &e2);
+      if (e1 < 0) { continue; }
+      mfem::seas::LtsFaceSpec fs;
+      fs.face_id  = f;
+      fs.elem1    = e1;
+      fs.elem2    = e2;
+      fs.is_fault = (is_fault_face[f] != 0);
+      in.faces.push_back(fs);
+   }
+   return in;
+}
+
 // Map TOML mixed_flux string -> WaveOperator enum.
 MixedFluxMode ParseMixedFlux(const std::string &s)
 {
@@ -1655,16 +1755,62 @@ int main(int argc, char *argv[])
                "spatial_dyn_driver: [numerics].fault_iterator=\"one-shot\" is "
                "not implemented (the spatial driver always sub-steps with "
                "O=ader_order); use fault_iterator=\"substep\".");
+
+   // -----------------------------------------------------------------
+   // (LTS Phase 4 Step 0 / Phase 3 P-006) Build the clustered-LTS layout BEFORE
+   // the wave operator, so the per-element cluster ids can be passed into the
+   // ctor to reorder the fault-face list into cluster-contiguous order (P-006).
+   // Sourced from (pmesh, material) directly — operator-independent — producing
+   // the SAME cluster ids the operator-sourced BuildLtsMeshInputs would (identical
+   // dt_e binning), and reused by the Phase-1 log + the LTS stepping loop below
+   // (single-sourced clustering).  Gated lts != "off" AND np==1 (deterministic
+   // serial-mesh clustering for np>1 is the remaining half of Step 0); for
+   // lts="off" NOTHING here runs => byte-identical to the pre-LTS GTS path.
+   // -----------------------------------------------------------------
+   std::vector<int> lts_cluster_id;    // per-element cluster ids; empty => no reorder
+   LtsClustering    lts_cl;            // valid iff lts_layout_ready
+   LtsLayout        lts_layout;
+   LtsGlobalMeta    lts_meta;
+   bool             lts_layout_ready = false;
+   if (cfg.numerics.LtsEnabled() && nprocs == 1)
+   {
+      LtsMeshInputs in =
+         BuildLtsMeshInputsFromMaterial(pmesh, material, bc.fault_attr);
+
+      LtsClusteringOptions opt;
+      opt.nc_cap         = cfg.numerics.lts_nc_cap;
+      opt.merge_loss_tol = cfg.numerics.lts_merge_loss_tol;
+      if (cfg.numerics.lts_wiggle == "scan") { opt.wiggle_scan = true; }
+      else if (cfg.numerics.lts_wiggle == "off")
+      { opt.wiggle_scan = false; opt.lambda_fixed = 1.0; }
+      else
+      {
+         opt.wiggle_scan  = false;
+         opt.lambda_fixed = std::strtod(cfg.numerics.lts_wiggle.c_str(), nullptr);
+      }
+
+      const Table &e2e = pmesh.ElementToElementTable();
+      lts_cl     = BuildLtsClustering(in.dt_e, e2e, in.fault_pairs, opt);
+      lts_layout = BuildLtsLayout(lts_cl.cluster, lts_cl.num_clusters, in.faces);
+      lts_meta   = ReduceGlobalMeta(lts_layout, nullptr);   // serial (np=1)
+      lts_cluster_id   = lts_cl.cluster;
+      lts_layout_ready = true;
+   }
+   const std::vector<int> *lts_cluster_ptr =
+      lts_layout_ready ? &lts_cluster_id : nullptr;
+
    std::unique_ptr<WaveOperator<ParMesh>> wave_ptr;
    if (cfg.numerics.interior_flux == spatial::InteriorFlux::Scalar)
    {
       // Scalar (homogeneous Godunov) path — byte-identical to pre-Phase-9.
+      // `lts_cluster_ptr` (P-006) is nullptr unless lts != "off", so lts="off"
+      // is byte-identical (no reorder).
       wave_ptr = std::make_unique<WaveOperator<ParMesh>>(
                     pmesh, cfg.mesh.order,
                     material.lambda_const,
                     material.mu_const,
                     material.rho_const,
-                    bc);
+                    bc, lts_cluster_ptr);
    }
    else  // spatial::InteriorFlux::Matrix
    {
@@ -1692,7 +1838,7 @@ int main(int argc, char *argv[])
       // ApplyElementJacobian_/ComputeMaxDt/SetMixedFluxMode) resolve virtually
       // to the per-element bimaterial overrides.
       wave_ptr = std::make_unique<BimaterialWaveOperator<ParMesh>>(
-                    pmesh, cfg.mesh.order, material, bc);
+                    pmesh, cfg.mesh.order, material, bc, lts_cluster_ptr);
       // (Cross-rank Phase 5) DEPRECATED: [material].seam_continuous now has NO
       // effect — the cross-rank exchange reads the TRUE peer material, so the
       // central build no longer gates on this affirmation (the abort it guarded is
@@ -1726,42 +1872,26 @@ int main(int argc, char *argv[])
    {
       if (nprocs == 1)
       {
-         LtsMeshInputs in = BuildLtsMeshInputs(wave, pmesh);
-
-         LtsClusteringOptions opt;
-         opt.nc_cap         = cfg.numerics.lts_nc_cap;
-         opt.merge_loss_tol = cfg.numerics.lts_merge_loss_tol;
-         if (cfg.numerics.lts_wiggle == "scan")
-         {
-            opt.wiggle_scan = true;
-         }
-         else if (cfg.numerics.lts_wiggle == "off")
-         {
-            opt.wiggle_scan  = false;
-            opt.lambda_fixed = 1.0;
-         }
-         else   // validated numeric lambda in (0.5, 1]
-         {
-            opt.wiggle_scan  = false;
-            opt.lambda_fixed =
-               std::strtod(cfg.numerics.lts_wiggle.c_str(), nullptr);
-         }
-
-         const Table &e2e = pmesh.ElementToElementTable();
-         const LtsClustering cl =
-            BuildLtsClustering(in.dt_e, e2e, in.fault_pairs, opt);
-         const LtsLayout layout =
-            BuildLtsLayout(cl.cluster, cl.num_clusters, in.faces);
+         // Reuse the pre-operator clustering (single-sourced with the P-006
+         // fault-face reorder built into the operator above).
+         MFEM_VERIFY(lts_layout_ready,
+                     "spatial_dyn: LTS enabled at np=1 but the pre-operator "
+                     "clustering was not built (internal error).");
+         const LtsClustering &cl     = lts_cl;
+         const LtsLayout      &layout = lts_layout;
 
          if (rank == 0)
          {
             const auto hist = cl.cells_per_cluster();
             std::cout << "[lts] ENABLED (mode=" << cfg.numerics.lts
-                      << "; Phase 1 still steps GTS): Nc = " << cl.num_clusters
+                      << "): Nc = " << cl.num_clusters
                       << ", lambda = " << cl.lambda
                       << ", predicted harmonic speedup "
-                      << HarmonicUpdateSpeedup(cl) << "x\n"
-                      << "[lts]   histogram (cells per cluster c=0..):";
+                      << HarmonicUpdateSpeedup(cl) << "x"
+                      << (wave.FaultFacesReordered()
+                          ? "; fault-face reorder ACTIVE (cluster-contiguous, "
+                            "P-006)" : "")
+                      << "\n[lts]   histogram (cells per cluster c=0..):";
             for (long long h : hist) { std::cout << ' ' << h; }
             std::cout << "\n[lts]   layout: " << layout.provider_elems.size()
                       << " provider elems, " << layout.consumer_owner_elems.size()
@@ -3589,16 +3719,45 @@ int main(int argc, char *argv[])
    // it identically.  Only meaningful when lts is enabled (fault-free bulk).
    auto compute_lts_layout_hash = [&]() -> std::uint64_t
    {
-      LtsMeshInputs in = BuildLtsMeshInputs(wave, pmesh);
-      LtsClusteringOptions o;
-      o.nc_cap = cfg.numerics.lts_nc_cap;
-      o.merge_loss_tol = cfg.numerics.lts_merge_loss_tol;
-      if (cfg.numerics.lts_wiggle == "scan") { o.wiggle_scan = true; }
-      else if (cfg.numerics.lts_wiggle == "off") { o.wiggle_scan = false; o.lambda_fixed = 1.0; }
-      else { o.wiggle_scan = false; o.lambda_fixed = std::strtod(cfg.numerics.lts_wiggle.c_str(), nullptr); }
-      const LtsClustering c = BuildLtsClustering(in.dt_e, pmesh.ElementToElementTable(),
-                                                 in.fault_pairs, o);
-      return LtsLayoutHash(o.rate, c.num_clusters, c.cluster, c.lambda * dt_cfl, c.lambda);
+      // Reuse the pre-operator clustering (single-sourced with the reorder), so
+      // the restart hash matches the write-time hash exactly.
+      MFEM_VERIFY(lts_layout_ready,
+                  "spatial_dyn: LTS layout hash requested but the pre-operator "
+                  "clustering was not built (internal error).");
+      return LtsLayoutHash(/*rate=*/2, lts_cl.num_clusters, lts_cl.cluster,
+                           lts_cl.lambda * dt_cfl, lts_cl.lambda);
+   };
+
+   // (P-006) Per-QP canonical permutation of the (reordered) fault stack, used
+   // to serialize checkpoint dof_data in CANONICAL (layout-independent) order.
+   // Empty (=> nullptr) when the reorder is off, so the write/read are unchanged.
+   const std::vector<int> qp_canon_perm =
+      wave.FaultFacesReordered() ? wave.GetFaultQpCanonicalPerm()
+                                 : std::vector<int>{};
+   const std::vector<int> *qp_canon_ptr =
+      qp_canon_perm.empty() ? nullptr : &qp_canon_perm;
+
+   // (P-006 canary) A GTS-path checkpoint under the fault-face reorder is written
+   // as V2 (layout hash + canonical perm) so the on-disk dof_data stays
+   // layout-independent and LtsCheckpointCheck refuses a cross-mode (lts on<->off)
+   // restart; without the reorder it is the usual V1 write (byte-identical).
+   auto write_gts_checkpoint =
+      [&](const std::string &prefix, real_t tt, real_t dtt, int stp)
+   {
+      if (wave.FaultFacesReordered())
+      {
+         mfem::seas::internal::WriteTpv104CheckpointV2Impl(
+            prefix, tt, dtt, stp, /*lts_mode=*/1, compute_lts_layout_hash(),
+            Q, dof_data, rank, nprocs, "spatial_dyn", qp_canon_ptr);
+      }
+      else
+      {
+         WriteTpv104Checkpoint(prefix, tt, dtt, stp, Q, dof_data, rank, nprocs
+#ifdef MFEM_USE_MPI
+                               , comm
+#endif
+                               , "spatial_dyn");
+      }
    };
 
    if (!restart_prefix.empty())
@@ -3614,7 +3773,8 @@ int main(int argc, char *argv[])
          int lts_mode = 0; std::uint64_t stored_hash = 0;
          const bool ok = mfem::seas::internal::ReadTpv104CheckpointV2Impl(
             restart_prefix, t, dt_now, step0, lts_mode, stored_hash, Q,
-            NUM_STATE * ndof_total, dof_data, rank, nprocs, &driver_tag);
+            NUM_STATE * ndof_total, dof_data, rank, nprocs, &driver_tag,
+            qp_canon_ptr);
          MFEM_VERIFY(ok, "spatial_dyn: V2 checkpoint read failed for rank " << rank);
          const std::uint64_t computed_hash = compute_lts_layout_hash();
          const LtsCheckpointDecision decision =
@@ -3627,6 +3787,15 @@ int main(int argc, char *argv[])
       }
       else
       {
+      // (P-006) A V1 checkpoint holds CANONICAL (non-reordered) dof_data; it
+      // cannot be read directly into a run whose fault stack was reordered
+      // (lts != "off").  Refuse loudly rather than silently mis-scattering.
+      // Restart the canary from its own V2 checkpoint, or start it fresh.
+      MFEM_VERIFY(!qp_canon_ptr,
+                  "spatial_dyn: refusing restart — a V1 (non-reordered) "
+                  "checkpoint cannot resume a run with the fault-face reorder "
+                  "active (lts != \"off\"); its dof_data is in canonical order. "
+                  "Restart from a V2 checkpoint or start the run fresh.");
       const bool ok = ReadTpv104Checkpoint(
          restart_prefix, t, dt_now, step0, Q, NUM_STATE * ndof_total,
          dof_data, rank, nprocs
@@ -4020,17 +4189,29 @@ int main(int argc, char *argv[])
    //   stepping engine (predictor/corrector/multi-rate coupling) is unit-
    //   validated (test_lts_predictor / test_lts_layout); this is its wiring.
    // -----------------------------------------------------------------
-   const bool lts_stepping = cfg.numerics.LtsEnabled();
+   // (Phase 3 canary) A fault run under lts != "off" REORDERS the fault-face
+   // list into cluster-contiguous order at operator construction (P-006, done
+   // above via lts_cluster_ptr) but STEPS GTS — the fault-half LTS interleave is
+   // Phase 3.  So the LTS multi-cluster sync loop runs ONLY for the fault-free
+   // bulk problem (Phase 2); a fault + lts run falls through to the GTS loop
+   // below with the reorder ACTIVE (the still-GTS reorder canary, P-006 gate).
+   const bool lts_stepping =
+      cfg.numerics.LtsEnabled() && num_fault_total == 0;
+   if (cfg.numerics.LtsEnabled() && num_fault_total > 0 && rank == 0)
+   {
+      std::cout << "[lts] fault + lts=\"" << cfg.numerics.lts
+                << "\": fault-face reorder "
+                << (wave.FaultFacesReordered() ? "ACTIVE" : "inactive")
+                << " (cluster-contiguous, P-006) but stepping GTS — the "
+                   "fault-half LTS interleave is Phase 3 (still-GTS reorder "
+                   "canary).\n";
+   }
    bool lts_v2_checkpoint_written = false;
    if (lts_stepping)
    {
       MFEM_VERIFY(nprocs == 1,
                   "spatial_dyn: lts=\"rate2\" stepping requires np=1 (Phase-1b "
                   "serial clustering for np>1 determinism not yet landed).");
-      MFEM_VERIFY(bc.fault_attr == 0 || num_fault_total == 0,
-                  "spatial_dyn: lts=\"rate2\" stepping is FAULT-FREE (Phase 2, "
-                  "bulk only); this config carries a fault, and fault-LTS is "
-                  "Phase 3.  Use lts=\"off\" for fault runs.");
       // REVIEW OUT-2: the per-sync volume writer keys off the adaptive
       // slip-rate schedule, but a fault-free bulk run has no slip rate, so it
       // would pin the slowest (interseismic) regime and under-sample.  Warn so
@@ -4045,20 +4226,17 @@ int main(int argc, char *argv[])
                       "an adaptive (slip-rate) schedule under-samples here.\n";
       }
 
-      LtsMeshInputs in = BuildLtsMeshInputs(wave, pmesh);
-      LtsClusteringOptions opt;
-      opt.nc_cap         = cfg.numerics.lts_nc_cap;
-      opt.merge_loss_tol = cfg.numerics.lts_merge_loss_tol;
-      if (cfg.numerics.lts_wiggle == "scan") { opt.wiggle_scan = true; }
-      else if (cfg.numerics.lts_wiggle == "off")
-      { opt.wiggle_scan = false; opt.lambda_fixed = 1.0; }
-      else
-      { opt.wiggle_scan = false; opt.lambda_fixed = std::strtod(cfg.numerics.lts_wiggle.c_str(), nullptr); }
-
-      const Table &e2e = pmesh.ElementToElementTable();
-      const LtsClustering cl = BuildLtsClustering(in.dt_e, e2e, in.fault_pairs, opt);
-      const LtsLayout layout = BuildLtsLayout(cl.cluster, cl.num_clusters, in.faces);
-      const LtsGlobalMeta meta = ReduceGlobalMeta(layout, nullptr);   // serial (np=1)
+      // Reuse the pre-operator clustering (single-sourced with the fault-face
+      // reorder above; the pre-operator (pmesh, material) inputs give the SAME
+      // cluster ids BuildLtsMeshInputs(wave, pmesh) would — identical dt_e
+      // binning), so the reorder and the checkpoint layout_hash cannot disagree.
+      MFEM_VERIFY(lts_layout_ready,
+                  "spatial_dyn: LTS stepping requested but the pre-operator "
+                  "clustering was not built (internal error).");
+      const LtsClustering &cl     = lts_cl;
+      const LtsLayout      &layout = lts_layout;
+      const LtsGlobalMeta  &meta   = lts_meta;
+      LtsClusteringOptions opt;   // default rate=2 for the layout hash below
 
       // Fine-cluster dt in seconds = lambda * dt_cfl (dt_cfl is the min stable
       // dt over the mesh — the fine cluster's dt; cluster c steps at dt_base*2^c,
@@ -4474,12 +4652,7 @@ int main(int argc, char *argv[])
       {
          const std::string prefix = cfg.output.output_dir + "/"
                                     + cfg.output.restart_prefix;
-         WriteTpv104Checkpoint(prefix, t, dt_now, step + 1, Q, dof_data,
-                               rank, nprocs
-#ifdef MFEM_USE_MPI
-                               , comm
-#endif
-                               , "spatial_dyn");
+         write_gts_checkpoint(prefix, t, dt_now, step + 1);
       }
 
       // R-008: also print on the step that exhausts `tfinal` so the
@@ -4535,13 +4708,7 @@ int main(int argc, char *argv[])
                                  + cfg.output.restart_prefix;
       // R-603 round-6: use last_completed_step instead of nsteps so the
       // checkpoint reports the actual step the loop reached.
-      WriteTpv104Checkpoint(prefix, t, dt_now, last_completed_step,
-                            Q, dof_data,
-                            rank, nprocs
-#ifdef MFEM_USE_MPI
-                            , comm
-#endif
-                            , "spatial_dyn");
+      write_gts_checkpoint(prefix, t, dt_now, last_completed_step);
    }
    else if (already_checkpointed_final && rank == 0)
    {
