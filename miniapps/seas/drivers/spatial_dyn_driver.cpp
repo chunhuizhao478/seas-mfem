@@ -4040,7 +4040,12 @@ int main(int argc, char *argv[])
       if (rank == 0)
       {
          std::cout << "[lts] done: " << sync << " sync intervals, t = " << t
-                   << " s (fault-free bulk; outputs/checkpoint below)\n";
+                   << " s (fault-free bulk).\n"
+                   << "[lts] NOTE (REVIEW DL-2): per-sync volume/station output is "
+                      "NOT yet emitted on the LTS path (only the pre-loop t=0 "
+                      "frame); per-sync output cadence (ceil(dt_out/T_s)) + LTS "
+                      "checkpoint (V2) are the remaining driver-integration items "
+                      "(land with the Phase-3 fault corrector).\n";
       }
    }
 
@@ -4421,6 +4426,22 @@ int main(int argc, char *argv[])
    // R-011: skip when the last in-loop checkpoint already covered
    // `last_completed_step` — the two writes would be byte-identical
    // and waste Lustre metadata ops on production.
+   // (LTS Phase 2, REVIEW DL-1) On the LTS path `last_completed_step` is a
+   // sync-interval count, NOT a GTS step count, so it must not flow into the
+   // step-based checkpoint modulus below.  LTS writes NO checkpoints yet: the
+   // V2 (layout-hash) checkpoint write is Phase 3, and a V1 checkpoint under LTS
+   // would be (correctly) refused on restart.  Skip the final write and say so.
+   if (lts_stepping)
+   {
+      if (rank == 0 && cfg.output.checkpoint_every_steps > 0)
+      {
+         std::cout << "[checkpoint] lts=\"" << cfg.numerics.lts
+                   << "\": checkpointing disabled (V2 layout-hash checkpoint "
+                      "write is Phase 3); no restart file written.\n";
+      }
+   }
+   else
+   {
    const bool already_checkpointed_final =
       (cfg.output.checkpoint_every_steps > 0)
       && (last_completed_step > step0)
@@ -4445,6 +4466,7 @@ int main(int argc, char *argv[])
                 << "step " << last_completed_step
                 << "; skipping redundant final write.\n";
    }
+   }   // end else (!lts_stepping) — REVIEW DL-1
 
    if (rank == 0)
    {

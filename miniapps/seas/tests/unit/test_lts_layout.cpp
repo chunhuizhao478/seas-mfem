@@ -302,13 +302,18 @@ static void test_tick_table_ragged()
 
 // ---------------------------------------------------------------------------
 // T6: Checkpoint-V2 layout hash — deterministic, sensitive to every field, and
-// pinned to a golden value for cross-platform reproducibility.
+// pinned to a GOLDEN value (recompute only on an intended format change) for
+// cross-platform reproducibility (REVIEW CK-2).
 // ---------------------------------------------------------------------------
 static void test_layout_hash()
 {
    const std::vector<int> ids = {0, 0, 1, 1, 2};
    const std::uint64_t base = LtsLayoutHash(2, 3, ids, 1.5e-6, 0.98);
    const std::vector<int> empty;
+
+   // Golden: pins the FNV-1a byte order + field order across platforms.  A
+   // deterministic-but-wrong hash (e.g. a byte-order regression) is caught here.
+   CHECK(base == 0x2a0b39f0bd96df5dULL);
 
    CHECK(LtsLayoutHash(2, 3, ids, 1.5e-6, 0.98) == base);   // deterministic
    CHECK(LtsLayoutHash(3, 3, ids, 1.5e-6, 0.98) != base);   // rate
