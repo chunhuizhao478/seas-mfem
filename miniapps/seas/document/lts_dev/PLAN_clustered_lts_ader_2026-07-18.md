@@ -758,19 +758,27 @@ the Normative Scheduling and Buffer sections.
 >   abort otherwise (the production driver interleaves fault sub-stepping with the
 >   bulk corrector, so fault-LTS is Phase 3; np>1 needs the Phase-1b serial
 >   clustering).  `dt_base = λ·dt_cfl`.  Compiles + links.
-> - **Checkpoint V2:** `LtsLayoutHash` (FNV-1a, golden-pinned) + `LtsCheckpointCheck`
->   (V1+lts / V2+off / hash-mismatch → refuse), wired into the driver restart (an
->   LTS run refuses a V1/GTS checkpoint).
-> - Reviewed a THIRD time (driver/checkpoint): fixed DL-1 (sync-count vs step-count
->   in the final-checkpoint gate → skip V1 checkpoint under LTS), DL-2 (honest
->   rank-0 note that per-sync output is not yet emitted), CK-2 (golden pin).
+> - **Checkpoint V2 (write + read + refusal):** `io/tpv104_checkpoint.hpp`
+>   `WriteTpv104CheckpointV2Impl` / `ReadTpv104CheckpointV2Impl` /
+>   `PeekTpv104CheckpointVersion` (magic + `lts_mode` + `LtsLayoutHash`, FNV-1a,
+>   golden-pinned).  The LTS loop writes V2 on the sync cadence + a final one;
+>   restart peeks the version and branches — V2 → read + `LtsCheckpointCheck`
+>   against the recomputed hash (refuse on mismatch / lts=off); V1 → refused under
+>   lts.  Round-trip bit-exact (`test_lts_predictor` 28/28).
+> - **Per-sync bulk output:** each sync the LTS loop runs a NaN tripwire
+>   (`Q.CheckFinite`) + the volume/free-surface ParaView writer (fault/station
+>   output is a fault feature → Phase 3; a fault-free bulk run has none).
+> - Reviewed a THIRD and FOURTH time (driver / checkpoint+output): fixed DL-1
+>   (sync-vs-step checkpoint), DL-2 (per-sync output now emitted), CK-2 (golden
+>   pin), CK-1 (V2 trailer fail-loud guard), OUT-2 (time-based volume cadence note).
 >
-> Phase-2 CAVEAT (honest scope): the LTS **run path cannot execute the production
-> SAFS meshes yet** — they carry faults, and fault-LTS is Phase 3.  The remaining
-> Phase-2/3-boundary items (per-sync output cadence, the Checkpoint-V2 *write*,
-> and the fault corrector that lets LTS run production) land in Phase 3.  The
-> complete bulk stepping engine + its driver wiring are done and validated
-> (single-cluster == GTS bit/machine-exact; multi-rate consistent + fine-refining).
+> Phase-2 CAVEAT (honest scope, per the plan's own Phase-2 title "bulk only …
+> fault-free problem"): the LTS **run path cannot execute the production SAFS
+> meshes** — they carry faults, and the **fault corrector is Phase 3** ("Phase 3:
+> Fault (dynamic rupture) under LTS").  The complete fault-free bulk engine + its
+> driver wiring (stepping, per-sync output, Checkpoint V2 write/read) are done and
+> validated (single-cluster == GTS bit/machine-exact; multi-rate consistent +
+> fine-refining; gated so lts=off is byte-identical).
 
 > **Unblocked by the resequencing.** Phase 2 is bulk-only and np=1, so it needs
 > NONE of the deferred trio — it consumes exactly the layout Phase 1 shipped. One
