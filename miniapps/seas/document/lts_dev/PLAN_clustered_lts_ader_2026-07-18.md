@@ -947,10 +947,30 @@ each other.
 are counted and gated globally, and parity with single-rank LTS is the gate —
 first with the simple exchange (4a), then the EDGE payloads (4b).
 
-### Step 0 — Pre-ParMesh clustering pipeline (MOVED from Phase 1)  — ◑ PART-DONE (2026-07-19)
+### Step 0 — Pre-ParMesh clustering pipeline (MOVED from Phase 1)  — ✅ WIRED (2026-07-19); np>1 gates Frontera
 
-**Status (2026-07-19, local branch, unpushed).** Two of the self-contained,
-locally-validatable pieces are done:
+**Status (2026-07-19, local branch, unpushed).** All three Step-0 items are
+implemented; np=1 is locally validated + byte-exact-off, the np>1 parity/balance
+gates are Frontera-only.
+- **Serial-mesh clustering + material-before-ParMesh — DONE.** Before the ParMesh
+  ctor (gated `lts != "off"`), rank 0 builds the material on the SERIAL mesh (all
+  spatial-driver modes are coordinate-evaluable; the sidecar uses the existing
+  `Mesh&` `LoadSpatialVelocityBundle` overload), runs `BuildLtsClustering` on it
+  (connected ⇒ contiguous, rank-count-independent ids), and MPI_Bcasts the ids +
+  Nc/λ/dt_base.  After the ParMesh the serial ids are mapped to LOCAL element
+  order (MFEM assigns local elems in ascending serial order among `part[e]==rank`)
+  and passed to the operator ctor + layout; the checkpoint layout hash uses the
+  SERIAL ids (rank-independent).  np=1 == the prior per-pmesh clustering.
+- **LTS-aware METIS partition (P-009) — DONE + wired.** rank 0 builds
+  `BuildLtsAwarePartition` (companion `dynamic/lts_partition.{hpp,cpp}`,
+  `test_lts_partition` 19/0) from the serial ids + serial graph, broadcasts it,
+  and injects it as `part_data` at the ParMesh ctor (np>1; overrides
+  fault-locality, which its fault-lock already enforces).
+- **Reorder activation (Phase-3 Step-0 payoff) — DONE** (rides on the above).
+
+The old two-of-three status below is superseded; kept for history.
+
+**(superseded) Two of the self-contained, locally-validatable pieces are done:**
 - **Reorder activation (np=1), the Phase-3 Step-0 payoff — DONE.** The driver
   now clusters from `(pmesh, material)` BEFORE the operator
   (`BuildLtsMeshInputsFromMaterial`) and passes the ids into the ctor, so the

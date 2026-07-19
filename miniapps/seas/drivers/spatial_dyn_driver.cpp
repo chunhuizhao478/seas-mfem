@@ -1571,11 +1571,29 @@ int main(int argc, char *argv[])
    bool             serial_lts_ready = false;
    if (cfg.numerics.LtsEnabled())
    {
+      // REVIEW F-1b: the serial->local element map (below the ParMesh) relies on
+      // MFEM assigning local elements in ascending SERIAL order — a CONFORMING-
+      // mesh guarantee; a nonconforming/AMR serial mesh would silently mis-map.
+      MFEM_VERIFY(!smesh.Nonconforming(),
+                  "spatial_dyn: LTS serial clustering requires a conforming serial "
+                  "mesh (the nonconforming serial->local element map is not "
+                  "handled).");
+      // REVIEW F-1 (CRITICAL): use the EFFECTIVE fault attribute.  SAFS decks omit
+      // the [boundary] block => cfg.boundary.fault_attr = -1, and the driver falls
+      // back to 101 (into bc.fault_attr) only LATER.  Passing the raw -1 here empties
+      // in.fault_pairs => BuildLtsClustering never forces a fault face's two elements
+      // into one cluster (D-1) AND the partition fault-lock is a no-op (D-2) — both
+      // silently broken on every SAFS mesh (invisible to TPV tests, which set fault=3).
+      const int fault_attr_eff =
+         (cfg.boundary.fault_attr > 0) ? cfg.boundary.fault_attr : 101;
+
       serial_cluster.assign(static_cast<std::size_t>(serial_ne), 0);
       int nc = 1; double lam = 1.0, dtb = 0.0, modeled = 0.0;
       if (nprocs > 1) { lts_part_vec.assign(static_cast<std::size_t>(serial_ne), 0); }
       if (rank == 0)
       {
+       try
+       {
          // Serial material on smesh (wrappers local to this scope; smat borrows
          // them and is consumed by BuildLtsMeshInputsFromMaterial below).
          std::unique_ptr<DepthProfile1DMaterial>          s_depth;
@@ -1609,7 +1627,7 @@ int main(int argc, char *argv[])
          }
 
          LtsMeshInputs in =
-            BuildLtsMeshInputsFromMaterial(smesh, smat, cfg.boundary.fault_attr);
+            BuildLtsMeshInputsFromMaterial(smesh, smat, fault_attr_eff);
          const LtsClusteringOptions opt = MakeLtsClusteringOptions(
             cfg.numerics.lts_nc_cap, cfg.numerics.lts_merge_loss_tol,
             cfg.numerics.lts_wiggle);
@@ -1632,11 +1650,30 @@ int main(int argc, char *argv[])
             }
             catch (const std::exception &ex)
             {
+               // REVIEW F-4: fall back to a RECONSTRUCTABLE explicit partition
+               // (fault-locality = MFEM GeneratePartitioning + fault-lock), NOT
+               // MFEM's internal default — the serial->local map below can only
+               // reproduce an explicit part_data, and this preserves D-2.
                std::cerr << "[lts] LTS-aware partition failed (" << ex.what()
-                         << "); falling back to MFEM's default partition.\n";
-               lts_part_vec.clear();
+                         << "); falling back to the fault-locality partition.\n";
+               Array<int> ff, fbp;
+               seas::FindFaultFaceIndices(smesh, fault_attr_eff, ff);
+               seas::BuildFaultLocalityPartitioning(smesh, ff, nprocs, fbp);
+               MFEM_VERIFY(fbp.Size() == serial_ne,
+                           "spatial_dyn: fallback partition size mismatch.");
+               lts_part_vec.assign(fbp.GetData(), fbp.GetData() + serial_ne);
             }
          }
+       }
+       catch (const std::exception &ex)
+       {
+          // REVIEW F-2: a throw here (e.g. bad_alloc from the ~1.3 GB sidecar)
+          // would otherwise terminate rank 0 while peers wait at MPI_Bcast below
+          // (hang).  Abort the whole job loudly instead.
+          std::cerr << "[lts] serial clustering failed on rank 0: " << ex.what()
+                    << "\n";
+          MPI_Abort(comm, 1);
+       }
       }
 #ifdef MFEM_USE_MPI
       if (nprocs > 1)
@@ -1646,22 +1683,18 @@ int main(int argc, char *argv[])
          double d3[3] = {lam, dtb, modeled};
          MPI_Bcast(d3, 3, MPI_DOUBLE, 0, comm);
          lam = d3[0]; dtb = d3[1]; modeled = d3[2];
-         int have_part = (rank == 0)
-            ? (static_cast<int>(lts_part_vec.size()) == serial_ne) : 0;
-         MPI_Bcast(&have_part, 1, MPI_INT, 0, comm);
-         if (have_part)
+         // The LTS (or fault-locality-fallback) partition is ALWAYS filled at
+         // np>1, so it is always injected as part_data (the serial->local map
+         // below requires an explicit partition).
+         if (static_cast<int>(lts_part_vec.size()) != serial_ne)
+         { lts_part_vec.assign(static_cast<std::size_t>(serial_ne), 0); }
+         MPI_Bcast(lts_part_vec.data(), serial_ne, MPI_INT, 0, comm);
+         part_data = lts_part_vec.data();   // override fault-locality
+         if (rank == 0)
          {
-            if (static_cast<int>(lts_part_vec.size()) != serial_ne)
-            { lts_part_vec.assign(static_cast<std::size_t>(serial_ne), 0); }
-            MPI_Bcast(lts_part_vec.data(), serial_ne, MPI_INT, 0, comm);
-            part_data = lts_part_vec.data();   // override fault-locality
-            if (rank == 0)
-            {
-               std::cout << "[lts] LTS-aware partition injected (Nc=" << nc
-                         << ", np=" << nprocs << ")\n";
-            }
+            std::cout << "[lts] LTS-aware partition injected (Nc=" << nc
+                      << ", np=" << nprocs << ")\n";
          }
-         else { lts_part_vec.clear(); }        // fell back -> MFEM default below
       }
 #endif
       serial_cl.cluster = serial_cluster;
@@ -2041,13 +2074,14 @@ int main(int argc, char *argv[])
    // -----------------------------------------------------------------
    if (cfg.numerics.LtsEnabled())
    {
-      if (nprocs == 1)
+      if (lts_layout_ready)
       {
-         // Reuse the pre-operator clustering (single-sourced with the P-006
-         // fault-face reorder built into the operator above).
-         MFEM_VERIFY(lts_layout_ready,
-                     "spatial_dyn: LTS enabled at np=1 but the pre-operator "
-                     "clustering was not built (internal error).");
+         // Serial-mesh clustering built the layout (single-sourced with the P-006
+         // fault-face reorder in the operator).  REVIEW F-6: at np>1 this is NO
+         // LONGER "byte-identical to lts=off" — the reorder + LTS partition are
+         // ACTIVE; only the multi-cluster stepping stays np=1 (the MPI stepper is
+         // Phase 4, the fault-half interleave Phase 3), so np>1 currently steps
+         // GTS but with the Step-0 machinery active (np>1 parity is Frontera).
          const LtsClustering &cl     = lts_cl;
          const LtsLayout      &layout = lts_layout;
 
@@ -2055,16 +2089,20 @@ int main(int argc, char *argv[])
          {
             const auto hist = cl.cells_per_cluster();
             std::cout << "[lts] ENABLED (mode=" << cfg.numerics.lts
-                      << "): Nc = " << cl.num_clusters
+                      << ", np=" << nprocs << "): Nc = " << cl.num_clusters
                       << ", lambda = " << cl.lambda
                       << ", predicted harmonic speedup "
                       << HarmonicUpdateSpeedup(cl) << "x"
                       << (wave.FaultFacesReordered()
                           ? "; fault-face reorder ACTIVE (cluster-contiguous, "
                             "P-006)" : "")
+                      << (nprocs > 1
+                          ? "; LTS partition ACTIVE (Step 0; stepping GTS — MPI "
+                            "stepping is Phase 4, np>1 parity Frontera-validated)"
+                          : "")
                       << "\n[lts]   histogram (cells per cluster c=0..):";
             for (long long h : hist) { std::cout << ' ' << h; }
-            std::cout << "\n[lts]   layout: " << layout.provider_elems.size()
+            std::cout << "\n[lts]   layout (rank 0): " << layout.provider_elems.size()
                       << " provider elems, " << layout.consumer_owner_elems.size()
                       << " consumer-owner elems, " << layout.num_owned_faces()
                       << " owned faces, "
@@ -2075,9 +2113,7 @@ int main(int argc, char *argv[])
       else if (rank == 0)
       {
          std::cout << "[lts] ENABLED (mode=" << cfg.numerics.lts
-                   << ") but np=" << nprocs << " > 1: layout build DEFERRED to "
-                      "the Phase-1b serial-mesh clustering (needed for "
-                      "rank-count-independent cluster ids); running GTS "
+                   << ") but the serial clustering was not built; running GTS "
                       "(byte-identical to lts=off).\n";
       }
    }
