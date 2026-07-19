@@ -364,6 +364,12 @@ inline bool ReadTpv104CheckpointV2Impl(const std::string &prefix,
          MFEM_VERIFY(mt == "DRIVER_TAG_V1",
                      "V2 checkpoint trailer parse: got '" << mt << "' in " << filename);
          std::string tag; in >> tag;
+         // REVIEW CK-1: mirror the V1 reader's fail-loud guard so a truncated /
+         // empty-tag trailer aborts rather than silently yielding driver_tag=""
+         // (which would bypass the driver's provenance refusal).
+         MFEM_VERIFY(!in.fail() && !tag.empty(),
+                     "V2 checkpoint DRIVER_TAG_V1 trailer malformed in " << filename
+                     << " (expected a non-empty tag after DRIVER_TAG_V1).");
          if (driver_tag) { *driver_tag = tag; }
       }
    }

@@ -4018,6 +4018,19 @@ int main(int argc, char *argv[])
                   "spatial_dyn: lts=\"rate2\" stepping is FAULT-FREE (Phase 2, "
                   "bulk only); this config carries a fault, and fault-LTS is "
                   "Phase 3.  Use lts=\"off\" for fault runs.");
+      // REVIEW OUT-2: the per-sync volume writer keys off the adaptive
+      // slip-rate schedule, but a fault-free bulk run has no slip rate, so it
+      // would pin the slowest (interseismic) regime and under-sample.  Warn so
+      // the user sets a fixed time-based volume cadence (--paraview-volume-pv-dt
+      // / paraview_fault_dt); free-surface + fixed-dt bulk-stress output are
+      // unaffected (own schedules).
+      if (rank == 0 && pv_out)
+      {
+         std::cout << "[lts] NOTE: per-sync volume ParaView uses a TIME-based "
+                      "cadence (no slip-rate under fault-free bulk).  Set a fixed "
+                      "volume dt (paraview_fault_dt / --paraview-volume-pv-dt); "
+                      "an adaptive (slip-rate) schedule under-samples here.\n";
+      }
 
       LtsMeshInputs in = BuildLtsMeshInputs(wave, pmesh);
       LtsClusteringOptions opt;
