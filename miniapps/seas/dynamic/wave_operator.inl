@@ -2126,6 +2126,10 @@ void WaveOperator<MeshType>::AdvanceADERClusterBulk(
    for (int c = 0; c < NUM_STATE; c++) { bulk_bg_scaled[c] = dt_step * bulk_bg_[c]; }
 
    std::vector<real_t> I_coarse_sub(block);   // reused for consumer faces
+   // REVIEW C-1: `fill` counts fine SUB-STEPS, not faces.  This whole call is ONE
+   // fine sub-correct, so each coarse buffer it touches gets fill += 1 — even
+   // when the coarse element borders several of this cluster's consumer faces.
+   std::set<int> touched_coarse_slots;
 
    for (int fi = 0; fi < n_faces; ++fi)
    {
@@ -2290,6 +2294,7 @@ void WaveOperator<MeshType>::AdvanceADERClusterBulk(
             // Fine side -> rhs; coarse side -> its accumulate buffer.
             const int cslot = buffer_slot_of_elem[coarse_elem];
             MFEM_VERIFY(cslot >= 0, "AdvanceADERClusterBulk: coarse neighbour has no buffer slot");
+            touched_coarse_slots.insert(cslot);   // one fill++ per slot after the sweep
             real_t *cbuf = buffers->Buf(cslot);
             if (e2 == coarse_elem)   // e1 fine, e2 coarse
             {
@@ -2319,8 +2324,10 @@ void WaveOperator<MeshType>::AdvanceADERClusterBulk(
             }
          }
       }
-      if (is_consumer) { buffers->fill[buffer_slot_of_elem[coarse_elem]]++; }
    }
+   // One fine sub-step deposited into each coarse buffer this call touched
+   // (fill == number of fine sub-steps of the closing coarse step, invariant i).
+   for (int s : touched_coarse_slots) { buffers->fill[s]++; }
 
    // 3. Consume this cluster's accumulate buffers (coarse elements) into rhs.
    if (buffers && buffer_slot_of_elem)
