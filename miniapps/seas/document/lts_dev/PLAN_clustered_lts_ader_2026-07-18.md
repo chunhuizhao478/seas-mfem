@@ -717,22 +717,37 @@ Phase-3 step 0 and the partition/serial-clustering (~few days) is now Phase 4.**
 fault-free problem, with cluster-boundary coupling by Taylor-integration, per
 the Normative Scheduling and Buffer sections.
 
-> **Progress (2026-07-18).** DONE + locally byte-validated: `lts_time_basis.hpp`
-> (`IntegrateTaylor`, A.4 — test B.3 11/11); `lts_stepper.{hpp,cpp}` storage
-> (`LtsDkStore`, `LtsAccumulateBuffers`) + the pure tick loop `RunSyncInterval`
-> (A.6 data + Normative Scheduling — test B.4 31/31); and the **per-cluster ADER
-> predictor** `ComputeADERSubStepStatesAndIntegralCluster` (A.5) with
-> element-restricted CK kernels (`ApplySpatialDerivativeElems_`,
-> `ApplyElementJacobianElems_` + its BimaterialWaveOperator override) and D(k)
-> retention — `test_lts_predictor` 12/12, **single-cluster == GTS bit-for-bit on
-> BOTH the scalar and the heterogeneous bimaterial operator**. Reviewed
-> (adversarial, 11 raw → 1 confirmed → fixed: the bimaterial star-matrix override).
-> REMAINING: the per-cluster **corrector** `AdvanceADERCluster` (A.6 — the
-> role-driven face sweep + accumulate buffers + consumer-face `IntegrateTaylor`;
-> requires restricting the ~200-line multi-path `ComputeADERFaceFluxRHS`), the
-> driver sync-interval loop, Checkpoint V2, and tests B.5/B.6/B.7/B.8. The
-> predictor (the CK-recursion element-restriction — the mathematically hardest
-> half) landed first; the corrector's face-flux restriction is the remaining core.
+> **Progress (2026-07-18).** The STEPPING CORE is DONE + locally validated + reviewed:
+> - `lts_time_basis.hpp` (`IntegrateTaylor`, A.4 — B.3 11/11).
+> - `lts_stepper.{hpp,cpp}`: `LtsDkStore` / `LtsAccumulateBuffers` storage + the
+>   pure tick loop `RunSyncInterval` (A.6 data + Normative Scheduling — B.4 31/31).
+> - Per-cluster **predictor** `ComputeADERSubStepStatesAndIntegralCluster` (A.5):
+>   element-restricted CK kernels (`ApplySpatialDerivativeElems_`,
+>   `ApplyElementJacobianElems_` + BimaterialWaveOperator override) + D(k)
+>   retention — **single-cluster == GTS BIT-for-bit, scalar + bimaterial**.
+> - Per-cluster **corrector** `AdvanceADERClusterBulk` (A.6): element-restricted
+>   volume (bit-exact) + role-driven face sweep (GTS / Boundary / ProviderSkip /
+>   ConsumerFine with the coarse neighbour's `IntegrateTaylor`'d sub-interval
+>   state + accumulate buffers) + restricted mass-inverse + in-place `Q +=` —
+>   **single-cluster == GTS to machine epsilon (~1e-15)**, scalar + bimaterial.
+> - **Multi-cluster consumer/buffer path** validated: a degenerate 2-cluster run
+>   (both driven at dt, `[0,dt]` sub-intervals) reduces the coupling to GTS and
+>   reproduces `AdvanceADER` to machine epsilon — 4 consumer faces + 4 provider
+>   elems live, exercising D(k) retention, the ConsumerFine `IntegrateTaylor`
+>   flux, buffer fill/consume, ProviderCoarseSkip, and buffers-zero-at-sync.
+> - **End-to-end** `RunSyncInterval` wiring predict+correct: single-cluster LTS
+>   over 6 steps == GTS. All in `test_lts_predictor` (19/19).
+> - Reviewed twice (adversarial): fixed the bimaterial star-matrix override + the
+>   accumulate-buffer fill-counts-sub-steps semantics (C-1).
+>
+> REMAINING for full Phase 2: the **driver sync-interval loop** (wire the core
+> into `spatial_dyn_driver.cpp` — note the driver always carries a fault, so a
+> fault-free bulk run needs a fault-free config; the fault half is Phase 3), the
+> **multi-cluster conservation tests** (B.5 ragged / B.6 periodic-box / B.7
+> mixed-neighbour — these exercise + validate the consumer/buffer path, which the
+> single-cluster gates do not), and **Checkpoint V2**. The mathematically hard
+> core (CK-recursion element-restriction + the role-driven Taylor-coupled face
+> sweep) is complete and reproduces GTS.
 
 > **Unblocked by the resequencing.** Phase 2 is bulk-only and np=1, so it needs
 > NONE of the deferred trio — it consumes exactly the layout Phase 1 shipped. One
