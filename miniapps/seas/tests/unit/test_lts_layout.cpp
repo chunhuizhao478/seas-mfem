@@ -300,6 +300,29 @@ static void test_tick_table_ragged()
    CHECK(std::abs(tab[3].dt_step[0] - 0.5) < 1e-14);
 }
 
+// ---------------------------------------------------------------------------
+// T6: Checkpoint-V2 layout hash — deterministic, sensitive to every field, and
+// pinned to a golden value for cross-platform reproducibility.
+// ---------------------------------------------------------------------------
+static void test_layout_hash()
+{
+   const std::vector<int> ids = {0, 0, 1, 1, 2};
+   const std::uint64_t base = LtsLayoutHash(2, 3, ids, 1.5e-6, 0.98);
+   const std::vector<int> empty;
+
+   CHECK(LtsLayoutHash(2, 3, ids, 1.5e-6, 0.98) == base);   // deterministic
+   CHECK(LtsLayoutHash(3, 3, ids, 1.5e-6, 0.98) != base);   // rate
+   CHECK(LtsLayoutHash(2, 4, ids, 1.5e-6, 0.98) != base);   // num_clusters
+   std::vector<int> ids2 = ids; ids2[2] = 2;
+   CHECK(LtsLayoutHash(2, 3, ids2, 1.5e-6, 0.98) != base);  // a cluster id
+   CHECK(LtsLayoutHash(2, 3, ids, 1.5000001e-6, 0.98) != base);  // dt_base
+   CHECK(LtsLayoutHash(2, 3, ids, 1.5e-6, 0.99) != base);   // lambda
+   std::vector<int> idr = {1, 1, 0, 0, 2};
+   CHECK(LtsLayoutHash(2, 3, idr, 1.5e-6, 0.98) != base);   // id order
+   CHECK(LtsLayoutHash(2, 1, empty, 1.0, 1.0) == LtsLayoutHash(2, 1, empty, 1.0, 1.0));
+   CHECK(LtsLayoutHash(2, 1, empty, 1.0, 1.0) != base);
+}
+
 int main()
 {
    test_chain_roles();
@@ -307,6 +330,7 @@ int main()
    test_global_meta();
    test_tick_table();
    test_tick_table_ragged();
+   test_layout_hash();
 
    std::printf("test_lts_layout: %d/%d passed, %d failed.\n",
                g_checks - g_fails, g_checks, g_fails);

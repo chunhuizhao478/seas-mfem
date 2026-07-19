@@ -35,6 +35,8 @@
 
 #include "lts_stepper.hpp"   // LtsGlobalMeta (global metadata target)
 
+#include <cstdint>
+#include <cstring>
 #include <functional>
 #include <vector>
 
@@ -127,6 +129,39 @@ LtsLayout BuildLtsLayout(const std::vector<int>&          cluster,
 LtsGlobalMeta ReduceGlobalMeta(
    const LtsLayout&                              layout,
    const std::function<void(std::vector<long long>&)>& sum_across_ranks);
+
+/// (Checkpoint V2) Deterministic 64-bit FNV-1a hash of a clustering, for the
+/// restart layout-match check (Phase 2, `io` checkpoint V2 schema).  Hashed, in
+/// order, as little-endian bytes: `rate` (int32), `num_clusters` (int32), each
+/// `cluster_ids[i]` (int32, in SERIAL-mesh element order — the caller supplies
+/// that order), then the raw IEEE-754 bit patterns of `dt_base` and `lambda`.
+/// Cross-platform reproducible (integer loop + explicit LE byte order; no float
+/// arithmetic on the ids), so a restart with a changed layout is refused rather
+/// than silently continued.
+inline std::uint64_t LtsLayoutHash(int rate, int num_clusters,
+                                   const std::vector<int>& cluster_ids,
+                                   double dt_base, double lambda)
+{
+   std::uint64_t h = 14695981039346656037ULL;         // FNV offset basis
+   auto mix_byte = [&](std::uint8_t b)
+   { h ^= static_cast<std::uint64_t>(b); h *= 1099511628211ULL; };  // FNV prime
+   auto mix_i32 = [&](std::int32_t v)
+   {
+      const std::uint32_t u = static_cast<std::uint32_t>(v);
+      for (int k = 0; k < 4; ++k) { mix_byte(static_cast<std::uint8_t>((u >> (8 * k)) & 0xFF)); }
+   };
+   auto mix_f64 = [&](double d)
+   {
+      std::uint64_t u; std::memcpy(&u, &d, sizeof(u));
+      for (int k = 0; k < 8; ++k) { mix_byte(static_cast<std::uint8_t>((u >> (8 * k)) & 0xFF)); }
+   };
+   mix_i32(rate);
+   mix_i32(num_clusters);
+   for (int c : cluster_ids) { mix_i32(c); }
+   mix_f64(dt_base);
+   mix_f64(lambda);
+   return h;
+}
 
 } // namespace seas
 } // namespace mfem
