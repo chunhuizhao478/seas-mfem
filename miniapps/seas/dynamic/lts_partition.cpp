@@ -32,7 +32,12 @@ std::vector<int> BuildLtsVertexWeights(const std::vector<int>& cluster,
       long long w = 1;
       if (cell_cost && (*cell_cost)[v] > 0.0)
       {
-         w = std::llround((*cell_cost)[v]);
+         // REVIEW B-7: clamp the DOUBLE to the ceiling before llround — llround
+         // on a value > LLONG_MAX is implementation-defined (may return a
+         // negative sentinel, defeating the intended clamp).
+         const double c = std::min((*cell_cost)[v],
+                                   static_cast<double>(1LL << 20));
+         w = std::llround(c);
       }
       if (w < 1) { w = 1; }
       if (w > (1LL << 20)) { w = (1LL << 20); }
@@ -130,6 +135,39 @@ bool BuildLtsAwarePartition(
    { throw std::runtime_error("BuildLtsAwarePartition: num_clusters < 1"); }
    if (cell_cost && static_cast<int>(cell_cost->size()) != nvtxs)
    { throw std::runtime_error("BuildLtsAwarePartition: cell_cost.size() != nvtxs"); }
+
+   // REVIEW B-2: every cluster id must be in [0, num_clusters); for the
+   // multi-constraint partition each cluster must be NON-EMPTY (a zero-total
+   // constraint is version-dependent in METIS balance refinement).
+   // BuildLtsClustering guarantees contiguous 0-based ids, but validate here
+   // since this is a public / independently-tested entry point.
+   {
+      std::vector<char> used(static_cast<std::size_t>(num_clusters), 0);
+      for (int v = 0; v < nvtxs; ++v)
+      {
+         const int c = cluster[v];
+         if (c < 0 || c >= num_clusters)
+         {
+            throw std::runtime_error(
+               "BuildLtsAwarePartition: cluster id " + std::to_string(c)
+               + " out of [0, " + std::to_string(num_clusters) + ")");
+         }
+         used[static_cast<std::size_t>(c)] = 1;
+      }
+      if (!opt.scalar_weights && num_clusters > 1)
+      {
+         for (int c = 0; c < num_clusters; ++c)
+         {
+            if (!used[static_cast<std::size_t>(c)])
+            {
+               throw std::runtime_error(
+                  "BuildLtsAwarePartition: cluster " + std::to_string(c)
+                  + " is empty (multi-constraint requires every cluster "
+                    "non-empty; ids must be contiguous 0-based)");
+            }
+         }
+      }
+   }
 
    const bool multi = (!opt.scalar_weights) && (num_clusters > 1);
    idx_t ncon = multi ? static_cast<idx_t>(num_clusters) : 1;

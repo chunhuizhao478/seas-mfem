@@ -947,7 +947,34 @@ each other.
 are counted and gated globally, and parity with single-rank LTS is the gate —
 first with the simple exchange (4a), then the EDGE payloads (4b).
 
-### Step 0 — Pre-ParMesh clustering pipeline (MOVED from Phase 1)
+### Step 0 — Pre-ParMesh clustering pipeline (MOVED from Phase 1)  — ◑ PART-DONE (2026-07-19)
+
+**Status (2026-07-19, local branch, unpushed).** Two of the self-contained,
+locally-validatable pieces are done:
+- **Reorder activation (np=1), the Phase-3 Step-0 payoff — DONE.** The driver
+  now clusters from `(pmesh, material)` BEFORE the operator
+  (`BuildLtsMeshInputsFromMaterial`) and passes the ids into the ctor, so the
+  P-006 fault-face reorder is ACTIVE for ALL material modes. **Key correction:**
+  every spatial-driver material mode is `Mode::Constant`/`Mode::Coefficient`
+  (EvalAt-able) — incl. the SAFS sidecar (`MakeCoefficient`); the earlier
+  "sidecar = GridFunction ⇒ EvalAt aborts" was a mis-diagnosis, so **np=1 reorder
+  activation needs NO material-before-ParMesh refactor.** A fault+lts run now
+  reorders + steps GTS (the still-GTS canary) instead of aborting; GTS-path
+  checkpoints route through V2 (hash+perm) under the reorder. `lts="off"`
+  byte-identical.
+- **LTS-aware METIS partition (P-009) — DONE (companion + unit test).**
+  `dynamic/lts_partition.{hpp,cpp}` (isolated from mfem for the metis.h `real_t`
+  collision): multi-constraint `METIS_PartGraphKway` (ncon=num_clusters, one-hot
+  cluster weights) + scalar fallback + post-partition fault-lock; `test_lts_partition`
+  16/0.  NOT yet driver-wired (needs the serial cluster ids below).
+
+**Remaining (np>1, Frontera-gated):** the **serial-mesh clustering** (rank 0,
+before the ParMesh, for rank-count-independent ids) + wiring the partition as
+`part_data` at the ParMesh ctor + re-basing the checkpoint hash on the serial
+element order.  The serial clustering needs the material coefficients built on
+the SERIAL mesh before the ParMesh (all Coefficient-based ⇒ tractable, but it is
+the invasive construction-reorder).  Its acceptance (np=2==np=1, symmirror) is
+production-mesh-only.
 
 The np>1 machinery lands here, where rank-count-independent cluster ids first
 matter (the np=2==np=1 gate) and where the LTS partition is first exercised.

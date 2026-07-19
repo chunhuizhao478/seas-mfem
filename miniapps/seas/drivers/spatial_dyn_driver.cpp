@@ -302,8 +302,21 @@ LtsMeshInputs BuildLtsMeshInputsFromMaterial(ParMesh &pmesh,
       double cp = 1.0;
       if (in.per_elem_material)
       {
+         // REVIEW A-3: this LTS path evaluates the material as a coordinate
+         // COEFFICIENT (EvalAt); Mode::GridFunction would abort inside EvalAt.
+         // The spatial driver only ever builds Constant/Coefficient material, so
+         // guard loudly rather than aborting deep in EvalAt.
+         MFEM_VERIFY(material.mode != MaterialField::Mode::GridFunction,
+                     "BuildLtsMeshInputsFromMaterial: Mode::GridFunction is not "
+                     "supported on the pre-operator LTS clustering path (it needs "
+                     "a coordinate-evaluable coefficient).");
          ElementTransformation *T = pmesh.GetElementTransformation(e);
          const IntegrationPoint &ip = Geometries.GetCenter(gtype);
+         // REVIEW A-2: SET the integration point before EvalAt, mirroring the
+         // operator's MaterialAtLocal_ (P2-005) — a coefficient that reads
+         // T.GetIntPoint() would otherwise see a stale point and yield a
+         // different c_p (hence a different dt_e binning than the operator).
+         T->SetIntPoint(&ip);
          real_t lam = 0, mu = 0, rho = 0;
          material.EvalAt(e, *T, ip, lam, mu, rho);
          MFEM_VERIFY(rho > 0.0 && (lam + 2.0*mu) > 0.0,
@@ -4195,9 +4208,16 @@ int main(int argc, char *argv[])
    // Phase 3.  So the LTS multi-cluster sync loop runs ONLY for the fault-free
    // bulk problem (Phase 2); a fault + lts run falls through to the GTS loop
    // below with the reorder ACTIVE (the still-GTS reorder canary, P-006 gate).
+   // REVIEW A-1: `nprocs == 1` is REQUIRED here.  `num_fault_total` is a LOCAL
+   // count, so without it an np>1 run diverges: fault-free ranks would enter the
+   // sync loop and abort at the `nprocs==1` guard while fault-bearing ranks fall
+   // to the GTS loop (MPI hang / partial abort).  With it, every np>1 rank takes
+   // the GTS loop uniformly (the "running GTS at np>1" behavior the log promises;
+   // np>1 LTS is Phase 4).
    const bool lts_stepping =
-      cfg.numerics.LtsEnabled() && num_fault_total == 0;
-   if (cfg.numerics.LtsEnabled() && num_fault_total > 0 && rank == 0)
+      cfg.numerics.LtsEnabled() && num_fault_total == 0 && nprocs == 1;
+   if (cfg.numerics.LtsEnabled() && num_fault_total > 0 && nprocs == 1
+       && rank == 0)
    {
       std::cout << "[lts] fault + lts=\"" << cfg.numerics.lts
                 << "\": fault-face reorder "

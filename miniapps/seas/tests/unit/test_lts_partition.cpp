@@ -13,6 +13,7 @@
 #include "../../dynamic/lts_partition.hpp"
 
 #include <cstdio>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -115,6 +116,34 @@ int main()
       CHECK(VerifyLtsPartitionFaultLocality(fault, part) == 0,
             "fault pairs are co-located (fault-locality invariant)");
       CHECK(!fault.empty(), "fixture actually has fault pairs (non-vacuous)");
+
+      // B-6: the invariant above is vacuous if the partition collapsed to one
+      // rank.  Assert it is non-trivial.
+      std::set<int> ranks(part.begin(), part.end());
+      CHECK(ranks.size() >= 2, "partition uses >1 rank (non-trivial)");
+   }
+
+   // ---- T4b: the fault-lock is DETERMINISTICALLY exercised.  Two triangles
+   // (cliques {0,1,2} and {3,4,5}) bridged by the single edge (2,3), which is
+   // ALSO the fault pair; the balanced 2-way min-cut MUST sever the bridge, so
+   // the raw METIS partition cuts the fault pair and the lock must repair it. ----
+   {
+      const std::vector<int> xadj   = {0, 2, 4, 7, 10, 12, 14};
+      const std::vector<int> adjncy = {1,2, 0,2, 0,1,3, 2,4,5, 3,5, 3,4};
+      const std::vector<int> cluster(6, 0);
+      const std::vector<std::pair<int,int>> fault = {{2, 3}};
+      const std::vector<std::pair<int,int>> nofault;
+      LtsPartitionOptions opt;
+
+      std::vector<int> raw, locked;
+      BuildLtsAwarePartition(6, xadj, adjncy, cluster, 1, 2, nullptr, nofault,
+                             opt, raw);
+      CHECK(VerifyLtsPartitionFaultLocality(fault, raw) > 0,
+            "raw METIS severs the bridge fault pair (lock has work to do)");
+      BuildLtsAwarePartition(6, xadj, adjncy, cluster, 1, 2, nullptr, fault,
+                             opt, locked);
+      CHECK(VerifyLtsPartitionFaultLocality(fault, locked) == 0,
+            "the fault-lock repairs the cut pair (lock is exercised)");
    }
 
    // ---- T5: scalar-weight fallback also partitions + preserves fault locality --
