@@ -520,6 +520,11 @@ LTS_TIME_BASIS_HEADERS                      = dynamic/lts_time_basis.hpp
 TEST_LTS_TIME_BASIS_SRC                     = tests/unit/test_lts_time_basis.cpp
 LTS_STEPPER_HEADERS                         = dynamic/lts_stepper.hpp
 LTS_STEPPER_SRC                             = dynamic/lts_stepper.cpp
+# LTS-aware METIS partition (Phase 4 Step 0, P-009).  Companion .cpp isolated
+# from mfem (metis.h `real_t` float vs mfem::real_t double collision).
+LTS_PARTITION_HEADERS                       = dynamic/lts_partition.hpp
+LTS_PARTITION_SRC                           = dynamic/lts_partition.cpp
+TEST_LTS_PARTITION_SRC                      = tests/unit/test_lts_partition.cpp
 TEST_LTS_SCHEDULER_SRC                      = tests/unit/test_lts_scheduler.cpp
 TEST_LTS_PREDICTOR_SRC                      = tests/unit/test_lts_predictor.cpp
 # Clustered LTS Phase 3 (fault under LTS).
@@ -600,6 +605,8 @@ LTS_LAYOUT_OBJ                   = $(LTS_LAYOUT_SRC:.cpp=.o)
 TEST_LTS_LAYOUT_OBJ              = $(TEST_LTS_LAYOUT_SRC:.cpp=.o)
 TEST_LTS_TIME_BASIS_OBJ         = $(TEST_LTS_TIME_BASIS_SRC:.cpp=.o)
 LTS_STEPPER_OBJ                 = $(LTS_STEPPER_SRC:.cpp=.o)
+LTS_PARTITION_OBJ               = $(LTS_PARTITION_SRC:.cpp=.o)
+TEST_LTS_PARTITION_OBJ          = $(TEST_LTS_PARTITION_SRC:.cpp=.o)
 TEST_LTS_SCHEDULER_OBJ          = $(TEST_LTS_SCHEDULER_SRC:.cpp=.o)
 TEST_LTS_PREDICTOR_OBJ          = $(TEST_LTS_PREDICTOR_SRC:.cpp=.o)
 TEST_LTS_NUCLEATION_ABSOLUTE_OBJ = $(TEST_LTS_NUCLEATION_ABSOLUTE_SRC:.cpp=.o)
@@ -1171,6 +1178,12 @@ seas_test_lts_predictor: $(TEST_LTS_PREDICTOR_OBJ) $(WAVE_OPERATOR_OBJ) \
 	    $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) \
 	    $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
 	    $(LTS_STEPPER_OBJ) $(LTS_LAYOUT_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Clustered LTS Phase 4 Step 0: cluster-weighted METIS partition (P-009).
+seas_test_lts_partition: $(TEST_LTS_PARTITION_OBJ) $(LTS_PARTITION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_LTS_PARTITION_OBJ) \
+	    $(LTS_PARTITION_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Clustered LTS Phase 3: fault-face cluster-contiguous reorder (P-006 gate).
@@ -3221,6 +3234,17 @@ $(LTS_STEPPER_OBJ): %.o: $(SRC)%.cpp $(LTS_STEPPER_HEADERS) \
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+# LTS partition companion — compiled WITHOUT SEAS_INCLUDES/mfem headers so
+# metis.h's `real_t` (float) does not collide with mfem::real_t.  metis.h lives
+# in the conda -isystem include path already in MFEM_FLAGS.
+$(LTS_PARTITION_OBJ): %.o: $(SRC)%.cpp $(LTS_PARTITION_HEADERS) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) -c $< -o $@
+
+$(TEST_LTS_PARTITION_OBJ): %.o: $(SRC)%.cpp $(LTS_PARTITION_HEADERS) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) -c $< -o $@
+
 $(TEST_LTS_SCHEDULER_OBJ): %.o: $(SRC)%.cpp $(LTS_STEPPER_HEADERS) \
                                 $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
@@ -4324,6 +4348,9 @@ test-lts-friction-range: seas_test_lts_friction_range
 
 test-lts-fault-reorder: seas_test_lts_fault_reorder
 	./seas_test_lts_fault_reorder
+
+test-lts-partition: seas_test_lts_partition
+	./seas_test_lts_partition
 
 test-data-field-3d: seas_test_data_field_3d
 	./seas_test_data_field_3d
