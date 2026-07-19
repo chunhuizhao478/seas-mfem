@@ -30,6 +30,7 @@
 
 #include "fault_face_flux.hpp"   // DOFData
 
+#include <cstddef>
 #include <functional>
 #include <vector>
 
@@ -192,6 +193,26 @@ void ApplyGradualOverstressAbsolute(
    real_t                                 T_nuc_s,
    real_t                                 t);
 
+/// @brief LTS Phase 3 (D-3) RANGE overload of `ApplyGradualOverstressAbsolute`.
+/// Applies the absolute SCEC ramp value `SmoothStep(t, T_nuc_s)·amplitude_*(i)`
+/// ONLY to the cluster-contiguous global-QP half-open range `[qp_begin, qp_end)`;
+/// every `dof_data[i]` with `i` outside the range is left byte-untouched.  Under
+/// LTS each cluster forces its own fault QPs at its own stage times, so the
+/// whole-vector form would stomp another cluster's `tau_nuc` at the wrong time
+/// (see D-3).  `params` stays GLOBALLY indexed (its `amplitude_*` size equals
+/// `dof_data.size()`); the range selects which of those global indices are
+/// written this call.  The full-vector form above delegates here with
+/// `(0, dof_data.size())`.  Requires `qp_begin <= qp_end <= dof_data.size()`.
+/// Early-returns when nucleation is disabled (zero-sized params) or the range is
+/// empty.
+void ApplyGradualOverstressAbsolute(
+   std::vector<DOFData>&                  dof_data,
+   const GradualOverstressPerDOFParams&   params,
+   real_t                                 T_nuc_s,
+   real_t                                 t,
+   std::size_t                            qp_begin,
+   std::size_t                            qp_end);
+
 // =====================================================================
 // Phase 7 — compact-circular gradual overstress (TPV102/104).
 // =====================================================================
@@ -261,6 +282,22 @@ void ApplyGradualOverstressCompactCircularAbsolute(
    const CompactCircularPerDOFParams&     params,
    real_t                                 T_nuc_s,
    real_t                                 t);
+
+/// @brief LTS Phase 3 (D-3) RANGE overload of the compact-circular absolute
+/// applier.  Writes `dof_data[i].tau2_nuc = SmoothStep(t, T_nuc_s)·
+/// amplitude_strike(i)` ONLY for global-QP indices `i ∈ [qp_begin, qp_end)`;
+/// indices outside the range are byte-untouched (pure strike-slip: tau1_nuc /
+/// sigma_n_nuc left at 0).  `params` stays globally indexed; the full-vector
+/// form above delegates here with `(0, dof_data.size())`.  Requires
+/// `qp_begin <= qp_end <= dof_data.size()`.  Early-returns when disabled or the
+/// range is empty.
+void ApplyGradualOverstressCompactCircularAbsolute(
+   std::vector<DOFData>&                  dof_data,
+   const CompactCircularPerDOFParams&     params,
+   real_t                                 T_nuc_s,
+   real_t                                 t,
+   std::size_t                            qp_begin,
+   std::size_t                            qp_end);
 
 // =====================================================================
 // Phase 7 — instantaneous circular overstress (TPV31, one-shot).

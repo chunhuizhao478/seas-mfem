@@ -183,25 +183,46 @@ void ApplyGradualOverstressAbsolute(
    real_t                                 T_nuc_s,
    real_t                                 t)
 {
+   // Full-vector form delegates to the range implementation over [0, N).
+   ApplyGradualOverstressAbsolute(dof_data, params, T_nuc_s, t,
+                                  static_cast<std::size_t>(0),
+                                  dof_data.size());
+}
+
+void ApplyGradualOverstressAbsolute(
+   std::vector<DOFData>&                  dof_data,
+   const GradualOverstressPerDOFParams&   params,
+   real_t                                 T_nuc_s,
+   real_t                                 t,
+   std::size_t                            qp_begin,
+   std::size_t                            qp_end)
+{
    // Disabled (resolver returned zero-sized) or this rank has no fault DOFs.
    if (params.amplitude_dip.Size() == 0) { return; }
 
-   const int n = static_cast<int>(dof_data.size());
-   MFEM_VERIFY(params.amplitude_dip.Size()    == n
-               && params.amplitude_strike.Size() == n,
+   const std::size_t n = dof_data.size();
+   MFEM_VERIFY(static_cast<std::size_t>(params.amplitude_dip.Size())    == n
+               && static_cast<std::size_t>(params.amplitude_strike.Size()) == n,
                "ApplyGradualOverstressAbsolute: params.amplitude_* size ("
                << params.amplitude_dip.Size()
                << ") != dof_data.size() (" << n << ")");
+   // Range is over the cluster-contiguous GLOBAL QP order; params are global-
+   // indexed so [qp_begin, qp_end) selects which global indices are written.
+   MFEM_VERIFY(qp_begin <= qp_end && qp_end <= n,
+               "ApplyGradualOverstressAbsolute: bad range [" << qp_begin
+               << ", " << qp_end << ") for n = " << n);
+   if (qp_begin == qp_end) { return; }
 
    // SET (not accumulate) the absolute SCEC ramp value at stage time t.
    // SmoothStep is 0 for t<=0, 1 for t>=T_nuc_s, monotone in between — so this
    // is the no-op-equivalent steady target after the ramp and is idempotent
    // under repeated RK-stage evaluation (no double-apply).
    const real_t S = SmoothStep(t, T_nuc_s);
-   for (int i = 0; i < n; ++i)
+   for (std::size_t i = qp_begin; i < qp_end; ++i)
    {
-      dof_data[i].tau1_nuc = S * params.amplitude_dip(i);
-      dof_data[i].tau2_nuc = S * params.amplitude_strike(i);
+      const int ii = static_cast<int>(i);
+      dof_data[i].tau1_nuc = S * params.amplitude_dip(ii);
+      dof_data[i].tau2_nuc = S * params.amplitude_strike(ii);
       // sigma_n_nuc is intentionally not updated.
    }
 }
@@ -322,19 +343,37 @@ void ApplyGradualOverstressCompactCircularAbsolute(
    real_t                                 T_nuc_s,
    real_t                                 t)
 {
+   // Full-vector form delegates to the range implementation over [0, N).
+   ApplyGradualOverstressCompactCircularAbsolute(dof_data, params, T_nuc_s, t,
+                                                 static_cast<std::size_t>(0),
+                                                 dof_data.size());
+}
+
+void ApplyGradualOverstressCompactCircularAbsolute(
+   std::vector<DOFData>&                  dof_data,
+   const CompactCircularPerDOFParams&     params,
+   real_t                                 T_nuc_s,
+   real_t                                 t,
+   std::size_t                            qp_begin,
+   std::size_t                            qp_end)
+{
    if (params.amplitude_strike.Size() == 0) { return; }
 
-   const int n = static_cast<int>(dof_data.size());
-   MFEM_VERIFY(params.amplitude_strike.Size() == n,
+   const std::size_t n = dof_data.size();
+   MFEM_VERIFY(static_cast<std::size_t>(params.amplitude_strike.Size()) == n,
                "ApplyGradualOverstressCompactCircularAbsolute: "
                "params.amplitude_strike size ("
                << params.amplitude_strike.Size()
                << ") != dof_data.size() (" << n << ")");
+   MFEM_VERIFY(qp_begin <= qp_end && qp_end <= n,
+               "ApplyGradualOverstressCompactCircularAbsolute: bad range ["
+               << qp_begin << ", " << qp_end << ") for n = " << n);
+   if (qp_begin == qp_end) { return; }
 
    const real_t S = SmoothStep(t, T_nuc_s);
-   for (int i = 0; i < n; ++i)
+   for (std::size_t i = qp_begin; i < qp_end; ++i)
    {
-      dof_data[i].tau2_nuc = S * params.amplitude_strike(i);
+      dof_data[i].tau2_nuc = S * params.amplitude_strike(static_cast<int>(i));
       // tau1_nuc / sigma_n_nuc intentionally not updated (pure strike-slip).
    }
 }

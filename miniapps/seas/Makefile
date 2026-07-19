@@ -522,6 +522,9 @@ LTS_STEPPER_HEADERS                         = dynamic/lts_stepper.hpp
 LTS_STEPPER_SRC                             = dynamic/lts_stepper.cpp
 TEST_LTS_SCHEDULER_SRC                      = tests/unit/test_lts_scheduler.cpp
 TEST_LTS_PREDICTOR_SRC                      = tests/unit/test_lts_predictor.cpp
+# Clustered LTS Phase 3 (fault under LTS).
+TEST_LTS_NUCLEATION_ABSOLUTE_SRC            = tests/unit/test_lts_nucleation_absolute.cpp
+TEST_LTS_FRICTION_RANGE_SRC                 = tests/unit/test_lts_friction_range.cpp
 
 # Data-projection feature (Phase 3..5).  See document/features_dev/
 # data_projection_feature_plan_v2.md.
@@ -598,6 +601,8 @@ TEST_LTS_TIME_BASIS_OBJ         = $(TEST_LTS_TIME_BASIS_SRC:.cpp=.o)
 LTS_STEPPER_OBJ                 = $(LTS_STEPPER_SRC:.cpp=.o)
 TEST_LTS_SCHEDULER_OBJ          = $(TEST_LTS_SCHEDULER_SRC:.cpp=.o)
 TEST_LTS_PREDICTOR_OBJ          = $(TEST_LTS_PREDICTOR_SRC:.cpp=.o)
+TEST_LTS_NUCLEATION_ABSOLUTE_OBJ = $(TEST_LTS_NUCLEATION_ABSOLUTE_SRC:.cpp=.o)
+TEST_LTS_FRICTION_RANGE_OBJ      = $(TEST_LTS_FRICTION_RANGE_SRC:.cpp=.o)
 DATA_FIELD_3D_OBJ                = $(DATA_FIELD_3D_SRC:.cpp=.o)
 STRESS_FIELD_3D_OBJ              = $(STRESS_FIELD_3D_SRC:.cpp=.o)
 FIELD_COEFFICIENT_OBJ            = $(FIELD_COEFFICIENT_SRC:.cpp=.o)
@@ -1164,6 +1169,15 @@ seas_test_lts_predictor: $(TEST_LTS_PREDICTOR_OBJ) $(WAVE_OPERATOR_OBJ) \
 	    $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) \
 	    $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
 	    $(LTS_STEPPER_OBJ) $(LTS_LAYOUT_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Clustered LTS Phase 3: nucleation absolute-form range overloads (B.10).
+seas_test_lts_nucleation_absolute: $(TEST_LTS_NUCLEATION_ABSOLUTE_OBJ) \
+    $(SPATIAL_NUCLEATION_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) \
+    $(TPV205_SUBSTEP_ITERATOR_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_LTS_NUCLEATION_ABSOLUTE_OBJ) \
+	    $(SPATIAL_NUCLEATION_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) \
+	    $(TPV205_SUBSTEP_ITERATOR_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Data-projection feature: DataField3D / FieldCoefficient / FieldProjector /
@@ -3192,6 +3206,16 @@ $(TEST_LTS_PREDICTOR_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+$(TEST_LTS_NUCLEATION_ABSOLUTE_OBJ): %.o: $(SRC)%.cpp \
+                                $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_LTS_FRICTION_RANGE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
 $(DATA_FIELD_3D_OBJ): %.o: $(SRC)%.cpp $(DATA_FIELD_3D_HEADERS) \
                           $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
@@ -4261,6 +4285,12 @@ test-lts-scheduler: seas_test_lts_scheduler
 
 test-lts-predictor: seas_test_lts_predictor
 	./seas_test_lts_predictor
+
+test-lts-nucleation-absolute: seas_test_lts_nucleation_absolute
+	./seas_test_lts_nucleation_absolute
+
+test-lts-friction-range: seas_test_lts_friction_range
+	./seas_test_lts_friction_range
 
 test-data-field-3d: seas_test_data_field_3d
 	./seas_test_data_field_3d
