@@ -19,7 +19,9 @@
 #include "../../dynamic/lts_stepper.hpp"   // RunSyncInterval + BuildTickTable (e2e)
 #include "../../dynamic/lts_layout.hpp"    // BuildLtsLayout (multi-cluster path)
 #include "../../dynamic/lts_bulk_stepper.hpp"  // LtsBulkSyncStepper (real multi-rate)
+#include "../../io/tpv104_checkpoint.hpp"       // Checkpoint V2 write/read/peek
 #include "../../domain/boundary_config.hpp"
+#include <cstdio>
 
 #include <cmath>
 #include <cstdio>
@@ -520,8 +522,41 @@ static void multirate_conservation(WaveOperator<Mesh> &wave, Mesh &mesh, const c
    CHECK(lts_fine < 0.5 * g2_fine, m);
 }
 
+// Checkpoint-V2 write -> peek -> read round-trip (B.8): a fault-free bulk V2
+// checkpoint (empty dof_data) preserves t/dt/sync/layout_hash/Q exactly, and the
+// magic peeks as version 2.
+static void checkpoint_v2_roundtrip()
+{
+   const char *prefix = "test_lts_ckpt_tmp";
+   const real_t t = 1.234e-3, dt = 5.6e-7;
+   const int sync = 42; const std::uint64_t hash = 0x0123456789abcdefULL;
+   Vector Qw(24); for (int i = 0; i < 24; ++i) { Qw[i] = std::sin(0.3 * i) - 0.11 * i; }
+   std::vector<DOFData> dd;   // fault-free bulk -> empty
+
+   mfem::seas::internal::WriteTpv104CheckpointV2Impl(prefix, t, dt, sync,
+      /*lts_mode=*/1, hash, Qw, dd, /*rank=*/0, /*size=*/1, "spatial_dyn");
+
+   CHECK(mfem::seas::internal::PeekTpv104CheckpointVersion(prefix, 0) == 2,
+         "[ckpt] V2 file peeks as version 2");
+
+   real_t tr = 0, dtr = 0; int syncr = 0, lts_mode = 0; std::uint64_t hr = 0;
+   Vector Qr; std::vector<DOFData> ddr; std::string tag;
+   const bool ok = mfem::seas::internal::ReadTpv104CheckpointV2Impl(prefix, tr, dtr,
+      syncr, lts_mode, hr, Qr, 24, ddr, 0, 1, &tag);
+   CHECK(ok, "[ckpt] V2 read ok");
+   CHECK(tr == t && dtr == dt && syncr == sync, "[ckpt] V2 t/dt/sync round-trip");
+   CHECK(lts_mode == 1 && hr == hash, "[ckpt] V2 lts_mode + layout_hash round-trip");
+   CHECK(tag == "spatial_dyn", "[ckpt] V2 driver_tag round-trip");
+   bool q_ok = (Qr.Size() == 24);
+   for (int i = 0; q_ok && i < 24; ++i) { q_ok = (Qr[i] == Qw[i]); }
+   CHECK(q_ok, "[ckpt] V2 Q round-trip bit-exact (17-digit text)");
+
+   std::remove((std::string(prefix) + "_checkpoint_r0.txt").c_str());
+}
+
 int main()
 {
+   checkpoint_v2_roundtrip();
    const int order = 1;
    const real_t lambda = 32.04e9, mu = 32.04e9, rho = 2670.0;
    BoundaryConfig bc = AbsorbingBC();

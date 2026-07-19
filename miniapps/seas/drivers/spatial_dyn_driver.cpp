@@ -3570,9 +3570,50 @@ int main(int argc, char *argv[])
    real_t t      = cfg.time.t_initial;
    int    step0  = 0;
    real_t dt_now = dt;
+   // (Checkpoint V2) Recompute the current clustering's layout hash — the same
+   // (rate, Nc, cluster ids, dt_base=lambda*dt_cfl, lambda) the LTS loop uses —
+   // for the restart layout-match check.  Deterministic; the LTS loop rebuilds
+   // it identically.  Only meaningful when lts is enabled (fault-free bulk).
+   auto compute_lts_layout_hash = [&]() -> std::uint64_t
+   {
+      LtsMeshInputs in = BuildLtsMeshInputs(wave, pmesh);
+      LtsClusteringOptions o;
+      o.nc_cap = cfg.numerics.lts_nc_cap;
+      o.merge_loss_tol = cfg.numerics.lts_merge_loss_tol;
+      if (cfg.numerics.lts_wiggle == "scan") { o.wiggle_scan = true; }
+      else if (cfg.numerics.lts_wiggle == "off") { o.wiggle_scan = false; o.lambda_fixed = 1.0; }
+      else { o.wiggle_scan = false; o.lambda_fixed = std::strtod(cfg.numerics.lts_wiggle.c_str(), nullptr); }
+      const LtsClustering c = BuildLtsClustering(in.dt_e, pmesh.ElementToElementTable(),
+                                                 in.fault_pairs, o);
+      return LtsLayoutHash(o.rate, c.num_clusters, c.cluster, c.lambda * dt_cfl, c.lambda);
+   };
+
    if (!restart_prefix.empty())
    {
       std::string driver_tag;
+      const int ckpt_version = mfem::seas::internal::PeekTpv104CheckpointVersion(restart_prefix, rank);
+      if (ckpt_version == 2)
+      {
+         // V2 (LTS) checkpoint: refuse under lts=off; else validate the hash.
+         MFEM_VERIFY(cfg.numerics.LtsEnabled(),
+                     "spatial_dyn: refusing restart — a V2 (LTS) checkpoint "
+                     "cannot resume an lts=\"off\" (GTS) run (different scheme).");
+         int lts_mode = 0; std::uint64_t stored_hash = 0;
+         const bool ok = mfem::seas::internal::ReadTpv104CheckpointV2Impl(
+            restart_prefix, t, dt_now, step0, lts_mode, stored_hash, Q,
+            NUM_STATE * ndof_total, dof_data, rank, nprocs, &driver_tag);
+         MFEM_VERIFY(ok, "spatial_dyn: V2 checkpoint read failed for rank " << rank);
+         const std::uint64_t computed_hash = compute_lts_layout_hash();
+         const LtsCheckpointDecision decision =
+            LtsCheckpointCheck(2, true, stored_hash, computed_hash);
+         MFEM_VERIFY(decision == LtsCheckpointDecision::Accept,
+                     "spatial_dyn: refusing V2 restart — layout hash mismatch "
+                     "(stored 0x" << std::hex << stored_hash << " != computed 0x"
+                     << computed_hash << std::dec << "); mesh/clustering/config "
+                     "changed since the checkpoint was written.");
+      }
+      else
+      {
       const bool ok = ReadTpv104Checkpoint(
          restart_prefix, t, dt_now, step0, Q, NUM_STATE * ndof_total,
          dof_data, rank, nprocs
@@ -3593,11 +3634,7 @@ int main(int argc, char *argv[])
 #endif
          return 5;
       }
-      // (Checkpoint V2) An lts != off run must NOT resume a V1 (GTS) checkpoint —
-      // the LTS trajectory differs from global stepping.  Current checkpoints are
-      // V1; a V2 (LTS) checkpoint carries the layout hash and is validated against
-      // the recomputed one (LtsCheckpointCheck).  Today only V1 exists, so
-      // lts + restart maps to RefuseV1WithLts.
+      // (Checkpoint V2) An lts != off run must NOT resume a V1 (GTS) checkpoint.
       if (cfg.numerics.LtsEnabled())
       {
          const LtsCheckpointDecision decision =
@@ -3605,10 +3642,9 @@ int main(int argc, char *argv[])
          MFEM_VERIFY(decision == LtsCheckpointDecision::Accept,
                      "spatial_dyn: refusing restart — lts=\"" << cfg.numerics.lts
                      << "\" cannot resume a V1 (GTS) checkpoint (different "
-                     "trajectory).  V2 (LTS) checkpoints, written by LTS runs and "
-                     "validated by the layout hash, are the Phase-3 production "
-                     "path (LTS stepping is currently fault-free bulk only).");
+                     "trajectory).  LTS runs write V2 checkpoints.");
       }
+      }   // end else (V1 path)
       if (!driver_tag.empty() && driver_tag != "spatial_dyn")
       {
          if (rank == 0)
@@ -3972,6 +4008,7 @@ int main(int argc, char *argv[])
    //   validated (test_lts_predictor / test_lts_layout); this is its wiring.
    // -----------------------------------------------------------------
    const bool lts_stepping = cfg.numerics.LtsEnabled();
+   bool lts_v2_checkpoint_written = false;
    if (lts_stepping)
    {
       MFEM_VERIFY(nprocs == 1,
@@ -4032,20 +4069,40 @@ int main(int argc, char *argv[])
                      << sync << " (buffer lifecycle bug — invariant ii).");
          t_lts += T_actual;
          ++sync;
+         // Per-sync bulk output: NaN tripwire + volume ParaView (fault-free, so
+         // no station/fault output) + a V2 (LTS) checkpoint on the sync cadence.
+         MFEM_VERIFY(Q.CheckFinite() == 0,
+                     "spatial_dyn: LTS Q non-finite at sync " << sync
+                     << ", t = " << t_lts << " s (NaN tripwire).");
+         paraview_write(sync, t_lts, /*V_max=*/0.0);   // volume/free-surface (fault-free)
+         if (cfg.output.checkpoint_every_steps > 0
+             && (sync % cfg.output.checkpoint_every_steps == 0))
+         {
+            const std::string prefix = cfg.output.output_dir + "/" + cfg.output.restart_prefix;
+            mfem::seas::internal::WriteTpv104CheckpointV2Impl(prefix, t_lts, dt_base, sync,
+                                                  /*lts_mode=*/1, layout_hash, Q,
+                                                  dof_data, rank, nprocs, "spatial_dyn");
+         }
          if (rank == 0 && (sync % 100 == 0))
          { std::cout << "[lts] sync " << sync << ", t = " << t_lts << " s\n"; }
       }
       t = t_lts;
       last_completed_step = sync;
+      // Final V2 checkpoint (unless the last sync already wrote one on cadence).
+      if (cfg.output.checkpoint_every_steps > 0
+          && !(sync > 0 && sync % cfg.output.checkpoint_every_steps == 0))
+      {
+         const std::string prefix = cfg.output.output_dir + "/" + cfg.output.restart_prefix;
+         mfem::seas::internal::WriteTpv104CheckpointV2Impl(prefix, t, dt_base, sync,
+                                               /*lts_mode=*/1, layout_hash, Q,
+                                               dof_data, rank, nprocs, "spatial_dyn");
+      }
+      lts_v2_checkpoint_written = (cfg.output.checkpoint_every_steps > 0);
       if (rank == 0)
       {
          std::cout << "[lts] done: " << sync << " sync intervals, t = " << t
-                   << " s (fault-free bulk).\n"
-                   << "[lts] NOTE (REVIEW DL-2): per-sync volume/station output is "
-                      "NOT yet emitted on the LTS path (only the pre-loop t=0 "
-                      "frame); per-sync output cadence (ceil(dt_out/T_s)) + LTS "
-                      "checkpoint (V2) are the remaining driver-integration items "
-                      "(land with the Phase-3 fault corrector).\n";
+                   << " s (fault-free bulk; per-sync volume output + V2 "
+                      "checkpoints written; fault/station output is Phase 3).\n";
       }
    }
 
@@ -4428,16 +4485,16 @@ int main(int argc, char *argv[])
    // and waste Lustre metadata ops on production.
    // (LTS Phase 2, REVIEW DL-1) On the LTS path `last_completed_step` is a
    // sync-interval count, NOT a GTS step count, so it must not flow into the
-   // step-based checkpoint modulus below.  LTS writes NO checkpoints yet: the
-   // V2 (layout-hash) checkpoint write is Phase 3, and a V1 checkpoint under LTS
-   // would be (correctly) refused on restart.  Skip the final write and say so.
+   // step-based checkpoint modulus below.  The LTS loop already wrote V2
+   // (layout-hash) checkpoints on the sync cadence + a final one; do NOT also run
+   // the step-based V1 write here (that would emit a V1 file an LTS restart
+   // refuses).  The GTS path (else) is byte-identical to before.
    if (lts_stepping)
    {
-      if (rank == 0 && cfg.output.checkpoint_every_steps > 0)
+      if (rank == 0 && lts_v2_checkpoint_written)
       {
-         std::cout << "[checkpoint] lts=\"" << cfg.numerics.lts
-                   << "\": checkpointing disabled (V2 layout-hash checkpoint "
-                      "write is Phase 3); no restart file written.\n";
+         std::cout << "[checkpoint] LTS V2 checkpoint(s) written on the sync "
+                      "cadence; skipping the step-based V1 final write.\n";
       }
    }
    else

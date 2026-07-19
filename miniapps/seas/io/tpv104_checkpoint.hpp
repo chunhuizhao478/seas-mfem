@@ -40,6 +40,7 @@
 #include "../dynamic/fault_face_flux.hpp"  // DOFData
 #include "checkpoint.hpp"                  // CheckpointFilename helper
 
+#include <cstdint>
 #include <fstream>
 #include <iomanip>
 #include <string>
@@ -250,6 +251,122 @@ inline bool ReadTpv104CheckpointImpl(const std::string &prefix,
       }
    }
 
+   in.close();
+   return true;
+}
+
+// ---------------------------------------------------------------------------
+// (Checkpoint V2, LTS Phase 2)  Same text body as V1 but magic
+// TPV104_CHECKPOINT_V2 and two extra header fields after `step` (the
+// sync-interval counter): `lts_mode` and `layout_hash` (the LtsLayoutHash of the
+// clustering, so a restart whose recomputed layout differs is REFUSED).
+// dof_data is empty on the fault-free bulk path.
+// ---------------------------------------------------------------------------
+inline void WriteTpv104CheckpointV2Impl(const std::string &prefix,
+                                        real_t t, real_t dt, int sync_step,
+                                        int lts_mode, std::uint64_t layout_hash,
+                                        const Vector &Q,
+                                        const std::vector<DOFData> &dof_data,
+                                        int rank, int size,
+                                        const std::string &driver_tag = "")
+{
+   MFEM_VERIFY(driver_tag.empty()
+               || (driver_tag.size() <= 31
+                   && driver_tag.find_first_of(" \t\n\r") == std::string::npos),
+               "WriteTpv104CheckpointV2: bad driver_tag '" << driver_tag << "'.");
+   const std::string filename = Tpv104CheckpointFilename(prefix, rank);
+   std::ofstream out(filename);
+   MFEM_VERIFY(out.good(), "WriteTpv104CheckpointV2: cannot open " << filename);
+   out << std::setprecision(17) << std::scientific;
+   out << "TPV104_CHECKPOINT_V2\n";
+   out << "num_ranks " << size << "\n";
+   out << "rank " << rank << "\n";
+   out << "time " << t << "\n";
+   out << "dt " << dt << "\n";
+   out << "step " << sync_step << "\n";
+   out << "lts_mode " << lts_mode << "\n";
+   out << "layout_hash " << layout_hash << "\n";
+   out << "Q_size " << Q.Size() << "\n";
+   for (int i = 0; i < Q.Size(); ++i) { out << Q(i) << "\n"; }
+   const int nd = static_cast<int>(dof_data.size());
+   out << "dof_data_size " << nd << "\n";
+   for (int i = 0; i < nd; ++i)
+   {
+      const DOFData &d = dof_data[i];
+      out << d.psi << "\n" << d.slip_rate << "\n" << d.V1 << "\n" << d.V2 << "\n"
+          << d.slip1 << "\n" << d.slip2 << "\n" << d.tau1_nuc << "\n"
+          << d.tau2_nuc << "\n" << d.sigma_n_nuc << "\n";
+   }
+   if (!driver_tag.empty()) { out << "DRIVER_TAG_V1\n" << driver_tag << "\n"; }
+   out.close();
+}
+
+/// Peek the checkpoint magic tag: 1 (V1/GTS), 2 (V2/LTS), or 0 (missing/unknown).
+inline int PeekTpv104CheckpointVersion(const std::string &prefix, int rank)
+{
+   std::ifstream in(Tpv104CheckpointFilename(prefix, rank));
+   if (!in.good()) { return 0; }
+   std::string tag; in >> tag;
+   if (tag == "TPV104_CHECKPOINT_V1") { return 1; }
+   if (tag == "TPV104_CHECKPOINT_V2") { return 2; }
+   return 0;
+}
+
+inline bool ReadTpv104CheckpointV2Impl(const std::string &prefix,
+                                       real_t &t, real_t &dt, int &sync_step,
+                                       int &lts_mode, std::uint64_t &layout_hash,
+                                       Vector &Q, int expected_Q_size,
+                                       std::vector<DOFData> &dof_data,
+                                       int rank, int size,
+                                       std::string *driver_tag = nullptr)
+{
+   const std::string filename = Tpv104CheckpointFilename(prefix, rank);
+   std::ifstream in(filename);
+   if (!in.good()) { return false; }
+   auto read_tag = [&](const std::string &e)
+   {
+      std::string tag; in >> tag;
+      MFEM_VERIFY(tag == e, "TPV104 V2 checkpoint parse: expected '" << e
+                  << "', got '" << tag << "' in " << filename);
+   };
+   read_tag("TPV104_CHECKPOINT_V2");
+   int fnr = 0, fr = 0;
+   read_tag("num_ranks"); in >> fnr;
+   read_tag("rank");      in >> fr;
+   MFEM_VERIFY(fnr == size, "V2 checkpoint num_ranks mismatch: " << fnr << " != " << size);
+   MFEM_VERIFY(fr == rank, "V2 checkpoint rank mismatch: " << fr << " != " << rank);
+   read_tag("time"); in >> t;
+   read_tag("dt");   in >> dt;
+   read_tag("step"); in >> sync_step;
+   read_tag("lts_mode");    in >> lts_mode;
+   read_tag("layout_hash"); in >> layout_hash;
+   int Q_size = 0; read_tag("Q_size"); in >> Q_size;
+   MFEM_VERIFY(expected_Q_size >= 0 && Q_size == expected_Q_size,
+               "ReadTpv104CheckpointV2: Q size mismatch: file " << Q_size
+               << " != expected " << expected_Q_size);
+   Q.SetSize(Q_size);
+   for (int i = 0; i < Q_size; ++i) { in >> Q(i); }
+   int nd = 0; read_tag("dof_data_size"); in >> nd;
+   MFEM_VERIFY(static_cast<int>(dof_data.size()) == nd,
+               "V2 checkpoint dof_data_size mismatch: " << nd << " != " << dof_data.size());
+   for (int i = 0; i < nd; ++i)
+   {
+      DOFData &d = dof_data[i];
+      in >> d.psi >> d.slip_rate >> d.V1 >> d.V2 >> d.slip1 >> d.slip2
+         >> d.tau1_nuc >> d.tau2_nuc >> d.sigma_n_nuc;
+   }
+   MFEM_VERIFY(!in.fail(), "V2 checkpoint stream error in " << filename);
+   if (driver_tag) { driver_tag->clear(); }
+   {
+      std::string mt;
+      if (in >> mt)
+      {
+         MFEM_VERIFY(mt == "DRIVER_TAG_V1",
+                     "V2 checkpoint trailer parse: got '" << mt << "' in " << filename);
+         std::string tag; in >> tag;
+         if (driver_tag) { *driver_tag = tag; }
+      }
+   }
    in.close();
    return true;
 }
