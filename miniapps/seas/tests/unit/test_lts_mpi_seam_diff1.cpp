@@ -163,7 +163,11 @@ int main(int argc, char *argv[])
    real_t t_lts = 0.0;
    for (int s = 0; s < K; ++s)
    {
-      const real_t T_s = dt_base * static_cast<real_t>(1LL << (NClust - 1));
+      const real_t T_full = dt_base * static_cast<real_t>(1LL << (NClust - 1));
+      // Make the LAST interval RAGGED (T_actual < T_s): exercises the coarse
+      // cluster's truncated step + the [a,b] min(...) clamp at a rank seam (the
+      // np=1 vs np>1 differential must still hold; both use this same schedule).
+      const real_t T_s = (s == K - 1) ? (T_full - dt_base) : T_full;
       auto tab = BuildTickTable(NClust, dt_base, T_s, ader_order, meta);
       stepper.SetSyncInterval(t_lts, T_s);
       wave.SetTime(t_lts);

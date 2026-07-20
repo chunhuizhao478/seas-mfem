@@ -2497,6 +2497,14 @@ void WaveOperator<MeshType>::AdvanceADERClusterBulk(
          if (it == seam_coarse_buf_.end()) { continue; }
          if (static_cast<int>(it->second.size()) != block) { continue; }
          if (seam_coarse_fill_[e] == 0) { continue; }   // nothing accumulated
+         // Invariant-i (defense-in-depth, REVIEW p4a-2 LOW): the finer neighbour is
+         // exactly one cluster down (maxdiff<=1), so a full coarse step accumulates
+         // 2 fine sub-steps; a ragged final interval accumulates 1.  >2 is a
+         // double-fill bug.
+         MFEM_VERIFY(seam_coarse_fill_[e] >= 1 && seam_coarse_fill_[e] <= 2,
+                     "AdvanceADERClusterBulk: coarse-seam elem " << e
+                     << " in-tray fill " << seam_coarse_fill_[e]
+                     << " out of [1,2] (buffer lifecycle bug).");
          const int off = e * ndof_per_el_;
          for (int c = 0; c < NUM_STATE; ++c)
          {
@@ -2695,9 +2703,20 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
          if      (c1 == cluster_c     && c_nbr == cluster_c)     { mode = 0; }
          else if (c1 == cluster_c     && c_nbr == cluster_c + 1) { mode = 1; }
          else if (c1 == cluster_c + 1 && c_nbr == cluster_c)     { mode = 2; }
-         else { continue; }   // handled when the other incident cluster corrects
-         // maxdiff<=1 is enforced by the clustering; anything else can't be one of
-         // the three modes above (already skipped).
+         else
+         {
+            // Faces not matching a mode above are either between OTHER clusters
+            // (handled when one of THEM corrects) or the "other side" of a diff-1
+            // seam incident to cluster_c (handled at the finer cluster's correct).
+            // All of those have |c1-c_nbr| <= 1.  A seam differing by >1 is a
+            // clustering/partition bug (maxdiff<=1 violated) — fail loud rather
+            // than silently drop its flux (REVIEW p4a-2 LOW).
+            MFEM_VERIFY(std::abs(c1 - c_nbr) <= 1,
+                        "ComputeADERClusterSeamFaceFluxRHS: rank seam sf=" << sf
+                        << " joins clusters " << c1 << " and " << c_nbr
+                        << " differing by >1 (maxdiff<=1 violated).");
+            continue;
+         }
 
          // Shared FAULT faces are rank-interior under D-2 — must not reach here.
          MFEM_VERIFY(!(bc_.fault_attr > 0
@@ -2749,6 +2768,18 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
                                  == dk_order * NUM_STATE,
                            "ComputeADERClusterSeamFaceFluxRHS: ghost D(k) for cluster "
                            << c_coarse << " not exchanged (Predict order / opt-in?).");
+               // GAP-A3 (no stale D(k)): the cached ghost forecast must be from the
+               // coarse cluster's CURRENT step, i.e. its last predict tick
+               // t_origin_tick = floor(tick/period)*period (REVIEW p4a-2 LOW).
+               const long long t_origin_tick = (tick / period) * period;
+               MFEM_VERIFY(c_coarse < static_cast<int>(ghost_dk_epoch_.size())
+                           && ghost_dk_epoch_[c_coarse] == t_origin_tick,
+                           "ComputeADERClusterSeamFaceFluxRHS: stale ghost D(k) for "
+                           "cluster " << c_coarse << " (epoch "
+                           << (c_coarse < static_cast<int>(ghost_dk_epoch_.size())
+                               ? ghost_dk_epoch_[c_coarse] : -1)
+                           << " != current coarse-step predict tick " << t_origin_tick
+                           << ").");
                ghost_stack.assign(static_cast<std::size_t>(dk_order) * block, 0.0);
                for (int k = 0; k < dk_order; ++k)
                   for (int comp = 0; comp < NUM_STATE; ++comp)
