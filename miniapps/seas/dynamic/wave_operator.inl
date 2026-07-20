@@ -2561,8 +2561,14 @@ void WaveOperator<MeshType>::EnsureGhostClusterIds_() const
 
 template <typename MeshType>
 void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
-   int cluster_c, const Vector &I_cluster, real_t dt, Vector &rhs) const
+   int cluster_c, const Vector &I_cluster, real_t dt, Vector &rhs,
+   mfem::real_t t_s, mfem::real_t dt_base, int tick, mfem::real_t T_actual,
+   const real_t *dk_data, int dk_order, const int *provider_slot_of_elem) const
 {
+   // Stage-2 params (unused until the diff-1 corrector paths land; a diff-1 seam
+   // still FAILS LOUD below).
+   (void)t_s; (void)dt_base; (void)tick; (void)T_actual;
+   (void)dk_data; (void)dk_order; (void)provider_slot_of_elem;
    if constexpr (!IsParallelMesh<MeshType>::value)
    {
       (void)cluster_c; (void)I_cluster; (void)dt; (void)rhs;
@@ -2715,6 +2721,81 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
             }
          }
       }
+#endif
+   }
+}
+
+// ---------------------------------------------------------------------------
+// LTS Phase 4a Stage 2: exchange a cluster's provider Taylor stacks D(k) to
+// face neighbours (so a finer cross-rank neighbour can integrate the coarse
+// forecast at a diff-1 rank seam) and cache them in ghost_dk_[cluster_c].
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void WaveOperator<MeshType>::ExchangeClusterProviderDkGhost(
+   int cluster_c, const real_t *dk_data, int dk_order,
+   const int *provider_slot_of_elem, int tick) const
+{
+   if constexpr (!IsParallelMesh<MeshType>::value)
+   {
+      (void)cluster_c; (void)dk_data; (void)dk_order;
+      (void)provider_slot_of_elem; (void)tick;
+      return;   // serial mesh: no rank seams
+   }
+   else
+   {
+#ifdef MFEM_USE_MPI
+      auto &pmesh = static_cast<const ParMesh &>(mesh_);
+      if (pmesh.GetNSharedFaces() == 0) { return; }   // np=1: no ghosts
+      MFEM_VERIFY(ghost_gf_, "ExchangeClusterProviderDkGhost: ghost GF unset.");
+      MFEM_VERIFY(dk_data && provider_slot_of_elem && dk_order > 0,
+                  "ExchangeClusterProviderDkGhost: provider D(k) inputs unset.");
+      MFEM_VERIFY(!lts_cluster_id_.empty()
+                  && static_cast<int>(lts_cluster_id_.size()) == ne_,
+                  "ExchangeClusterProviderDkGhost: cluster ids unset/mismatched.");
+      const int block = NUM_STATE * ndof_per_el_;
+
+      // Size the per-cluster cache lazily (num_clusters = max id + 1).
+      int nc = 0;
+      for (int e = 0; e < ne_; ++e) { nc = std::max(nc, lts_cluster_id_[e] + 1); }
+      if (static_cast<int>(ghost_dk_.size()) < nc)
+      {
+         ghost_dk_.resize(static_cast<std::size_t>(nc));
+         ghost_dk_epoch_.assign(static_cast<std::size_t>(nc), -1);
+      }
+      MFEM_VERIFY(cluster_c >= 0 && cluster_c < nc,
+                  "ExchangeClusterProviderDkGhost: cluster_c out of range.");
+      std::vector<Vector> &cache = ghost_dk_[static_cast<std::size_t>(cluster_c)];
+      if (static_cast<int>(cache.size()) != dk_order * NUM_STATE)
+      { cache.assign(static_cast<std::size_t>(dk_order) * NUM_STATE, Vector()); }
+
+      ParGridFunction &q_gf = *ghost_gf_;
+      for (int k = 0; k < dk_order; ++k)
+      {
+         for (int comp = 0; comp < NUM_STATE; ++comp)
+         {
+            for (int i = 0; i < ndof_total_; ++i) { q_gf[i] = 0.0; }
+            for (int e = 0; e < ne_; ++e)
+            {
+               if (lts_cluster_id_[static_cast<std::size_t>(e)] != cluster_c)
+               { continue; }
+               const int slot = provider_slot_of_elem[e];
+               if (slot < 0) { continue; }   // not a provider
+               // D(k) stack for this slot: [slot][k][block], block component-major.
+               const real_t *blk = dk_data
+                  + (static_cast<std::size_t>(slot) * dk_order + k) * block
+                  + static_cast<std::size_t>(comp) * ndof_per_el_;
+               const int off = e * ndof_per_el_;
+               for (int i = 0; i < ndof_per_el_; ++i) { q_gf[off + i] = blk[i]; }
+            }
+            q_gf.ExchangeFaceNbrData();
+            ++n_ghost_exchanges_;
+            const Vector &s = q_gf.FaceNbrData();
+            Vector &dst = cache[static_cast<std::size_t>(k) * NUM_STATE + comp];
+            dst.SetSize(s.Size());
+            std::memcpy(dst.GetData(), s.GetData(), s.Size() * sizeof(real_t));
+         }
+      }
+      ghost_dk_epoch_[static_cast<std::size_t>(cluster_c)] = tick;
 #endif
    }
 }

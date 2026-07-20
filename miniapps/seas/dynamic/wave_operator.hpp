@@ -638,6 +638,19 @@ public:
       // seams; a cross-cluster (diff-1) seam FAILS LOUD (Stage 2).
       int cluster_id_for_seam = -1) const;
 
+   /// LTS Phase 4a Stage 2: exchange cluster `cluster_c`'s PROVIDER Taylor stacks
+   /// D(k) to face neighbours and cache them in `ghost_dk_[cluster_c]` (per level ×
+   /// component; 4a uses the scalar ghost_gf_, so NUM_STATE·dk_order exchanges).
+   /// A finer neighbour integrates this forecast over its sub-interval at the diff-1
+   /// seam.  Called from LtsBulkSyncStepper::Predict(c) when cluster c is a GLOBAL
+   /// cross-rank provider.  Records `ghost_dk_epoch_[cluster_c] = tick`.  No-op at
+   /// np=1 (no shared faces).  Increments `n_ghost_exchanges_`.  Public: the
+   /// stepper (and unit tests) call it directly.
+   void ExchangeClusterProviderDkGhost(int cluster_c, const real_t *dk_data,
+                                       int dk_order,
+                                       const int *provider_slot_of_elem,
+                                       int tick) const;
+
    /// Element-subset twins of the corrector primitives (element-local, so
    /// byte-identical to the whole-vector versions over the full list).
    void ComputeVolumeRHSElems_(const Vector &Q, Vector &rhs,
@@ -1413,6 +1426,37 @@ protected:
    /// by the seam corrector, for the per-tick matched-collective assertion.
    mutable long long n_ghost_exchanges_ = 0;
 
+   /// LTS Phase 4a Stage 2 (diff-1 rank seams): cached ghost (face-neighbour)
+   /// Taylor stacks D(k), one bucket per cluster (the coarse provider whose
+   /// forecast the finer neighbour integrates).  `ghost_dk_[c][k*NUM_STATE+comp]`
+   /// is a FaceNbrData Vector indexed `nbr_idx*ndof_per_el_ + dof`.  Refreshed by
+   /// ExchangeClusterProviderDkGhost when cluster c predicts; `ghost_dk_epoch_[c]`
+   /// records that tick so a fine-side read can assert it is current (GAP-A3).
+   mutable std::vector<std::vector<Vector>> ghost_dk_;
+   mutable std::vector<long long>           ghost_dk_epoch_;
+   /// LTS Phase 4a Stage 2: coarse-side seam in-tray — a diff-1 rank seam's COARSE
+   /// element (local) accumulates its share of the seam flux here across the fine
+   /// neighbour's sub-corrects (the fine element/buffer is on another rank), then
+   /// consumes it at its own correct.  Keyed by local coarse element id.
+   mutable std::map<int, std::vector<mfem::real_t>> seam_coarse_buf_;
+   mutable std::map<int, int>                       seam_coarse_fill_;
+
+public:
+   /// LTS Phase 4a Stage 2 (tests): the cached ghost D(k) stacks for a cluster
+   /// (`[k*NUM_STATE+comp]` → FaceNbrData Vector).  Empty until
+   /// ExchangeClusterProviderDkGhost has run for that cluster.
+   const std::vector<Vector> &GhostDkForTest(int cluster_c) const
+   { return ghost_dk_.at(static_cast<std::size_t>(cluster_c)); }
+   /// LTS Phase 4a Stage 2 (tests): true iff every coarse-side seam in-tray is
+   /// zero (invariant: must hold at every sync point).
+   bool SeamCoarseBuffersZero() const
+   {
+      for (const auto &kv : seam_coarse_buf_)
+         for (mfem::real_t v : kv.second) { if (v != mfem::real_t(0)) { return false; } }
+      return true;
+   }
+private:
+
 public:
    /// LTS Phase 4a: read + reset the ghost-exchange counter (matched-collective
    /// audit).  The driver checks it per sync against the tick table's summed
@@ -1503,8 +1547,19 @@ private:
    /// and the exchange is UNCONDITIONAL (gated only on the rank-uniform
    /// GetNSharedFaces()>0), so the NUM_STATE ExchangeFaceNbrData calls are paired
    /// across ranks by construction.  Increments `n_ghost_exchanges_`.
-   void ComputeADERClusterSeamFaceFluxRHS(int cluster_c, const Vector &I_cluster,
-                                          real_t dt, Vector &rhs) const;
+   ///
+   /// Stage 2 (diff-1 seams): the schedule params (t_s, dt_base, tick, T_actual)
+   /// give the closed-form sub-interval [a,b] relative to the COARSE side's
+   /// expansion point; `dk_data`/`dk_order`/`provider_slot_of_elem` are the LOCAL
+   /// Taylor stacks (for the coarse-side seam, where THIS rank owns the coarse
+   /// element).  When these are unset (nullptr / negative) only diff-0 seams are
+   /// handled and a diff-1 seam FAILS LOUD (Stage-1 behaviour).
+   void ComputeADERClusterSeamFaceFluxRHS(
+      int cluster_c, const Vector &I_cluster, real_t dt, Vector &rhs,
+      mfem::real_t t_s = 0.0, mfem::real_t dt_base = 0.0, int tick = 0,
+      mfem::real_t T_actual = 0.0,
+      const real_t *dk_data = nullptr, int dk_order = 0,
+      const int *provider_slot_of_elem = nullptr) const;
 
    /// LTS Phase 4a: build (once, cached) the per-face-neighbour ghost cluster id
    /// from `lts_cluster_id_`, so the seam corrector can classify a seam face as
