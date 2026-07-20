@@ -4446,19 +4446,31 @@ int main(int argc, char *argv[])
       fault_interleave_env != nullptr && fault_interleave_env[0] != '\0'
       && std::strcmp(fault_interleave_env, "0") != 0
       && std::strcmp(fault_interleave_env, "false") != 0;
+   // LTS Phase 4a: the fault interleave now runs at np>1.  D-2 (fault-locality)
+   // keeps every fault face rank-INTERIOR, so the fault half stays local; the BULK
+   // half's rank seams are handled by the same seam machinery as the bulk stepper.
+   // The gate MUST be PURELY rank-uniform (all three terms are the same on every
+   // rank) — a collective branch decision must not hinge on per-rank state.
+   // REVIEW p4-fault MODERATE: an earlier `(FaultFacesReordered() ||
+   // num_fault_total==0)` clause could diverge (a rank owning only SHARED fault
+   // faces has num_fault_total>0 but an empty interior reorder => false, while
+   // clean ranks get true => deadlock).  The P-006 reorder + D-2 are instead
+   // enforced fail-loud on ALL ranks by the fault stepper's ctor asserts
+   // (GetNumSharedFaultQPs()==0 + per-cluster QP contiguity) and the
+   // num_shared_global==0 check just below.
    const bool lts_fault_stepping =
-      cfg.numerics.LtsEnabled() && num_fault_total > 0 && nprocs == 1
-      && wave.FaultFacesReordered() && lts_fault_interleave_optin;
-   if (cfg.numerics.LtsEnabled() && num_fault_total > 0 && nprocs == 1
-       && rank == 0)
+      cfg.numerics.LtsEnabled() && num_fault_global > 0
+      && lts_fault_interleave_optin;
+   if (cfg.numerics.LtsEnabled() && num_fault_global > 0 && rank == 0)
    {
       if (lts_fault_stepping)
       {
          std::cout << "[lts] fault + lts=\"" << cfg.numerics.lts
-                   << "\": fault-half LTS INTERLEAVE ACTIVE (P3-4, np=1) — each "
-                      "cluster advances its fault QPs at dt_base*2^c.  Multi-cluster "
-                      "physics fidelity is Frontera-gated; single-cluster == GTS "
-                      "(to machine-eps) is the local gate.\n";
+                   << "\": fault-half LTS INTERLEAVE ACTIVE (P3-4; np" << nprocs
+                   << ") — each cluster advances its fault QPs at dt_base*2^c.  "
+                      "Fault faces are rank-interior (D-2); bulk rank seams use the "
+                      "seam machinery.  Multi-cluster physics fidelity is Frontera-"
+                      "gated; single-cluster == GTS (machine-eps) is the local gate.\n";
       }
       else
       {
@@ -4619,9 +4631,16 @@ int main(int argc, char *argv[])
    // is the local gate; multi-cluster physics fidelity is Frontera-staged.
    if (lts_fault_stepping)
    {
-      MFEM_VERIFY(nprocs == 1,
-                  "spatial_dyn: LTS fault interleave requires np=1 (D-2: no shared "
-                  "fault faces; cross-rank fault stepping is Phase 4).");
+      // LTS Phase 4a: np>1 enabled.  D-2 (fault-locality) keeps fault faces
+      // rank-interior; the bulk half's rank seams use the seam machinery.
+      // Enforce D-2 GLOBALLY + uniformly (num_shared_global is an Allreduce, so
+      // this aborts on ALL ranks together if fault-locality was not applied — the
+      // fault interleave has no cross-rank shared-fault path).
+      MFEM_VERIFY(num_shared_global == 0,
+                  "spatial_dyn: LTS fault interleave requires fault-locality (D-2): "
+                  "expected zero SHARED fault faces globally, got " << num_shared_global
+                  << ".  lts != off implies fault-locality (P-017) — check the "
+                  "partition (cross-rank shared-fault stepping is not supported).");
       MFEM_VERIFY(lts_layout_ready,
                   "spatial_dyn: LTS fault interleave requested but the pre-operator "
                   "clustering was not built (internal error).");
@@ -4637,6 +4656,10 @@ int main(int argc, char *argv[])
       LtsFaultSyncStepper<ParMesh> stepper(
          wave, layout, lts_cluster_id, Q, cfg.numerics.ader_order, dt_base,
          substep_iterator, dof_data, fault_coords, nuc.get());
+      // LTS Phase 4a Stage 2: enable the bulk diff-1 seam D(k) exchange at np>1
+      // with >1 cluster (consistent with the tick-table matched-collective count).
+      lts_meta.exchange_bulk_provider_dk = (nprocs > 1 && cl.num_clusters > 1);
+      stepper.SetExchangeProviderDk(lts_meta.exchange_bulk_provider_dk);
       if (rank == 0)
       {
          std::cout << "[lts] STEPPING (rate2, fault interleave): Nc = "
@@ -4680,10 +4703,27 @@ int main(int argc, char *argv[])
                                    cfg.numerics.ader_order, meta);
          stepper.SetSyncInterval(t_lts, T_actual);
          wave.SetTime(t_lts);
+         // LTS Phase 4a (P-007): matched-collective audit — the bulk seam ghost
+         // exchanges this sync must equal the tick-table n_collectives on every
+         // rank that owns shared faces (fault faces are rank-interior, D-2, so the
+         // fault half adds no exchanges).
+         wave.ResetGhostExchangeCount();
+         long long sched_exchanges = 0;
+         for (const auto &tk : tab) { sched_exchanges += tk.n_collectives; }
+         const long long expected_exchanges =
+            wave.HasSharedFaces() ? sched_exchanges : 0;
          RunSyncInterval(tab, stepper);
+         MFEM_VERIFY(wave.GhostExchangeCount() == expected_exchanges,
+                     "spatial_dyn: LTS fault-path ghost-exchange count "
+                     << wave.GhostExchangeCount() << " != expected "
+                     << expected_exchanges << " at sync " << sync
+                     << " (matched-collective violation, P-007).");
          MFEM_VERIFY(stepper.BuffersZero(),
                      "spatial_dyn: LTS accumulate buffers non-zero at sync point "
                      << sync << " (buffer lifecycle bug — invariant ii).");
+         MFEM_VERIFY(wave.SeamCoarseBuffersZero(),
+                     "spatial_dyn: LTS coarse-side seam in-tray non-zero at sync "
+                     << sync << " (Stage-2 buffer lifecycle bug).");
          t_lts += T_actual;
          ++sync;
 

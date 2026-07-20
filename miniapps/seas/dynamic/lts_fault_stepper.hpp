@@ -17,8 +17,14 @@
 // per-cluster face sweep reassociates the face sum vs the whole-mesh GTS sum;
 // the nucleation is absolute vs GTS-incremental — same value, different rounding).
 //
-// np=1 ONLY (D-2: no shared fault faces).  The driver gates this on
-// nprocs==1 && fault && lts!="off".  Cross-rank fault stepping is Phase 4.
+// np>=1 under D-2: fault faces are rank-INTERIOR (fault-locality partition,
+// P-017), so the fault half is purely local (the interior-only per-cluster
+// fault-QP eval + friction range Advance).  At np>1 the BULK half additionally
+// has rank seams — handled by the SAME bulk-seam machinery as LtsBulkSyncStepper
+// (Correct forwards cluster_id_for_seam + schedule to AdvanceADERClusterBulk;
+// Predict runs PrepareSeamCoarseForecast for the diff-1 coarse forecast when
+// SetExchangeProviderDk is on).  There are NO cross-rank FAULT faces (D-2,
+// asserted in the ctor).
 
 #ifndef MFEM_SEAS_LTS_FAULT_STEPPER_HPP
 #define MFEM_SEAS_LTS_FAULT_STEPPER_HPP
@@ -89,22 +95,26 @@ public:
       n_total_fault_qps_ = wave_.GetNumTotalFaultQPs();
       const int nbf = wave_.GetNbfPerFace();
       nbf_ = nbf;
-      // REVIEW P3-4 A2: D-2 invariant — the np=1 fault interleave has NO shared
-      // (cross-rank) fault faces; the per-cluster QP ranges are built only from the
-      // interior fault-face list, so any shared QP slot would stay zero in the
-      // imposed-state buffer and the corrector would silently consume zeroed states.
-      // Fail loud (cross-rank shared-fault stepping is Phase 4).
+      // REVIEW P3-4 A2 / p4-fault: D-2 invariant — the fault interleave has NO
+      // shared (cross-rank) fault faces AT ANY np (fault-locality partitioning,
+      // P-017); the per-cluster QP ranges are built only from the interior
+      // fault-face list, so any shared QP slot would stay zero in the imposed-state
+      // buffer and the corrector would silently consume zeroed states.  Fail loud
+      // (cross-rank shared-fault stepping is not supported).
       MFEM_VERIFY(wave_.GetNumSharedFaultQPs() == 0,
-                  "LtsFaultSyncStepper: expected zero shared fault QPs (D-2, np=1), "
-                  "got " << wave_.GetNumSharedFaultQPs()
-                  << " — cross-rank shared-fault stepping is Phase 4.");
-      // REVIEW P3-4 A4: the fault stepper is only built for a fault run, so the
-      // fault-QP layout must already exist (SetFaultDOFData ran); otherwise nbf=0
-      // collapses every range to [0,0), the imposed-state buffer stays unset, and
-      // Correct() silently falls to the inline friction re-solve.
-      MFEM_VERIFY(nbf > 0 && n_total_fault_qps_ > 0,
-                  "LtsFaultSyncStepper: nbf_per_face=" << nbf
-                  << ", n_total_fault_qps=" << n_total_fault_qps_
+                  "LtsFaultSyncStepper: expected zero shared fault QPs (D-2, "
+                  "fault-locality), got " << wave_.GetNumSharedFaultQPs()
+                  << " — cross-rank shared-fault stepping is not supported.");
+      // REVIEW P3-4 A4: on a FAULT-BEARING rank the fault-QP layout must exist
+      // (SetFaultDOFData ran); otherwise nbf=0 collapses every range to [0,0), the
+      // imposed-state buffer stays unset, and Correct() silently falls to the inline
+      // friction re-solve.  LTS Phase 4a: at np>1 a rank may own NO fault faces
+      // (fault-free subdomain) — that is legitimate (the fault half is then a no-op,
+      // the rank does bulk + bulk seams only).  So require nbf>0 only when this rank
+      // actually has fault QPs.
+      MFEM_VERIFY(n_total_fault_qps_ == 0 || nbf > 0,
+                  "LtsFaultSyncStepper: n_total_fault_qps=" << n_total_fault_qps_
+                  << " > 0 but nbf_per_face=" << nbf
                   << " — the fault DOF layout must be built (SetFaultDOFData) before "
                   "constructing the fault stepper.");
       const mfem::Array<int> &fif = wave_.GetFaultInteriorFaces();
@@ -199,6 +209,11 @@ public:
    void SetSyncInterval(mfem::real_t t_s, mfem::real_t T_actual)
    { t_s_ = t_s; T_actual_ = T_actual; }
 
+   /// LTS Phase 4a Stage 2: enable the coarse provider-D(k) ghost exchange for
+   /// the BULK diff-1 rank seams (np>1).  Must match the tick table's
+   /// LtsGlobalMeta.exchange_bulk_provider_dk.  Default off (np=1 / single cluster).
+   void SetExchangeProviderDk(bool v) { exchange_dk_ = v; }
+
    void BeginTick(int tick) override { tick_ = tick; }
 
    void Predict(int c, mfem::real_t dt_step) override
@@ -267,6 +282,16 @@ public:
                            Qpw_plus_, Qpw_minus_, dt_step, t_step_start,
                            I_imp_plus_.data(), I_imp_minus_.data(), nuc_cb);
       }
+
+      // 3. BULK diff-1 rank seams (np>1): retain + exchange this (coarse) cluster's
+      //    seam-provider D(k) so a finer cross-rank neighbour can integrate its
+      //    forecast.  Fault faces are rank-interior (D-2), so the fault half above
+      //    needs no exchange; only the bulk half has rank seams.  c==0 is finest
+      //    (never a provider); the c>=1 gate is rank-uniform (matched collectives).
+      if (exchange_dk_ && c >= 1)
+      {
+         wave_.PrepareSeamCoarseForecast(c, Q_, dt_step, order_, tau, tick_);
+      }
    }
 
    void Correct(int c, mfem::real_t dt_step) override
@@ -300,7 +325,12 @@ public:
          dt_step, order_, I_[c], Q_,
          dk_.data.data(), order_, layout_.provider_slot_of_elem.data(),
          sa.data(), sb.data(), &buf_, layout_.buffer_slot_of_elem.data(),
-         ff, nff);
+         ff, nff,
+         // LTS Phase 4a: process this cluster's BULK rank-seam faces (diff-0 +
+         // diff-1) via the seam corrector; the schedule gives the diff-1 [a,b].
+         // np=1 / no shared faces => no-op.
+         /*cluster_id_for_seam=*/c,
+         /*t_s=*/t_s_, /*dt_base=*/dt_base_, /*tick=*/tick_, /*T_actual=*/T_actual_);
    }
 
    /// Invariant (ii): every accumulate buffer is zero at each sync point.
@@ -314,6 +344,7 @@ private:
    int order_, block_ = 0;
    mfem::real_t dt_base_ = 0.0, t_s_ = 0.0, T_actual_ = 0.0;
    int tick_ = 0;
+   bool exchange_dk_ = false;   // Stage 2: bulk coarse provider-D(k) ghost exchange
 
    IFrictionIterator &iterator_;
    std::vector<DOFData> &dof_data_;
