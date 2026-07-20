@@ -269,11 +269,13 @@ static void test_tick_table()
    CHECK(std::abs(tab[0].dt_step[1] - 2.0) < 1e-14);
    CHECK(std::abs(tab[0].dt_step[2] - 4.0) < 1e-14);
 
-   // Collective count = num_state * |correct| (fault predictor dropped).
-   CHECK_EQ(tab[0].n_collectives, 9);    // 1 correcting cluster
-   CHECK_EQ(tab[1].n_collectives, 18);   // 2
-   CHECK_EQ(tab[2].n_collectives, 9);    // 1
-   CHECK_EQ(tab[3].n_collectives, 27);   // 3
+   // LTS Phase 4b: the seam I-exchange is ONE batched collective per correcting
+   // cluster, so the count = |correct| (fault predictor dropped; D(k) term off by
+   // default meta.exchange_bulk_provider_dk=false).
+   CHECK_EQ(tab[0].n_collectives, 1);    // 1 correcting cluster
+   CHECK_EQ(tab[1].n_collectives, 2);    // 2
+   CHECK_EQ(tab[2].n_collectives, 1);    // 1
+   CHECK_EQ(tab[3].n_collectives, 3);    // 3
 }
 
 // ---------------------------------------------------------------------------
