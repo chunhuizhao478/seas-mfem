@@ -12,6 +12,7 @@
 
 #include "../../dynamic/lts_partition.hpp"
 
+#include <cmath>
 #include <cstdio>
 #include <set>
 #include <utility>
@@ -177,6 +178,71 @@ int main()
       CHECK(BuildLtsAwarePartition(3, xa, ad, cl, 1, 1, nullptr, fault, opt, p1)
             && p1.size() == 3 && p1[0] == 0 && p1[1] == 0 && p1[2] == 0,
             "nparts=1 => all rank 0");
+   }
+
+   // ---- T7: ComputeLtsPartitionImbalance (Phase-5 realization diagnostic) ----
+   {
+      // (a) perfectly balanced: each cluster split evenly across 2 ranks.
+      {
+         std::vector<int> cluster = {0, 0, 1, 1};
+         std::vector<int> part    = {0, 1, 0, 1};
+         std::vector<std::pair<int,int>> nofault;
+         auto pib = ComputeLtsPartitionImbalance(cluster, 2, part, 2, nullptr,
+                                                 nofault);
+         CHECK(pib.per_cluster.size() == 2,
+               "imb: per_cluster length == num_clusters");
+         CHECK(std::abs(pib.overall - 1.0) < 1e-12,
+               "imb: balanced => overall == 1");
+         CHECK(std::abs(pib.per_cluster[0] - 1.0) < 1e-12,
+               "imb: balanced => cluster0 == 1");
+         CHECK(std::abs(pib.per_cluster[1] - 1.0) < 1e-12,
+               "imb: balanced => cluster1 == 1");
+         CHECK(std::abs(pib.fault - 1.0) < 1e-12,
+               "imb: no fault pairs => fault == 1");
+      }
+      // (b) cluster 0 piled onto rank 0 => cluster-0 imbalance = 2, worst = c0.
+      {
+         std::vector<int> cluster = {0, 0, 1, 1};
+         std::vector<int> part    = {0, 0, 0, 1};
+         std::vector<std::pair<int,int>> nofault;
+         auto pib = ComputeLtsPartitionImbalance(cluster, 2, part, 2, nullptr,
+                                                 nofault);
+         CHECK(std::abs(pib.per_cluster[0] - 2.0) < 1e-12,
+               "imb: piled cluster0 imbalance == 2");
+         CHECK(std::abs(pib.per_cluster[1] - 1.0) < 1e-12,
+               "imb: cluster1 still balanced");
+         CHECK(pib.worst_cluster == 0, "imb: worst cluster is c0");
+         CHECK(std::abs(pib.worst_cluster_imbalance - 2.0) < 1e-12,
+               "imb: worst imbalance == 2");
+         CHECK(pib.overall > 1.0, "imb: overall > 1 when piled");
+      }
+      // (c) balanced BULK but fault work concentrated on one rank (SAFS gap).
+      {
+         std::vector<int> cluster = {0, 0, 0, 0};
+         std::vector<int> part    = {0, 0, 1, 1};
+         std::vector<std::pair<int,int>> fault = {{0, 1}};   // both on rank 0
+         auto pib = ComputeLtsPartitionImbalance(cluster, 1, part, 2, nullptr,
+                                                 fault);
+         CHECK(std::abs(pib.per_cluster[0] - 1.0) < 1e-12,
+               "imb: single-cluster bulk balanced");
+         CHECK(std::abs(pib.fault - 2.0) < 1e-12,
+               "imb: fault work all on one rank => fault == 2");
+      }
+      // (d) defensive: size mismatch / empty inputs => neutral 1.0.
+      {
+         std::vector<int> cluster = {0, 1};
+         std::vector<int> part_bad = {0};        // wrong length
+         std::vector<std::pair<int,int>> nofault;
+         auto pib = ComputeLtsPartitionImbalance(cluster, 2, part_bad, 2, nullptr,
+                                                 nofault);
+         CHECK(std::abs(pib.overall - 1.0) < 1e-12,
+               "imb: size mismatch => neutral overall 1");
+         std::vector<int> empty;
+         auto pib2 = ComputeLtsPartitionImbalance(empty, 0, empty, 2, nullptr,
+                                                  nofault);
+         CHECK(std::abs(pib2.overall - 1.0) < 1e-12,
+               "imb: empty => neutral overall 1");
+      }
    }
 
    std::printf("test_lts_partition: %d checks, %d failures\n", g_checks, g_fails);

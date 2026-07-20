@@ -227,5 +227,94 @@ bool BuildLtsAwarePartition(
    return true;
 }
 
+LtsPartitionImbalance ComputeLtsPartitionImbalance(
+   const std::vector<int>& cluster,
+   int num_clusters,
+   const std::vector<int>& part,
+   int nparts,
+   const std::vector<double>* cell_cost,
+   const std::vector<std::pair<int, int>>& fault_pairs)
+{
+   LtsPartitionImbalance out;
+   out.per_cluster.assign(
+      static_cast<std::size_t>(num_clusters > 0 ? num_clusters : 0), 1.0);
+
+   const int nv = static_cast<int>(cluster.size());
+   if (nv <= 0 || nparts <= 0 || num_clusters <= 0) { return out; }
+   if (static_cast<int>(part.size()) != nv) { return out; }
+   if (cell_cost && static_cast<int>(cell_cost->size()) != nv) { return out; }
+
+   const int maxC = num_clusters - 1;
+   auto wraw = [&](int v) -> double
+   {
+      if (cell_cost && (*cell_cost)[static_cast<std::size_t>(v)] > 0.0)
+      { return (*cell_cost)[static_cast<std::size_t>(v)]; }
+      return 1.0;
+   };
+   // max/mean imbalance of a per-rank quantity (1.0 when the total is zero).
+   auto imb = [](const std::vector<double>& a) -> double
+   {
+      double sum = 0.0, mx = 0.0;
+      for (double x : a) { sum += x; if (x > mx) { mx = x; } }
+      if (sum <= 0.0) { return 1.0; }
+      const double mean = sum / static_cast<double>(a.size());
+      return (mean > 0.0) ? mx / mean : 1.0;
+   };
+
+   // W[r]      : rank r's LTS-weighted per-sync work.
+   // C[c][r]   : rank r's raw work within cluster c (flattened c*nparts + r).
+   std::vector<double> W(static_cast<std::size_t>(nparts), 0.0);
+   std::vector<double> C(static_cast<std::size_t>(num_clusters) * nparts, 0.0);
+   for (int v = 0; v < nv; ++v)
+   {
+      const int r = part[static_cast<std::size_t>(v)];
+      const int c = cluster[static_cast<std::size_t>(v)];
+      if (r < 0 || r >= nparts || c < 0 || c >= num_clusters) { continue; }
+      int shift = maxC - c;
+      if (shift < 0)  { shift = 0; }
+      if (shift > 30) { shift = 30; }
+      const double w = wraw(v);
+      W[static_cast<std::size_t>(r)] += w * static_cast<double>(1LL << shift);
+      C[static_cast<std::size_t>(c) * nparts + r] += w;
+   }
+
+   out.overall = imb(W);
+   out.worst_cluster = -1;
+   out.worst_cluster_imbalance = -1.0;
+   for (int c = 0; c < num_clusters; ++c)
+   {
+      std::vector<double> Cc(
+         C.begin() + static_cast<std::ptrdiff_t>(static_cast<std::size_t>(c) * nparts),
+         C.begin() + static_cast<std::ptrdiff_t>((static_cast<std::size_t>(c) + 1) * nparts));
+      const double ib = imb(Cc);
+      out.per_cluster[static_cast<std::size_t>(c)] = ib;
+      if (ib > out.worst_cluster_imbalance)
+      { out.worst_cluster_imbalance = ib; out.worst_cluster = c; }
+   }
+   if (out.worst_cluster < 0) { out.worst_cluster_imbalance = 1.0; }
+
+   // Fault-work proxy: unique fault-incident elements per rank.
+   if (!fault_pairs.empty())
+   {
+      std::vector<char> seen(static_cast<std::size_t>(nv), 0);
+      std::vector<double> F(static_cast<std::size_t>(nparts), 0.0);
+      for (const auto& pr : fault_pairs)
+      {
+         const int es[2] = {pr.first, pr.second};
+         for (int e : es)
+         {
+            if (e >= 0 && e < nv && !seen[static_cast<std::size_t>(e)])
+            {
+               seen[static_cast<std::size_t>(e)] = 1;
+               const int r = part[static_cast<std::size_t>(e)];
+               if (r >= 0 && r < nparts) { F[static_cast<std::size_t>(r)] += 1.0; }
+            }
+         }
+      }
+      out.fault = imb(F);
+   }
+   return out;
+}
+
 } // namespace seas
 } // namespace mfem

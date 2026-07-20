@@ -91,6 +91,46 @@ int VerifyLtsPartitionFaultLocality(
    const std::vector<std::pair<int, int>>& fault_pairs,
    const std::vector<int>& part);
 
+/// Partition-quality diagnostic (Phase 5 realization-fraction attribution).
+///
+/// For a computed `part` over `nparts` ranks, reports the load imbalance
+/// `max_rank_work / mean_rank_work` (1.0 = perfect; the amount above 1.0 is the
+/// fraction of the busiest rank the others sit idle) at three granularities:
+///
+///   overall     : LTS-weighted per-sync work `w_v * 2^(maxC - cluster_v)`
+///                 (cluster c steps 2^(maxC-c) times per sync).  The aggregate
+///                 idle-time predictor.
+///   per_cluster : cluster-c work in isolation — exactly what the multi-
+///                 constraint METIS targets, and the DIRECT per-substep-balance
+///                 predictor.  The fine clusters (c=0,1) dominate wall-clock, so
+///                 their imbalance is the number that decides the realization
+///                 fraction.
+///   fault       : count of fault-incident elements per rank (a friction-work
+///                 proxy).  The bulk multi-constraint does NOT model friction
+///                 work, so a high `fault` with low `per_cluster` flags the case
+///                 where a fault-owning rank is friction-bound while its bulk
+///                 clusters look balanced (the SAFS ncon=2 bulk+friction gap).
+struct LtsPartitionImbalance
+{
+   double overall = 1.0;
+   std::vector<double> per_cluster;    ///< length num_clusters
+   double fault = 1.0;                 ///< 1.0 when there are no fault pairs
+   int    worst_cluster = -1;          ///< argmax over per_cluster (-1 if none)
+   double worst_cluster_imbalance = 1.0;
+};
+
+/// Compute the imbalance diagnostic above.  Pure reduction over `part` — no
+/// METIS, no MPI.  `cell_cost == nullptr` ⇒ uniform per-element weight 1.
+/// Ranks/clusters out of range are skipped defensively; a zero-total quantity
+/// reports imbalance 1.0.
+LtsPartitionImbalance ComputeLtsPartitionImbalance(
+   const std::vector<int>& cluster,
+   int num_clusters,
+   const std::vector<int>& part,
+   int nparts,
+   const std::vector<double>* cell_cost,
+   const std::vector<std::pair<int, int>>& fault_pairs);
+
 } // namespace seas
 } // namespace mfem
 

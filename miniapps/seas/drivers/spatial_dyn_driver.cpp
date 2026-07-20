@@ -1664,6 +1664,21 @@ int main(int argc, char *argv[])
                            "spatial_dyn: fallback partition size mismatch.");
                lts_part_vec.assign(fbp.GetData(), fbp.GetData() + serial_ne);
             }
+
+            // Phase-5 realization-fraction attribution: log the achieved
+            // per-cluster / fault-work imbalance of the injected partition.
+            {
+               const auto pib = seas::ComputeLtsPartitionImbalance(
+                  serial_cluster, nc, lts_part_vec, nprocs, nullptr,
+                  in.fault_pairs);
+               std::cout << "[lts-partition] imbalance: overall=" << pib.overall
+                         << "  worst-cluster c" << pib.worst_cluster << "="
+                         << pib.worst_cluster_imbalance << "  fault=" << pib.fault
+                         << "\n[lts-partition]   per-cluster:";
+               for (int c = 0; c < nc; ++c)
+               { std::cout << " c" << c << "=" << pib.per_cluster[c]; }
+               std::cout << "\n";
+            }
          }
        }
        catch (const std::exception &ex)
@@ -3488,6 +3503,61 @@ int main(int argc, char *argv[])
                       << ", dt_cfl = " << dt_cfl << " s\n";
             print_report("RAW (SeisSol algorithm: lambda=1, no merge)", raw);
             print_report("PRODUCTION (lambda-scan + Nc-cap merge)", prod);
+
+            // --lts-report-nparts N: build a HYPOTHETICAL N-rank LTS-aware
+            // partition of THIS (serial) mesh and report its load imbalance —
+            // the Phase-5 realization-fraction predictor, measured on one core
+            // WITHOUT launching N ranks.  Uses the PRODUCTION clustering (what a
+            // real run steps) and the same METIS path as the run.
+            const int report_nparts =
+               GetIntArg(argc, argv, "--lts-report-nparts", 0);
+            if (report_nparts > 1)
+            {
+               std::vector<int> xadj, adjncy;
+               xadj.reserve(static_cast<std::size_t>(neL) + 1);
+               xadj.push_back(0);
+               const int *I = e2e.GetI();
+               const int *J = e2e.GetJ();
+               for (int e = 0; e < neL; ++e)
+               {
+                  for (int k = I[e]; k < I[e + 1]; ++k)
+                  {
+                     const int nb = J[k];
+                     if (nb >= 0 && nb != e) { adjncy.push_back(nb); }
+                  }
+                  xadj.push_back(static_cast<int>(adjncy.size()));
+               }
+               std::vector<int> part_hyp;
+               seas::LtsPartitionOptions popt;
+               try
+               {
+                  seas::BuildLtsAwarePartition(neL, xadj, adjncy, prod.cluster,
+                                               prod.num_clusters, report_nparts,
+                                               nullptr, fault_pairs, popt,
+                                               part_hyp);
+                  const int viol = seas::VerifyLtsPartitionFaultLocality(
+                     fault_pairs, part_hyp);
+                  const auto pib = seas::ComputeLtsPartitionImbalance(
+                     prod.cluster, prod.num_clusters, part_hyp, report_nparts,
+                     nullptr, fault_pairs);
+                  std::cout << "[lts-report] HYPOTHETICAL " << report_nparts
+                            << "-rank LTS partition (production clustering):\n"
+                            << "[lts-report]   imbalance overall=" << pib.overall
+                            << "  worst-cluster c" << pib.worst_cluster << "="
+                            << pib.worst_cluster_imbalance
+                            << "  fault=" << pib.fault
+                            << "  fault-lock-violations=" << viol << "\n"
+                            << "[lts-report]   per-cluster imbalance:";
+                  for (int c = 0; c < prod.num_clusters; ++c)
+                  { std::cout << " c" << c << "=" << pib.per_cluster[c]; }
+                  std::cout << "\n";
+               }
+               catch (const std::exception &ex)
+               {
+                  std::cout << "[lts-report] partition for " << report_nparts
+                            << " ranks failed: " << ex.what() << "\n";
+               }
+            }
          }
       }
    }
