@@ -129,11 +129,12 @@ inline std::vector<LtsTick> BuildTickTable(int num_clusters,
       // coarse side consumes it in the same tick.
       std::sort(tk.correct_clusters.begin(), tk.correct_clusters.end());
 
-      // Per-tick collective count (plan Matched-collectives constraint, refined
-      // for the split predict/correct predicates): num_state exchanges per
-      // correcting cluster, plus ader_order predictor exchanges per predicting
-      // cluster that has GLOBAL fault faces (dropped entirely under D-2).
-      int nx = meta.num_state * static_cast<int>(tk.correct_clusters.size());
+      // Per-tick collective count (plan Matched-collectives constraint).
+      // LTS Phase 4b: the seam I-exchange is now ONE batched (all-NUM_STATE)
+      // collective per correcting cluster (was num_state per-component in 4a), so
+      // the I term is 1*|correct|.  Plus ader_order predictor exchanges per
+      // predicting cluster with GLOBAL fault faces (dropped under D-2).
+      int nx = static_cast<int>(tk.correct_clusters.size());
       if (!meta.drop_fault_predictor_exchange)
       {
          for (int c : tk.predict_clusters)
@@ -142,9 +143,10 @@ inline std::vector<LtsTick> BuildTickTable(int num_clusters,
          }
       }
       // LTS Phase 4a Stage 2 (diff-1 seams): each predicting cluster c>=1 exchanges
-      // its coarse provider D(k) (NUM_STATE*ader_order collectives) for the finer
-      // neighbour's cross-rank forecast.  c==0 is the finest cluster (never a
-      // provider), so it is skipped — a rank-uniform gate, matched across ranks.
+      // its coarse provider D(k) for the finer neighbour's cross-rank forecast.
+      // 4b (D(k) batching pending): still NUM_STATE*ader_order per-component
+      // collectives.  c==0 is the finest cluster (never a provider), skipped —
+      // a rank-uniform gate, matched across ranks.
       if (meta.exchange_bulk_provider_dk)
       {
          for (int c : tk.predict_clusters)

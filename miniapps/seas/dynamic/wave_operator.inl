@@ -2604,13 +2604,11 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
    mfem::real_t t_s, mfem::real_t dt_base, int tick, mfem::real_t T_actual,
    const real_t *dk_data, int dk_order, const int *provider_slot_of_elem) const
 {
-   // Stage-2 params (unused until the diff-1 corrector paths land; a diff-1 seam
-   // still FAILS LOUD below).
-   (void)t_s; (void)dt_base; (void)tick; (void)T_actual;
-   (void)dk_data; (void)dk_order; (void)provider_slot_of_elem;
    if constexpr (!IsParallelMesh<MeshType>::value)
    {
       (void)cluster_c; (void)I_cluster; (void)dt; (void)rhs;
+      (void)t_s; (void)dt_base; (void)tick; (void)T_actual;
+      (void)dk_data; (void)dk_order; (void)provider_slot_of_elem;
       return;   // serial mesh: no rank seams
    }
    else
@@ -2633,40 +2631,37 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
       MFEM_VERIFY(static_cast<int>(lts_cluster_id_.size()) == ne_,
                   "ComputeADERClusterSeamFaceFluxRHS: cluster-id size mismatch.");
 
-      // Exchange this cluster's time integral I to face neighbours: NUM_STATE
-      // per-component collectives, the EXACT payload ComputeADERSharedFaceFluxRHS
-      // uses.  UNCONDITIONAL — every rank runs this for the same cluster_c
-      // (RunSyncInterval's Correct(c)), so the exchanges are matched (P-007).
-      MFEM_VERIFY(ghost_gf_, "ComputeADERClusterSeamFaceFluxRHS: ghost GF unset.");
+      // LTS Phase 4b: exchange this cluster's time integral I to face neighbours in
+      // ONE batched (all-NUM_STATE) collective via the vdim=NUM_STATE byNODES ghost
+      // GF — byte-identical to the 4a per-component exchange (the ghost values read
+      // per (comp,dof) are the same), but 1 collective instead of NUM_STATE.
+      // UNCONDITIONAL — every rank runs this for the same cluster_c (matched, P-007).
+      // Pack ONLY cluster_c's blocks (Ordering::byNODES == component-major, so the
+      // component-major I copies straight in) and zero the rest (UB-clean; a
+      // non-cluster-c ghost slot is never consumed).  Read back through the
+      // layout-agnostic GetFaceNbrElementVDofs map (R-004), per face, below.
+      MFEM_VERIFY(ghost_gf_full_state_ && pfes_full_state_,
+                  "ComputeADERClusterSeamFaceFluxRHS: batched ghost GF unset.");
       const real_t *I_data = I_cluster.GetData();
-      ParGridFunction &q_gf = *ghost_gf_;
-      std::vector<Vector> nbr_data(NUM_STATE);
-      for (int c = 0; c < NUM_STATE; ++c)
+      ParGridFunction &q_gf_full = *ghost_gf_full_state_;
       {
-         // REVIEW p4a R1 (LOW, UB-clean): pack ONLY this cluster's element blocks
-         // and zero the rest.  `I_cluster` (the per-cluster integral) has only
-         // cluster-c blocks filled — the other blocks are uninitialised, so packing
-         // all of `I_data` would be an uninitialised read (harmless numerically,
-         // since a non-cluster-c ghost slot is never consumed here — a diff-0 seam
-         // reads only cluster-c ghosts and a diff-1 seam aborts — but it trips
-         // UBSan/valgrind).  Result is bit-identical: cluster-c ghost slots still
-         // receive the same cluster-c integral.
-         for (int i = 0; i < ndof_total_; ++i) { q_gf[i] = 0.0; }
+         real_t *qd = q_gf_full.GetData();
+         const std::size_t nfull =
+            static_cast<std::size_t>(NUM_STATE) * static_cast<std::size_t>(ndof_total_);
+         for (std::size_t k = 0; k < nfull; ++k) { qd[k] = 0.0; }
          for (int e = 0; e < ne_; ++e)
          {
             if (lts_cluster_id_[static_cast<std::size_t>(e)] != cluster_c)
             { continue; }
             const int off = e * ndof_per_el_;
-            for (int i = 0; i < ndof_per_el_; ++i)
-            { q_gf[off + i] = I_data[c * ndof_total_ + off + i]; }
+            for (int c = 0; c < NUM_STATE; ++c)
+               for (int i = 0; i < ndof_per_el_; ++i)
+               { qd[c * ndof_total_ + off + i] = I_data[c * ndof_total_ + off + i]; }
          }
-         q_gf.ExchangeFaceNbrData();
-         ++n_ghost_exchanges_;
-         const Vector &s = q_gf.FaceNbrData();
-         nbr_data[c].SetSize(s.Size());
-         std::memcpy(nbr_data[c].GetData(), s.GetData(),
-                     s.Size() * sizeof(real_t));
       }
+      q_gf_full.ExchangeFaceNbrData();   // 1 collective for all NUM_STATE components.
+      ++n_ghost_exchanges_;
+      const Vector &nbr_all = q_gf_full.FaceNbrData();
 
       MFEM_VERIFY(!ghost_cluster_id_.empty(),
                   "ComputeADERClusterSeamFaceFluxRHS: ghost cluster ids not built "
@@ -2742,6 +2737,14 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
                      "ComputeADERClusterSeamFaceFluxRHS: heterogeneous ghost "
                      "element (ndof2=" << ndof2 << " vs ndof_per_el_="
                      << ndof_per_el_ << ") not supported.");
+         // LTS Phase 4b: layout-agnostic map (component c, ghost dof i) -> flat
+         // batched FaceNbrData index (byNODES vdof, R-004).  nbr_all[nbr_vdofs
+         // [c*ndof2+i]] equals the 4a per-component nbr_data[c][nbr_idx*ndof+i].
+         mfem::Array<int> nbr_vdofs;
+         pfes_full_state_->GetFaceNbrElementVDofs(nbr_idx, nbr_vdofs);
+         MFEM_VERIFY(nbr_vdofs.Size() == NUM_STATE * ndof2,
+                     "ComputeADERClusterSeamFaceFluxRHS: neighbour vdof count "
+                     << nbr_vdofs.Size() << " != NUM_STATE*ndof2 (byNODES map).");
          const int mesh_face_idx =
             const_cast<ParMesh &>(pmesh).GetSharedFace(sf);
          const IntegrationRule &ir =
@@ -2846,7 +2849,8 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
                   for (int i = 0; i < ndof; ++i)
                   { I_self[c] += shape1(i) * I_data[c * ndof_total_ + dof_offset1 + i]; }
                   for (int i = 0; i < ndof2; ++i)
-                  { I_nbr[c] += shape2(i) * nbr_data[c][nbr_idx * ndof_per_el_ + i]; }
+                  { const int vd = nbr_vdofs[c * ndof2 + i];
+                    I_nbr[c] += shape2(i) * nbr_all[vd >= 0 ? vd : -1 - vd]; }
                }
             }
             else if (mode == 1)
@@ -2868,7 +2872,8 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
                   for (int i = 0; i < ndof; ++i)
                   { I_self[c] += shape1(i) * forecast_blk[c * ndof_per_el_ + i]; }
                   for (int i = 0; i < ndof2; ++i)
-                  { I_nbr[c] += shape2(i) * nbr_data[c][nbr_idx * ndof_per_el_ + i]; }
+                  { const int vd = nbr_vdofs[c * ndof2 + i];
+                    I_nbr[c] += shape2(i) * nbr_all[vd >= 0 ? vd : -1 - vd]; }
                }
             }
 
