@@ -57,8 +57,19 @@ int main(int argc, char *argv[])
 
    const int order = 2;
    const real_t lam = 32.04e9, mu = 32.04e9, rho = 2670.0;
-   const real_t Lx = 8000.0, Ly = 2000.0, Lz = 2000.0, mid = 0.5 * Lx;
-   Mesh smesh = Mesh::MakeCartesian3D(8, 2, 2, Element::TETRAHEDRON, Lx, Ly, Lz);
+   // NClust clusters banded along x (adjacent bands differ by 1 => maxdiff 1).
+   // Requires np == 1 (reference; bands are LOCAL diff-1 faces) or np == NClust
+   // (each rank owns one band => every band boundary is a RANK-SEAM diff-1 face,
+   // and a MIDDLE band is simultaneously a provider and a consumer — the B.11
+   // 3-cluster-chain scenario at NClust=3).
+   const int NClust = std::getenv("SEAM_DIFF1_NC")
+                      ? std::atoi(std::getenv("SEAM_DIFF1_NC")) : 2;
+   MFEM_VERIFY(NClust >= 2 && (nprocs == 1 || nprocs == NClust),
+               "test_lts_mpi_seam_diff1: run with np==1 or np==NClust "
+               "(SEAM_DIFF1_NC).");
+   const real_t Lx = 2000.0 * NClust, Ly = 2000.0, Lz = 2000.0;
+   Mesh smesh = Mesh::MakeCartesian3D(4 * NClust, 2, 2, Element::TETRAHEDRON,
+                                      Lx, Ly, Lz);
    const int serial_ne = smesh.GetNE();
 
    // Serial-element centroid x (for the forced partition at np>1).
@@ -69,21 +80,25 @@ int main(int argc, char *argv[])
       for (int i = 0; i < v.Size(); ++i) { cx += m.GetVertex(v[i])[0]; }
       return (v.Size() > 0) ? cx / v.Size() : 0.0;
    };
+   const real_t band = Lx / NClust;
+   auto band_of = [&](double cx) -> int
+   { int b = static_cast<int>(cx / band); return std::min(std::max(b, 0), NClust - 1); };
+
    std::vector<int> part(static_cast<std::size_t>(serial_ne), 0);
    if (nprocs > 1)
    {
       for (int e = 0; e < serial_ne; ++e)
-      { part[e] = (centroid_x(smesh, e) < mid) ? 0 : 1; }
+      { part[e] = band_of(centroid_x(smesh, e)); }   // one band per rank
    }
 
    ParMesh pmesh(MPI_COMM_WORLD, smesh, nprocs > 1 ? part.data() : nullptr);
    const int ne = pmesh.GetNE();
 
-   // Cluster ids from the LOCAL centroid (partition-invariant): 0 fine (x<mid),
-   // 1 coarse (x>=mid).  Nc=2, maxdiff 1 at the mid boundary.
+   // Cluster ids from the LOCAL centroid (partition-invariant): band index in
+   // [0, NClust).  Adjacent bands differ by 1.
    std::vector<int> cluster_id(static_cast<std::size_t>(ne), 0);
    for (int e = 0; e < ne; ++e)
-   { cluster_id[e] = (centroid_x(pmesh, e) < mid) ? 0 : 1; }
+   { cluster_id[e] = band_of(centroid_x(pmesh, e)); }
 
    WaveOperator<ParMesh> wave(pmesh, order, lam, mu, rho, AbsorbingBC(),
                               &cluster_id);
@@ -102,7 +117,7 @@ int main(int argc, char *argv[])
       fs.is_fault = false;
       faces.push_back(fs);
    }
-   LtsLayout layout = BuildLtsLayout(cluster_id, 2, faces);
+   LtsLayout layout = BuildLtsLayout(cluster_id, NClust, faces);
 
    // Initial bulk state (physical-coordinate field, partition-invariant).
    Vector Q(Nfull);
@@ -127,7 +142,7 @@ int main(int argc, char *argv[])
    MPI_Allreduce(MPI_IN_PLACE, &init_energy, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 
    const int ader_order = 4, K = 8;
-   const real_t dt_base = 1.0e-4;   // Nc=2 => T_s = 2*dt_base, 2 ticks/sync
+   const real_t dt_base = 1.0e-4;   // T_s = 2^(NClust-1)*dt_base, 2^(NClust-1) ticks/sync
    LtsBulkSyncStepper<ParMesh> stepper(wave, layout, cluster_id, Q, ader_order,
                                        dt_base);
    stepper.SetExchangeProviderDk(nprocs > 1);   // Stage 2 diff-1 D(k) exchange
@@ -148,8 +163,8 @@ int main(int argc, char *argv[])
    real_t t_lts = 0.0;
    for (int s = 0; s < K; ++s)
    {
-      const real_t T_s = dt_base * static_cast<real_t>(1LL << (2 - 1));
-      auto tab = BuildTickTable(2, dt_base, T_s, ader_order, meta);
+      const real_t T_s = dt_base * static_cast<real_t>(1LL << (NClust - 1));
+      auto tab = BuildTickTable(NClust, dt_base, T_s, ader_order, meta);
       stepper.SetSyncInterval(t_lts, T_s);
       wave.SetTime(t_lts);
       wave.ResetGhostExchangeCount();
