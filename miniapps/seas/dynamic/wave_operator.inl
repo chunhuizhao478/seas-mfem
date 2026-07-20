@@ -2197,7 +2197,8 @@ void WaveOperator<MeshType>::AdvanceADERClusterBulk(
    LtsAccumulateBuffers *buffers, const int *buffer_slot_of_elem,
    const int *fault_face_ids, int n_fault_faces,
    int cluster_id_for_seam,
-   mfem::real_t t_s, mfem::real_t dt_base, int tick, mfem::real_t T_actual) const
+   mfem::real_t t_s, mfem::real_t dt_base, int tick, mfem::real_t T_actual,
+   bool exchange_forecast) const
 {
    MFEM_VERIFY(dt_step > 0.0, "AdvanceADERClusterBulk: dt_step > 0");
    MFEM_VERIFY(order >= 2 && order <= 4, "AdvanceADERClusterBulk: order in {2,3,4}");
@@ -2480,7 +2481,8 @@ void WaveOperator<MeshType>::AdvanceADERClusterBulk(
    {
       ComputeADERClusterSeamFaceFluxRHS(cluster_id_for_seam, I_cluster, dt_step, rhs,
                                         t_s, dt_base, tick, T_actual,
-                                        dk_store, dk_order, provider_slot_of_elem);
+                                        dk_store, dk_order, provider_slot_of_elem,
+                                        exchange_forecast);
    }
 
    // 2d. LTS Phase 4a Stage 2: consume THIS cluster's coarse-side seam in-tray
@@ -2602,13 +2604,15 @@ template <typename MeshType>
 void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
    int cluster_c, const Vector &I_cluster, real_t dt, Vector &rhs,
    mfem::real_t t_s, mfem::real_t dt_base, int tick, mfem::real_t T_actual,
-   const real_t *dk_data, int dk_order, const int *provider_slot_of_elem) const
+   const real_t *dk_data, int dk_order, const int *provider_slot_of_elem,
+   bool exchange_forecast) const
 {
    if constexpr (!IsParallelMesh<MeshType>::value)
    {
       (void)cluster_c; (void)I_cluster; (void)dt; (void)rhs;
       (void)t_s; (void)dt_base; (void)tick; (void)T_actual;
       (void)dk_data; (void)dk_order; (void)provider_slot_of_elem;
+      (void)exchange_forecast;
       return;   // serial mesh: no rank seams
    }
    else
@@ -2631,24 +2635,85 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
       MFEM_VERIFY(static_cast<int>(lts_cluster_id_.size()) == ne_,
                   "ComputeADERClusterSeamFaceFluxRHS: cluster-id size mismatch.");
 
-      // LTS Phase 4b: exchange this cluster's time integral I to face neighbours in
-      // ONE batched (all-NUM_STATE) collective via the vdim=NUM_STATE byNODES ghost
-      // GF — byte-identical to the 4a per-component exchange (the ghost values read
-      // per (comp,dof) are the same), but 1 collective instead of NUM_STATE.
-      // UNCONDITIONAL — every rank runs this for the same cluster_c (matched, P-007).
-      // Pack ONLY cluster_c's blocks (Ordering::byNODES == component-major, so the
-      // component-major I copies straight in) and zero the rest (UB-clean; a
-      // non-cluster-c ghost slot is never consumed).  Read back through the
-      // layout-agnostic GetFaceNbrElementVDofs map (R-004), per face, below.
       MFEM_VERIFY(ghost_gf_full_state_ && pfes_full_state_,
                   "ComputeADERClusterSeamFaceFluxRHS: batched ghost GF unset.");
+      MFEM_VERIFY(!ghost_cluster_id_.empty(),
+                  "ComputeADERClusterSeamFaceFluxRHS: ghost cluster ids not built "
+                  "(EnsureGhostClusterIds_ must run in the ctor).");
+      EnsureSeamCoarseElems_();
+
       const real_t *I_data = I_cluster.GetData();
       ParGridFunction &q_gf_full = *ghost_gf_full_state_;
+      const std::size_t nfull =
+         static_cast<std::size_t>(NUM_STATE) * static_cast<std::size_t>(ndof_total_);
+      const int block = NUM_STATE * ndof_per_el_;
+
+      // ---- LTS Phase 4b: PREMULTIPLIED (flux-projected) FORECAST exchange -------
+      // The deeper D-7 payload.  Instead of exchanging the raw coarse D(k) at
+      // predict and integrating it on the FINE rank, the COARSE side integrates its
+      // OWN retained D(k) over the closed-form sub-interval [a,b] HERE and exchanges
+      // the resulting FORECAST block; the fine side (mode 1) reads it directly.
+      // BYTE-IDENTICAL to the raw-D(k) 4b: IntegrateTaylor(a,b,D(k)) is deterministic
+      // and both D(k) (bit-copy) and [a,b] (closed-form, rank-identical) are the same
+      // on both ranks, so the coarse-computed forecast equals the fine-computed one.
+      // [a,b] depends only on the schedule + the coarse cluster (c+1), so it is the
+      // SAME for every coarse-seam element at this Correct(c) — computed once.
+      // ONE batched collective per correct (when this cluster has a coarser
+      // neighbour ⇒ exchange_forecast).  DEEP-COPY the result: the I exchange below
+      // reuses q_gf_full and overwrites its FaceNbrData.
+      std::vector<real_t> fc_all;   // ghost coarse forecast (deep copy); empty if none
+      bool have_forecast = false;
+      if (exchange_forecast)
+      {
+         const int c_coarse = cluster_c + 1;
+         const long long period = 1LL << c_coarse;
+         const real_t t_origin = t_s + dt_base * static_cast<real_t>(period)
+            * std::floor(static_cast<double>(tick) / static_cast<double>(period));
+         const real_t t_tick = t_s + dt_base * static_cast<real_t>(tick);
+         const real_t a = t_tick - t_origin;
+         const real_t b = std::min(t_tick + dt, t_s + T_actual) - t_origin;
+         real_t *qd = q_gf_full.GetData();
+         for (std::size_t j = 0; j < nfull; ++j) { qd[j] = 0.0; }
+         if (c_coarse < static_cast<int>(seam_coarse_elems_.size())
+             && !seam_coarse_elems_[c_coarse].empty())
+         {
+            MFEM_VERIFY(dk_order > 0 && dt_base > 0.0,
+                        "ComputeADERClusterSeamFaceFluxRHS: forecast exchange needs "
+                        "the Stage-2 schedule (dt_base>0) + dk_order>0.");
+            // GAP-A3 (no stale D(k)): the retained coarse D(k) must be from the
+            // coarse cluster's CURRENT step (its last predict tick).
+            MFEM_VERIFY(c_coarse < static_cast<int>(seam_coarse_dk_epoch_.size())
+                        && seam_coarse_dk_epoch_[c_coarse] == (tick / period) * period,
+                        "ComputeADERClusterSeamFaceFluxRHS: stale seam-coarse D(k) "
+                        "for cluster " << c_coarse << " (epoch mismatch).");
+            std::vector<real_t> fblk(static_cast<std::size_t>(block), 0.0);
+            for (int e : seam_coarse_elems_[c_coarse])
+            {
+               const int slot =
+                  seam_coarse_slot_of_elem_[c_coarse][static_cast<std::size_t>(e)];
+               const real_t *stack = seam_coarse_dk_[c_coarse].data()
+                  + static_cast<std::size_t>(slot) * dk_order * block;
+               IntegrateTaylor(a, b, stack, dk_order, block, fblk.data());
+               const int off = e * ndof_per_el_;
+               for (int c = 0; c < NUM_STATE; ++c)
+                  for (int i = 0; i < ndof_per_el_; ++i)
+                  { qd[c * ndof_total_ + off + i] = fblk[c * ndof_per_el_ + i]; }
+            }
+         }
+         q_gf_full.ExchangeFaceNbrData();
+         ++n_ghost_exchanges_;
+         const Vector &s = q_gf_full.FaceNbrData();
+         fc_all.assign(s.GetData(), s.GetData() + s.Size());   // DEEP COPY
+         have_forecast = true;
+      }
+
+      // ---- I exchange (batched, all-NUM_STATE, 1 collective) --------------------
+      // byte-identical to the 4a per-component exchange; pack ONLY cluster_c's
+      // blocks (byNODES == component-major) and zero the rest.  `nbr_all` is aliased
+      // and read across the whole face loop (NOT re-exchanged inside it).
       {
          real_t *qd = q_gf_full.GetData();
-         const std::size_t nfull =
-            static_cast<std::size_t>(NUM_STATE) * static_cast<std::size_t>(ndof_total_);
-         for (std::size_t k = 0; k < nfull; ++k) { qd[k] = 0.0; }
+         for (std::size_t j = 0; j < nfull; ++j) { qd[j] = 0.0; }
          for (int e = 0; e < ne_; ++e)
          {
             if (lts_cluster_id_[static_cast<std::size_t>(e)] != cluster_c)
@@ -2663,15 +2728,8 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
       ++n_ghost_exchanges_;
       const Vector &nbr_all = q_gf_full.FaceNbrData();
 
-      MFEM_VERIFY(!ghost_cluster_id_.empty(),
-                  "ComputeADERClusterSeamFaceFluxRHS: ghost cluster ids not built "
-                  "(EnsureGhostClusterIds_ must run in the ctor).");
-      EnsureSeamCoarseElems_();
-
       real_t *rhs_data = rhs.GetData();
-      const int block = NUM_STATE * ndof_per_el_;
       std::vector<real_t> forecast_blk(static_cast<std::size_t>(block), 0.0);
-      std::vector<real_t> ghost_stack;   // reassembled ghost coarse D(k) [k][block]
       std::set<int>       touched_seam_coarse;   // coarse-seam elems filled this call
       for (int sf = 0; sf < n_shared; ++sf)
       {
@@ -2750,10 +2808,22 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
          const IntegrationRule &ir =
             IntRules.Get(ftr->GetGeometryType(), 2 * order_);
 
-         // Coarse forecast over the closed-form sub-interval [a,b] (modes 1,2).
-         // The COARSE side is cluster_c+1 in BOTH cases; dt is the FINE (cluster_c)
-         // dt_step.  Both ranks compute the SAME [a,b] (rank-identical schedule).
-         if (mode != 0)
+         // Coarse forecast over the closed-form sub-interval [a,b].
+         // mode 1 (fine side): reads the ghost coarse forecast from `fc_all` (the
+         //   premultiplied-forecast exchange above) in the QP loop — NO local
+         //   integration.  It only needs the exchange to have run.
+         // mode 2 (coarse side): integrates its OWN retained D(k) over [a,b] here
+         //   (c_coarse=cluster_c+1; dt = the FINE cluster dt_step; rank-identical
+         //   schedule — SAME [a,b] the coarse used when it packed the forecast, so
+         //   both sides consume the identical coarse forecast).
+         if (mode == 1)
+         {
+            MFEM_VERIFY(have_forecast,
+                        "ComputeADERClusterSeamFaceFluxRHS: mode-1 fine-side seam "
+                        "needs the exchanged coarse forecast — exchange_forecast was "
+                        "off for this Correct(c) (stepper wiring / c==coarsest?).");
+         }
+         else if (mode == 2)
          {
             const int c_coarse = cluster_c + 1;
             const long long period = 1LL << c_coarse;
@@ -2762,59 +2832,18 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
             const real_t t_tick = t_s + dt_base * static_cast<real_t>(tick);
             const real_t a = t_tick - t_origin;
             const real_t b = std::min(t_tick + dt, t_s + T_actual) - t_origin;
-            if (mode == 1)
-            {
-               // Fine side: integrate the GHOST coarse's forecast.  Reassemble its
-               // contiguous [k][block] Taylor stack from ghost_dk_[c_coarse] — 4b:
-               // one batched full-state FaceNbrData per level, read via the byNODES
-               // vdof map (byte-identical to the 4a per-(k,comp) cache).
-               MFEM_VERIFY(c_coarse < static_cast<int>(ghost_dk_.size())
-                           && static_cast<int>(ghost_dk_[c_coarse].size()) == dk_order,
-                           "ComputeADERClusterSeamFaceFluxRHS: ghost D(k) for cluster "
-                           << c_coarse << " not exchanged (Predict order / opt-in?).");
-               // GAP-A3 (no stale D(k)): the cached ghost forecast must be from the
-               // coarse cluster's CURRENT step, i.e. its last predict tick
-               // t_origin_tick = floor(tick/period)*period (REVIEW p4a-2 LOW).
-               const long long t_origin_tick = (tick / period) * period;
-               MFEM_VERIFY(c_coarse < static_cast<int>(ghost_dk_epoch_.size())
-                           && ghost_dk_epoch_[c_coarse] == t_origin_tick,
-                           "ComputeADERClusterSeamFaceFluxRHS: stale ghost D(k) for "
-                           "cluster " << c_coarse << " (epoch "
-                           << (c_coarse < static_cast<int>(ghost_dk_epoch_.size())
-                               ? ghost_dk_epoch_[c_coarse] : -1)
-                           << " != current coarse-step predict tick " << t_origin_tick
-                           << ").");
-               ghost_stack.assign(static_cast<std::size_t>(dk_order) * block, 0.0);
-               for (int k = 0; k < dk_order; ++k)
-               {
-                  const Vector &g = ghost_dk_[c_coarse][static_cast<std::size_t>(k)];
-                  for (int comp = 0; comp < NUM_STATE; ++comp)
-                     for (int i = 0; i < ndof2; ++i)
-                     {
-                        const int vd = nbr_vdofs[comp * ndof2 + i];
-                        ghost_stack[static_cast<std::size_t>(k) * block
-                                    + comp * ndof_per_el_ + i]
-                           = g[vd >= 0 ? vd : -1 - vd];
-                     }
-               }
-               IntegrateTaylor(a, b, ghost_stack.data(), dk_order, block,
-                               forecast_blk.data());
-            }
-            else   // mode 2: integrate the LOCAL coarse's retained forecast.
-            {
-               MFEM_VERIFY(c_coarse < static_cast<int>(seam_coarse_dk_.size())
-                           && c_coarse < static_cast<int>(seam_coarse_slot_of_elem_.size()),
-                           "ComputeADERClusterSeamFaceFluxRHS: seam-coarse D(k) for "
-                           "cluster " << c_coarse << " not retained.");
-               const int slot =
-                  seam_coarse_slot_of_elem_[c_coarse][static_cast<std::size_t>(e1)];
-               MFEM_VERIFY(slot >= 0,
-                           "ComputeADERClusterSeamFaceFluxRHS: coarse elem " << e1
-                           << " has no retained seam D(k) slot.");
-               const real_t *stack = seam_coarse_dk_[c_coarse].data()
-                  + static_cast<std::size_t>(slot) * dk_order * block;
-               IntegrateTaylor(a, b, stack, dk_order, block, forecast_blk.data());
-            }
+            MFEM_VERIFY(c_coarse < static_cast<int>(seam_coarse_dk_.size())
+                        && c_coarse < static_cast<int>(seam_coarse_slot_of_elem_.size()),
+                        "ComputeADERClusterSeamFaceFluxRHS: seam-coarse D(k) for "
+                        "cluster " << c_coarse << " not retained.");
+            const int slot =
+               seam_coarse_slot_of_elem_[c_coarse][static_cast<std::size_t>(e1)];
+            MFEM_VERIFY(slot >= 0,
+                        "ComputeADERClusterSeamFaceFluxRHS: coarse elem " << e1
+                        << " has no retained seam D(k) slot.");
+            const real_t *stack = seam_coarse_dk_[c_coarse].data()
+               + static_cast<std::size_t>(slot) * dk_order * block;
+            IntegrateTaylor(a, b, stack, dk_order, block, forecast_blk.data());
          }
 
          std::vector<real_t> *cbuf = nullptr;
@@ -2858,13 +2887,18 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
             }
             else if (mode == 1)
             {
-               // fine side: self = local fine I; nbr = coarse forecast (ghost FE).
+               // fine side: self = local fine I; nbr = the GHOST coarse's forecast
+               // read directly from the exchanged `fc_all` via the byNODES vdof map
+               // (the premultiplied-forecast payload).  Byte-identical to reading a
+               // locally-integrated ghost-D(k) forecast: fc_all[vdof(c,i)] IS the
+               // coarse's IntegrateTaylor(a,b,D(k)) comp-c dof-i, same [a,b] + D(k).
                for (int c = 0; c < NUM_STATE; ++c)
                {
                   for (int i = 0; i < ndof; ++i)
                   { I_self[c] += shape1(i) * I_data[c * ndof_total_ + dof_offset1 + i]; }
                   for (int i = 0; i < ndof2; ++i)
-                  { I_nbr[c] += shape2(i) * forecast_blk[c * ndof_per_el_ + i]; }
+                  { const int vd = nbr_vdofs[c * ndof2 + i];
+                    I_nbr[c] += shape2(i) * fc_all[vd >= 0 ? vd : -1 - vd]; }
                }
             }
             else   // mode 2
@@ -2904,86 +2938,6 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
       // One fine sub-step deposited into each touched coarse seam in-tray this call
       // (fill == #fine sub-steps of the closing coarse step; invariant i).
       for (int e : touched_seam_coarse) { seam_coarse_fill_[e] += 1; }
-#endif
-   }
-}
-
-// ---------------------------------------------------------------------------
-// LTS Phase 4a Stage 2: exchange a cluster's provider Taylor stacks D(k) to
-// face neighbours (so a finer cross-rank neighbour can integrate the coarse
-// forecast at a diff-1 rank seam) and cache them in ghost_dk_[cluster_c].
-// ---------------------------------------------------------------------------
-template <typename MeshType>
-void WaveOperator<MeshType>::ExchangeClusterProviderDkGhost(
-   int cluster_c, const real_t *dk_data, int dk_order,
-   const int *provider_slot_of_elem, int tick) const
-{
-   if constexpr (!IsParallelMesh<MeshType>::value)
-   {
-      (void)cluster_c; (void)dk_data; (void)dk_order;
-      (void)provider_slot_of_elem; (void)tick;
-      return;   // serial mesh: no rank seams
-   }
-   else
-   {
-#ifdef MFEM_USE_MPI
-      auto &pmesh = static_cast<const ParMesh &>(mesh_);
-      if (pmesh.GetNSharedFaces() == 0) { return; }   // np=1: no ghosts
-      MFEM_VERIFY(ghost_gf_full_state_ && pfes_full_state_,
-                  "ExchangeClusterProviderDkGhost: batched ghost GF unset.");
-      MFEM_VERIFY(dk_data && provider_slot_of_elem && dk_order > 0,
-                  "ExchangeClusterProviderDkGhost: provider D(k) inputs unset.");
-      MFEM_VERIFY(!lts_cluster_id_.empty()
-                  && static_cast<int>(lts_cluster_id_.size()) == ne_,
-                  "ExchangeClusterProviderDkGhost: cluster ids unset/mismatched.");
-      const int block = NUM_STATE * ndof_per_el_;
-
-      // Grow the per-cluster cache so it can hold cluster_c (a rank may need a
-      // ghost cluster id above its own local max — e.g. an all-fine subdomain
-      // caching its coarse neighbour's forecast).
-      MFEM_VERIFY(cluster_c >= 0, "ExchangeClusterProviderDkGhost: bad cluster_c.");
-      if (static_cast<int>(ghost_dk_.size()) < cluster_c + 1)
-      {
-         ghost_dk_.resize(static_cast<std::size_t>(cluster_c + 1));
-         ghost_dk_epoch_.resize(static_cast<std::size_t>(cluster_c + 1), -1);
-      }
-      // LTS Phase 4b: ONE batched (all-NUM_STATE) collective PER TAYLOR LEVEL
-      // (was NUM_STATE per-component per level in 4a) — dk_order exchanges instead
-      // of NUM_STATE*dk_order.  Cache one full-state FaceNbrData per level; the
-      // fine-side reassembly reads it via the byNODES vdof map (byte-identical).
-      std::vector<Vector> &cache = ghost_dk_[static_cast<std::size_t>(cluster_c)];
-      if (static_cast<int>(cache.size()) != dk_order)
-      { cache.assign(static_cast<std::size_t>(dk_order), Vector()); }
-
-      ParGridFunction &q_gf_full = *ghost_gf_full_state_;
-      const std::size_t nfull =
-         static_cast<std::size_t>(NUM_STATE) * static_cast<std::size_t>(ndof_total_);
-      for (int k = 0; k < dk_order; ++k)
-      {
-         real_t *qd = q_gf_full.GetData();
-         for (std::size_t j = 0; j < nfull; ++j) { qd[j] = 0.0; }
-         for (int e = 0; e < ne_; ++e)
-         {
-            if (lts_cluster_id_[static_cast<std::size_t>(e)] != cluster_c)
-            { continue; }
-            const int slot = provider_slot_of_elem[e];
-            if (slot < 0) { continue; }   // not a provider
-            // D(k)[k] block for this slot: [slot][k][block], block component-major.
-            const real_t *stack_k = dk_data
-               + (static_cast<std::size_t>(slot) * dk_order + k) * block;
-            const int off = e * ndof_per_el_;
-            for (int comp = 0; comp < NUM_STATE; ++comp)
-               for (int i = 0; i < ndof_per_el_; ++i)
-               { qd[comp * ndof_total_ + off + i] = stack_k[comp * ndof_per_el_ + i]; }
-         }
-         q_gf_full.ExchangeFaceNbrData();
-         ++n_ghost_exchanges_;
-         const Vector &s = q_gf_full.FaceNbrData();
-         Vector &dst = cache[static_cast<std::size_t>(k)];
-         dst.SetSize(s.Size());
-         std::memcpy(dst.GetData(), s.GetData(), s.Size() * sizeof(real_t));
-      }
-      ghost_dk_epoch_[static_cast<std::size_t>(cluster_c)] = tick;
 #endif
    }
 }
@@ -3076,27 +3030,25 @@ void WaveOperator<MeshType>::PrepareSeamCoarseForecast(
       std::vector<real_t> &store = seam_coarse_dk_[cluster_c];
       store.assign(static_cast<std::size_t>(std::max(n_sc, 1)) * order * block, 0.0);
 
-      // Slot map (element -> retention slot): the built map when touched, else an
-      // all-(-1) map so the exchange packs zero.
-      const int *slot_map = nullptr;
-      std::vector<int> none_map;
-      if (touched) { slot_map = seam_coarse_slot_of_elem_[cluster_c].data(); }
-      else { none_map.assign(static_cast<std::size_t>(ne_), -1); slot_map = none_map.data(); }
-
       if (n_sc > 0)
       {
-         // Extra element-local CK over the seam-coarse elems to retain their raw
-         // D(k) into `store` (scratch I / Qn discarded).  D(k) is dt-independent,
-         // so this reproduces the layout-provider path exactly.
+         // Extra element-local CK over the seam-coarse elems to RETAIN their raw
+         // D(k) into `store` (scratch I / Qn discarded).  D(k) is dt-independent, so
+         // this reproduces the layout-provider path exactly.  4b: NO exchange here —
+         // the coarse INTEGRATES this D(k) into a forecast and exchanges THAT at the
+         // fine's Correct (ComputeADERClusterSeamFaceFluxRHS's forecast pre-pass).
          Vector I_scratch(NUM_STATE * ndof_total_);
          std::vector<Vector> Qn_scratch;
          ComputeADERSubStepStatesAndIntegralCluster(
             sc_elems.data(), n_sc, Q, dt_step, order, tau, Qn_scratch, I_scratch,
-            store.data(), slot_map);
+            store.data(), seam_coarse_slot_of_elem_[cluster_c].data());
       }
 
-      // Exchange (matched: all ranks call this for the same cluster_c).
-      ExchangeClusterProviderDkGhost(cluster_c, store.data(), order, slot_map, tick);
+      // Record the retention epoch (the coarse cluster's current-step predict tick)
+      // so the forecast pre-pass can assert the retained D(k) is not stale (GAP-A3).
+      if (static_cast<int>(seam_coarse_dk_epoch_.size()) < cluster_c + 1)
+      { seam_coarse_dk_epoch_.resize(static_cast<std::size_t>(cluster_c + 1), -1); }
+      seam_coarse_dk_epoch_[static_cast<std::size_t>(cluster_c)] = tick;
 #endif
    }
 }

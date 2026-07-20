@@ -641,26 +641,17 @@ public:
       // closed-form seam sub-interval [a,b] at diff-1 rank seams; forwarded to the
       // seam corrector.  Defaults => diff-0-only (Stage 1) behaviour.
       mfem::real_t t_s = 0.0, mfem::real_t dt_base = 0.0, int tick = 0,
-      mfem::real_t T_actual = 0.0) const;
+      mfem::real_t T_actual = 0.0,
+      // LTS Phase 4b: forwarded to the seam corrector — run the premultiplied
+      // coarse-forecast exchange (diff-1 fine side reads the exchanged forecast).
+      bool exchange_forecast = false) const;
 
-   /// LTS Phase 4a Stage 2: exchange cluster `cluster_c`'s PROVIDER Taylor stacks
-   /// D(k) to face neighbours and cache them in `ghost_dk_[cluster_c]` (per level ×
-   /// component; 4a uses the scalar ghost_gf_, so NUM_STATE·dk_order exchanges).
-   /// A finer neighbour integrates this forecast over its sub-interval at the diff-1
-   /// seam.  Called from LtsBulkSyncStepper::Predict(c) when cluster c is a GLOBAL
-   /// cross-rank provider.  Records `ghost_dk_epoch_[cluster_c] = tick`.  No-op at
-   /// np=1 (no shared faces).  Increments `n_ghost_exchanges_`.  Public: the
-   /// stepper (and unit tests) call it directly.
-   void ExchangeClusterProviderDkGhost(int cluster_c, const real_t *dk_data,
-                                       int dk_order,
-                                       const int *provider_slot_of_elem,
-                                       int tick) const;
-
-   /// LTS Phase 4a Stage 2: retain this cluster's coarse-side SEAM elements' Taylor
-   /// stacks D(k) (an extra element-local CK over `seam_coarse_elems_[cluster_c]`)
-   /// and exchange them to face neighbours (so a finer cross-rank neighbour can
-   /// integrate the coarse forecast).  Called from LtsBulkSyncStepper::Predict(c)
-   /// for c>=1 when `meta.exchange_bulk_provider_dk`.  No-op at np=1 / no seam.
+   /// LTS Phase 4b: RETAIN this cluster's coarse-side SEAM elements' Taylor stacks
+   /// D(k) (an extra element-local CK over `seam_coarse_elems_[cluster_c]`) for the
+   /// premultiplied-forecast exchange.  Called from the stepper's Predict(c) for
+   /// c>=1.  No exchange here — the coarse INTEGRATES this D(k) into a forecast and
+   /// exchanges THAT at the fine's Correct (ComputeADERClusterSeamFaceFluxRHS).
+   /// Records `seam_coarse_dk_epoch_[cluster_c] = tick`.  No-op at np=1 / no seam.
    void PrepareSeamCoarseForecast(int cluster_c, const Vector &Q,
                                   real_t dt_step, int order,
                                   const std::vector<real_t> &tau, int tick) const;
@@ -1440,14 +1431,6 @@ protected:
    /// by the seam corrector, for the per-tick matched-collective assertion.
    mutable long long n_ghost_exchanges_ = 0;
 
-   /// LTS Phase 4a Stage 2 (diff-1 rank seams): cached ghost (face-neighbour)
-   /// Taylor stacks D(k), one bucket per cluster (the coarse provider whose
-   /// forecast the finer neighbour integrates).  `ghost_dk_[c][k*NUM_STATE+comp]`
-   /// is a FaceNbrData Vector indexed `nbr_idx*ndof_per_el_ + dof`.  Refreshed by
-   /// ExchangeClusterProviderDkGhost when cluster c predicts; `ghost_dk_epoch_[c]`
-   /// records that tick so a fine-side read can assert it is current (GAP-A3).
-   mutable std::vector<std::vector<Vector>> ghost_dk_;
-   mutable std::vector<long long>           ghost_dk_epoch_;
    /// LTS Phase 4a Stage 2: coarse-side seam in-tray — a diff-1 rank seam's COARSE
    /// element (local) accumulates its share of the seam flux here across the fine
    /// neighbour's sub-corrects (the fine element/buffer is on another rank), then
@@ -1466,13 +1449,13 @@ protected:
    mutable std::vector<std::vector<int>>            seam_coarse_elems_;
    mutable std::vector<std::vector<int>>            seam_coarse_slot_of_elem_;
    mutable std::vector<std::vector<mfem::real_t>>   seam_coarse_dk_;
+   /// LTS Phase 4b: per-cluster tick at which `seam_coarse_dk_[c]` was last
+   /// retained by PrepareSeamCoarseForecast — the epoch base `(tick/period)*period`
+   /// the coarse-forecast integrator asserts against (GAP-A3: a stale D(k) would
+   /// integrate the wrong sub-interval origin).
+   mutable std::vector<long long>                   seam_coarse_dk_epoch_;
 
 public:
-   /// LTS Phase 4a Stage 2 (tests): the cached ghost D(k) stacks for a cluster
-   /// (`[k*NUM_STATE+comp]` → FaceNbrData Vector).  Empty until
-   /// ExchangeClusterProviderDkGhost has run for that cluster.
-   const std::vector<Vector> &GhostDkForTest(int cluster_c) const
-   { return ghost_dk_.at(static_cast<std::size_t>(cluster_c)); }
    /// LTS Phase 4a Stage 2 (tests): true iff every coarse-side seam in-tray is
    /// zero (invariant: must hold at every sync point).
    bool SeamCoarseBuffersZero() const
@@ -1585,7 +1568,13 @@ private:
       mfem::real_t t_s = 0.0, mfem::real_t dt_base = 0.0, int tick = 0,
       mfem::real_t T_actual = 0.0,
       const real_t *dk_data = nullptr, int dk_order = 0,
-      const int *provider_slot_of_elem = nullptr) const;
+      const int *provider_slot_of_elem = nullptr,
+      // LTS Phase 4b: when true, run the PREMULTIPLIED-forecast exchange (the
+      // coarse side integrates its retained D(k) over [a,b] and exchanges the
+      // FORECAST; the fine side reads it directly).  Set by the stepper iff this
+      // correcting cluster has a coarser neighbour (c < num_clusters-1) and the
+      // bulk-provider exchange is enabled.  False => diff-0-only.
+      bool exchange_forecast = false) const;
 
    /// LTS Phase 4a: build (once, cached) the per-face-neighbour ghost cluster id
    /// from `lts_cluster_id_`, so the seam corrector can classify a seam face as

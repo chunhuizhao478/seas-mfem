@@ -330,7 +330,10 @@ public:
          // diff-1) via the seam corrector; the schedule gives the diff-1 [a,b].
          // np=1 / no shared faces => no-op.
          /*cluster_id_for_seam=*/c,
-         /*t_s=*/t_s_, /*dt_base=*/dt_base_, /*tick=*/tick_, /*T_actual=*/T_actual_);
+         /*t_s=*/t_s_, /*dt_base=*/dt_base_, /*tick=*/tick_, /*T_actual=*/T_actual_,
+         // LTS Phase 4b: premultiplied coarse-forecast exchange iff this correcting
+         // cluster has a coarser neighbour across a rank seam (c < num_clusters-1).
+         /*exchange_forecast=*/exchange_dk_ && (c < layout_.num_clusters - 1));
    }
 
    /// Invariant (ii): every accumulate buffer is zero at each sync point.

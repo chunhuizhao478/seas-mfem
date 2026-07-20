@@ -47,11 +47,14 @@ struct LtsGlobalMeta
    /// experiment.  When false, a predicting cluster with fault faces contributes
    /// ader_order predictor exchanges.
    bool drop_fault_predictor_exchange = true;
-   /// LTS Phase 4a Stage 2: when true, each PREDICTING cluster c>=1 exchanges its
-   /// coarse-side provider Taylor stacks D(k) to face neighbours (for the diff-1
-   /// rank-seam forecast) — NUM_STATE*ader_order collectives each.  Set by the
-   /// driver/test for np>1 multi-cluster runs; false keeps Stage-1 (diff-0) +
-   /// single-rank counts unchanged (so existing tick-table tests are unaffected).
+   /// LTS Phase 4b (flux-PREMULTIPLIED forecast): when true, the diff-1 rank-seam
+   /// coarse forecast is exchanged at the FINE cluster's CORRECT — one batched
+   /// (all-NUM_STATE) collective per correcting cluster c with a coarser neighbour
+   /// (c < num_clusters-1).  The coarse side integrates its retained D(k) into the
+   /// forecast locally and sends the PROJECTED block; predict is retain-only.  (In
+   /// 4a/4b-batched this instead exchanged the raw D(k) at each predicting c>=1 —
+   /// ader_order collectives each.)  Set by the driver/test for np>1 multi-cluster
+   /// runs; false keeps Stage-1 (diff-0) + single-rank counts unchanged.
    bool exchange_bulk_provider_dk = false;
 };
 
@@ -142,16 +145,21 @@ inline std::vector<LtsTick> BuildTickTable(int num_clusters,
             if (meta.global_fault_faces[c] > 0) { nx += ader_order; }
          }
       }
-      // LTS Phase 4a Stage 2 (diff-1 seams): each predicting cluster c>=1 exchanges
-      // its coarse provider D(k) for the finer neighbour's cross-rank forecast.
-      // 4b: ONE batched (all-NUM_STATE) collective PER TAYLOR LEVEL => ader_order
-      // collectives (was NUM_STATE*ader_order per-component in 4a).  c==0 is the
-      // finest cluster (never a provider), skipped — a rank-uniform gate, matched.
+      // LTS Phase 4b (flux-PREMULTIPLIED forecast): the diff-1 coarse-forecast
+      // exchange moved from PREDICT to CORRECT.  Instead of each predicting cluster
+      // c>=1 exchanging its raw D(k) (ader_order batched levels), the COARSE side now
+      // INTEGRATES its retained D(k) into a forecast and exchanges THAT once, at the
+      // FINE cluster's correct — so every correcting cluster c that has a coarser
+      // neighbour (c < num_clusters-1) fires exactly ONE batched (all-NUM_STATE)
+      // collective.  Predict is now retain-only (no collective).  c==num_clusters-1
+      // (coarsest, no coarser neighbour) is skipped — a rank-uniform gate, matched.
+      // (ader_order is unused by this term now; retained in the signature for the
+      // fault-predictor term above.)
       if (meta.exchange_bulk_provider_dk)
       {
-         for (int c : tk.predict_clusters)
+         for (int c : tk.correct_clusters)
          {
-            if (c >= 1) { nx += ader_order; }
+            if (c < num_clusters - 1) { nx += 1; }
          }
       }
       tk.n_collectives = nx;

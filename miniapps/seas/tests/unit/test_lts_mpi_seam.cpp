@@ -267,46 +267,13 @@ int main(int argc, char *argv[])
    }
 
    // --- Stage 2 (2a): D(k) ghost-exchange primitive round-trip -----------------
-   // Pack a KNOWN constant V(k,comp) into every cluster-0 provider's Taylor stack,
-   // exchange, and assert every cached ghost slot reads V(k,comp) back — catches
-   // pack/index/cache bugs in ExchangeClusterProviderDkGhost.  np>1 only.
-   if (nprocs > 1)
-   {
-      const int dko = ader_order;
-      const int block = NUM_STATE * ndof_per_el;
-      std::vector<int> prov_slot(static_cast<std::size_t>(ne));
-      for (int e = 0; e < ne; ++e) { prov_slot[e] = e; }   // every elem a provider
-      std::vector<real_t> dk(static_cast<std::size_t>(ne) * dko * block, 0.0);
-      auto Vkc = [](int k, int c) { return 100.0 * (k + 1) + (c + 1); };
-      for (int e = 0; e < ne; ++e)
-         for (int k = 0; k < dko; ++k)
-            for (int c = 0; c < NUM_STATE; ++c)
-               for (int i = 0; i < ndof_per_el; ++i)
-                  dk[((static_cast<std::size_t>(e) * dko + k) * block)
-                     + static_cast<std::size_t>(c) * ndof_per_el + i] = Vkc(k, c);
-      wave.ExchangeClusterProviderDkGhost(/*cluster_c=*/0, dk.data(), dko,
-                                          prov_slot.data(), /*tick=*/0);
-      // 4b: the D(k) cache is now ONE batched full-state FaceNbrData per level
-      // (gdk.size()==dko), holding, per ghost element, Vkc(k,comp) for each
-      // component.  Every entry of gdk[k] must therefore equal SOME Vkc(k,c) — i.e.
-      // lie in {100(k+1)+1 .. 100(k+1)+NUM_STATE} — confirming the batched pack /
-      // exchange / cache round-trips each component's value.
-      const std::vector<Vector> &gdk = wave.GhostDkForTest(0);
-      bool dk_ok = (static_cast<int>(gdk.size()) == dko);
-      for (int k = 0; k < dko && dk_ok; ++k)
-      {
-         const Vector &g = gdk[static_cast<std::size_t>(k)];
-         const double lo = Vkc(k, 0), hi = Vkc(k, NUM_STATE - 1);
-         for (int j = 0; j < g.Size() && dk_ok; ++j)
-         {
-            const double v = g[j];
-            const double r = v - std::round(v);   // Vkc values are integers
-            if (v < lo - 1e-9 || v > hi + 1e-9 || std::abs(r) > 1e-9)
-            { dk_ok = false; }
-         }
-      }
-      CHECK(dk_ok, "batched D(k) ghost exchange round-trips each component's value");
-   }
+   // REMOVED in 4b (premultiplied-forecast exchange).  4a/4b-batched exposed a raw
+   // D(k) ghost-exchange primitive (ExchangeClusterProviderDkGhost) that packed the
+   // coarse provider's Taylor stack and let the FINE side integrate it.  4b moves
+   // that integration to the COARSE side (which owns D(k) locally) and exchanges
+   // the already-integrated FORECAST instead — there is no longer a raw-D(k) ghost
+   // exchange to round-trip in isolation.  The forecast exchange is covered
+   // end-to-end by the diff-1 byte-vs-np=1 gate in test_lts_mpi_seam_diff1.
 
    int local_fails = g_fails, total_fails = 0, total_checks = 0;
    MPI_Allreduce(&local_fails, &total_fails, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);

@@ -125,7 +125,11 @@ public:
          // diff-1 coarse forecast's [a,b].
          /*fault_face_ids=*/nullptr, /*n_fault_faces=*/0,
          /*cluster_id_for_seam=*/c,
-         /*t_s=*/t_s_, /*dt_base=*/dt_base_, /*tick=*/tick_, /*T_actual=*/T_actual_);
+         /*t_s=*/t_s_, /*dt_base=*/dt_base_, /*tick=*/tick_, /*T_actual=*/T_actual_,
+         // LTS Phase 4b: run the premultiplied coarse-forecast exchange iff this
+         // correcting cluster has a coarser neighbour across a rank seam.  Matches
+         // the correct-side +1 collective per c<num_clusters-1 in BuildTickTable.
+         /*exchange_forecast=*/exchange_dk_ && (c < layout_.num_clusters - 1));
    }
 
    /// Invariant (ii): every accumulate buffer is zero at each sync point.
