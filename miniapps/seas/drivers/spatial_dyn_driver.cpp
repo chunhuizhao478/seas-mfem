@@ -4517,6 +4517,13 @@ int main(int argc, char *argv[])
 
       LtsBulkSyncStepper<ParMesh> stepper(wave, layout, lts_cluster_id, Q,
                                           cfg.numerics.ader_order, dt_base);
+      // LTS Phase 4a Stage 2: enable the coarse provider-D(k) ghost exchange for
+      // CROSS-CLUSTER (diff-1) rank seams — only meaningful at np>1 with >1
+      // cluster.  Must be set consistently on the stepper AND in `meta` (which
+      // feeds BuildTickTable's matched-collective count).  `meta` is a reference
+      // to `lts_meta`, so this update is visible to the loop below.
+      lts_meta.exchange_bulk_provider_dk = (nprocs > 1 && cl.num_clusters > 1);
+      stepper.SetExchangeProviderDk(lts_meta.exchange_bulk_provider_dk);
       if (rank == 0)
       {
          std::cout << "[lts] STEPPING (rate2, fault-free bulk): Nc = "
