@@ -2011,13 +2011,11 @@ int main(int argc, char *argv[])
                                   MPI_LONG_LONG, MPI_SUM, comm);
                  })
             : nullptr);
-      // LTS Phase 4a (P-007): the per-sync ghost-exchange counter identity relies
-      // on the seam corrector doing exactly NUM_STATE exchanges per correcting
-      // cluster, matching the tick table's num_state·|correct| term.  Pin them.
-      MFEM_VERIFY(lts_meta.num_state == NUM_STATE,
-                  "spatial_dyn: LtsGlobalMeta.num_state (" << lts_meta.num_state
-                  << ") != NUM_STATE (" << NUM_STATE << ") — the matched-collective "
-                  "counter and the tick-table n_collectives would diverge.");
+      // LTS Phase 4b: the batched exchange makes the collective count independent
+      // of NUM_STATE (seam I = 1 batched call/correct; provider D(k) = ader_order
+      // batched calls/predict), so the former `lts_meta.num_state == NUM_STATE`
+      // pin is now vacuous and was removed (REVIEW p4b LOW) — num_state no longer
+      // feeds n_collectives.
       lts_layout_ready = true;
    }
    const std::vector<int> *lts_cluster_ptr =
