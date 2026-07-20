@@ -53,6 +53,7 @@
 #include "../dynamic/lts_layout.hpp"                 // LTS Phase 1: run-side layout
 #include "../dynamic/lts_partition.hpp"              // LTS Phase 4 Step 0: cluster-weighted METIS partition
 #include "../dynamic/lts_bulk_stepper.hpp"           // LTS Phase 2: sync-interval stepper
+#include "../dynamic/lts_fault_stepper.hpp"          // LTS Phase 3 (P3-4): fault-aware sync-interval stepper
 #include <cstdint>
 #include "../dynamic/fault_face_flux.hpp"
 #include "../dynamic/friction_solver.hpp"
@@ -1997,7 +1998,26 @@ int main(int argc, char *argv[])
          BuildLtsMeshInputsFromMaterial(pmesh, material, bc.fault_attr);
       lts_cl     = serial_cl;   // SERIAL ids + num_clusters/lambda/dt_base (hash)
       lts_layout = BuildLtsLayout(lts_cluster_id, serial_cl.num_clusters, lin.faces);
-      lts_meta   = ReduceGlobalMeta(lts_layout, nullptr);   // np=1 stepping; Phase 4 = cross-rank
+      // LTS Phase 4a: reduce the LOCAL per-cluster counts into the GLOBAL counts
+      // that gate collectives (P-007).  At np=1 the sum hook is a no-op (identity).
+      lts_meta   = ReduceGlobalMeta(
+         lts_layout,
+         (nprocs > 1)
+            ? std::function<void(std::vector<long long>&)>(
+                 [comm](std::vector<long long> &buf)
+                 {
+                    MPI_Allreduce(MPI_IN_PLACE, buf.data(),
+                                  static_cast<int>(buf.size()),
+                                  MPI_LONG_LONG, MPI_SUM, comm);
+                 })
+            : nullptr);
+      // LTS Phase 4a (P-007): the per-sync ghost-exchange counter identity relies
+      // on the seam corrector doing exactly NUM_STATE exchanges per correcting
+      // cluster, matching the tick table's num_state·|correct| term.  Pin them.
+      MFEM_VERIFY(lts_meta.num_state == NUM_STATE,
+                  "spatial_dyn: LtsGlobalMeta.num_state (" << lts_meta.num_state
+                  << ") != NUM_STATE (" << NUM_STATE << ") — the matched-collective "
+                  "counter and the tick-table n_collectives would diverge.");
       lts_layout_ready = true;
    }
    const std::vector<int> *lts_cluster_ptr =
@@ -4402,30 +4422,60 @@ int main(int argc, char *argv[])
    // Phase 3.  So the LTS multi-cluster sync loop runs ONLY for the fault-free
    // bulk problem (Phase 2); a fault + lts run falls through to the GTS loop
    // below with the reorder ACTIVE (the still-GTS reorder canary, P-006 gate).
-   // REVIEW A-1: `nprocs == 1` is REQUIRED here.  `num_fault_total` is a LOCAL
-   // count, so without it an np>1 run diverges: fault-free ranks would enter the
-   // sync loop and abort at the `nprocs==1` guard while fault-bearing ranks fall
-   // to the GTS loop (MPI hang / partial abort).  With it, every np>1 rank takes
-   // the GTS loop uniformly (the "running GTS at np>1" behavior the log promises;
-   // np>1 LTS is Phase 4).
+   // LTS Phase 4a: the fault-free bulk stepper now runs at np>1 (the MPI
+   // ghost-field seam exchange).  The gate MUST use the GLOBAL fault count
+   // (`num_fault_global`), not the per-rank `num_fault_total`: a fault mesh
+   // partitioned so some ranks own no fault faces would otherwise send those
+   // ranks into the bulk sync loop while fault-bearing ranks take a different
+   // path (the REVIEW A-1 divergence).  With the global count, EVERY rank agrees:
+   // a genuinely fault-free mesh ⇒ all ranks run the bulk stepper; any fault ⇒
+   // all ranks fall to the fault path (np=1 interleave / GTS).
    const bool lts_stepping =
-      cfg.numerics.LtsEnabled() && num_fault_total == 0 && nprocs == 1;
+      cfg.numerics.LtsEnabled() && num_fault_global == 0;
+   // LTS Phase 3 (P3-4): the fault-half INTERLEAVE — each cluster advances its
+   // fault QPs at its own rate.  OPT-IN via SEAS_LTS_FAULT_INTERLEAVE (default OFF
+   // ⇒ the still-GTS reorder canary is preserved, and the default fault+lts science
+   // is unchanged until the Frontera physics gate + the D-5 default flip).  Requires
+   // np=1 (D-2: no shared fault faces) + the active P-006 reorder (cluster-contiguous
+   // fault-QP ranges).
+   // REVIEW P3-4 C1: parse the VALUE (not mere presence) — this flag changes the
+   // science, so `SEAS_LTS_FAULT_INTERLEAVE=0` (or empty / "false") must DISABLE it,
+   // not silently enable it (unlike the presence-based SEAS_DIAG_* debug gates).
+   const char *fault_interleave_env = std::getenv("SEAS_LTS_FAULT_INTERLEAVE");
+   const bool lts_fault_interleave_optin =
+      fault_interleave_env != nullptr && fault_interleave_env[0] != '\0'
+      && std::strcmp(fault_interleave_env, "0") != 0
+      && std::strcmp(fault_interleave_env, "false") != 0;
+   const bool lts_fault_stepping =
+      cfg.numerics.LtsEnabled() && num_fault_total > 0 && nprocs == 1
+      && wave.FaultFacesReordered() && lts_fault_interleave_optin;
    if (cfg.numerics.LtsEnabled() && num_fault_total > 0 && nprocs == 1
        && rank == 0)
    {
-      std::cout << "[lts] fault + lts=\"" << cfg.numerics.lts
-                << "\": fault-face reorder "
-                << (wave.FaultFacesReordered() ? "ACTIVE" : "inactive")
-                << " (cluster-contiguous, P-006) but stepping GTS — the "
-                   "fault-half LTS interleave is Phase 3 (still-GTS reorder "
-                   "canary).\n";
+      if (lts_fault_stepping)
+      {
+         std::cout << "[lts] fault + lts=\"" << cfg.numerics.lts
+                   << "\": fault-half LTS INTERLEAVE ACTIVE (P3-4, np=1) — each "
+                      "cluster advances its fault QPs at dt_base*2^c.  Multi-cluster "
+                      "physics fidelity is Frontera-gated; single-cluster == GTS "
+                      "(to machine-eps) is the local gate.\n";
+      }
+      else
+      {
+         std::cout << "[lts] fault + lts=\"" << cfg.numerics.lts
+                   << "\": fault-face reorder "
+                   << (wave.FaultFacesReordered() ? "ACTIVE" : "inactive")
+                   << " (cluster-contiguous, P-006) but stepping GTS — the fault-half "
+                      "LTS interleave (P3-4) is OPT-IN via SEAS_LTS_FAULT_INTERLEAVE "
+                      "(this is the still-GTS reorder canary).\n";
+      }
    }
    bool lts_v2_checkpoint_written = false;
    if (lts_stepping)
    {
-      MFEM_VERIFY(nprocs == 1,
-                  "spatial_dyn: lts=\"rate2\" stepping requires np=1 (Phase-1b "
-                  "serial clustering for np>1 determinism not yet landed).");
+      // LTS Phase 4a: np>1 is enabled for the fault-free bulk stepper (the MPI
+      // ghost-field seam exchange); serial clustering (Step 0) gives rank-count-
+      // independent cluster ids, so the per-rank stepping is deterministic.
       // REVIEW OUT-2: the per-sync volume writer keys off the adaptive
       // slip-rate schedule, but a fault-free bulk run has no slip rate, so it
       // would pin the slowest (interseismic) regime and under-sample.  Warn so
@@ -4457,9 +4507,11 @@ int main(int argc, char *argv[])
       // CFL-safe by the GAP-A1 clustering guarantee).
       const real_t dt_base = cl.lambda * dt_cfl;
       const real_t T_s = dt_base * static_cast<real_t>(1LL << (cl.num_clusters - 1));
-      // The hash uses the SERIAL cluster ids (cl.cluster, rank-independent); the
-      // stepper needs the LOCAL ids (lts_cluster_id).  This block is np==1 only
-      // (see lts_stepping), where the two coincide.
+      // The hash uses the SERIAL cluster ids (cl.cluster, rank-independent — so a
+      // restart is layout-checked independent of rank count); the stepper uses the
+      // LOCAL ids (lts_cluster_id).  LTS Phase 4a: this block now runs at np>1
+      // too (the bulk seam exchange); the SERIAL-vs-LOCAL split is exactly what
+      // makes it rank-count-independent (they coincide only at np=1).
       const std::uint64_t layout_hash =
          LtsLayoutHash(opt.rate, cl.num_clusters, cl.cluster, dt_base, cl.lambda);
 
@@ -4475,7 +4527,11 @@ int main(int argc, char *argv[])
       }
 
       real_t t_lts = t;
-      int sync = 0;
+      // REVIEW P3-4 C2: seed the sync/cycle counter from the restored step0 (a
+      // sync count for the LTS V2 checkpoint) so output cycles + logs CONTINUE
+      // across --restart instead of restarting at 0 and colliding pre-restart
+      // ParaView frames.  Fresh run ⇒ step0 == 0.
+      int sync = step0;
       while (t_lts < cfg.time.tfinal - 1e-12 * T_s)
       {
          const real_t T_actual = std::min(T_s, cfg.time.tfinal - t_lts);
@@ -4484,7 +4540,25 @@ int main(int argc, char *argv[])
                                    cfg.numerics.ader_order, meta);
          stepper.SetSyncInterval(t_lts, T_actual);
          wave.SetTime(t_lts);
+         // LTS Phase 4a (P-007): the ghost seam exchanges made this sync must
+         // equal the tick table's summed n_collectives on EVERY rank that OWNS
+         // shared faces (matched collectives — a mismatch is the class of bug that
+         // hangs np>=10).  A rank with no shared faces (np=1, or an isolated
+         // subdomain at np>1) does zero exchanges — expect 0 there, else the
+         // check would false-abort a correct run (REVIEW p4a MODERATE).
+         wave.ResetGhostExchangeCount();
+         long long sched_exchanges = 0;
+         for (const auto &tk : tab) { sched_exchanges += tk.n_collectives; }
+         const long long expected_exchanges =
+            wave.HasSharedFaces() ? sched_exchanges : 0;
          RunSyncInterval(tab, stepper);
+         MFEM_VERIFY(wave.GhostExchangeCount() == expected_exchanges,
+                     "spatial_dyn: LTS ghost-exchange count "
+                     << wave.GhostExchangeCount() << " != expected "
+                     << expected_exchanges << " (tick-table n_collectives "
+                     << sched_exchanges << ", has_shared="
+                     << wave.HasSharedFaces() << ") at sync " << sync
+                     << " (matched-collective violation, P-007).");
          MFEM_VERIFY(stepper.BuffersZero(),
                      "spatial_dyn: LTS accumulate buffers non-zero at sync point "
                      << sync << " (buffer lifecycle bug — invariant ii).");
@@ -4527,7 +4601,140 @@ int main(int argc, char *argv[])
       }
    }
 
-   for (int step = step0; step < nsteps && !lts_stepping; ++step)
+   // ------------------------------------------------------------------
+   // (LTS Phase 3, P3-4) Fault-half INTERLEAVE sync loop (np=1, opt-in).
+   // ------------------------------------------------------------------
+   // Mirrors the fault-free bulk sync loop above but drives the fault-aware
+   // LtsFaultSyncStepper and writes per-sync fault + station output.  Each due
+   // cluster advances its fault QPs over its cluster-contiguous global-QP range
+   // at dt_base*2^c (range friction Advance + absolute range nucleation + the
+   // cluster corrector's fault-face flux).  Single-cluster == GTS (machine-eps)
+   // is the local gate; multi-cluster physics fidelity is Frontera-staged.
+   if (lts_fault_stepping)
+   {
+      MFEM_VERIFY(nprocs == 1,
+                  "spatial_dyn: LTS fault interleave requires np=1 (D-2: no shared "
+                  "fault faces; cross-rank fault stepping is Phase 4).");
+      MFEM_VERIFY(lts_layout_ready,
+                  "spatial_dyn: LTS fault interleave requested but the pre-operator "
+                  "clustering was not built (internal error).");
+      const LtsClustering &cl     = lts_cl;
+      const LtsLayout      &layout = lts_layout;
+      const LtsGlobalMeta  &meta   = lts_meta;
+      LtsClusteringOptions opt;   // default rate=2 for the layout hash
+      const real_t dt_base = cl.lambda * dt_cfl;
+      const real_t T_s = dt_base * static_cast<real_t>(1LL << (cl.num_clusters - 1));
+      const std::uint64_t layout_hash =
+         LtsLayoutHash(opt.rate, cl.num_clusters, cl.cluster, dt_base, cl.lambda);
+
+      LtsFaultSyncStepper<ParMesh> stepper(
+         wave, layout, lts_cluster_id, Q, cfg.numerics.ader_order, dt_base,
+         substep_iterator, dof_data, fault_coords, nuc.get());
+      if (rank == 0)
+      {
+         std::cout << "[lts] STEPPING (rate2, fault interleave): Nc = "
+                   << cl.num_clusters << ", dt_base = " << dt_base
+                   << " s, T_sync = " << T_s << " s, predicted harmonic speedup "
+                   << HarmonicUpdateSpeedup(cl) << "x, layout_hash = 0x"
+                   << std::hex << layout_hash << std::dec << "\n";
+      }
+      // REVIEW P3-4 C3: at Nc>1 the fault + SCEC-station output fires once per
+      // SYNC (period T_sync = dt_base*2^(Nc-1), the COARSEST cluster's step), so a
+      // fast near-fault fine-cluster signal is under-sampled — the SCEC .dat is the
+      // benchmark artifact, so this aliases the very signal being validated.  This
+      // coarse-cadence sampling is acceptable for the Nc=1 local gate; sub-sync
+      // fault/station sampling is a Phase-4 item.  Warn loudly for Nc>1 runs.
+      if (rank == 0 && cl.num_clusters > 1)
+      {
+         std::cout << "[lts] WARNING: fault/station output is written once per SYNC "
+                      "(coarse cadence T_sync = " << T_s << " s) — at Nc = "
+                   << cl.num_clusters << " > 1 this UNDER-SAMPLES the near-fault "
+                      "signal.  Multi-cluster fault-output fidelity + physics "
+                      "acceptance are Frontera-staged (sub-sync sampling is Phase 4); "
+                      "the local gate is Nc=1 == GTS.\n";
+      }
+
+      real_t t_lts = t;
+      // REVIEW P3-4 C2: seed the sync/cycle counter from the restored step0 (a
+      // sync count for the LTS V2 checkpoint) so output cycles + logs CONTINUE
+      // across --restart instead of restarting at 0 and colliding pre-restart
+      // ParaView frames.  Fresh run ⇒ step0 == 0.
+      int sync = step0;
+      while (t_lts < cfg.time.tfinal - 1e-12 * T_s)
+      {
+         const real_t T_actual = std::min(T_s, cfg.time.tfinal - t_lts);
+         if (T_actual <= 0.0) { break; }
+         // Per-sync reset of the honest sub-step |V| max (mirrors the GTS loop's
+         // per-step reset); the friction range Advance takes running max over it.
+         for (int i = 0; i < num_fault_total; ++i)
+         { dof_data[i].slip_rate_substep_max = 0.0; }
+
+         auto tab = BuildTickTable(cl.num_clusters, dt_base, T_actual,
+                                   cfg.numerics.ader_order, meta);
+         stepper.SetSyncInterval(t_lts, T_actual);
+         wave.SetTime(t_lts);
+         RunSyncInterval(tab, stepper);
+         MFEM_VERIFY(stepper.BuffersZero(),
+                     "spatial_dyn: LTS accumulate buffers non-zero at sync point "
+                     << sync << " (buffer lifecycle bug — invariant ii).");
+         t_lts += T_actual;
+         ++sync;
+
+         real_t V_max_local = 0.0;
+         for (int i = 0; i < num_fault_total; ++i)
+         {
+            V_max_local = std::max(V_max_local,
+               std::max(dof_data[i].slip_rate, dof_data[i].slip_rate_substep_max));
+         }
+         real_t V_max_step = V_max_local;
+#ifdef MFEM_USE_MPI
+         MPI_Allreduce(&V_max_local, &V_max_step, 1,
+                       MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
+#endif
+         V_max_global = std::max(V_max_global, V_max_step);
+
+         MFEM_VERIFY(Q.CheckFinite() == 0,
+                     "spatial_dyn: LTS Q non-finite at sync " << sync
+                     << ", t = " << t_lts << " s (NaN tripwire).");
+         paraview_write(sync, t_lts, V_max_step);         // fault + volume/free-surface
+         if (stations_write) { stations_write(t_lts, dof_data); }
+         if (cfg.output.checkpoint_every_steps > 0
+             && (sync % cfg.output.checkpoint_every_steps == 0))
+         {
+            const std::string prefix =
+               cfg.output.output_dir + "/" + cfg.output.restart_prefix;
+            mfem::seas::internal::WriteTpv104CheckpointV2Impl(
+               prefix, t_lts, dt_base, sync, /*lts_mode=*/1, layout_hash, Q,
+               dof_data, rank, nprocs, "spatial_dyn", qp_canon_ptr);
+         }
+         if (rank == 0 && (sync % 100 == 0))
+         {
+            std::cout << "[lts] sync " << sync << ", t = " << t_lts
+                      << " s, V_max = " << V_max_step << " m/s\n";
+         }
+      }
+      t = t_lts;
+      last_completed_step = sync;
+      if (cfg.output.checkpoint_every_steps > 0
+          && !(sync > 0 && sync % cfg.output.checkpoint_every_steps == 0))
+      {
+         const std::string prefix =
+            cfg.output.output_dir + "/" + cfg.output.restart_prefix;
+         mfem::seas::internal::WriteTpv104CheckpointV2Impl(
+            prefix, t, dt_base, sync, /*lts_mode=*/1, layout_hash, Q,
+            dof_data, rank, nprocs, "spatial_dyn", qp_canon_ptr);
+      }
+      lts_v2_checkpoint_written = (cfg.output.checkpoint_every_steps > 0);
+      if (rank == 0)
+      {
+         std::cout << "[lts] done: " << sync << " sync intervals (fault "
+                      "interleave), t = " << t << " s, V_max = " << V_max_global
+                   << " m/s.\n";
+      }
+   }
+
+   for (int step = step0;
+        step < nsteps && !lts_stepping && !lts_fault_stepping; ++step)
    {
       MFEM_PERF_SCOPE("seas::spatial_dyn::step");
       const real_t dt_step = std::min(dt_now, cfg.time.tfinal - t);
@@ -4905,8 +5112,12 @@ int main(int argc, char *argv[])
    // (layout-hash) checkpoints on the sync cadence + a final one; do NOT also run
    // the step-based V1 write here (that would emit a V1 file an LTS restart
    // refuses).  The GTS path (else) is byte-identical to before.
-   if (lts_stepping)
+   if (lts_stepping || lts_fault_stepping)
    {
+      // (LTS Phase 2/3) `last_completed_step` is a sync-interval count, not a GTS
+      // step count; the LTS loop already wrote V2 (layout-hash) checkpoints on the
+      // sync cadence + a final one, so the step-based V1 write below must NOT run
+      // (an LTS restart refuses a V1 file).
       if (rank == 0 && lts_v2_checkpoint_written)
       {
          std::cout << "[checkpoint] LTS V2 checkpoint(s) written on the sync "

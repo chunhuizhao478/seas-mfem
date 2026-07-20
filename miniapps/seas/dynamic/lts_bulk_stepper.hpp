@@ -105,7 +105,12 @@ public:
          fids_[c].data(), froles_[c].data(), fnbr_[c].data(), nf,
          dt_step, order_, I_[c], Q_,
          dk_.data.data(), order_, layout_.provider_slot_of_elem.data(),
-         sa.data(), sb.data(), &buf_, layout_.buffer_slot_of_elem.data());
+         sa.data(), sb.data(), &buf_, layout_.buffer_slot_of_elem.data(),
+         // LTS Phase 4a: no fault faces on the bulk path (fault-free); pass the
+         // cluster id so the corrector applies this cluster's rank-seam flux
+         // (no-op at np=1 / no shared faces).
+         /*fault_face_ids=*/nullptr, /*n_fault_faces=*/0,
+         /*cluster_id_for_seam=*/c);
    }
 
    /// Invariant (ii): every accumulate buffer is zero at each sync point.

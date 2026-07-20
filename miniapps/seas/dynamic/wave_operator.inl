@@ -306,12 +306,21 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
    {
 #ifdef MFEM_USE_MPI
       auto &pmesh = static_cast<const ParMesh &>(mesh_);
-      for (int sf = 0; sf < pmesh.GetNSharedFaces(); sf++)
+      // LTS Phase 4a: guard on `bc_.fault_attr > 0` (mirrors the
+      // fault_interior_faces_ loop above).  Without it, a FAULT-FREE mesh
+      // (fault_attr == 0) matches every non-fault shared face's default
+      // shared_face_bdr_attr_ (0 == 0) and wrongly tags all rank seams as
+      // fault-shared — which trips the D-2 assert on the fault-free bulk LTS
+      // np>1 path.  In the fault case (fault_attr > 0) this is a no-op.
+      if (bc_.fault_attr > 0)
       {
-         if (sf < static_cast<int>(shared_face_bdr_attr_.size()) &&
-             shared_face_bdr_attr_[sf] == bc_.fault_attr)
+         for (int sf = 0; sf < pmesh.GetNSharedFaces(); sf++)
          {
-            fault_shared_faces_.Append(sf);
+            if (sf < static_cast<int>(shared_face_bdr_attr_.size()) &&
+                shared_face_bdr_attr_[sf] == bc_.fault_attr)
+            {
+               fault_shared_faces_.Append(sf);
+            }
          }
       }
 #endif
@@ -346,6 +355,13 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
                   "LTS fault reorder: expected zero shared fault faces under "
                   "fault-locality partitioning (D-2), got "
                   << fault_shared_faces_.Size());
+
+      // LTS Phase 4a: cache the per-local-element cluster ids and build the ghost
+      // (face-neighbour) cluster ids ONCE (all ranks reach this together ⇒ the
+      // one ExchangeFaceNbrData inside is matched).  The seam corrector uses these
+      // to classify each rank-seam bulk face as diff-0 (same cluster) vs diff-1.
+      lts_cluster_id_.assign(lts_cluster_id->begin(), lts_cluster_id->end());
+      EnsureGhostClusterIds_();
 
       if (fault_interior_faces_.Size() > 0)
       {
@@ -2178,7 +2194,9 @@ void WaveOperator<MeshType>::AdvanceADERClusterBulk(
    Vector &Q,
    const real_t *dk_store, int dk_order, const int *provider_slot_of_elem,
    const real_t *face_sub_a, const real_t *face_sub_b,
-   LtsAccumulateBuffers *buffers, const int *buffer_slot_of_elem) const
+   LtsAccumulateBuffers *buffers, const int *buffer_slot_of_elem,
+   const int *fault_face_ids, int n_fault_faces,
+   int cluster_id_for_seam) const
 {
    MFEM_VERIFY(dt_step > 0.0, "AdvanceADERClusterBulk: dt_step > 0");
    MFEM_VERIFY(order >= 2 && order <= 4, "AdvanceADERClusterBulk: order in {2,3,4}");
@@ -2414,6 +2432,52 @@ void WaveOperator<MeshType>::AdvanceADERClusterBulk(
    // (fill == number of fine sub-steps of the closing coarse step, invariant i).
    for (int s : touched_coarse_slots) { buffers->fill[s]++; }
 
+   // 2b. LTS Phase 3 (P3-4): this cluster's FAULT-face flux.  The main sweep above
+   // skips role-4 (Fault) faces; apply them here via the extracted per-face helper
+   // (the EXACT GTS fault flux) so the LTS fault half cannot diverge from GTS.  The
+   // driver's per-cluster friction range Advance already wrote the imposed states
+   // for this cluster's fault-QP range into the global substep_I_imp_* buffer;
+   // ProcessADERFaceToRHS_ consumes them.  Both elements of every fault face are in
+   // this cluster (D-1 fault-lock), so the flux only touches this cluster's DOFs.
+   // Accumulates into `rhs` BEFORE the mass inverse.  fault_face_ids == nullptr
+   // (Phase-2 fault-free bulk) => no-op => byte-exact bulk behavior.
+   if (fault_face_ids != nullptr)
+   {
+      // REVIEW P3-4 R1 (fail-loud): the fault helper consumes the imposed-state
+      // side channel; if it is NOT set, ProcessADERFaceToRHS_ falls to the inline
+      // EvaluateADER path and RE-SOLVES friction (double-advancing the fault state
+      // already advanced in the stepper's Predict).  Require the buffer explicitly.
+      MFEM_VERIFY(substep_I_imp_plus_flat_ != nullptr
+                  && substep_I_imp_minus_flat_ != nullptr,
+                  "AdvanceADERClusterBulk: fault_face_ids given but the imposed-state "
+                  "buffer is not set.  The LTS fault interleave must call "
+                  "SetSubStepFaultImposedStates before the corrector; otherwise the "
+                  "inline friction re-solve would double-advance the fault state.");
+      const real_t *I_data_ff = I_cluster.GetData();
+      for (int i = 0; i < n_fault_faces; ++i)
+      {
+         // REVIEW P3-4 R6 (fail-loud, Phase-4 landmine): a shared (partition-seam)
+         // fault face would be silently DROPPED by the helper (early return) — the
+         // LTS corrector has no shared-fault path yet.  np=1 only (D-2); abort loud.
+         MFEM_VERIFY(shared_mesh_face_set_.count(fault_face_ids[i]) == 0,
+                     "AdvanceADERClusterBulk: fault face " << fault_face_ids[i]
+                     << " is a partition seam (shared); the LTS fault interleave is "
+                     "np=1 only (cross-rank shared-fault flux is Phase 4).");
+         ProcessADERFaceToRHS_(fault_face_ids[i], I_data_ff, dt_step, rhs,
+                               FaultEvalStageAvgMode::None);
+      }
+   }
+
+   // 2c. LTS Phase 4a: this cluster's rank-SEAM bulk-face flux.  The main sweep
+   // above SKIPS rank-seam faces (e2<0 && in shared_mesh_face_set_); apply them
+   // here from exchanged ghost `I` (local side only, the EXACT GTS shared flux) so
+   // np>1 == np=1.  Runs on every rank for the same cluster (matched exchange).
+   // cluster_id_for_seam < 0 (np=1 default) => no-op.
+   if (cluster_id_for_seam >= 0)
+   {
+      ComputeADERClusterSeamFaceFluxRHS(cluster_id_for_seam, I_cluster, dt_step, rhs);
+   }
+
    // 3. Consume this cluster's accumulate buffers (coarse elements) into rhs.
    if (buffers && buffer_slot_of_elem)
    {
@@ -2449,6 +2513,209 @@ void WaveOperator<MeshType>::AdvanceADERClusterBulk(
          const real_t *rd = rhs_data + c * ndof_total_ + off;
          for (int i = 0; i < ndof_per_el_; i++) { qd[i] += rd[i]; }
       }
+   }
+}
+
+// ---------------------------------------------------------------------------
+// LTS Phase 4a: ghost (face-neighbour) cluster ids + per-cluster seam corrector.
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void WaveOperator<MeshType>::EnsureGhostClusterIds_() const
+{
+   if (!ghost_cluster_id_.empty()) { return; }   // already built
+   if (lts_cluster_id_.empty())    { return; }   // LTS off (byte-exact)
+   if constexpr (!IsParallelMesh<MeshType>::value)
+   {
+      return;   // serial mesh: no ghosts
+   }
+   else
+   {
+#ifdef MFEM_USE_MPI
+      auto &pmesh = static_cast<const ParMesh &>(mesh_);
+      if (pmesh.GetNSharedFaces() == 0) { return; }   // np=1: no ghosts
+      MFEM_VERIFY(ghost_gf_, "EnsureGhostClusterIds_: ghost GF not initialized.");
+      MFEM_VERIFY(static_cast<int>(lts_cluster_id_.size()) == ne_,
+                  "EnsureGhostClusterIds_: cluster-id size "
+                  << lts_cluster_id_.size() << " != ne_ " << ne_ << ".");
+      // Pack the (constant-per-element) cluster id into every scalar dof of the
+      // element, exchange once, and read the ghost values back.  Because the id
+      // is constant over the element, any dof of the ghost element carries it.
+      ParGridFunction &g = *ghost_gf_;
+      for (int e = 0; e < ne_; ++e)
+      {
+         const real_t cid = static_cast<real_t>(lts_cluster_id_[e]);
+         for (int i = 0; i < ndof_per_el_; ++i) { g[e * ndof_per_el_ + i] = cid; }
+      }
+      g.ExchangeFaceNbrData();
+      const Vector &src = g.FaceNbrData();
+      const int n_nbr = (ndof_per_el_ > 0) ? src.Size() / ndof_per_el_ : 0;
+      ghost_cluster_id_.assign(static_cast<std::size_t>(n_nbr), -1);
+      for (int j = 0; j < n_nbr; ++j)
+      {
+         ghost_cluster_id_[static_cast<std::size_t>(j)] =
+            static_cast<int>(std::llround(src[j * ndof_per_el_]));
+      }
+#endif
+   }
+}
+
+template <typename MeshType>
+void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
+   int cluster_c, const Vector &I_cluster, real_t dt, Vector &rhs) const
+{
+   if constexpr (!IsParallelMesh<MeshType>::value)
+   {
+      (void)cluster_c; (void)I_cluster; (void)dt; (void)rhs;
+      return;   // serial mesh: no rank seams
+   }
+   else
+   {
+#ifdef MFEM_USE_MPI
+      MFEM_VERIFY(dt > 0.0, "ComputeADERClusterSeamFaceFluxRHS: dt must be > 0.");
+      MFEM_VERIFY(I_cluster.Size() == NUM_STATE * ndof_total_,
+                  "ComputeADERClusterSeamFaceFluxRHS: I size mismatch.");
+      auto *pfes = dynamic_cast<ParFiniteElementSpace *>(fes_.get());
+      MFEM_VERIFY(pfes, "FESpace must be ParFiniteElementSpace for ParMesh.");
+      auto &pmesh = static_cast<const ParMesh &>(mesh_);
+      const int n_shared = pmesh.GetNSharedFaces();
+      // Rank-uniform gate (a connected mesh at np>1 has shared faces on every
+      // rank): a rank with none has no face-neighbours, so skipping the P2P
+      // exchange cannot desync a peer (nobody expects data from it).  Matches
+      // ComputeADERSharedFaceFluxRHS's early return.
+      if (n_shared == 0) { return; }
+      MFEM_VERIFY(!lts_cluster_id_.empty(),
+                  "ComputeADERClusterSeamFaceFluxRHS: LTS cluster ids not set.");
+      MFEM_VERIFY(static_cast<int>(lts_cluster_id_.size()) == ne_,
+                  "ComputeADERClusterSeamFaceFluxRHS: cluster-id size mismatch.");
+
+      // Exchange this cluster's time integral I to face neighbours: NUM_STATE
+      // per-component collectives, the EXACT payload ComputeADERSharedFaceFluxRHS
+      // uses.  UNCONDITIONAL — every rank runs this for the same cluster_c
+      // (RunSyncInterval's Correct(c)), so the exchanges are matched (P-007).
+      MFEM_VERIFY(ghost_gf_, "ComputeADERClusterSeamFaceFluxRHS: ghost GF unset.");
+      const real_t *I_data = I_cluster.GetData();
+      ParGridFunction &q_gf = *ghost_gf_;
+      std::vector<Vector> nbr_data(NUM_STATE);
+      for (int c = 0; c < NUM_STATE; ++c)
+      {
+         // REVIEW p4a R1 (LOW, UB-clean): pack ONLY this cluster's element blocks
+         // and zero the rest.  `I_cluster` (the per-cluster integral) has only
+         // cluster-c blocks filled — the other blocks are uninitialised, so packing
+         // all of `I_data` would be an uninitialised read (harmless numerically,
+         // since a non-cluster-c ghost slot is never consumed here — a diff-0 seam
+         // reads only cluster-c ghosts and a diff-1 seam aborts — but it trips
+         // UBSan/valgrind).  Result is bit-identical: cluster-c ghost slots still
+         // receive the same cluster-c integral.
+         for (int i = 0; i < ndof_total_; ++i) { q_gf[i] = 0.0; }
+         for (int e = 0; e < ne_; ++e)
+         {
+            if (lts_cluster_id_[static_cast<std::size_t>(e)] != cluster_c)
+            { continue; }
+            const int off = e * ndof_per_el_;
+            for (int i = 0; i < ndof_per_el_; ++i)
+            { q_gf[off + i] = I_data[c * ndof_total_ + off + i]; }
+         }
+         q_gf.ExchangeFaceNbrData();
+         ++n_ghost_exchanges_;
+         const Vector &s = q_gf.FaceNbrData();
+         nbr_data[c].SetSize(s.Size());
+         std::memcpy(nbr_data[c].GetData(), s.GetData(),
+                     s.Size() * sizeof(real_t));
+      }
+
+      MFEM_VERIFY(!ghost_cluster_id_.empty(),
+                  "ComputeADERClusterSeamFaceFluxRHS: ghost cluster ids not built "
+                  "(EnsureGhostClusterIds_ must run in the ctor).");
+
+      real_t *rhs_data = rhs.GetData();
+      for (int sf = 0; sf < n_shared; ++sf)
+      {
+         FaceElementTransformations *ftr =
+            const_cast<ParMesh &>(pmesh).GetSharedFaceTransformations(sf);
+         if (!ftr) { continue; }
+         const int e1 = ftr->Elem1No;
+         MFEM_VERIFY(e1 >= 0 && e1 < ne_,
+                     "ComputeADERClusterSeamFaceFluxRHS: bad Elem1No " << e1 << ".");
+         if (lts_cluster_id_[static_cast<std::size_t>(e1)] != cluster_c)
+         { continue; }   // not this cluster's seam face
+
+         // Shared FAULT faces are rank-interior under D-2 — they must not reach
+         // the bulk seam sweep.  Fail loud rather than misapply a bulk flux.
+         MFEM_VERIFY(!(bc_.fault_attr > 0
+                       && sf < static_cast<int>(shared_face_bdr_attr_.size())
+                       && shared_face_bdr_attr_[sf] == bc_.fault_attr),
+                     "ComputeADERClusterSeamFaceFluxRHS: shared FAULT face sf=" << sf
+                     << " under LTS — D-2 requires fault-locality (no cross-rank "
+                     "fault faces).");
+
+         const int nbr_idx = ftr->Elem2No - ne_;
+         MFEM_VERIFY(nbr_idx >= 0
+                     && nbr_idx < static_cast<int>(ghost_cluster_id_.size()),
+                     "ComputeADERClusterSeamFaceFluxRHS: ghost index " << nbr_idx
+                     << " out of range [0," << ghost_cluster_id_.size() << ").");
+         const int c_nbr = ghost_cluster_id_[static_cast<std::size_t>(nbr_idx)];
+         // Stage 1: SAME-CLUSTER (diff-0) seams only.  A cross-cluster (diff-1)
+         // seam needs the coarse forecast-D(k) ghost exchange + the coarse-side
+         // local-buffer accumulation (Stage 2); fail loud rather than drop or
+         // mis-scale its flux.
+         MFEM_VERIFY(c_nbr == cluster_c,
+                     "ComputeADERClusterSeamFaceFluxRHS: cross-cluster (diff-1) rank "
+                     "seam (local cluster " << cluster_c << ", ghost cluster "
+                     << c_nbr << ") is not handled in Phase 4a Stage 1 (Stage 2 "
+                     "adds the forecast-D(k) exchange + coarse-side buffer).");
+
+         const FiniteElement *fe1 = fes_->GetFE(e1);
+         const int ndof = fe1->GetDof();
+         const int dof_offset1 = e1 * ndof_per_el_;
+         const FiniteElement *fe2 = pfes->GetFaceNbrFE(nbr_idx);
+         const int ndof2 = fe2->GetDof();
+         MFEM_VERIFY(ndof2 == ndof_per_el_,
+                     "ComputeADERClusterSeamFaceFluxRHS: heterogeneous ghost "
+                     "element (ndof2=" << ndof2 << " vs ndof_per_el_="
+                     << ndof_per_el_ << ") not supported.");
+
+         const int mesh_face_idx =
+            const_cast<ParMesh &>(pmesh).GetSharedFace(sf);
+         const IntegrationRule &ir =
+            IntRules.Get(ftr->GetGeometryType(), 2 * order_);
+
+         for (int q = 0; q < ir.GetNPoints(); ++q)
+         {
+            const IntegrationPoint &ip = ir.IntPoint(q);
+            ftr->SetAllIntPoints(&ip);
+            Vector nor_vec(3);
+            CalcOrtho(ftr->Face->Jacobian(), nor_vec);
+            const real_t nor_len = nor_vec.Norml2();
+            if (nor_len > 0) { nor_vec /= nor_len; }
+            const real_t w = ip.weight * nor_len;
+            const real_t nor[3] = {nor_vec(0), nor_vec(1), nor_vec(2)};
+
+            IntegrationPoint ip1; ftr->Loc1.Transform(ip, ip1);
+            Vector shape1(ndof); fe1->CalcShape(ip1, shape1);
+            IntegrationPoint ip2; ftr->Loc2.Transform(ip, ip2);
+            Vector shape2(ndof2); fe2->CalcShape(ip2, shape2);
+
+            real_t I_self[NUM_STATE], I_nbr[NUM_STATE];
+            for (int c = 0; c < NUM_STATE; ++c)
+            {
+               I_self[c] = 0.0; I_nbr[c] = 0.0;
+               for (int i = 0; i < ndof; ++i)
+               { I_self[c] += shape1(i) * I_data[c * ndof_total_ + dof_offset1 + i]; }
+               for (int i = 0; i < ndof2; ++i)
+               { I_nbr[c] += shape2(i) * nbr_data[c][nbr_idx * ndof_per_el_ + i]; }
+            }
+
+            real_t F_h[NUM_STATE];
+            // The EXACT GTS shared non-fault flux (local Elem1 side only).
+            SharedInteriorFaceFlux_(mesh_face_idx, I_self, I_nbr, nor, F_h);
+            for (int c = 0; c < NUM_STATE; ++c)
+            {
+               real_t *rc = rhs_data + c * ndof_total_ + dof_offset1;
+               for (int i = 0; i < ndof; ++i) { rc[i] -= w * shape1(i) * F_h[c]; }
+            }
+         }
+      }
+#endif
    }
 }
 
@@ -2824,77 +3091,18 @@ void WaveOperator<MeshType>::BuildCentralFluxFaceSet_()
 }
 
 // ---------------------------------------------------------------------------
-// EvaluateBulkAtFaultQPsCanonical — read bulk Q at every fault QP (interior
-// + shared, R-1003), rotate to the canonical fault-local frame, route Elem1's
-// evaluation into the canonical-+/− output bucket, and pack into flat per-QP
-// arrays.
-//
-// Layout:
-//   Q_*_flat[ dof_idx * NUM_STATE + c ]
-// where
-//   dof_idx = fault_face_dof_offset_[f]   + q   for interior fault face f
-//   dof_idx = shared_fault_dof_offset_[sf] + q   for shared   fault face sf
-// (the latter map already includes the GetNumLocalFaultQPs() base offset by
-// construction; see SetFaultDOFData in wave_operator.hpp).  This is the same
-// indexing used by the fault branches of ComputeADERFaceFluxRHS and
-// ComputeADERSharedFaceFluxRHS, so the iterator's I_imp accumulator and the
-// flux's substep gate share a single absolute index.
-//
-// Reuses the canonical frame from FaultBasis (sign_flipped reconstruction)
-// and the per-face elem1_on_plus flag (R-101 for interior; geometric for
-// shared) so the rotation and side-labeling are bit-identical to the
-// production fault flux path on each branch.  The interior loop uses
-// `!interior_fault_elem1_on_plus_[fi]` for frame negation (R-101); the
-// shared loop uses `qpd.sign_flipped` to mirror ComputeADERSharedFaceFluxRHS
-// (R-1305 / R-801 documents this convention split as a separate latent
-// risk; matching the existing flux convention is required so the iterator's
-// canonical Q matches what the flux's substep gate will rotate back).
-// ---------------------------------------------------------------------------
 template <typename MeshType>
-void WaveOperator<MeshType>::EvaluateBulkAtFaultQPsCanonical(
-   const Vector &Q_bulk,
-   std::vector<real_t> &Q_plus_flat,
-   std::vector<real_t> &Q_minus_flat) const
+void WaveOperator<MeshType>::EvalBulkAtFaultQPsForInteriorFace_(
+   int fi, const real_t *Q_data,
+   std::vector<real_t> &Q_plus_flat, std::vector<real_t> &Q_minus_flat) const
 {
-   MFEM_VERIFY(Q_bulk.Size() == NUM_STATE * ndof_total_,
-               "EvaluateBulkAtFaultQPsCanonical: Q_bulk size "
-               << Q_bulk.Size() << " != NUM_STATE * ndof_total_ = "
-               << NUM_STATE * ndof_total_);
-
-   // R-1003 §4: size to TOTAL fault QPs (interior + shared).  Interior
-   // entries occupy [0, GetNumLocalFaultQPs()); shared entries occupy
-   // [GetNumLocalFaultQPs(), GetNumTotalFaultQPs()).  At np=1 the shared
-   // count is 0 so this is byte-identical to the pre-R-1003 sizing.
-   const int n_local_qps = GetNumLocalFaultQPs();
-   const int n_total_qps = GetNumTotalFaultQPs();
-   const size_t expect_words =
-      static_cast<size_t>(NUM_STATE) * static_cast<size_t>(n_total_qps);
-   Q_plus_flat.assign(expect_words, 0.0);
-   Q_minus_flat.assign(expect_words, 0.0);
-
-   // R-1600: at np>1 the parallel block below performs a per-substep
-   // PAIRWISE collective (`q_gf.ExchangeFaceNbrData`) that EVERY rank
-   // with any face neighbours must participate in, even ranks with
-   // zero fault QPs (and zero `fault_basis_` — the ctor only allocates
-   // fault_basis_ on ranks with at least one local fault face, see
-   // wave_operator.inl ctor L332-333).  Pre-R-1600 this site short-
-   // circuited on `n_total_qps == 0` (or equivalently `!fault_basis_`),
-   // causing fault-adjacent ranks to hang in MPI_Wait at np>1 (the
-   // production 13.5-min spin).
-   //
-   // On serial builds the parallel block is `if constexpr` skipped at
-   // compile time, so a no-fault-QPs rank can return early without harm.
-   // The interior and shared loops below are bounded by
-   // `fault_interior_faces_.Size()` and `fault_shared_faces_.Size()`
-   // respectively — both are 0 when `fault_basis_` is null, so the loop
-   // bodies (which DO dereference `fault_basis_`) never run on those
-   // ranks.  No early return on `!fault_basis_` is needed.
-   if (n_total_qps == 0 && !IsParallelMesh<MeshType>::value) { return; }
-
-   const real_t *Q_data = Q_bulk.GetData();
-
-   for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
-   {
+   // LTS Phase 3 (A1): extracted per-interior-fault-face body of
+   // EvaluateBulkAtFaultQPsCanonical (PURE MOVE, bit-preserving).  Evaluates
+   // the bulk Q at interior fault face `fi`'s QPs, rotates to the canonical
+   // frame, and writes that face's QP slots of Q_*_flat.  Called by the
+   // whole-mesh eval (all interior fault faces) AND by the per-cluster range
+   // eval (a cluster's contiguous face block) — one source of truth, so the
+   // per-cluster fault traces are bit-identical to the whole-mesh path.
       const int f = fault_interior_faces_[fi];
       FaceElementTransformations *ftr =
          mesh_.GetInteriorFaceTransformations(f);
@@ -3022,6 +3230,81 @@ void WaveOperator<MeshType>::EvaluateBulkAtFaultQPsCanonical(
             dst_m[c] = src_minus[c];
          }
       }
+}
+
+// EvaluateBulkAtFaultQPsCanonical — read bulk Q at every fault QP (interior
+// + shared, R-1003), rotate to the canonical fault-local frame, route Elem1's
+// evaluation into the canonical-+/− output bucket, and pack into flat per-QP
+// arrays.
+//
+// Layout:
+//   Q_*_flat[ dof_idx * NUM_STATE + c ]
+// where
+//   dof_idx = fault_face_dof_offset_[f]   + q   for interior fault face f
+//   dof_idx = shared_fault_dof_offset_[sf] + q   for shared   fault face sf
+// (the latter map already includes the GetNumLocalFaultQPs() base offset by
+// construction; see SetFaultDOFData in wave_operator.hpp).  This is the same
+// indexing used by the fault branches of ComputeADERFaceFluxRHS and
+// ComputeADERSharedFaceFluxRHS, so the iterator's I_imp accumulator and the
+// flux's substep gate share a single absolute index.
+//
+// Reuses the canonical frame from FaultBasis (sign_flipped reconstruction)
+// and the per-face elem1_on_plus flag (R-101 for interior; geometric for
+// shared) so the rotation and side-labeling are bit-identical to the
+// production fault flux path on each branch.  The interior loop uses
+// `!interior_fault_elem1_on_plus_[fi]` for frame negation (R-101); the
+// shared loop uses `qpd.sign_flipped` to mirror ComputeADERSharedFaceFluxRHS
+// (R-1305 / R-801 documents this convention split as a separate latent
+// risk; matching the existing flux convention is required so the iterator's
+// canonical Q matches what the flux's substep gate will rotate back).
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void WaveOperator<MeshType>::EvaluateBulkAtFaultQPsCanonical(
+   const Vector &Q_bulk,
+   std::vector<real_t> &Q_plus_flat,
+   std::vector<real_t> &Q_minus_flat) const
+{
+   MFEM_VERIFY(Q_bulk.Size() == NUM_STATE * ndof_total_,
+               "EvaluateBulkAtFaultQPsCanonical: Q_bulk size "
+               << Q_bulk.Size() << " != NUM_STATE * ndof_total_ = "
+               << NUM_STATE * ndof_total_);
+
+   // R-1003 §4: size to TOTAL fault QPs (interior + shared).  Interior
+   // entries occupy [0, GetNumLocalFaultQPs()); shared entries occupy
+   // [GetNumLocalFaultQPs(), GetNumTotalFaultQPs()).  At np=1 the shared
+   // count is 0 so this is byte-identical to the pre-R-1003 sizing.
+   const int n_local_qps = GetNumLocalFaultQPs();
+   const int n_total_qps = GetNumTotalFaultQPs();
+   const size_t expect_words =
+      static_cast<size_t>(NUM_STATE) * static_cast<size_t>(n_total_qps);
+   Q_plus_flat.assign(expect_words, 0.0);
+   Q_minus_flat.assign(expect_words, 0.0);
+
+   // R-1600: at np>1 the parallel block below performs a per-substep
+   // PAIRWISE collective (`q_gf.ExchangeFaceNbrData`) that EVERY rank
+   // with any face neighbours must participate in, even ranks with
+   // zero fault QPs (and zero `fault_basis_` — the ctor only allocates
+   // fault_basis_ on ranks with at least one local fault face, see
+   // wave_operator.inl ctor L332-333).  Pre-R-1600 this site short-
+   // circuited on `n_total_qps == 0` (or equivalently `!fault_basis_`),
+   // causing fault-adjacent ranks to hang in MPI_Wait at np>1 (the
+   // production 13.5-min spin).
+   //
+   // On serial builds the parallel block is `if constexpr` skipped at
+   // compile time, so a no-fault-QPs rank can return early without harm.
+   // The interior and shared loops below are bounded by
+   // `fault_interior_faces_.Size()` and `fault_shared_faces_.Size()`
+   // respectively — both are 0 when `fault_basis_` is null, so the loop
+   // bodies (which DO dereference `fault_basis_`) never run on those
+   // ranks.  No early return on `!fault_basis_` is needed.
+   if (n_total_qps == 0 && !IsParallelMesh<MeshType>::value) { return; }
+
+   const real_t *Q_data = Q_bulk.GetData();
+
+   for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
+   {
+      EvalBulkAtFaultQPsForInteriorFace_(fi, Q_data, Q_plus_flat,
+                                         Q_minus_flat);
    }
 
    // R-1003 §3: shared-fault loop.  Populates the
@@ -3395,6 +3678,43 @@ void WaveOperator<MeshType>::EvaluateBulkAtFaultQPsCanonical(
          }
       }
 #endif
+   }
+}
+
+// ---------------------------------------------------------------------------
+// EvaluateBulkAtFaultQPsCanonicalRange (LTS P3-4 A1) — per-cluster fault-QP eval
+// RESTRICTED to the contiguous interior-fault-face position range [fi_begin,
+// fi_end).  Interior-only, NO shared handling, NO MPI exchange (D-2 / np=1).
+// Reuses the extracted per-face helper, so it is bit-identical to the interior
+// part of EvaluateBulkAtFaultQPsCanonical on the same faces.
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void WaveOperator<MeshType>::EvaluateBulkAtFaultQPsCanonicalRange(
+   const Vector &Q_bulk, int fi_begin, int fi_end,
+   std::vector<real_t> &Q_plus_flat, std::vector<real_t> &Q_minus_flat) const
+{
+   MFEM_VERIFY(Q_bulk.Size() == NUM_STATE * ndof_total_,
+               "EvaluateBulkAtFaultQPsCanonicalRange: Q_bulk size mismatch");
+   MFEM_VERIFY(GetNumSharedFaultQPs() == 0,
+               "EvaluateBulkAtFaultQPsCanonicalRange: shared fault QPs present "
+               "(np>1); the per-cluster range eval is interior-only (Phase 4).");
+   const int nfi = fault_interior_faces_.Size();
+   MFEM_VERIFY(fi_begin >= 0 && fi_end <= nfi && fi_begin <= fi_end,
+               "EvaluateBulkAtFaultQPsCanonicalRange: bad range [" << fi_begin
+               << "," << fi_end << ") for " << nfi << " interior fault faces.");
+   // Size the (globally-indexed) buffers to hold every fault-QP slot; only the
+   // range's slots are WRITTEN here — the caller reads only the range, so no
+   // uninitialized read occurs (this is exactly the A1 fix: write == read range).
+   const std::size_t expect_words =
+      static_cast<std::size_t>(NUM_STATE) *
+      static_cast<std::size_t>(GetNumTotalFaultQPs());
+   if (Q_plus_flat.size()  < expect_words) { Q_plus_flat.resize(expect_words); }
+   if (Q_minus_flat.size() < expect_words) { Q_minus_flat.resize(expect_words); }
+
+   const real_t *Q_data = Q_bulk.GetData();
+   for (int fi = fi_begin; fi < fi_end; ++fi)
+   {
+      EvalBulkAtFaultQPsForInteriorFace_(fi, Q_data, Q_plus_flat, Q_minus_flat);
    }
 }
 
@@ -4740,12 +5060,9 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
 
    const real_t *I_data = I.GetData();
 
-   // Time-integrated background: bulk_bg_scaled[c] = dt · bulk_bg_[c].
-   real_t bulk_bg_scaled[NUM_STATE];
-   for (int c = 0; c < NUM_STATE; c++)
-   {
-      bulk_bg_scaled[c] = dt * bulk_bg_[c];
-   }
+   // P3-4: bulk_bg_scaled is now computed inside ProcessADERFaceToRHS_ (the
+   // extracted per-face body) from `dt`; the former caller-scope copy here was
+   // dead after the extraction and has been removed (REVIEW P3-4 R4).
 
    // Phase 13: mixed-flux dispatch now lives in InteriorFaceFlux_ /
    // SharedInteriorFaceFlux_ (which read the `mf_on_` member directly);
@@ -4769,7 +5086,6 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
    // (not inside `FaultFaceFlux::Evaluate`) because averaging requires
    // simultaneous access to every QP on a face — `Evaluate` only sees
    // one.
-   enum class FaultEvalStageAvgMode { None, Trial, Theta, Vabs, Tcorr };
    FaultEvalStageAvgMode eval_avg_mode = FaultEvalStageAvgMode::None;
    {
       const char *env = std::getenv("SEAS_TEST_EVAL_FACE_AVG_STAGE");
@@ -4830,19 +5146,37 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
          }
       }
 
+      ProcessADERFaceToRHS_(f, I_data, dt, rhs, eval_avg_mode);
+   }
+}
+
+template <typename MeshType>
+void WaveOperator<MeshType>::ProcessADERFaceToRHS_(
+   int f, const real_t *I_data, real_t dt, Vector &rhs,
+   FaultEvalStageAvgMode eval_avg_mode) const
+{
+   // LTS Phase 3 (P3-4): extracted per-face body of ComputeADERFaceFluxRHS
+   // (PURE MOVE, bit-preserving).  Processes ONE face `f` (fault / boundary /
+   // interior), accumulating its ADER flux into `rhs`.  Reused by the
+   // per-cluster fault-aware corrector for a cluster's fault faces.  The only
+   // former loop-scope inputs are `I_data`, `dt` (-> bulk_bg_scaled) and
+   // `eval_avg_mode`; the 3 face-level `continue`s became `return`s.
+   real_t bulk_bg_scaled[NUM_STATE];
+   for (int c = 0; c < NUM_STATE; c++) { bulk_bg_scaled[c] = dt * bulk_bg_[c]; }
+
       FaceElementTransformations *ftr = mesh_.GetFaceElementTransformations(f);
-      if (!ftr) { continue; }
+      if (!ftr) { return; }
 
       int e1 = ftr->Elem1No;
       int e2 = ftr->Elem2No;
 
       int bdr_attr = face_bdr_attr_[f];
 
-      if (e2 < 0 && shared_mesh_face_set_.count(f) > 0) { continue; }
+      if (e2 < 0 && shared_mesh_face_set_.count(f) > 0) { return; }
 
       bool is_boundary = (e2 < 0) && (bdr_attr > 0);
 
-      if (e2 < 0 && bdr_attr == 0) { continue; }
+      if (e2 < 0 && bdr_attr == 0) { return; }
 
       const FiniteElement *fe1 = fes_->GetFE(e1);
       int ndof = fe1->GetDof();
@@ -5748,7 +6082,6 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
 #endif
          }
       }
-   }
 }
 
 // ---------------------------------------------------------------------------

@@ -623,7 +623,20 @@ public:
       const int *provider_slot_of_elem = nullptr,
       const real_t *face_sub_a = nullptr, const real_t *face_sub_b = nullptr,
       LtsAccumulateBuffers *buffers = nullptr,
-      const int *buffer_slot_of_elem = nullptr) const;
+      const int *buffer_slot_of_elem = nullptr,
+      // LTS Phase 3 (P3-4): when non-null, apply this cluster's fault-face flux
+      // (the EXACT GTS flux via ProcessADERFaceToRHS_, consuming the imposed
+      // states the friction range Advance wrote for this cluster's QP range)
+      // into `rhs` before the mass inverse.  nullptr (Phase-2 fault-free bulk) =>
+      // no fault faces processed => byte-exact bulk behavior unchanged.
+      const int *fault_face_ids = nullptr, int n_fault_faces = 0,
+      // LTS Phase 4a: when >= 0 AND the mesh is parallel with shared faces, apply
+      // this cluster's rank-SEAM bulk-face flux via ComputeADERClusterSeamFaceFluxRHS
+      // (the EXACT GTS shared flux, local-side only, from exchanged ghost `I`) into
+      // `rhs` before the mass inverse.  -1 (default, np=1) => no seam processing =>
+      // byte-exact np=1 behavior unchanged.  Stage 1 handles same-cluster (diff-0)
+      // seams; a cross-cluster (diff-1) seam FAILS LOUD (Stage 2).
+      int cluster_id_for_seam = -1) const;
 
    /// Element-subset twins of the corrector primitives (element-local, so
    /// byte-identical to the whole-vector versions over the full list).
@@ -704,6 +717,29 @@ public:
    /// @param[out] Q_minus_flat  Output, same size.
    void EvaluateBulkAtFaultQPsCanonical(
       const Vector &Q_bulk,
+      std::vector<real_t> &Q_plus_flat,
+      std::vector<real_t> &Q_minus_flat) const;
+
+   /// LTS Phase 3 (A1): extracted per-interior-fault-face body of
+   /// EvaluateBulkAtFaultQPsCanonical (PURE MOVE, bit-preserving).  Evaluates
+   /// interior fault face at POSITION `fi` in fault_interior_faces_ and writes its
+   /// QP slots of Q_*_flat.  Shared by the whole-mesh eval and the range eval.
+   void EvalBulkAtFaultQPsForInteriorFace_(
+      int fi, const real_t *Q_data,
+      std::vector<real_t> &Q_plus_flat,
+      std::vector<real_t> &Q_minus_flat) const;
+
+   /// LTS Phase 3 (A1): per-cluster fault-QP eval RESTRICTED to the contiguous
+   /// interior-fault-face position range `[fi_begin, fi_end)` — evaluates ONLY
+   /// those faces (writes only their QP slots), does NO shared-face handling and
+   /// NO MPI exchange (D-2 / np=1).  Q_*_flat are globally sized
+   /// (NUM_STATE*GetNumTotalFaultQPs()); slots outside the range are left as-is.
+   /// This is the fault half of the LTS interleave: it removes the whole-mesh
+   /// eval's ~2x per-cluster cost, its Nc>1 uninitialized read, and (at np>1) the
+   /// per-cluster collective.  At fi_begin=0,fi_end=all it is bit-identical to the
+   /// interior part of EvaluateBulkAtFaultQPsCanonical.
+   void EvaluateBulkAtFaultQPsCanonicalRange(
+      const Vector &Q_bulk, int fi_begin, int fi_end,
       std::vector<real_t> &Q_plus_flat,
       std::vector<real_t> &Q_minus_flat) const;
 
@@ -1365,6 +1401,38 @@ protected:
    mutable std::unique_ptr<ParGridFunction>       ghost_gf_full_state_;
 #endif
 
+   /// LTS Phase 4a: per-LOCAL-element cluster id (copied from the ctor's
+   /// `lts_cluster_id` argument when LTS is active; empty ⇔ LTS off).  Used by
+   /// the seam corrector to filter shared faces by cluster.
+   std::vector<int> lts_cluster_id_;
+   /// LTS Phase 4a: ghost (face-neighbour) element cluster id, indexed by
+   /// `Elem2No - ne_`.  Built once by EnsureGhostClusterIds_; empty at np=1 or
+   /// when LTS is off.
+   mutable std::vector<int> ghost_cluster_id_;
+   /// LTS Phase 4a (P-007): running count of ghost ExchangeFaceNbrData calls made
+   /// by the seam corrector, for the per-tick matched-collective assertion.
+   mutable long long n_ghost_exchanges_ = 0;
+
+public:
+   /// LTS Phase 4a: read + reset the ghost-exchange counter (matched-collective
+   /// audit).  The driver checks it per sync against the tick table's summed
+   /// n_collectives on every rank.
+   long long GhostExchangeCount() const { return n_ghost_exchanges_; }
+   void ResetGhostExchangeCount() const { n_ghost_exchanges_ = 0; }
+   /// LTS Phase 4a: true iff this rank owns >=1 shared (rank-seam) face.  The
+   /// seam corrector early-returns (does 0 ghost exchanges) on a rank with none,
+   /// so the per-sync counter check must expect 0 there rather than the schedule
+   /// count (else it false-aborts an isolated-subdomain rank at np>1).
+   bool HasSharedFaces() const
+   {
+#ifdef MFEM_USE_MPI
+      if constexpr (IsParallelMesh<MeshType>::value)
+      { return static_cast<const ParMesh &>(mesh_).GetNSharedFaces() > 0; }
+#endif
+      return false;
+   }
+private:
+
    // Test-visibility accessors — exposed for the Arm 1 localization probes
    // (Phase 3 STOP investigation).  Production code uses `Mult` /
    // `AdvanceADER`; these wrappers forward to the private impls so unit
@@ -1395,6 +1463,19 @@ private:
    /// integrated boundary flux.  Additive into `rhs`.
    void ComputeADERFaceFluxRHS(const Vector &I, real_t dt,
                                Vector &rhs) const;
+   /// LTS Phase 3 (P3-4): per-face ADER face-flux stage-averaging test mode
+   /// (SEAS_TEST_EVAL_FACE_AVG_STAGE).  Hoisted out of ComputeADERFaceFluxRHS
+   /// so the extracted per-face helper can take it as a parameter.
+   enum class FaultEvalStageAvgMode { None, Trial, Theta, Vabs, Tcorr };
+   /// LTS Phase 3 (P3-4): the per-face body of ComputeADERFaceFluxRHS, extracted
+   /// as a PURE MOVE (bit-preserving).  Processes ONE face `f` (fault / boundary
+   /// / interior), accumulating its ADER flux into `rhs`.  ComputeADERFaceFluxRHS
+   /// calls it for every non-cached face; the per-cluster fault-aware corrector
+   /// (AdvanceADERClusterBulk with fault_face_ids) calls it for a cluster's fault faces so the LTS fault
+   /// half reuses the EXACT GTS fault flux (no divergence).
+   void ProcessADERFaceToRHS_(int f, const real_t *I_data, real_t dt,
+                              Vector &rhs,
+                              FaultEvalStageAvgMode eval_avg_mode) const;
    /// Opt 2026-06-24: cached fast-path for one interior non-fault face —
    /// gather I, `InteriorFaceFlux_`, scatter, using `FaceGeomEntry` geometry.
    /// Algorithm-identical to the on-the-fly interior `else` branch
@@ -1403,6 +1484,34 @@ private:
       const FaceGeomEntry &fc, const real_t *I_data, Vector &rhs) const;
    void ComputeADERSharedFaceFluxRHS(const Vector &I, real_t dt,
                                      Vector &rhs) const;
+
+   /// LTS Phase 4a: per-cluster restriction of ComputeADERSharedFaceFluxRHS for
+   /// the fault-free bulk multi-rate corrector.  Exchanges this cluster's time-
+   /// integral `I` to face neighbours (NUM_STATE per-component, the exact GTS
+   /// shared-flux payload) and, for every rank-SEAM bulk face whose LOCAL element
+   /// is in `cluster_c`, computes the one-sided (local Elem1) flux from the ghost
+   /// neighbour's `I` and accumulates it into `rhs` — bit-identical to the GTS
+   /// shared corrector, so np>1 == np=1 for a single-cluster (P-022) run.
+   ///
+   /// Stage 1 handles SAME-CLUSTER (diff-0) seams only: a face whose ghost
+   /// neighbour is in a DIFFERENT cluster (diff-1, the cross-cluster seam) FAILS
+   /// LOUD (its forecast-integral machinery is Stage 2).  Shared FAULT faces are
+   /// rank-interior under D-2 and must not appear here (asserted).
+   ///
+   /// Matched collectives (P-007): the caller (AdvanceADERClusterBulk from
+   /// RunSyncInterval's Correct(c)) runs on EVERY rank for the same `cluster_c`,
+   /// and the exchange is UNCONDITIONAL (gated only on the rank-uniform
+   /// GetNSharedFaces()>0), so the NUM_STATE ExchangeFaceNbrData calls are paired
+   /// across ranks by construction.  Increments `n_ghost_exchanges_`.
+   void ComputeADERClusterSeamFaceFluxRHS(int cluster_c, const Vector &I_cluster,
+                                          real_t dt, Vector &rhs) const;
+
+   /// LTS Phase 4a: build (once, cached) the per-face-neighbour ghost cluster id
+   /// from `lts_cluster_id_`, so the seam corrector can classify a seam face as
+   /// diff-0 vs diff-1.  A no-op at np=1 (no shared faces) or when LTS is off
+   /// (`lts_cluster_id_` empty).  Uses one ExchangeFaceNbrData on `ghost_gf_`;
+   /// called from the ctor (all ranks together) so it is matched.
+   void EnsureGhostClusterIds_() const;
 
    /// @brief Cross-rank exchange + pairing of shared fault QPs (Phase 2 of
    /// PLAN_shared_fault_reconcile_fix_2026-05-23.md — the method-invariant
