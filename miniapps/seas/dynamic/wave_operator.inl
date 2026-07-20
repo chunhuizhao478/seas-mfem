@@ -2765,10 +2765,11 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
             if (mode == 1)
             {
                // Fine side: integrate the GHOST coarse's forecast.  Reassemble its
-               // contiguous [k][block] Taylor stack from ghost_dk_[c_coarse].
+               // contiguous [k][block] Taylor stack from ghost_dk_[c_coarse] — 4b:
+               // one batched full-state FaceNbrData per level, read via the byNODES
+               // vdof map (byte-identical to the 4a per-(k,comp) cache).
                MFEM_VERIFY(c_coarse < static_cast<int>(ghost_dk_.size())
-                           && static_cast<int>(ghost_dk_[c_coarse].size())
-                                 == dk_order * NUM_STATE,
+                           && static_cast<int>(ghost_dk_[c_coarse].size()) == dk_order,
                            "ComputeADERClusterSeamFaceFluxRHS: ghost D(k) for cluster "
                            << c_coarse << " not exchanged (Predict order / opt-in?).");
                // GAP-A3 (no stale D(k)): the cached ghost forecast must be from the
@@ -2785,15 +2786,17 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
                            << ").");
                ghost_stack.assign(static_cast<std::size_t>(dk_order) * block, 0.0);
                for (int k = 0; k < dk_order; ++k)
+               {
+                  const Vector &g = ghost_dk_[c_coarse][static_cast<std::size_t>(k)];
                   for (int comp = 0; comp < NUM_STATE; ++comp)
-                  {
-                     const Vector &g =
-                        ghost_dk_[c_coarse][static_cast<std::size_t>(k) * NUM_STATE + comp];
-                     for (int i = 0; i < ndof_per_el_; ++i)
+                     for (int i = 0; i < ndof2; ++i)
+                     {
+                        const int vd = nbr_vdofs[comp * ndof2 + i];
                         ghost_stack[static_cast<std::size_t>(k) * block
                                     + comp * ndof_per_el_ + i]
-                           = g[nbr_idx * ndof_per_el_ + i];
-                  }
+                           = g[vd >= 0 ? vd : -1 - vd];
+                     }
+               }
                IntegrateTaylor(a, b, ghost_stack.data(), dk_order, block,
                                forecast_blk.data());
             }
@@ -2926,7 +2929,8 @@ void WaveOperator<MeshType>::ExchangeClusterProviderDkGhost(
 #ifdef MFEM_USE_MPI
       auto &pmesh = static_cast<const ParMesh &>(mesh_);
       if (pmesh.GetNSharedFaces() == 0) { return; }   // np=1: no ghosts
-      MFEM_VERIFY(ghost_gf_, "ExchangeClusterProviderDkGhost: ghost GF unset.");
+      MFEM_VERIFY(ghost_gf_full_state_ && pfes_full_state_,
+                  "ExchangeClusterProviderDkGhost: batched ghost GF unset.");
       MFEM_VERIFY(dk_data && provider_slot_of_elem && dk_order > 0,
                   "ExchangeClusterProviderDkGhost: provider D(k) inputs unset.");
       MFEM_VERIFY(!lts_cluster_id_.empty()
@@ -2943,36 +2947,41 @@ void WaveOperator<MeshType>::ExchangeClusterProviderDkGhost(
          ghost_dk_.resize(static_cast<std::size_t>(cluster_c + 1));
          ghost_dk_epoch_.resize(static_cast<std::size_t>(cluster_c + 1), -1);
       }
+      // LTS Phase 4b: ONE batched (all-NUM_STATE) collective PER TAYLOR LEVEL
+      // (was NUM_STATE per-component per level in 4a) — dk_order exchanges instead
+      // of NUM_STATE*dk_order.  Cache one full-state FaceNbrData per level; the
+      // fine-side reassembly reads it via the byNODES vdof map (byte-identical).
       std::vector<Vector> &cache = ghost_dk_[static_cast<std::size_t>(cluster_c)];
-      if (static_cast<int>(cache.size()) != dk_order * NUM_STATE)
-      { cache.assign(static_cast<std::size_t>(dk_order) * NUM_STATE, Vector()); }
+      if (static_cast<int>(cache.size()) != dk_order)
+      { cache.assign(static_cast<std::size_t>(dk_order), Vector()); }
 
-      ParGridFunction &q_gf = *ghost_gf_;
+      ParGridFunction &q_gf_full = *ghost_gf_full_state_;
+      const std::size_t nfull =
+         static_cast<std::size_t>(NUM_STATE) * static_cast<std::size_t>(ndof_total_);
       for (int k = 0; k < dk_order; ++k)
       {
-         for (int comp = 0; comp < NUM_STATE; ++comp)
+         real_t *qd = q_gf_full.GetData();
+         for (std::size_t j = 0; j < nfull; ++j) { qd[j] = 0.0; }
+         for (int e = 0; e < ne_; ++e)
          {
-            for (int i = 0; i < ndof_total_; ++i) { q_gf[i] = 0.0; }
-            for (int e = 0; e < ne_; ++e)
-            {
-               if (lts_cluster_id_[static_cast<std::size_t>(e)] != cluster_c)
-               { continue; }
-               const int slot = provider_slot_of_elem[e];
-               if (slot < 0) { continue; }   // not a provider
-               // D(k) stack for this slot: [slot][k][block], block component-major.
-               const real_t *blk = dk_data
-                  + (static_cast<std::size_t>(slot) * dk_order + k) * block
-                  + static_cast<std::size_t>(comp) * ndof_per_el_;
-               const int off = e * ndof_per_el_;
-               for (int i = 0; i < ndof_per_el_; ++i) { q_gf[off + i] = blk[i]; }
-            }
-            q_gf.ExchangeFaceNbrData();
-            ++n_ghost_exchanges_;
-            const Vector &s = q_gf.FaceNbrData();
-            Vector &dst = cache[static_cast<std::size_t>(k) * NUM_STATE + comp];
-            dst.SetSize(s.Size());
-            std::memcpy(dst.GetData(), s.GetData(), s.Size() * sizeof(real_t));
+            if (lts_cluster_id_[static_cast<std::size_t>(e)] != cluster_c)
+            { continue; }
+            const int slot = provider_slot_of_elem[e];
+            if (slot < 0) { continue; }   // not a provider
+            // D(k)[k] block for this slot: [slot][k][block], block component-major.
+            const real_t *stack_k = dk_data
+               + (static_cast<std::size_t>(slot) * dk_order + k) * block;
+            const int off = e * ndof_per_el_;
+            for (int comp = 0; comp < NUM_STATE; ++comp)
+               for (int i = 0; i < ndof_per_el_; ++i)
+               { qd[comp * ndof_total_ + off + i] = stack_k[comp * ndof_per_el_ + i]; }
          }
+         q_gf_full.ExchangeFaceNbrData();
+         ++n_ghost_exchanges_;
+         const Vector &s = q_gf_full.FaceNbrData();
+         Vector &dst = cache[static_cast<std::size_t>(k)];
+         dst.SetSize(s.Size());
+         std::memcpy(dst.GetData(), s.GetData(), s.Size() * sizeof(real_t));
       }
       ghost_dk_epoch_[static_cast<std::size_t>(cluster_c)] = tick;
 #endif

@@ -144,14 +144,14 @@ inline std::vector<LtsTick> BuildTickTable(int num_clusters,
       }
       // LTS Phase 4a Stage 2 (diff-1 seams): each predicting cluster c>=1 exchanges
       // its coarse provider D(k) for the finer neighbour's cross-rank forecast.
-      // 4b (D(k) batching pending): still NUM_STATE*ader_order per-component
-      // collectives.  c==0 is the finest cluster (never a provider), skipped —
-      // a rank-uniform gate, matched across ranks.
+      // 4b: ONE batched (all-NUM_STATE) collective PER TAYLOR LEVEL => ader_order
+      // collectives (was NUM_STATE*ader_order per-component in 4a).  c==0 is the
+      // finest cluster (never a provider), skipped — a rank-uniform gate, matched.
       if (meta.exchange_bulk_provider_dk)
       {
          for (int c : tk.predict_clusters)
          {
-            if (c >= 1) { nx += meta.num_state * ader_order; }
+            if (c >= 1) { nx += ader_order; }
          }
       }
       tk.n_collectives = nx;

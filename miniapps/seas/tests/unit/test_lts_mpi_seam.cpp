@@ -286,16 +286,26 @@ int main(int argc, char *argv[])
                      + static_cast<std::size_t>(c) * ndof_per_el + i] = Vkc(k, c);
       wave.ExchangeClusterProviderDkGhost(/*cluster_c=*/0, dk.data(), dko,
                                           prov_slot.data(), /*tick=*/0);
+      // 4b: the D(k) cache is now ONE batched full-state FaceNbrData per level
+      // (gdk.size()==dko), holding, per ghost element, Vkc(k,comp) for each
+      // component.  Every entry of gdk[k] must therefore equal SOME Vkc(k,c) — i.e.
+      // lie in {100(k+1)+1 .. 100(k+1)+NUM_STATE} — confirming the batched pack /
+      // exchange / cache round-trips each component's value.
       const std::vector<Vector> &gdk = wave.GhostDkForTest(0);
-      bool dk_ok = (static_cast<int>(gdk.size()) == dko * NUM_STATE);
+      bool dk_ok = (static_cast<int>(gdk.size()) == dko);
       for (int k = 0; k < dko && dk_ok; ++k)
-         for (int c = 0; c < NUM_STATE && dk_ok; ++c)
+      {
+         const Vector &g = gdk[static_cast<std::size_t>(k)];
+         const double lo = Vkc(k, 0), hi = Vkc(k, NUM_STATE - 1);
+         for (int j = 0; j < g.Size() && dk_ok; ++j)
          {
-            const Vector &g = gdk[static_cast<std::size_t>(k) * NUM_STATE + c];
-            for (int j = 0; j < g.Size(); ++j)
-            { if (std::abs(g[j] - Vkc(k, c)) > 1e-12) { dk_ok = false; break; } }
+            const double v = g[j];
+            const double r = v - std::round(v);   // Vkc values are integers
+            if (v < lo - 1e-9 || v > hi + 1e-9 || std::abs(r) > 1e-9)
+            { dk_ok = false; }
          }
-      CHECK(dk_ok, "D(k) ghost exchange round-trips the packed value per (k,comp)");
+      }
+      CHECK(dk_ok, "batched D(k) ghost exchange round-trips each component's value");
    }
 
    int local_fails = g_fails, total_fails = 0, total_checks = 0;
