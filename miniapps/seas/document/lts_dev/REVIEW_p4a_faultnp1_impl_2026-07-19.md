@@ -53,6 +53,24 @@ a fault-free rank); V_max is a matched Allreduce.
   is defensively handled (relaxed ctor + skip-fault-half) but UNTESTED locally
   (the np=2 TPV104 gate has fault on both ranks); verify at np≥4 on Frontera.
 
+## np-scaling validation (local, np≤10 per the laptop-MPI rule) — GREEN
+Fault-interleave differential np ∈ {2,4,10} vs np=1, TPV104-1000m, Nc=6, over 15
+sync intervals (≥12-sync gate), `SEAS_LTS_FAULT_INTERLEAVE=1`:
+
+| np | fault field vs np=1 | SCEC stations | shared fault QPs | run |
+|---|---|---|---|---|
+| 2 | max\|Δ\| ~3.9e-26 | 9/9 byte-identical | 0 (D-2) | clean, 15 syncs |
+| 4 | max\|Δ\| ~3.6e-26 | 9/9 byte-identical | 0 | clean, 15 syncs |
+| 10 | max\|Δ\| ~3.6e-25 | 9/9 byte-identical | 0 | clean, 15 syncs |
+
+`num_fault_global` printed `shared = 0` at every np ⇒ the fault-locality partition
+kept all fault faces rank-interior (D-2 held).  No hang / abort / matched-collective
+violation at any np.  **np=10 exercised the fault-FREE-rank path** (far-field ranks
+own zero fault faces) and completed cleanly — closing the review's one untested-path
+LOW item.  (A pre-existing blanket "rate_state at np>1 … shared psi 1st-order"
+WARNING fires on nprocs>1 regardless of the shared count; moot here since shared=0 —
+a candidate one-line refinement is to gate it on `num_shared_global>0`.)
+
 ## Scope / remaining
 - Active-rupture fidelity (T_nuc=1.0s ⇒ ~72 syncs, too slow locally) + np≥4
   fault-free-rank coverage + the SAFS/TPV104 physics acceptance stay Expanse/
