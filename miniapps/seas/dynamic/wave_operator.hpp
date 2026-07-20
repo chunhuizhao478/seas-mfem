@@ -636,7 +636,12 @@ public:
       // `rhs` before the mass inverse.  -1 (default, np=1) => no seam processing =>
       // byte-exact np=1 behavior unchanged.  Stage 1 handles same-cluster (diff-0)
       // seams; a cross-cluster (diff-1) seam FAILS LOUD (Stage 2).
-      int cluster_id_for_seam = -1) const;
+      int cluster_id_for_seam = -1,
+      // LTS Phase 4a Stage 2: schedule (t_s, dt_base, tick, T_actual) for the
+      // closed-form seam sub-interval [a,b] at diff-1 rank seams; forwarded to the
+      // seam corrector.  Defaults => diff-0-only (Stage 1) behaviour.
+      mfem::real_t t_s = 0.0, mfem::real_t dt_base = 0.0, int tick = 0,
+      mfem::real_t T_actual = 0.0) const;
 
    /// LTS Phase 4a Stage 2: exchange cluster `cluster_c`'s PROVIDER Taylor stacks
    /// D(k) to face neighbours and cache them in `ghost_dk_[cluster_c]` (per level ×
@@ -650,6 +655,15 @@ public:
                                        int dk_order,
                                        const int *provider_slot_of_elem,
                                        int tick) const;
+
+   /// LTS Phase 4a Stage 2: retain this cluster's coarse-side SEAM elements' Taylor
+   /// stacks D(k) (an extra element-local CK over `seam_coarse_elems_[cluster_c]`)
+   /// and exchange them to face neighbours (so a finer cross-rank neighbour can
+   /// integrate the coarse forecast).  Called from LtsBulkSyncStepper::Predict(c)
+   /// for c>=1 when `meta.exchange_bulk_provider_dk`.  No-op at np=1 / no seam.
+   void PrepareSeamCoarseForecast(int cluster_c, const Vector &Q,
+                                  real_t dt_step, int order,
+                                  const std::vector<real_t> &tau, int tick) const;
 
    /// Element-subset twins of the corrector primitives (element-local, so
    /// byte-identical to the whole-vector versions over the full list).
@@ -1440,6 +1454,18 @@ protected:
    /// consumes it at its own correct.  Keyed by local coarse element id.
    mutable std::map<int, std::vector<mfem::real_t>> seam_coarse_buf_;
    mutable std::map<int, int>                       seam_coarse_fill_;
+   /// LTS Phase 4a Stage 2: per-cluster LOCAL coarse-side seam elements (a coarse
+   /// element whose finer neighbour is a GHOST across a rank seam) + a dense
+   /// element->seam-slot map (size ne_, -1 elsewhere) + their retained Taylor
+   /// stacks `[slot][k][block]` (block-component-major).  Built once by
+   /// EnsureSeamCoarseElems_; the stacks are refreshed each coarse predict by
+   /// PrepareSeamCoarseForecast (an extra element-local CK over these elements —
+   /// they are not layout providers, so the stepper's dk_store lacks them; D(k) is
+   /// raw/dt-independent so the recompute is exact).
+   mutable bool                                     seam_coarse_ready_ = false;
+   mutable std::vector<std::vector<int>>            seam_coarse_elems_;
+   mutable std::vector<std::vector<int>>            seam_coarse_slot_of_elem_;
+   mutable std::vector<std::vector<mfem::real_t>>   seam_coarse_dk_;
 
 public:
    /// LTS Phase 4a Stage 2 (tests): the cached ghost D(k) stacks for a cluster
@@ -1567,6 +1593,11 @@ private:
    /// (`lts_cluster_id_` empty).  Uses one ExchangeFaceNbrData on `ghost_gf_`;
    /// called from the ctor (all ranks together) so it is matched.
    void EnsureGhostClusterIds_() const;
+
+   /// LTS Phase 4a Stage 2: identify (once, cached) the LOCAL coarse-side seam
+   /// elements per cluster + their dense element->slot maps (for D(k) retention),
+   /// from the shared faces + ghost cluster ids.  No-op at np=1 / LTS off.
+   void EnsureSeamCoarseElems_() const;
 
    /// @brief Cross-rank exchange + pairing of shared fault QPs (Phase 2 of
    /// PLAN_shared_fault_reconcile_fix_2026-05-23.md — the method-invariant

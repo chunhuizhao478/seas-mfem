@@ -2196,7 +2196,8 @@ void WaveOperator<MeshType>::AdvanceADERClusterBulk(
    const real_t *face_sub_a, const real_t *face_sub_b,
    LtsAccumulateBuffers *buffers, const int *buffer_slot_of_elem,
    const int *fault_face_ids, int n_fault_faces,
-   int cluster_id_for_seam) const
+   int cluster_id_for_seam,
+   mfem::real_t t_s, mfem::real_t dt_base, int tick, mfem::real_t T_actual) const
 {
    MFEM_VERIFY(dt_step > 0.0, "AdvanceADERClusterBulk: dt_step > 0");
    MFEM_VERIFY(order >= 2 && order <= 4, "AdvanceADERClusterBulk: order in {2,3,4}");
@@ -2472,10 +2473,40 @@ void WaveOperator<MeshType>::AdvanceADERClusterBulk(
    // above SKIPS rank-seam faces (e2<0 && in shared_mesh_face_set_); apply them
    // here from exchanged ghost `I` (local side only, the EXACT GTS shared flux) so
    // np>1 == np=1.  Runs on every rank for the same cluster (matched exchange).
-   // cluster_id_for_seam < 0 (np=1 default) => no-op.
+   // cluster_id_for_seam < 0 (np=1 default) => no-op.  Stage 2 (diff-1): the
+   // schedule gives the coarse forecast's [a,b]; the fine side scatters to rhs and
+   // the coarse side fills its LOCAL seam in-tray (consumed at step 2d below).
    if (cluster_id_for_seam >= 0)
    {
-      ComputeADERClusterSeamFaceFluxRHS(cluster_id_for_seam, I_cluster, dt_step, rhs);
+      ComputeADERClusterSeamFaceFluxRHS(cluster_id_for_seam, I_cluster, dt_step, rhs,
+                                        t_s, dt_base, tick, T_actual,
+                                        dk_store, dk_order, provider_slot_of_elem);
+   }
+
+   // 2d. LTS Phase 4a Stage 2: consume THIS cluster's coarse-side seam in-tray
+   // (a diff-1 rank seam where the local element is the COARSE side; its share was
+   // accumulated across the fine neighbour's sub-corrects).  Add into rhs before
+   // the mass inverse, then zero + reset fill (mirrors the local buffer consume).
+   if (cluster_id_for_seam >= 0
+       && cluster_id_for_seam < static_cast<int>(seam_coarse_elems_.size()))
+   {
+      const int block = NUM_STATE * ndof_per_el_;
+      for (int e : seam_coarse_elems_[cluster_id_for_seam])
+      {
+         auto it = seam_coarse_buf_.find(e);
+         if (it == seam_coarse_buf_.end()) { continue; }
+         if (static_cast<int>(it->second.size()) != block) { continue; }
+         if (seam_coarse_fill_[e] == 0) { continue; }   // nothing accumulated
+         const int off = e * ndof_per_el_;
+         for (int c = 0; c < NUM_STATE; ++c)
+         {
+            real_t *rc = rhs_data + c * ndof_total_ + off;
+            const real_t *bc = it->second.data() + c * ndof_per_el_;
+            for (int i = 0; i < ndof_per_el_; ++i) { rc[i] += bc[i]; }
+         }
+         std::fill(it->second.begin(), it->second.end(), real_t(0));
+         seam_coarse_fill_[e] = 0;
+      }
    }
 
    // 3. Consume this cluster's accumulate buffers (coarse elements) into rhs.
@@ -2632,8 +2663,13 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
       MFEM_VERIFY(!ghost_cluster_id_.empty(),
                   "ComputeADERClusterSeamFaceFluxRHS: ghost cluster ids not built "
                   "(EnsureGhostClusterIds_ must run in the ctor).");
+      EnsureSeamCoarseElems_();
 
       real_t *rhs_data = rhs.GetData();
+      const int block = NUM_STATE * ndof_per_el_;
+      std::vector<real_t> forecast_blk(static_cast<std::size_t>(block), 0.0);
+      std::vector<real_t> ghost_stack;   // reassembled ghost coarse D(k) [k][block]
+      std::set<int>       touched_seam_coarse;   // coarse-seam elems filled this call
       for (int sf = 0; sf < n_shared; ++sf)
       {
          FaceElementTransformations *ftr =
@@ -2642,33 +2678,41 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
          const int e1 = ftr->Elem1No;
          MFEM_VERIFY(e1 >= 0 && e1 < ne_,
                      "ComputeADERClusterSeamFaceFluxRHS: bad Elem1No " << e1 << ".");
-         if (lts_cluster_id_[static_cast<std::size_t>(e1)] != cluster_c)
-         { continue; }   // not this cluster's seam face
-
-         // Shared FAULT faces are rank-interior under D-2 — they must not reach
-         // the bulk seam sweep.  Fail loud rather than misapply a bulk flux.
-         MFEM_VERIFY(!(bc_.fault_attr > 0
-                       && sf < static_cast<int>(shared_face_bdr_attr_.size())
-                       && shared_face_bdr_attr_[sf] == bc_.fault_attr),
-                     "ComputeADERClusterSeamFaceFluxRHS: shared FAULT face sf=" << sf
-                     << " under LTS — D-2 requires fault-locality (no cross-rank "
-                     "fault faces).");
-
+         const int c1 = lts_cluster_id_[static_cast<std::size_t>(e1)];
          const int nbr_idx = ftr->Elem2No - ne_;
          MFEM_VERIFY(nbr_idx >= 0
                      && nbr_idx < static_cast<int>(ghost_cluster_id_.size()),
                      "ComputeADERClusterSeamFaceFluxRHS: ghost index " << nbr_idx
                      << " out of range [0," << ghost_cluster_id_.size() << ").");
          const int c_nbr = ghost_cluster_id_[static_cast<std::size_t>(nbr_idx)];
-         // Stage 1: SAME-CLUSTER (diff-0) seams only.  A cross-cluster (diff-1)
-         // seam needs the coarse forecast-D(k) ghost exchange + the coarse-side
-         // local-buffer accumulation (Stage 2); fail loud rather than drop or
-         // mis-scale its flux.
-         MFEM_VERIFY(c_nbr == cluster_c,
-                     "ComputeADERClusterSeamFaceFluxRHS: cross-cluster (diff-1) rank "
-                     "seam (local cluster " << cluster_c << ", ghost cluster "
-                     << c_nbr << ") is not handled in Phase 4a Stage 1 (Stage 2 "
-                     "adds the forecast-D(k) exchange + coarse-side buffer).");
+
+         // Classify this seam face relative to the CORRECTING cluster cluster_c:
+         //   mode 0 (diff-0): local & ghost both cluster_c.
+         //   mode 1 (fine):   local cluster_c (finer), ghost cluster_c+1 (coarser).
+         //   mode 2 (coarse): local cluster_c+1 (coarser), ghost cluster_c (finer,
+         //                    the cluster that just corrected).
+         int mode;
+         if      (c1 == cluster_c     && c_nbr == cluster_c)     { mode = 0; }
+         else if (c1 == cluster_c     && c_nbr == cluster_c + 1) { mode = 1; }
+         else if (c1 == cluster_c + 1 && c_nbr == cluster_c)     { mode = 2; }
+         else { continue; }   // handled when the other incident cluster corrects
+         // maxdiff<=1 is enforced by the clustering; anything else can't be one of
+         // the three modes above (already skipped).
+
+         // Shared FAULT faces are rank-interior under D-2 — must not reach here.
+         MFEM_VERIFY(!(bc_.fault_attr > 0
+                       && sf < static_cast<int>(shared_face_bdr_attr_.size())
+                       && shared_face_bdr_attr_[sf] == bc_.fault_attr),
+                     "ComputeADERClusterSeamFaceFluxRHS: shared FAULT face sf=" << sf
+                     << " under LTS — D-2 requires fault-locality (no cross-rank "
+                     "fault faces).");
+         if (mode != 0)
+         {
+            MFEM_VERIFY(dt_base > 0.0 && dk_order > 0,
+                        "ComputeADERClusterSeamFaceFluxRHS: diff-1 seam needs the "
+                        "Stage-2 schedule (dt_base>0, dk_order>0) — check the stepper "
+                        "wiring of AdvanceADERClusterBulk.");
+         }
 
          const FiniteElement *fe1 = fes_->GetFE(e1);
          const int ndof = fe1->GetDof();
@@ -2679,11 +2723,71 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
                      "ComputeADERClusterSeamFaceFluxRHS: heterogeneous ghost "
                      "element (ndof2=" << ndof2 << " vs ndof_per_el_="
                      << ndof_per_el_ << ") not supported.");
-
          const int mesh_face_idx =
             const_cast<ParMesh &>(pmesh).GetSharedFace(sf);
          const IntegrationRule &ir =
             IntRules.Get(ftr->GetGeometryType(), 2 * order_);
+
+         // Coarse forecast over the closed-form sub-interval [a,b] (modes 1,2).
+         // The COARSE side is cluster_c+1 in BOTH cases; dt is the FINE (cluster_c)
+         // dt_step.  Both ranks compute the SAME [a,b] (rank-identical schedule).
+         if (mode != 0)
+         {
+            const int c_coarse = cluster_c + 1;
+            const long long period = 1LL << c_coarse;
+            const real_t t_origin = t_s + dt_base * static_cast<real_t>(period)
+               * std::floor(static_cast<double>(tick) / static_cast<double>(period));
+            const real_t t_tick = t_s + dt_base * static_cast<real_t>(tick);
+            const real_t a = t_tick - t_origin;
+            const real_t b = std::min(t_tick + dt, t_s + T_actual) - t_origin;
+            if (mode == 1)
+            {
+               // Fine side: integrate the GHOST coarse's forecast.  Reassemble its
+               // contiguous [k][block] Taylor stack from ghost_dk_[c_coarse].
+               MFEM_VERIFY(c_coarse < static_cast<int>(ghost_dk_.size())
+                           && static_cast<int>(ghost_dk_[c_coarse].size())
+                                 == dk_order * NUM_STATE,
+                           "ComputeADERClusterSeamFaceFluxRHS: ghost D(k) for cluster "
+                           << c_coarse << " not exchanged (Predict order / opt-in?).");
+               ghost_stack.assign(static_cast<std::size_t>(dk_order) * block, 0.0);
+               for (int k = 0; k < dk_order; ++k)
+                  for (int comp = 0; comp < NUM_STATE; ++comp)
+                  {
+                     const Vector &g =
+                        ghost_dk_[c_coarse][static_cast<std::size_t>(k) * NUM_STATE + comp];
+                     for (int i = 0; i < ndof_per_el_; ++i)
+                        ghost_stack[static_cast<std::size_t>(k) * block
+                                    + comp * ndof_per_el_ + i]
+                           = g[nbr_idx * ndof_per_el_ + i];
+                  }
+               IntegrateTaylor(a, b, ghost_stack.data(), dk_order, block,
+                               forecast_blk.data());
+            }
+            else   // mode 2: integrate the LOCAL coarse's retained forecast.
+            {
+               MFEM_VERIFY(c_coarse < static_cast<int>(seam_coarse_dk_.size())
+                           && c_coarse < static_cast<int>(seam_coarse_slot_of_elem_.size()),
+                           "ComputeADERClusterSeamFaceFluxRHS: seam-coarse D(k) for "
+                           "cluster " << c_coarse << " not retained.");
+               const int slot =
+                  seam_coarse_slot_of_elem_[c_coarse][static_cast<std::size_t>(e1)];
+               MFEM_VERIFY(slot >= 0,
+                           "ComputeADERClusterSeamFaceFluxRHS: coarse elem " << e1
+                           << " has no retained seam D(k) slot.");
+               const real_t *stack = seam_coarse_dk_[c_coarse].data()
+                  + static_cast<std::size_t>(slot) * dk_order * block;
+               IntegrateTaylor(a, b, stack, dk_order, block, forecast_blk.data());
+            }
+         }
+
+         std::vector<real_t> *cbuf = nullptr;
+         if (mode == 2)
+         {
+            std::vector<real_t> &v = seam_coarse_buf_[e1];
+            if (static_cast<int>(v.size()) != block) { v.assign(block, 0.0); }
+            cbuf = &v;
+            touched_seam_coarse.insert(e1);
+         }
 
          for (int q = 0; q < ir.GetNPoints(); ++q)
          {
@@ -2702,25 +2806,65 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
             Vector shape2(ndof2); fe2->CalcShape(ip2, shape2);
 
             real_t I_self[NUM_STATE], I_nbr[NUM_STATE];
-            for (int c = 0; c < NUM_STATE; ++c)
+            for (int c = 0; c < NUM_STATE; ++c) { I_self[c] = 0.0; I_nbr[c] = 0.0; }
+            if (mode == 0)
             {
-               I_self[c] = 0.0; I_nbr[c] = 0.0;
-               for (int i = 0; i < ndof; ++i)
-               { I_self[c] += shape1(i) * I_data[c * ndof_total_ + dof_offset1 + i]; }
-               for (int i = 0; i < ndof2; ++i)
-               { I_nbr[c] += shape2(i) * nbr_data[c][nbr_idx * ndof_per_el_ + i]; }
+               // diff-0: both sides from the exchanged cluster_c I.
+               for (int c = 0; c < NUM_STATE; ++c)
+               {
+                  for (int i = 0; i < ndof; ++i)
+                  { I_self[c] += shape1(i) * I_data[c * ndof_total_ + dof_offset1 + i]; }
+                  for (int i = 0; i < ndof2; ++i)
+                  { I_nbr[c] += shape2(i) * nbr_data[c][nbr_idx * ndof_per_el_ + i]; }
+               }
+            }
+            else if (mode == 1)
+            {
+               // fine side: self = local fine I; nbr = coarse forecast (ghost FE).
+               for (int c = 0; c < NUM_STATE; ++c)
+               {
+                  for (int i = 0; i < ndof; ++i)
+                  { I_self[c] += shape1(i) * I_data[c * ndof_total_ + dof_offset1 + i]; }
+                  for (int i = 0; i < ndof2; ++i)
+                  { I_nbr[c] += shape2(i) * forecast_blk[c * ndof_per_el_ + i]; }
+               }
+            }
+            else   // mode 2
+            {
+               // coarse side: self = coarse forecast (local FE); nbr = ghost fine I.
+               for (int c = 0; c < NUM_STATE; ++c)
+               {
+                  for (int i = 0; i < ndof; ++i)
+                  { I_self[c] += shape1(i) * forecast_blk[c * ndof_per_el_ + i]; }
+                  for (int i = 0; i < ndof2; ++i)
+                  { I_nbr[c] += shape2(i) * nbr_data[c][nbr_idx * ndof_per_el_ + i]; }
+               }
             }
 
             real_t F_h[NUM_STATE];
             // The EXACT GTS shared non-fault flux (local Elem1 side only).
             SharedInteriorFaceFlux_(mesh_face_idx, I_self, I_nbr, nor, F_h);
-            for (int c = 0; c < NUM_STATE; ++c)
+            if (mode == 2)
             {
-               real_t *rc = rhs_data + c * ndof_total_ + dof_offset1;
-               for (int i = 0; i < ndof; ++i) { rc[i] -= w * shape1(i) * F_h[c]; }
+               // The coarse element's own rhs contribution accumulates into its
+               // LOCAL seam in-tray (consumed at the coarse element's own correct).
+               for (int c = 0; c < NUM_STATE; ++c)
+                  for (int i = 0; i < ndof; ++i)
+                  { (*cbuf)[c * ndof_per_el_ + i] -= w * shape1(i) * F_h[c]; }
+            }
+            else
+            {
+               for (int c = 0; c < NUM_STATE; ++c)
+               {
+                  real_t *rc = rhs_data + c * ndof_total_ + dof_offset1;
+                  for (int i = 0; i < ndof; ++i) { rc[i] -= w * shape1(i) * F_h[c]; }
+               }
             }
          }
       }
+      // One fine sub-step deposited into each touched coarse seam in-tray this call
+      // (fill == #fine sub-steps of the closing coarse step; invariant i).
+      for (int e : touched_seam_coarse) { seam_coarse_fill_[e] += 1; }
 #endif
    }
 }
@@ -2754,16 +2898,15 @@ void WaveOperator<MeshType>::ExchangeClusterProviderDkGhost(
                   "ExchangeClusterProviderDkGhost: cluster ids unset/mismatched.");
       const int block = NUM_STATE * ndof_per_el_;
 
-      // Size the per-cluster cache lazily (num_clusters = max id + 1).
-      int nc = 0;
-      for (int e = 0; e < ne_; ++e) { nc = std::max(nc, lts_cluster_id_[e] + 1); }
-      if (static_cast<int>(ghost_dk_.size()) < nc)
+      // Grow the per-cluster cache so it can hold cluster_c (a rank may need a
+      // ghost cluster id above its own local max — e.g. an all-fine subdomain
+      // caching its coarse neighbour's forecast).
+      MFEM_VERIFY(cluster_c >= 0, "ExchangeClusterProviderDkGhost: bad cluster_c.");
+      if (static_cast<int>(ghost_dk_.size()) < cluster_c + 1)
       {
-         ghost_dk_.resize(static_cast<std::size_t>(nc));
-         ghost_dk_epoch_.assign(static_cast<std::size_t>(nc), -1);
+         ghost_dk_.resize(static_cast<std::size_t>(cluster_c + 1));
+         ghost_dk_epoch_.resize(static_cast<std::size_t>(cluster_c + 1), -1);
       }
-      MFEM_VERIFY(cluster_c >= 0 && cluster_c < nc,
-                  "ExchangeClusterProviderDkGhost: cluster_c out of range.");
       std::vector<Vector> &cache = ghost_dk_[static_cast<std::size_t>(cluster_c)];
       if (static_cast<int>(cache.size()) != dk_order * NUM_STATE)
       { cache.assign(static_cast<std::size_t>(dk_order) * NUM_STATE, Vector()); }
@@ -2796,6 +2939,119 @@ void WaveOperator<MeshType>::ExchangeClusterProviderDkGhost(
          }
       }
       ghost_dk_epoch_[static_cast<std::size_t>(cluster_c)] = tick;
+#endif
+   }
+}
+
+// ---------------------------------------------------------------------------
+// LTS Phase 4a Stage 2: coarse-side seam element identification + forecast prep.
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void WaveOperator<MeshType>::EnsureSeamCoarseElems_() const
+{
+   if (seam_coarse_ready_) { return; }
+   seam_coarse_ready_ = true;
+   if (lts_cluster_id_.empty()) { return; }   // LTS off
+   if constexpr (!IsParallelMesh<MeshType>::value)
+   {
+      return;   // serial mesh: no rank seams
+   }
+   else
+   {
+#ifdef MFEM_USE_MPI
+      auto &pmesh = static_cast<const ParMesh &>(mesh_);
+      const int n_shared = pmesh.GetNSharedFaces();
+      if (n_shared == 0 || ghost_cluster_id_.empty()) { return; }   // np=1
+      // Size to the clusters THIS rank touches (local ids + ghost ids): a rank may
+      // own only a subset of clusters (e.g. an all-fine subdomain whose neighbours
+      // are all coarser), so the ghost cluster ids extend the local range.
+      int nc = 0;
+      for (int e = 0; e < ne_; ++e) { nc = std::max(nc, lts_cluster_id_[e] + 1); }
+      for (int g : ghost_cluster_id_) { nc = std::max(nc, g + 1); }
+      seam_coarse_elems_.assign(static_cast<std::size_t>(nc), {});
+      seam_coarse_slot_of_elem_.assign(static_cast<std::size_t>(nc),
+                                       std::vector<int>(static_cast<std::size_t>(ne_), -1));
+      for (int sf = 0; sf < n_shared; ++sf)
+      {
+         FaceElementTransformations *ftr =
+            const_cast<ParMesh &>(pmesh).GetSharedFaceTransformations(sf);
+         if (!ftr) { continue; }
+         const int e1 = ftr->Elem1No;
+         if (e1 < 0 || e1 >= ne_) { continue; }
+         const int c1 = lts_cluster_id_[static_cast<std::size_t>(e1)];
+         const int nbr_idx = ftr->Elem2No - ne_;
+         if (nbr_idx < 0 || nbr_idx >= static_cast<int>(ghost_cluster_id_.size()))
+         { continue; }
+         const int c2 = ghost_cluster_id_[static_cast<std::size_t>(nbr_idx)];
+         if (c1 == c2 + 1)   // local is coarser than the ghost by 1 => coarse-side seam
+         {
+            if (seam_coarse_slot_of_elem_[c1][static_cast<std::size_t>(e1)] < 0)
+            {
+               seam_coarse_slot_of_elem_[c1][static_cast<std::size_t>(e1)] =
+                  static_cast<int>(seam_coarse_elems_[c1].size());
+               seam_coarse_elems_[c1].push_back(e1);
+            }
+         }
+      }
+#endif
+   }
+}
+
+template <typename MeshType>
+void WaveOperator<MeshType>::PrepareSeamCoarseForecast(
+   int cluster_c, const Vector &Q, real_t dt_step, int order,
+   const std::vector<real_t> &tau, int tick) const
+{
+   if constexpr (!IsParallelMesh<MeshType>::value)
+   {
+      (void)cluster_c; (void)Q; (void)dt_step; (void)order; (void)tau; (void)tick;
+      return;
+   }
+   else
+   {
+#ifdef MFEM_USE_MPI
+      auto &pmesh = static_cast<const ParMesh &>(mesh_);
+      if (pmesh.GetNSharedFaces() == 0) { return; }   // np=1
+      MFEM_VERIFY(cluster_c >= 0, "PrepareSeamCoarseForecast: bad cluster_c.");
+      EnsureSeamCoarseElems_();
+
+      const int block = NUM_STATE * ndof_per_el_;
+      // This rank's LOCAL coarse-seam elems for cluster_c (empty if the rank does
+      // not touch cluster_c — but it STILL exchanges, matched across ranks).
+      const bool touched = (cluster_c < static_cast<int>(seam_coarse_elems_.size()));
+      static const std::vector<int> s_empty;
+      const std::vector<int> &sc_elems =
+         touched ? seam_coarse_elems_[cluster_c] : s_empty;
+      const int n_sc = static_cast<int>(sc_elems.size());
+
+      if (static_cast<int>(seam_coarse_dk_.size()) < cluster_c + 1)
+      { seam_coarse_dk_.resize(static_cast<std::size_t>(cluster_c + 1)); }
+      // Retention store, >=1 block so .data() is non-null even with no local
+      // seam-coarse elements (the exchange still runs — matched across ranks).
+      std::vector<real_t> &store = seam_coarse_dk_[cluster_c];
+      store.assign(static_cast<std::size_t>(std::max(n_sc, 1)) * order * block, 0.0);
+
+      // Slot map (element -> retention slot): the built map when touched, else an
+      // all-(-1) map so the exchange packs zero.
+      const int *slot_map = nullptr;
+      std::vector<int> none_map;
+      if (touched) { slot_map = seam_coarse_slot_of_elem_[cluster_c].data(); }
+      else { none_map.assign(static_cast<std::size_t>(ne_), -1); slot_map = none_map.data(); }
+
+      if (n_sc > 0)
+      {
+         // Extra element-local CK over the seam-coarse elems to retain their raw
+         // D(k) into `store` (scratch I / Qn discarded).  D(k) is dt-independent,
+         // so this reproduces the layout-provider path exactly.
+         Vector I_scratch(NUM_STATE * ndof_total_);
+         std::vector<Vector> Qn_scratch;
+         ComputeADERSubStepStatesAndIntegralCluster(
+            sc_elems.data(), n_sc, Q, dt_step, order, tau, Qn_scratch, I_scratch,
+            store.data(), slot_map);
+      }
+
+      // Exchange (matched: all ranks call this for the same cluster_c).
+      ExchangeClusterProviderDkGhost(cluster_c, store.data(), order, slot_map, tick);
 #endif
    }
 }

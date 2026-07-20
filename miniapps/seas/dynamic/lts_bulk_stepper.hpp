@@ -70,6 +70,12 @@ public:
 
    void BeginTick(int tick) override { tick_ = tick; }
 
+   /// LTS Phase 4a Stage 2: enable the coarse provider-D(k) ghost exchange (for
+   /// diff-1 rank seams).  Must be set consistently with the tick table's
+   /// `LtsGlobalMeta.exchange_bulk_provider_dk` (else the matched-collective count
+   /// diverges).  Default off (Stage-1 diff-0 / np=1 behaviour).
+   void SetExchangeProviderDk(bool v) { exchange_dk_ = v; }
+
    void Predict(int c, mfem::real_t dt_step) override
    {
       std::vector<mfem::real_t> tau(order_);
@@ -79,6 +85,13 @@ public:
          static_cast<int>(layout_.clusters[c].elems.size()),
          Q_, dt_step, order_, tau, Qn_scratch_, I_[c],
          dk_.data.data(), layout_.provider_slot_of_elem.data());
+      // Stage 2: retain + exchange this (coarse) cluster's seam-provider D(k) so a
+      // finer cross-rank neighbour can integrate its forecast.  c==0 is finest
+      // (never a provider); the c>=1 gate is rank-uniform (matched).
+      if (exchange_dk_ && c >= 1)
+      {
+         wave_.PrepareSeamCoarseForecast(c, Q_, dt_step, order_, tau, tick_);
+      }
    }
 
    void Correct(int c, mfem::real_t dt_step) override
@@ -108,9 +121,11 @@ public:
          sa.data(), sb.data(), &buf_, layout_.buffer_slot_of_elem.data(),
          // LTS Phase 4a: no fault faces on the bulk path (fault-free); pass the
          // cluster id so the corrector applies this cluster's rank-seam flux
-         // (no-op at np=1 / no shared faces).
+         // (no-op at np=1 / no shared faces).  Stage 2: the schedule gives the
+         // diff-1 coarse forecast's [a,b].
          /*fault_face_ids=*/nullptr, /*n_fault_faces=*/0,
-         /*cluster_id_for_seam=*/c);
+         /*cluster_id_for_seam=*/c,
+         /*t_s=*/t_s_, /*dt_base=*/dt_base_, /*tick=*/tick_, /*T_actual=*/T_actual_);
    }
 
    /// Invariant (ii): every accumulate buffer is zero at each sync point.
@@ -124,6 +139,7 @@ private:
    int order_, block_ = 0;
    mfem::real_t dt_base_ = 0.0, t_s_ = 0.0, T_actual_ = 0.0;
    int tick_ = 0;
+   bool exchange_dk_ = false;   // Stage 2: coarse provider-D(k) ghost exchange
 
    std::vector<mfem::Vector> I_;          // per-cluster time integral
    std::vector<mfem::Vector> Qn_scratch_; // predictor sub-step scratch (unused output)

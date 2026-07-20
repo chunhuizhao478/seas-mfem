@@ -43,10 +43,15 @@ LtsLayout BuildLtsLayout(const std::vector<int>&         cluster,
                   << " out of range [0," << num_clusters << ").");
       max_c = std::max(max_c, cluster[i]);
    }
-   MFEM_VERIFY(max_c == num_clusters - 1,
-               "BuildLtsLayout: num_clusters (" << num_clusters
-               << ") != max cluster id + 1 (" << (max_c + 1)
-               << ") — ids must be contiguous.");
+   // LTS Phase 4a (np>1): `num_clusters` is the GLOBAL cluster count; a rank may
+   // own only a SUBSET of clusters (e.g. an all-fine or all-coarse subdomain), so
+   // its local max id can be < num_clusters-1 and clusters may be locally absent.
+   // Only require ids in [0, num_clusters) (checked per element above); the empty
+   // local clusters are handled downstream.  (Serial/np=1 still spans the range.)
+   (void)max_c;
+   MFEM_VERIFY(num_clusters >= 1,
+               "BuildLtsLayout: num_clusters must be >= 1 (got "
+               << num_clusters << ").");
 
    LtsLayout L;
    L.num_clusters = num_clusters;

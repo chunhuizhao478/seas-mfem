@@ -529,6 +529,8 @@ TEST_LTS_SCHEDULER_SRC                      = tests/unit/test_lts_scheduler.cpp
 TEST_LTS_PREDICTOR_SRC                      = tests/unit/test_lts_predictor.cpp
 # Clustered LTS Phase 4a (np>1 rank-seam bulk flux).
 TEST_LTS_MPI_SEAM_SRC                       = tests/unit/test_lts_mpi_seam.cpp
+# Clustered LTS Phase 4a Stage 2 (np>1 cross-cluster diff-1 rank seam).
+TEST_LTS_MPI_SEAM_DIFF1_SRC                 = tests/unit/test_lts_mpi_seam_diff1.cpp
 # Clustered LTS Phase 3 (fault under LTS).
 TEST_LTS_NUCLEATION_ABSOLUTE_SRC            = tests/unit/test_lts_nucleation_absolute.cpp
 TEST_LTS_FRICTION_RANGE_SRC                 = tests/unit/test_lts_friction_range.cpp
@@ -612,6 +614,7 @@ TEST_LTS_PARTITION_OBJ          = $(TEST_LTS_PARTITION_SRC:.cpp=.o)
 TEST_LTS_SCHEDULER_OBJ          = $(TEST_LTS_SCHEDULER_SRC:.cpp=.o)
 TEST_LTS_PREDICTOR_OBJ          = $(TEST_LTS_PREDICTOR_SRC:.cpp=.o)
 TEST_LTS_MPI_SEAM_OBJ           = $(TEST_LTS_MPI_SEAM_SRC:.cpp=.o)
+TEST_LTS_MPI_SEAM_DIFF1_OBJ     = $(TEST_LTS_MPI_SEAM_DIFF1_SRC:.cpp=.o)
 TEST_LTS_NUCLEATION_ABSOLUTE_OBJ = $(TEST_LTS_NUCLEATION_ABSOLUTE_SRC:.cpp=.o)
 TEST_LTS_FRICTION_RANGE_OBJ      = $(TEST_LTS_FRICTION_RANGE_SRC:.cpp=.o)
 TEST_LTS_FAULT_REORDER_OBJ       = $(TEST_LTS_FAULT_REORDER_SRC:.cpp=.o)
@@ -1190,6 +1193,19 @@ seas_test_lts_mpi_seam: $(TEST_LTS_MPI_SEAM_OBJ) $(WAVE_OPERATOR_OBJ) \
     $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
     $(LTS_STEPPER_OBJ) $(LTS_LAYOUT_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_LTS_MPI_SEAM_OBJ) \
+	    $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(GODUNOV_FLUX_POOL_OBJ) \
+	    $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(LTS_STEPPER_OBJ) $(LTS_LAYOUT_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Clustered LTS Phase 4a Stage 2: np>1 cross-cluster (diff-1) rank seam.
+seas_test_lts_mpi_seam_diff1: $(TEST_LTS_MPI_SEAM_DIFF1_OBJ) $(WAVE_OPERATOR_OBJ) \
+    $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(GODUNOV_FLUX_POOL_OBJ) \
+    $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) \
+    $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+    $(LTS_STEPPER_OBJ) $(LTS_LAYOUT_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_LTS_MPI_SEAM_DIFF1_OBJ) \
 	    $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(GODUNOV_FLUX_POOL_OBJ) \
 	    $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) \
 	    $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
@@ -3274,6 +3290,11 @@ $(TEST_LTS_PREDICTOR_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
 $(TEST_LTS_MPI_SEAM_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_LTS_MPI_SEAM_DIFF1_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
                                 $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@

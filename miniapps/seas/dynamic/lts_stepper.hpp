@@ -47,6 +47,12 @@ struct LtsGlobalMeta
    /// experiment.  When false, a predicting cluster with fault faces contributes
    /// ader_order predictor exchanges.
    bool drop_fault_predictor_exchange = true;
+   /// LTS Phase 4a Stage 2: when true, each PREDICTING cluster c>=1 exchanges its
+   /// coarse-side provider Taylor stacks D(k) to face neighbours (for the diff-1
+   /// rank-seam forecast) — NUM_STATE*ader_order collectives each.  Set by the
+   /// driver/test for np>1 multi-cluster runs; false keeps Stage-1 (diff-0) +
+   /// single-rank counts unchanged (so existing tick-table tests are unaffected).
+   bool exchange_bulk_provider_dk = false;
 };
 
 /// One tick of a sync interval (Appendix A.3).
@@ -133,6 +139,17 @@ inline std::vector<LtsTick> BuildTickTable(int num_clusters,
          for (int c : tk.predict_clusters)
          {
             if (meta.global_fault_faces[c] > 0) { nx += ader_order; }
+         }
+      }
+      // LTS Phase 4a Stage 2 (diff-1 seams): each predicting cluster c>=1 exchanges
+      // its coarse provider D(k) (NUM_STATE*ader_order collectives) for the finer
+      // neighbour's cross-rank forecast.  c==0 is the finest cluster (never a
+      // provider), so it is skipped — a rank-uniform gate, matched across ranks.
+      if (meta.exchange_bulk_provider_dk)
+      {
+         for (int c : tk.predict_clusters)
+         {
+            if (c >= 1) { nx += meta.num_state * ader_order; }
          }
       }
       tk.n_collectives = nx;
