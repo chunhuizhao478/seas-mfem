@@ -40,13 +40,13 @@ stations) · off-fault receivers re-enabled (`pickdt=0.005`, 6 stations at z=−
   comparable output cadence (0.05 s fault+surface), no volume output on either side.
 - **Each code its own production time-stepping**: SeisSol `CFL=0.5` + auto-cluster LTS
   (v1.1.3 defaults, no wiggle); MFEM `cfl_dg_safety=1.0` + λ-wiggle Nc=6.
-- ⚠️ **Courant-number asymmetry (disclosed)**: the MFEM TPV104 decks run Courant **0.25**
-  (the validated-benchmark value) vs SeisSol's **0.5** — with identical h and order factors,
-  **MFEM steps at half SeisSol's dt (2× the steps per sim-s)**. This *cancels* in the MFEM
-  LTS-vs-GTS realized-speedup ratio, but it handicaps MFEM ~2× in any cross-code sim-s/wall-h
-  number. Either normalize (MFEM ×2) or re-run the MFEM legs at `--cfl 0.5` after a stability
-  check — a decision for the Phase-5 readout, not silently baked in here. (The SAFS
-  comparisons used 0.5 on both sides and are unaffected.)
+- **Courant number MATCHED at 0.5 on both codes.** The MFEM decks originally inherited
+  TPV104's conservative `cfl=0.25` (half SeisSol's dt → a silent 2× step handicap); both MFEM
+  decks are now `cfl=0.5`, so with the identical h formula + order factor the two codes take
+  the SAME dt. Basis: SAFS production MFEM p3 upwind+ADER ran 0.5 at safety 1.0; the 2 s
+  window incl. rupture is the stability gate. ⚠️ MFEM runs *before* the change (52332649 GTS,
+  52340525 LTS, both cfl=0.25) keep a valid LTS-vs-GTS *ratio*; their absolute sim-s/h
+  convert ×2 for cross-code comparison.
 - **Known second-order asymmetries** (each ≲ a few %, disclosed not fixed):
   SeisSol's family config idles the reserved comm core (`SEISSOL_COMMTHREAD=0` with OMP=15
   → 120/128 cores busy, ~6% self-handicap — kept because it IS the proven production config);

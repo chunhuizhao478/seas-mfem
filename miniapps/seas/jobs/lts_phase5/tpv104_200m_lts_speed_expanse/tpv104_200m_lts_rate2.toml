@@ -64,7 +64,10 @@ sigma_n_pa    = 120.0e6
 lts            = "rate2"
 ader_order     = 4
 mixed_flux     = "none"     # LTS requires pure upwind; matched here for a like-for-like scheme
-cfl            = 0.25
+cfl            = 0.5      # MATCHED to SeisSol CFL=0.5 for the head-to-head (identical h
+                          # formula + order factor 7 => identical dt). SAFS production p3
+                          # upwind+ADER ran 0.5 at safety 1.0; TPV104's historical 0.25 was
+                          # inherited conservatism. The 2 s window incl. rupture is the gate.
 cfl_safety     = "dg"
 interior_flux  = "scalar"
 fault_iterator = "substep"

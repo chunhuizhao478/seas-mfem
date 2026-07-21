@@ -15,7 +15,7 @@ by the sbatch before launch:
 | LTS | `tpv104_200m_lts_rate2.toml` | `lts="rate2"` — clustered rate-2 LTS (bulk + fault-half interleave) |
 
 - **Mesh:** `tpv104/mesh/tpv104_200m.msh` (2.46 M tets, SCEC production resolution), via the in-folder symlink `mesh_tpv104_200m.msh`.
-- **Numerics:** `order=3` / `ader_order=4`, pure upwind (`mixed_flux="none"`), `--cfl-dg-safety 1.0`. Order-matched to SeisSol o4 (both degree-3 basis, order factor 7). ⚠️ The config's Courant `cfl=0.25` is HALF of SeisSol's 0.5 → MFEM steps at 0.5× SeisSol's dt (2× steps/sim-s). The LTS-vs-GTS ratio is unaffected; for cross-code sim-s/wall-h either normalize (×2) or re-run at `--cfl 0.5` after a stability check (see `../tpv104_200m_seissol_expanse/README.md`).
+- **Numerics:** `order=3` / `ader_order=4`, pure upwind (`mixed_flux="none"`), `--cfl-dg-safety 1.0`, **Courant `cfl=0.5` — MATCHED to SeisSol's CFL=0.5** (identical h formula + order factor 7 ⇒ identical dt, same steps/sim-s). Order-matched to SeisSol o4 (both degree-3 basis). SAFS production p3 upwind+ADER ran 0.5 at safety 1.0; TPV104's historical 0.25 was inherited conservatism — the 2 s window incl. rupture is the stability gate. ⚠️ Runs **before** this change (52332649 GTS, 52340525 LTS) used `cfl=0.25`: their LTS-vs-GTS *ratio* is valid; their absolute sim-s/h convert ×2 for cross-code use.
 - **Perf levers ON for both** (`--deriv-cache --shared-ck-recursion`) — this is a throughput comparison, not a bit-exact gate.
 - **`--lts-report` pre-step** (np=1) prints the predicted harmonic speedup and the hypothetical 256-rank partition imbalance before the timed runs.
 - 256 ranks (2 nodes × 128), pure MPI. TPV104 has **no sidecars** (analytic material).
