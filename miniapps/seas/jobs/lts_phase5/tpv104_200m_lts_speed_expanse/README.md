@@ -15,7 +15,7 @@ by the sbatch before launch:
 | LTS | `tpv104_200m_lts_rate2.toml` | `lts="rate2"` — clustered rate-2 LTS (bulk + fault-half interleave) |
 
 - **Mesh:** `tpv104/mesh/tpv104_200m.msh` (2.46 M tets, SCEC production resolution), via the in-folder symlink `mesh_tpv104_200m.msh`.
-- **Numerics:** `order=3` / `ader_order=4`, pure upwind (`mixed_flux="none"`), `--cfl-dg-safety 1.0` (SeisSol-equivalent dt). Order-matched to SeisSol o4.
+- **Numerics:** `order=3` / `ader_order=4`, pure upwind (`mixed_flux="none"`), `--cfl-dg-safety 1.0`. Order-matched to SeisSol o4 (both degree-3 basis, order factor 7). ⚠️ The config's Courant `cfl=0.25` is HALF of SeisSol's 0.5 → MFEM steps at 0.5× SeisSol's dt (2× steps/sim-s). The LTS-vs-GTS ratio is unaffected; for cross-code sim-s/wall-h either normalize (×2) or re-run at `--cfl 0.5` after a stability check (see `../tpv104_200m_seissol_expanse/README.md`).
 - **Perf levers ON for both** (`--deriv-cache --shared-ck-recursion`) — this is a throughput comparison, not a bit-exact gate.
 - **`--lts-report` pre-step** (np=1) prints the predicted harmonic speedup and the hypothetical 256-rank partition imbalance before the timed runs.
 - 256 ranks (2 nodes × 128), pure MPI. TPV104 has **no sidecars** (analytic material).

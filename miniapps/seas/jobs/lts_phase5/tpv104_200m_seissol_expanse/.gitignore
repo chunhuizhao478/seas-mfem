@@ -1,0 +1,5 @@
+*.h5
+*.msh
+*.xdmf
+output/
+*.out
