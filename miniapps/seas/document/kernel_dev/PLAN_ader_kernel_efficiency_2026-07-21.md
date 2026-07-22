@@ -156,7 +156,7 @@ unmeasured throughput rate. Concretely:
 - **Revisit trigger:** if the Rome-side spike (Phase 0) shows < 2× realizable kernel headroom,
   kernel Phase 2 is deprioritized below comm Phase 3 (overlap) — the composed end state is
   comm-bound anyway.
-- The B0 metric is per-update *compute* µs·core (Caliper subregion, comm excluded) so comm
+- The B0 metric is per-update *compute* µs·core (function-level Caliper region + perf self-time sample, comm excluded) so comm
   changes do not confound kernel gates; if a comm change lands mid-program, B0 is re-measured
   before the next kernel gate is evaluated.
 
@@ -183,27 +183,44 @@ unmeasured throughput rate. Concretely:
 
 ---
 
-## Phase 0: Measure and activate (configuration + instrumentation only)
+## Phase 0: Measure and activate (configuration + measurement only) — IMPLEMENTED
 
-**In one sentence:** Turn on the already-landed face cache, instrument the hot path, measure a
-rupture window, settle the BLAS question, and produce the B0 baseline + gate-reset memo that
-every later phase is judged against.
+**Status (2026-07-22):** implemented and locally validated; the Expanse job is prepped and
+**awaiting user approval to submit** (standing rule). Deliverables committed:
+`jobs/kernel_dev/run_p0_baseline_expanse.sbatch` (5 legs), `tests/bench/run_bench.sh`,
+`document/kernel_dev/B0_gate_reset_2026-07-22.md` (the exit memo), the `build_expanse.sh` BLAS
+fix, and the `--face-cache` default in the speed sbatch.
+
+**In one sentence:** Turn on the already-landed face cache, measure the hot path by *sampling*,
+measure a rupture window, settle the BLAS question, and produce the B0 baseline + gate-reset memo.
 
 ### Goal
 A trustworthy Expanse baseline (B0) with per-subphase attribution, including a rupture-phase
 measurement, before any kernel code is written.
 
-### Files to Modify
-- `dynamic/wave_operator.inl` — `MFEM_PERF_SCOPE` subregions inside `ProcessADERFaceToRHS_`
-  (basis-eval / rotation / split-flux / scatter) and `ApplySpatialDerivative` (matvec /
-  Jacobian pass / AXPYs) and around the Phase-2 gather/GEMM/scatter points-to-be.
-  Instrumentation only; compiled out without Caliper.
+### Instrumentation methodology (rev 3.1 change — no numerics file touched)
+The rev-2 plan called for `MFEM_PERF_SCOPE` subregions inside the per-QP loops. **Rejected during
+implementation:** a Caliper push/pop per face (4.9 M faces × ~250 steps) would add seconds of
+overhead and *perturb the very timing it measures* — a self-inflicted measurement artifact. The
+sub-function split (LU / CalcShape / rotations) is a *sampling* problem, so Phase 0 uses **`perf
+record -g` on rank 0** (the Expanse equivalent of the local macOS `sample` that already produced
+the 59 % / LU-15 % / CalcShape-6 % split), plus the existing function-level Caliper region report.
+**Consequence: `dynamic/wave_operator.inl` is NOT edited in Phase 0** — the safest possible Phase 0.
+
+### Files created / modified
+- `jobs/kernel_dev/run_p0_baseline_expanse.sbatch` (NEW) — the 5-leg B0 job:
+  (1) BLAS check (grep the deployed `config.mk`), (2) B0 GTS `--tfinal 1.5` with Caliper + `perf`,
+  windows read from the step log at `[0,0.5]` and `[1.0,1.5]`, (3) 64-vs-128 ranks/node layout A/B,
+  (4) the kernel bench spike (single + full-occupancy — Phase-2 go/no-go), (5) short LTS leg with
+  Caliper `profile.mpi` for the `MPI_Waitall` Max/Avg skew signal (comm-plan Phase 0).
+- `tests/bench/run_bench.sh` (NEW) — toolchain-portable bench compile (via `make -n`) + single/
+  full-occupancy run.
 - `jobs/lts_phase5/tpv104_200m_lts_speed_expanse/run_tpv104_200m_lts_speed_expanse.sbatch` —
-  `P5_DERIV_OPT` default gains `--face-cache`; new `P0_BASELINE=1` mode: GTS leg only, TWO
-  windows — pre-rupture `[0, 0.5]` s AND a rupture window `[1.0, 1.5]` s (via
-  `--tfinal 1.5` with the rate read from the `[1.0, 1.5]` segment of the step log; no
-  checkpoint machinery needed).
-- `build_expanse.sh` — the BLAS item (below).
+  `P5_DERIV_OPT` default now includes `--face-cache`.
+- `build_expanse.sh` — **BLAS bug fix (real finding):** the PETSc-openblas wiring only scanned
+  `${PETSC_PREFIX}/lib`, so a `lib64` install left `MFEM_USE_LAPACK=NO` (the slow internal LU path,
+  a candidate contributor to the 245.9 µs). Now scans `lib` and `lib64` and warns if unresolved.
+- `document/kernel_dev/B0_gate_reset_2026-07-22.md` (NEW) — the exit memo template with formulas.
 
 ### Detailed Requirements
 1. Verify `--face-cache` composes with `--deriv-cache --shared-ck-recursion` (its only
@@ -221,7 +238,7 @@ measurement, before any kernel code is written.
    from the hot loop. The local-vs-Expanse per-update gap (58.4 vs 245.9) is expected to be
    largely hardware; do not book it as recoverable.
 3. **B0 runs (needs user approval to submit):** GTS leg, levers + `--face-cache`, both windows,
-   Caliper subregions on. Deliverables: per-update µs·core (pre-rupture AND rupture windows),
+   function-level Caliper region report + `perf record -F 99 -g` self-time sampling on rank 0 (self-time symbol split; intra-function inlined blocks fold into the parent at -O2 — cross-check the local `sample` profile). Deliverables: per-update µs·core (pre-rupture AND rupture windows),
    subphase table, `MPI_Waitall`-free compute shares, HW-FLOP estimate if obtainable
    (`perf`-class counters via a short `LIKWID`/`perf stat` srun wrapper if available on
    Expanse; else the Caliper-derived arithmetic-intensity estimate) — the **roofline check**
@@ -251,9 +268,8 @@ measurement, before any kernel code is written.
    more is a bonus, not a plan.
 
 ### Interfaces
-No new public API. Subregion names (stable, consumed by later phases' gates):
-`ader::face::basis`, `ader::face::rotate`, `ader::face::flux`, `ader::face::scatter`,
-`ader::ck::matvec`, `ader::ck::jacobian`, `ader::ck::axpy`.
+No new public API and no source edit to `dynamic/` (see the methodology note above). The
+measurement contract is the 5-leg sbatch + `run_bench.sh <out_dir>` + the gate-reset memo.
 
 ### Rollback
 Revert the sbatch default and keep both binaries deployed (pre/post-rebuild paths recorded in
@@ -611,7 +627,7 @@ n/a (measurement + documentation).
 
 ### Acceptance Criteria
 - [ ] New three-way table published with window provenance; target met or shortfall
-      attributed by subregion.
+      attributed by perf sub-function self-time / function-level Caliper region.
 - [ ] All physics gates green; regression suite green; no-touch dirs clean.
 - [ ] CLAUDE.md/help/memory updated; dispositions recorded.
 

@@ -163,7 +163,11 @@ TFINAL_GTS="${P5_TFINAL_GTS:-2.0s}"
 TFINAL_LTS="${P5_TFINAL_LTS:-12.0s}"
 RUN_GTS="${P5_RUN_GTS:-1}"
 RUN_LTS="${P5_RUN_LTS:-1}"
-DERIV_OPT="${P5_DERIV_OPT:---deriv-cache --shared-ck-recursion}"
+# Kernel-plan Phase 0: --face-cache added to the default (it was OFF in the
+# original Phase-5 runs — the ~15% Vandermonde-LU + ~6% CalcShape interior-face
+# tax was paid in full).  Composes with the deriv levers (only exclusivity is
+# UsePrecomputedFaceFluxes).  Override P5_DERIV_OPT to change.
+DERIV_OPT="${P5_DERIV_OPT:---deriv-cache --shared-ck-recursion --face-cache}"
 FAULT_INTERLEAVE="${P5_FAULT_INTERLEAVE:-1}"
 ADER_ORDER=4
 

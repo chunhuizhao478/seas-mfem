@@ -1,0 +1,4 @@
+bench_ader_O2
+bench_ader_O3
+bench_ader_*[!.]
+*.o

@@ -941,11 +941,25 @@ build_petsc
 # Reuse PETSc's --download-openblas copy (LP64) for MFEM's LAPACK and
 # the MUMPS link line.  Runs here (not inside build_petsc) so QUICK
 # cache-hit re-runs resolve it too.
-if [ "${USE_PETSC_RESOLVED}" = "YES" ] && [ -z "${LAPACK_LIBDIR_RESOLVED}" ] && \
-   { [ -f "${PETSC_PREFIX}/lib/libopenblas.a" ] || [ -f "${PETSC_PREFIX}/lib/libopenblas.so" ]; }; then
-    LAPACK_LIBDIR_RESOLVED="${PETSC_PREFIX}/lib"
-    USE_LAPACK_RESOLVED="YES"
-    echo "  LAPACK   : PETSc-downloaded openblas at ${LAPACK_LIBDIR_RESOLVED}"
+# Kernel-plan Phase 0 (2026-07-22): scan BOTH lib and lib64 — some PETSc
+# --download-openblas installs land in lib64, and the old lib-only check left
+# MFEM_USE_LAPACK=NO (MFEM internal dense kernels: the slow LU/DenseMatrix path
+# implicated in the 245.9 us/update figure).  Linkability-correct: -lopenblas
+# needs the unversioned .so or the .a, so we still require one of those.
+if [ "${USE_PETSC_RESOLVED}" = "YES" ] && [ -z "${LAPACK_LIBDIR_RESOLVED}" ]; then
+    for _blasdir in "${PETSC_PREFIX}/lib" "${PETSC_PREFIX}/lib64"; do
+        if [ -f "${_blasdir}/libopenblas.a" ] || [ -f "${_blasdir}/libopenblas.so" ]; then
+            LAPACK_LIBDIR_RESOLVED="${_blasdir}"
+            USE_LAPACK_RESOLVED="YES"
+            echo "  LAPACK   : PETSc-downloaded openblas at ${LAPACK_LIBDIR_RESOLVED}"
+            break
+        fi
+    done
+    if [ "${USE_LAPACK_RESOLVED}" = "NO" ]; then
+        echo "  WARNING: PETSc build did not expose a linkable libopenblas.{a,so}"
+        echo "           in lib or lib64 -> MFEM_USE_LAPACK=NO (slow internal dense"
+        echo "           kernels).  Check '${PETSC_PREFIX}/lib*' after the PETSc build."
+    fi
 fi
 if [ "${USE_MUMPS_RESOLVED}" = "YES" ] && [ -z "${LAPACK_LIBDIR_RESOLVED}" ]; then
     echo "ERROR: MUMPS is enabled but no BLAS/LAPACK resolved (no openblas"
