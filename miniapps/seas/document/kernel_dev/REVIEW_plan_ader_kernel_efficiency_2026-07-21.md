@@ -63,3 +63,30 @@ Rev 2 incorporates every finding. The plan's claims are now either verified agai
 (file:line) or explicitly marked provisional pending the Phase-0 measurement, and the
 performance model is Amdahl-consistent with declared fallbacks. Status: **READY — Phase 0 is
 the next actionable step (needs user approval for the two Expanse baseline submissions).**
+
+---
+
+# Round 2 (2026-07-22): evidence-backed re-review of rev 2 → produced rev 3
+
+Fresh 3-pass review + a 3-agent EVIDENCE round (microbenchmark, roofline, comm pre-scope).
+Verdict: **PASS WITH FIXES** — "the plan does NOT yet support the claim that this move brings
+the code close to SeisSol runtime" until the two CRITICALs land. All findings applied in rev 3.
+
+| ID | Sev | Finding (compressed) | Disposition in rev 3 |
+|---|---|---|---|
+| R-401 | CRIT | End-to-end composition unstated: kernel success alone = ~2677 s/sim-s = 11.2× behind SeisSol; only kernel+comm reaches 2.4–3.9× | Composition subsection added to the Summary; scenario table in the EVIDENCE doc; Phase 4 publishes the measured version |
+| R-402 | CRIT | ≤40 µs rested on an unmeasured assumption (NATIVE batched GEMM rate on Rome); no prototype gate before implementation | **Spike EXECUTED** (local half): `tests/bench/bench_ader_kernel_variants.cpp` — A 5.2 µs (48 % peak), B 1.25×, **C BatchedLinAlg 0.46× — mechanism eliminated**, D 1.30×; Rome contended rerun added to Phase 0 as the Phase-2 go/no-go (≥2× contended B-vs-A) |
+| R-403 | MAJOR | Kernel-first sequencing asserted, not argued; comm plan unwritten | Comm plan WRITTEN (`document/comm_dev/PLAN_lts_comm_reduction_2026-07-22.md`, from the full exchange inventory); sequencing re-argued: shared Phase 0, then parallel comm-merge + face-tables, with a revisit trigger |
+| R-404 | MAJOR | SeisSol frozen at its favorable-to-MFEM 239; binary already drifted once | Phase 4 pins the 52365078 reference AND adds one async-IO SeisSol re-run to bracket 125–239 |
+| R-405 | MAJOR | Phase-1 share gate not protocol-pinned (parallel Phase-2/comm confound) | Gate pinned: B0 protocol + Phase-1 flags only, pre-rupture window |
+| R-406 | MAJOR | REAL SPEC BUG: builder cited `2*order_` rule for all faces; fault faces use `FaultFaceQuadDegree()` (wave_operator.inl:5524-26) | Interfaces comment corrected; fault tables sized by the fault rule's nqp |
+| R-407 | MOD | Catalog coverage holes: nonconforming, boundary faces | `MFEM_VERIFY(mesh.Conforming())` + parse-time reject; boundary-face disposition stated |
+| R-408 | MOD | No ragged-tile policy (finest cluster ~3.5 elems/rank at np=256) | `E_min` fallback to legacy path per (rank, cluster); correctness-neutral |
+| R-409 | MOD | 245.9-vs-14.4 confounds kernels with node layout (128 pure-MPI vs 8×15) | 64-vs-128 ranks/node A/B leg added to the B0 job |
+| R-410 | MOD | Certified flag set/leg ambiguous | ONE pinned flag line + pinned leg, decided at Phase-1 close-out |
+
+**Evidence-round numbers now in the record** (EVIDENCE_microbench_roofline_2026-07-22.md):
+fused-design bandwidth floor 14–18 µs (level fusion LOAD-BEARING; non-fused floor 45–49 µs
+kills the target); 40 µs needs 3.75–4.0 GFLOP/s/core (stretch), fallback 3–3.5× needs 1.8–2.3
+(near-certain); comm both-levers → exposed Waitall 2341 → ~150–400 s/sim-s (~1.8–2.0× LTS leg)
+with the skew caveat gated by comm-plan Phase 0.

@@ -1,10 +1,16 @@
 # Implementation Plan: MFEM-native ADER element-kernel efficiency program
 
-**Date:** 2026-07-21 (rev 2, post-adversarial-review) · **Branch:** `safs-v4_0_0-alt-case1-mfem-speed`
+**Date:** 2026-07-22 (**rev 3**, post-evidence-round) · **Branch:** `safs-v4_0_0-alt-case1-mfem-speed`
 **Scope:** `seas_spatial_dyn_driver` only
 **Motivating measurement:** `document/lts_dev/RESULTS_p5_tpv104_200m_2026-07-21.md` (Phase-5 three-way)
 **Prior-art verdicts referenced:** `document/code_optimization_dev/action_plan_2026-06-24.md` (the OPT-* IDs)
-**Review record:** `document/kernel_dev/REVIEW_plan_ader_kernel_efficiency_2026-07-21.md` (3-lens; all findings applied in this rev)
+**Review record:** `document/kernel_dev/REVIEW_plan_ader_kernel_efficiency_2026-07-21.md` (round 1 + round 2)
+**Evidence record (rev-3 basis):** `document/kernel_dev/EVIDENCE_microbench_roofline_2026-07-22.md`
+— a working microbenchmark (`tests/bench/bench_ader_kernel_variants.cpp`), the Rome roofline
+arithmetic, and the end-to-end composition table. **The Phase-0.5 prototype spike demanded by
+review R-402 has ALREADY RUN locally**; its results are baked into this rev.
+**Companion program:** `document/comm_dev/PLAN_lts_comm_reduction_2026-07-22.md` — the other half
+of the runtime claim; see "End-to-end composition" below.
 
 ## Summary — read this first
 
@@ -18,13 +24,33 @@ the face loop); the face loop re-derives geometry, rotations, and basis tables f
 every step and allocates temporaries per quadrature point; and the predictor sweeps the whole
 state vector ~40 times per step instead of finishing each element while its data is in cache.
 
-**The fix.** A four-phase, measure-first program using only machinery MFEM already ships.
-First, measure-and-activate: turn on the face cache we already built but never enabled in the
-benchmark, quantify the hardware-counter roofline, and re-baseline. Second, face-stage surgery:
+**What the prototype already told us (rev-3 change).** Before committing implementation, we
+built and ran a standalone benchmark of the candidate kernel structures against the real MFEM
+library. Three results redirect this plan: (1) the current kernel's *arithmetic* structure is
+NOT the bottleneck — a faithful replica runs at 5.2 µs/element on a well-fed core (48 % of
+peak), ~47× cheaper than the 245.9 µs production figure; (2) MFEM's built-in batched
+linear-algebra CPU backend is **2.2× slower** than the current structure and is eliminated as
+the mechanism; (3) the surviving case for restructuring is **memory traffic** — the current
+structure streams ~8× the DRAM bytes of a fused-tile design, which a bandwidth-starved
+128-rank node cannot absorb even though a laptop can. The roofline confirms: with operators
+kept resident across the time-expansion levels the target has 2.2–2.8× bandwidth headroom;
+without that fusion the target is unreachable. So Phase 2 is re-founded as a
+traffic-reduction program with hand-tiled fused loops (optionally small-dgemm), gated by a
+Rome-side rerun of the same benchmark.
+
+**The fix.** A four-phase, measure-first program. First, measure-and-activate: turn on the
+face cache we already built but never enabled in the benchmark, run the same microbenchmark on
+the cluster CPU, decompose a rupture window, and re-baseline. Second, face-stage surgery:
 evaluate basis, rotation, and flux tables once at setup and reuse them every step. Third,
-rebuild the predictor and volume stages as element-local batched small-matrix operations using
-MFEM's built-in batched linear-algebra machinery, tiled to stay in cache and batched per LTS
-cluster. Fourth, re-run the head-to-head and re-measure.
+rebuild the predictor and volume stages as cache-tiled fused loops over contiguous operator
+packs (the traffic fix), per LTS cluster. Fourth, re-run the head-to-head and re-measure.
+
+**End-to-end composition (why this program alone does NOT approach SeisSol).** Kernel success
+at the full 6× target still leaves the LTS leg at ~2677 s/sim-s — **11.2× behind SeisSol
+as-run** — because the untouched communication wait (2341 s/sim-s) then dominates. Only the
+composed state (this program + the companion comm program) reaches **~2.4–3.9× of SeisSol
+as-run** (~585–921 s/sim-s), and that composed state is comm-bound. The full scenario table
+lives in the evidence record; Phase 4 publishes the measured version of it.
 
 **Expected outcome.** Phase 0 (activation) is bounded by Amdahl at roughly **1.2–1.4×** — real
 but modest; it exists to produce the trustworthy baseline ("B0"), not the win. The program
@@ -112,15 +138,27 @@ with the bimaterial parity gate (`test_bimaterial_deriv_cache_parity` pattern). 
 1+2 green on TPV104 and the SAFS QD/dynamic program requesting it. Until then, every new flag
 is parse-time rejected on the unsupported paths (tested — see Testing Strategy).
 
-## Relationship to the comm plan
+## Relationship to the comm plan (rev 3: re-sequenced from the numbers)
 
-The Phase-5 results attribute a separate ~2.2× to exposed `MPI_Waitall` in the LTS tick loop.
-**That communication program is NOT yet written as a plan document** — this kernel plan and the
-future comm plan edit the same files (`wave_operator.inl`, the LTS steppers, the Phase-5
-sbatch). Sequencing decision: **kernel Phases 0–2 land first; comm work rebases on top.** The
-B0 metric is per-update *compute* µs·core (Caliper subregion, comm excluded) precisely so a
-comm fix landing mid-program does not confound kernel gates; if a comm change lands anyway, B0
-is re-measured before the next kernel gate is evaluated.
+The comm program now EXISTS as a plan: `document/comm_dev/PLAN_lts_comm_reduction_2026-07-22.md`
+(built from a full exchange inventory of the tick loop). The numbers argue for **co-first-class
+sequencing, not kernel-first**: comm removes the larger absolute term (2341 vs the kernel's
+~1687 s/sim-s), its Phases 1–2 are **bitwise-identical by construction** (no tolerance
+machinery), and its payoff arithmetic depends on message counts already measured — not on any
+unmeasured throughput rate. Concretely:
+
+- **Shared Phase 0:** the comm plan's Waitall wire-vs-skew decomposition rides in the SAME
+  Expanse job as this plan's B0 (one submission, both baselines).
+- **Then in parallel:** comm Phases 1–2 (per-tick merge — touches the LTS steppers + seam
+  corrector) and kernel Phase 1 (face tables — touches the face corrector). File overlap is
+  limited to `wave_operator.inl` in disjoint regions; both are flag-gated; whichever lands
+  second rebases.
+- **Revisit trigger:** if the Rome-side spike (Phase 0) shows < 2× realizable kernel headroom,
+  kernel Phase 2 is deprioritized below comm Phase 3 (overlap) — the composed end state is
+  comm-bound anyway.
+- The B0 metric is per-update *compute* µs·core (Caliper subregion, comm excluded) so comm
+  changes do not confound kernel gates; if a comm change lands mid-program, B0 is re-measured
+  before the next kernel gate is evaluated.
 
 ## Constraints
 
@@ -193,7 +231,22 @@ measurement, before any kernel code is written.
    the rupture-window fault share and the go/defer decision on fault work.
 5. Local: re-run the `sample` profile with `--face-cache` ON (expects the interior-face
    LU/CalcShape block to shrink; fault faces unaffected — they are outside the face cache).
-6. Expectation setting (honest): activation is Amdahl-bounded at ~**1.2–1.4×** (face-cache
+6. **Rome-side kernel spike (review R-402; the local half already ran):** compile and run
+   `tests/bench/bench_ader_kernel_variants.cpp` on an Expanse compute node — once single-core,
+   once at full 128-rank occupancy (mpirun the bench on every core simultaneously to expose the
+   ~2 GB/s/core bandwidth regime). Deliverables: A-vs-B ratio and absolute µs/elem under
+   contention (locally: A=5.2 µs, B=4.2, `BatchedLinAlg` C=11.2 — eliminated; the traffic case
+   predicts B's edge WIDENS under contention). **Go/no-go for kernel Phase 2:** proceed only if
+   contended B beats contended A by ≥ 2×; else Phase 2 is deprioritized below comm Phase 3 per
+   the revisit trigger.
+7. **Node-layout A/B (review R-409):** one extra GTS leg at 64 ranks/node (same node count,
+   half-populated) inside the B0 job; report per-update µs·core at 128 vs 64 ranks/node. This
+   separates per-core bandwidth starvation from kernel structure in the 245.9 figure — if 64
+   ranks/node recovers a large factor, the traffic case strengthens and an OpenMP-hybrid layout
+   becomes a candidate lever (SeisSol runs 8×15 for a reason).
+8. The companion comm plan's Phase 0 (Waitall wire-vs-skew decomposition) rides in this same
+   job — one submission, both baselines.
+9. Expectation setting (honest): activation is Amdahl-bounded at ~**1.2–1.4×** (face-cache
    addresses ≤ the interior-face part of the ~21 % LU+shape share plus some churn). Anything
    more is a bonus, not a plan.
 
@@ -298,8 +351,14 @@ struct FaceKernelTables
    long long BytesUsed() const;
 };
 
-// Builder reads the SAME IntegrationRule the legacy path uses
-// (IntRules.Get(face_geom, 2*order_), wave_operator.inl:5524-5526).
+// Builder replicates the legacy per-face rule selection EXACTLY (review R-406):
+//   IntRules.Get(geom, face_is_fault ? FaultFaceQuadDegree() : 2*order_)
+// (wave_operator.inl:5524-5526) — fault faces use the over-integration branch,
+// so fault_T_can/fault_Tinv_can are sized by the FAULT rule's nqp, not 12.
+// Guards (review R-407): MFEM_VERIFY(mesh.Conforming()) — nonconforming meshes
+// parse-time rejected (none in scope; fail loud); boundary faces (absorbing/
+// free-surface) get their own catalog entries or stay on the legacy path in v1
+// (decided at implementation; either way stated in the table struct docs).
 void BuildFaceKernelTables(const WaveOperator<MeshType>& wave,
                            bool build_fold_tables,
                            FaceKernelTables& out);   // R-004 guard inside
@@ -324,10 +383,11 @@ Flags off = legacy path byte-identical (legacy code untouched and compiled-in pe
       face subtree.
 - [ ] Parity: `--face-tables` bit-exact (or ≤ 1e-12 with documented cause); fold ≤ 1e-12;
       fault np=2 byte gate; seam gates green.
-- [ ] Expanse vs B0 — **share-based gate** (avoids double-selling Phase-0's activation): the
-      face-stage subphase share drops to ≤ 0.5× its B0 share, AND per-update improves ≥ 1.2×
-      vs B0. Stop-and-reassess if the share gate passes but per-update moves < 1.1×
-      (something else inflated).
+- [ ] Expanse vs B0 — **share-based gate, protocol-pinned (review R-405)**: measured on the B0
+      protocol + Phase-1 flags ONLY (`--kernel-batch` OFF, no comm changes since the B0 in the
+      denominator), pre-rupture window (rupture window reported alongside): the face-stage
+      subphase share drops to ≤ 0.5× its B0 share, AND per-update improves ≥ 1.2× vs B0.
+      Stop-and-reassess if the share gate passes but per-update moves < 1.1×.
 - [ ] Flag-matrix parse-time tests green; `make test` green; no-touch dirs clean.
 
 ### Dependencies
@@ -336,16 +396,23 @@ flags, separate subphases).
 
 ---
 
-## Phase 2: Batched element-local predictor + volume (the measured 27 % + 9 %)
+## Phase 2: Tiled-fused element-local predictor + volume — a TRAFFIC program (rev 3)
 
-**In one sentence:** Replace the whole-vector CK sweeps with cache-tiled, per-cluster batched
-small-GEMMs (MFEM `DenseTensor` + NATIVE `BatchedLinAlg`), fusing the per-level Jacobian
-combination and both factorial accumulations into the tile so each element finishes hot.
+**In one sentence:** Replace the whole-vector CK sweeps with cache-tiled fused loops over
+contiguous operator packs — cutting DRAM traffic ~8× per element — because the microbenchmark
+proved the win is bandwidth, not arithmetic, and eliminated `BatchedLinAlg` NATIVE as the
+mechanism (2.2× slower than the current structure).
 
 ### Goal
 Element-local fusion of the CK recursion over cache-sized element tiles inside cluster
-batches, eliminating the ~40 full-vector passes and the transposed-stride inner loop — with
-the roofline evidence (Phase 0) in hand, honoring the OPT-DERIV-GEMM-BATCH revisit clause.
+batches: operators read ONCE per element per step (levels fused — the roofline shows this is
+load-bearing: fused floor 14–18 µs vs non-fused 45–49 µs at 2 GB/s/core), eliminating the
+~40 full-vector passes. Mechanism per the measured spike: **hand-tiled fixed-stride fused
+loops (bench variant B), optionally per-element dgemm (variant D) where BLAS is linked** —
+NOT `BatchedLinAlg` NATIVE (bench variant C, measured 0.46× — its CPU path is a serial
+generic-kernel loop). `DenseTensor` is retained as the contiguous storage container only.
+Precondition: the Phase-0 Rome-side contended spike gate (≥ 2× contended B-vs-A), honoring
+the OPT-DERIV-GEMM-BATCH revisit clause with measured data.
 
 ### Files to Create
 - `dynamic/ader_batched_kernels.hpp`, `tests/unit/test_ader_batched_parity.cpp`.
@@ -374,11 +441,14 @@ the roofline evidence (Phase 0) in hand, honoring the OPT-DERIV-GEMM-BATCH revis
    `dk_retain[(slot·order+k)·block+j]`, **bit-identically to the scalar retain lambda**
    (`wave_operator.inl:1990-2009`). The ping-pong scratch needs no write-back. D(k) stays
    materialized per element (never fused away) — the seam contract.
-4. **Determinism/backends (review R-104C)**: call
-   `BatchedLinAlg::Get(BatchedLinAlg::NATIVE).AddMult(deriv_ops_[d], Xb_vec, Yb_vec, …)` —
-   NEVER the active-backend dispatch — with an `MFEM_VERIFY` at setup that the seam-contract
-   path is pinned NATIVE (a CUDA rebuild must not silently switch to vendor GEMM order).
-   `Xb_vec`/`Yb_vec` are `Vector`s viewed as (ndof, NUM_STATE, E) panels.
+4. **Determinism/mechanism (rev 3, from the spike)**: the tile kernel is a hand-written
+   fixed-stride fused loop (bench variant B — checksum bit-identical to the legacy order by
+   construction when the per-element summation order is preserved; else ≤ 1e-12 lever
+   convention). Per-element dgemm (variant D) is an optional flag-selected alternative ONLY
+   where an LP64 BLAS is verified (Expanse hazard) and NEVER on the seam-contract path unless
+   its bitwise reproducibility is proven (BLAS order is implementation-defined). Bitwise
+   rank-independence of the retained-D(k) pass is asserted by the existing epoch/parity tests.
+   `Xb`/`Yb` are `Vector` panels viewed as (ndof, NUM_STATE, E).
 5. Precision: summation order changes (row-dot → column-AXPY) → round-off lever convention;
    parity ≤ 1e-12 vs Cached on unit fixtures across orders 2/3/4, np1/np2; bit-exact checks
    only WITHIN batched mode (retain-vs-main D(k), two-run reproducibility at np=2).
@@ -420,6 +490,11 @@ void BatchedCKLevelTile(const DenseTensor deriv_ops[3],
 - Bimaterial: parse-time rejected (Phase 5).
 - Empty clusters / fault-free ranks: zero tiles is a no-op; surrounding collective structure
   untouched (R-001).
+- **Ragged tiles (review R-408)**: per-(rank, cluster) populations below `E_min` (default 8,
+  flag-tunable — the λ-wiggle's 888-cell finest cluster is ~3.5 elems/rank at np=256) fall
+  back to the legacy per-element path for that (rank, cluster) — correctness-neutral because
+  every batched operation is per-element independent; the single-cluster byte gate is
+  tile-geometry-safe by construction (no cross-element reductions).
 
 ### Rollback
 Flag off = legacy Cached path untouched.
@@ -509,10 +584,17 @@ Certify the program outcome on the same protocol that motivated it.
   rules), project memory note.
 
 ### Detailed Requirements
-1. Same decks as Phase 5; flags: levers + `--face-tables[-fold] --kernel-batch`.
+1. Same decks as Phase 5. **The certified configuration pins ONE exact flag line** (review
+   R-410), decided at Phase-1 close-out (fold in or out, with the measured delta recorded);
+   the same line goes to CLAUDE.md as the recommended spatial-driver performance flags. The
+   certified LEG (GTS window vs LTS leg) is likewise pinned and stated in the table.
 2. Speed readout on BOTH windows (pre-rupture and rupture — the fault share grows
    post-rupture; the certified number states its window). Table: MFEM before/after, SeisSol
-   14.4 µs·core / 239 s-per-sim-s references.
+   references. **The SeisSol reference is re-measured, not reused (review R-404):** pin the
+   existing 52365078 run (binary hash v1.3.1-2135, deck, cadence) in the table AND add ONE
+   SeisSol re-run with async output / production cadence (deck-only change) so the comparison
+   brackets SeisSol's honest range (~125–239 s/sim-s) instead of freezing its
+   favorable-to-MFEM as-run number.
 3. Physics gates: V_max(t) vs the validated GTS reference; SCEC station diff legacy-vs-new
    kernels (round-off convention); MFEM-vs-SeisSol qualitative overlay.
 4. Dispositions recorded: `--face-cache` (keep as fallback vs deprecate), fault-work decision
