@@ -1,3 +1,11 @@
+> # ⛔ SUPERSEDED (2026-07-23) — see `PLAN_performance_program_2026-07-23.md`
+>
+> Failed adversarial review (`REVIEW.md`, 28 findings, 5 CRITICAL). Its headline budget was wrong by
+> construction: it divided the measured LTS wall by a face-cache gain that only applies to the GTS
+> corrector. Its **direction — communication before kernels — survived every finding** and carries
+> forward unchanged; the successor restates it at its true magnitude and, unlike this document, keeps
+> no projected payoff in its body. Kept as review history.
+
 # Performance program v2 — post-Phase-0 redesign
 
 **Date:** 2026-07-22 · **Branch:** `safs-v4_0_0-alt-case1-mfem-speed` · **Supersedes** the phase
