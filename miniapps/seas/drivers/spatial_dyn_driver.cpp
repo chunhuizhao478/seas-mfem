@@ -4621,6 +4621,7 @@ int main(int argc, char *argv[])
       int sync = step0;
       while (t_lts < cfg.time.tfinal - 1e-12 * T_s)
       {
+         MFEM_PERF_SCOPE("seas::spatial_dyn::step");
          const real_t T_actual = std::min(T_s, cfg.time.tfinal - t_lts);
          if (T_actual <= 0.0) { break; }
          auto tab = BuildTickTable(cl.num_clusters, dt_base, T_actual,
@@ -4760,6 +4761,7 @@ int main(int argc, char *argv[])
       int sync = step0;
       while (t_lts < cfg.time.tfinal - 1e-12 * T_s)
       {
+         MFEM_PERF_SCOPE("seas::spatial_dyn::step");
          const real_t T_actual = std::min(T_s, cfg.time.tfinal - t_lts);
          if (T_actual <= 0.0) { break; }
          // Per-sync reset of the honest sub-step |V| max (mirrors the GTS loop's

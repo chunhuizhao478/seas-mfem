@@ -2201,6 +2201,7 @@ void WaveOperator<MeshType>::AdvanceADERClusterBulk(
    mfem::real_t t_s, mfem::real_t dt_base, int tick, mfem::real_t T_actual,
    bool exchange_forecast) const
 {
+   MFEM_PERF_SCOPE("seas::WaveOperator::AdvanceADERClusterBulk");
    MFEM_VERIFY(dt_step > 0.0, "AdvanceADERClusterBulk: dt_step > 0");
    MFEM_VERIFY(order >= 2 && order <= 4, "AdvanceADERClusterBulk: order in {2,3,4}");
    MFEM_VERIFY(I_cluster.Size() == NUM_STATE * ndof_total_,
