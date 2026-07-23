@@ -1,3 +1,13 @@
+> # ⛔ SUPERSEDED (2026-07-22) — see `PLAN_v2_performance_program_2026-07-22.md`
+>
+> Phase 0 measured the premises this plan was built on and **overturned two of them**: the stage
+> split is inverted (predictor 56 % ≫ face 23.5 %, not the reverse) and communication — not kernels
+> — is the primary lever (2041 vs 776 s/sim-s recoverable). The **v2 plan replaces this document's
+> phase structure, ordering, and targets.** What remains VALID here and is carried forward by v2:
+> the constraints/guardrails, the applicability matrix, the face-table design + corrected memory
+> budget (now v2's B4), the LTS coupling contract, and the interfaces. Phase 0 itself is COMPLETE
+> (`B0_gate_reset_2026-07-22.md`, FINAL). Keep this file as the design + review history.
+
 # Implementation Plan: MFEM-native ADER element-kernel efficiency program
 
 **Date:** 2026-07-22 (**rev 3**, post-evidence-round) · **Branch:** `safs-v4_0_0-alt-case1-mfem-speed`
