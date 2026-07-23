@@ -95,14 +95,17 @@ echo "=== git $(git rev-parse --short HEAD 2>/dev/null) | nodes=${SLURM_NNODES} 
 if [[ "${P0_LEG_1}" == "1" ]]; then
   echo ""; echo "===== LEG 1: MFEM_USE_LAPACK in the deployed build ====="
   grep -E "^MFEM_USE_LAPACK" "${SEAS_MFEM_ROOT}/config/config.mk" || echo "  (MFEM_USE_LAPACK not set -> defaults NO; the slow internal LU path)"
-  ldd "${DRIVER}" 2>/dev/null | grep -iE "openblas|lapack|libblas" || echo "  (no BLAS in ldd -> MFEM internal dense kernels)"
-  echo "  Interpretation: NO here means the 245.9 us LU tax runs MFEM's internal"
-  echo "  LSolve/USolve; rebuild after the build_expanse.sh lib64 fix and re-run."
+  ldd "${DRIVER}" 2>/dev/null | grep -iE "openblas|lapack|libblas" \
+    || echo "  (nothing in ldd — expected when openblas is STATICALLY linked; check nm below)"
+  nm "${DRIVER}" 2>/dev/null | grep -m2 -E " T (dgemm_|dgetrs_)" \
+    || echo "  (no dgemm_ symbol — if config.mk also says NO, the LU tax runs MFEM internal LSolve/USolve)"
+  echo "  Interpretation: config.mk YES + a defined dgemm_ (T) = optimized LAPACK LU path."
 fi
 
 # ---- LEG 2: B0 GTS, two windows, perf sub-function attribution ---------------
 if [[ "${P0_LEG_2}" == "1" ]]; then
-  echo ""; echo "===== LEG 2: B0 GTS (EndTime 1.5s; windows [0,0.5] pre-rupture, [1.0,1.5] rupture) ====="
+  _T0=$SECONDS
+  echo ""; echo "===== LEG 2: B0 GTS (EndTime 1.8s; windows [0,0.5] pre-rupture, [1.4,1.8] rupture) ====="
   OUT_B0="${OUT_ROOT}/b0_gts"; mkdir -p "${OUT_B0}"; LOG_B0="${OUT_ROOT}/b0_gts.log"
   # profile.mpi DROPPED here (review P0-6): perf covers sub-function attribution;
   # profile.mpi + perf both on rank 0 would bias rank 0 into the MPI straggler.
@@ -143,11 +146,13 @@ WRAP
   else
       echo "  NOTE: perf record produced no data (perf absent or paranoid>1); Caliper function-level only."
   fi
+  echo "LEG 2 WALL = $((SECONDS-_T0)) s   <-- per-update = WALL*256*1e6/(2464689*Δsteps)"
   unset CALI_CONFIG
 fi
 
 # ---- LEG 3: node-layout A/B (128 vs 64 ranks/node) --------------------------
 if [[ "${P0_LEG_3}" == "1" ]]; then
+  _T0=$SECONDS
   echo ""; echo "===== LEG 3: layout A/B — 64 ranks/node (half-populated), short GTS ====="
   OUT_L="${OUT_ROOT}/layout64"; mkdir -p "${OUT_L}"; LOG_L="${OUT_ROOT}/layout64.log"
   # 2 nodes x 64 = 128 ranks.  --distribution=cyclic:cyclic + --cpu-bind=cores
@@ -164,17 +169,21 @@ if [[ "${P0_LEG_3}" == "1" ]]; then
   echo "  compare to LEG 2's [0,0.5] window: a large speedup at 64/node => the"
   echo "  245.9 us is per-core memory starvation, not kernel structure)"
   grep -E "^step " "${LOG_L}" | head -1; grep -E "^step .* t = 0\.[45]" "${LOG_L}" | tail -1
+  echo "LEG 3 WALL = $((SECONDS-_T0)) s   <-- per-update = WALL*128*1e6/(2464689*Δsteps)  [ranks=128!]"
 fi
 
 # ---- LEG 4: kernel bench spike (contended A-vs-B = Phase-2 go/no-go) ---------
 if [[ "${P0_LEG_4}" == "1" ]]; then
   echo ""; echo "===== LEG 4: kernel microbenchmark on Rome (single-core + full-occupancy) ====="
-  bash "${SEAS_MFEM_ROOT}/miniapps/seas/tests/bench/run_bench.sh" "${OUT_ROOT}" 2>&1 | tail -60 \
-    || echo "  (bench build/run failed — see run_bench.sh output; non-fatal to the rest of the job)"
+  bash "${SEAS_MFEM_ROOT}/miniapps/seas/tests/bench/run_bench.sh" "${OUT_ROOT}" > "${OUT_ROOT}/bench.log" 2>&1
+  BENCH_RC=$?
+  tail -60 "${OUT_ROOT}/bench.log"
+  [[ ${BENCH_RC} -eq 0 ]] || echo "  (bench rc=${BENCH_RC} — see ${OUT_ROOT}/bench.log; non-fatal to the rest of the job)"
 fi
 
 # ---- LEG 5: comm Waitall skew capture (LTS leg, short) ----------------------
 if [[ "${P0_LEG_5}" == "1" ]]; then
+  _T0=$SECONDS
   echo ""; echo "===== LEG 5: comm skew — short LTS leg, Caliper profile.mpi (Waitall Max/Avg) ====="
   OUT_C="${OUT_ROOT}/comm_lts"; mkdir -p "${OUT_C}"; LOG_C="${OUT_ROOT}/comm_lts.log"
   export CALI_CONFIG="runtime-report(profile.mpi,calc.inclusive,region.count,max_column_width=60,output=${OUT_ROOT}/comm_lts.cali-region-report.txt)"
@@ -186,6 +195,7 @@ if [[ "${P0_LEG_5}" == "1" ]]; then
   grep -iE "MPI_Waitall|MPI_Isend|MPI_Irecv" "${OUT_ROOT}/comm_lts.cali-region-report.txt" 2>/dev/null
   echo "  If Max/Avg >> 1 and skew dominates, the comm plan's payoff degrades and the"
   echo "  fault-weighted partition (METIS ncon=2 v3) becomes co-requisite."
+  echo "LEG 5 WALL = $((SECONDS-_T0)) s"
   unset CALI_CONFIG
 fi
 

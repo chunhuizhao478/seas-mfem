@@ -12,6 +12,24 @@ review R-402 has ALREADY RUN locally**; its results are baked into this rev.
 **Companion program:** `document/comm_dev/PLAN_lts_comm_reduction_2026-07-22.md` — the other half
 of the runtime claim; see "End-to-end composition" below.
 
+> ## ⚠ PHASE-0 MEASURED (job 52379131) — rev-4 corrections supersede parts of this Summary
+>
+> `document/kernel_dev/B0_gate_reset_2026-07-22.md` is **FINAL**. Three corrections:
+> 1. **B0 = 187.5 µs·core** (`--face-cache` activation gave **1.31×**, exactly the predicted band).
+>    B0 — not 245.9 — is the denominator for every gate below.
+> 2. **The stage split is INVERTED vs the local profile that shaped this plan:** on target
+>    hardware with the cache on, **predictor = 56.2 %**, face = 23.5 % (local said face 59 %,
+>    predictor 27 %). ⇒ **Phase 2 is now the PRIMARY phase and Phase 1 is demoted.** `Vector::Add`
+>    + `operator=` alone are 28 % of perf self-time — the whole-vector sweeps Phase 2 targets.
+> 3. **Phase-2 GO.** The Rome bench *reverses* its local verdict under contention: A degrades
+>    33→79 µs while tiled-B stays flat at ~13 µs ⇒ **B = 2.3–6.3×**, D (dgemm) = 2.8–8.3×. The
+>    traffic hypothesis is confirmed on the target machine.
+> 4. **Revised target: ~2.3× vs B0 ≈ 81 µs·core ≈ 3.0× vs 245.8 — the declared FALLBACK band.
+>    The ≤40 µs / ≥6× stretch is NOT reachable** on the measured split. Fault work: **defer
+>    CONFIRMED** (0.65 % through rupture). Comm: skew 24 % < 40 % ⇒ **comm-plan payoff holds**.
+>
+> Read the memo's "Gate resets" table as authoritative wherever it disagrees with the text below.
+
 ## Summary — read this first
 
 **The problem.** On the TPV104 200 m benchmark at order 3, our solver spends 245.9 µs of core
