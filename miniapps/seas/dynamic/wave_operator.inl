@@ -1926,6 +1926,7 @@ void WaveOperator<MeshType>::ComputeADERSubStepStatesAndIntegralCluster(
    std::vector<Vector> &Q_per_node, Vector &I,
    real_t *dk_retain, const int *retain_slot_of_elem) const
 {
+   MFEM_PERF_SCOPE("seas::WaveOperator::ComputeADERSubStepStatesAndIntegralCluster");
    MFEM_VERIFY(order >= 2 && order <= 4,
                "ComputeADERSubStepStatesAndIntegralCluster: order in {2,3,4}");
    MFEM_VERIFY(dt > 0.0, "ComputeADERSubStepStatesAndIntegralCluster: dt > 0");
@@ -2607,6 +2608,7 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
    const real_t *dk_data, int dk_order, const int *provider_slot_of_elem,
    bool exchange_forecast) const
 {
+   MFEM_PERF_SCOPE("seas::WaveOperator::ComputeADERClusterSeamFaceFluxRHS");
    if constexpr (!IsParallelMesh<MeshType>::value)
    {
       (void)cluster_c; (void)I_cluster; (void)dt; (void)rhs;

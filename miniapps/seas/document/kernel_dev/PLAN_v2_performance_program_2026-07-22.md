@@ -52,6 +52,35 @@ mechanism (**benchmarked slower than what we have**).
 | fault deferred pending rupture data | 0.65 % through rupture | closed |
 | target ≤40 µs·core (≥6×) | split doesn't support it | **withdrawn**; target = fallback band |
 
+## Verification round (2026-07-22, post-redesign) — what was checked and what it changed
+
+The budget above is load-bearing, so it was audited against the source before either track starts.
+
+**CONFIRMED — the main kernel lever is real.** The concern was that the predictor's 56 % might be
+*waiting* nested inside a Caliper region rather than work. It is not: the predictor entry, the LTS
+cluster variant, and `ApplySpatialDerivative` contain **zero** MPI or `ExchangeFaceNbrData` call
+sites. Every exchange in the wave operator lives in exactly two places — `ComputeADERSharedFaceFluxRHS`
+and `ComputeADERClusterSeamFaceFluxRHS` — i.e. precisely the regions this plan assigns to Track A.
+That independently confirms the shared-face reassignment above, and identifies the LTS seam
+corrector as the second comm site.
+
+**DEFECT FOUND AND FIXED — the two LTS hot paths were uninstrumented.**
+`ComputeADERSubStepStatesAndIntegralCluster` (the LTS predictor — *B2's exact target*) and
+`ComputeADERClusterSeamFaceFluxRHS` (the LTS seam corrector) had **no Caliper scope at all**. Both
+tracks' gates are written against LTS-leg stage shares, so as written **neither track could have
+measured its own gate.** Both scopes are now added at function entry, mirroring the placement of
+their non-cluster siblings so region reports stay structurally comparable. Zero numerics touched.
+*Open gate:* the local build has `MFEM_USE_CALIPER = NO`, so the macro expanded to nothing and the
+real `CALI_CXX_MARK_SCOPE` path is **compile-verified only on the next Expanse build**, not locally.
+
+**CAVEAT — the stage split is GTS-measured, the budget is LTS.** Because of the gap above, the
+56/23/8 % split could only come from the GTS leg, while the 1538 + 2341 budget is the LTS leg,
+which additionally runs a seam corrector that does not exist in GTS. Two consequences: the split
+must be **re-measured on the LTS leg** now that instrumentation exists (fold this into A1/B1's
+first run, no separate job needed); and the error direction is **conservative** for the predictor —
+GTS's face-shared share includes its wait, so the predictor's share of true compute is if anything
+slightly *higher* than 56 %. The 776 s/sim-s kernel figure already excludes face-shared entirely.
+
 ## Track A — communication (PRIMARY, 2041 s/sim-s)
 
 Detailed phases live in `document/comm_dev/PLAN_lts_comm_reduction_2026-07-22.md`; Phase-0
@@ -77,6 +106,11 @@ not a kernel one; it belongs to Track A's imbalance analysis.
 The mechanism is settled by measurement: **hand-tiled fusion (bench variant B, 2.3–6.3× contended)
 and/or per-element dgemm (variant D, 2.8–8.3×)**, keeping each element's data in cache across all
 time-expansion levels. `DenseTensor` remains as contiguous storage; `BatchedLinAlg` is out.
+
+> **B1 and B2 savings do NOT add — B1 is a down payment on B2.** Both target the same predictor
+> stage; the 776 s/sim-s figure counts the predictor **once**, at the bench's ~4× end state. B1
+> exists because it reaches part of that win for a fraction of the effort and risk, not because it
+> is additive. If B1 alone clears the B2 gate, B2 is re-scoped, not stacked.
 
 ### B1 — fuse the accumulation sweeps (NEW, cheapest, do first)
 Perf shows **`Vector::Add` 18.9 % + `Vector::operator=` 9.3 % = 28 % of self-time in pure
@@ -104,6 +138,10 @@ the ≤40 µs·core target · SAFS bimaterial + mixed-flux extension (still a na
 unchanged, and now clearly gated behind both tracks proving out on TPV104).
 
 ## Sequencing
+
+**Prerequisite (DONE):** the two LTS Caliper scopes, so both tracks can measure their own gates on
+the LTS leg. **The first LTS run of either track must publish the re-measured LTS stage split** —
+that retires the GTS-proxy caveat above and is the last unmeasured input to this plan.
 
 **A1 first, and B1 in parallel.** They touch different code (A1: LTS steppers + seam corrector;
 B1: the predictor's accumulation loops), both are small, and both have the best
