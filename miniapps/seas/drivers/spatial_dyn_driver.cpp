@@ -4740,14 +4740,13 @@ int main(int argc, char *argv[])
       // with >1 cluster (consistent with the tick-table matched-collective count).
       lts_meta.exchange_bulk_provider_dk = (nprocs > 1 && cl.num_clusters > 1);
       stepper.SetExchangeProviderDk(lts_meta.exchange_bulk_provider_dk);
-      // A1 is NOT wired into the fault-interleave stepper yet (it has no
-      // BeforeCorrects override), so enabling the merge here would make the tick
-      // table predict 64 rounds while the stepper still fires 125 -> a
-      // matched-collective ABORT mid-run.  Refuse up front instead.
-      MFEM_VERIFY(!lts_merge_exch,
-                  "spatial_dyn: --lts-merge-exchanges is not supported on the LTS "
-                  "fault-interleave path yet (bulk-only; see document/comm_dev/"
-                  "DESIGN_a1_per_tick_merge_2026-07-24.md).  Re-run without it.");
+      // A1 (opt-in), fault-interleave path.  Same pairing rule as the bulk path:
+      // the meta flag and the stepper flag come from ONE value, because the tick
+      // table predicts the collective count and the driver aborts on a mismatch
+      // (P-007).  The fault half fires no seam collectives (D-2 keeps fault faces
+      // rank-interior), so only the BULK rank-seam exchanges are merged here.
+      lts_meta.merge_tick_seam_exchanges = lts_merge_exch;
+      stepper.SetMergeTickExchanges(lts_merge_exch);
       if (rank == 0)
       {
          std::cout << "[lts] STEPPING (rate2, fault interleave): Nc = "

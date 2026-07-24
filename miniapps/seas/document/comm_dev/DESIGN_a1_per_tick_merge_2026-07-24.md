@@ -123,3 +123,34 @@ comparison is a same-job A/B with everything else identical (the cleanliness A0 
 | a rank with no correcting clusters skips the collective → hang | tick table is rank-uniform; assert `correct_clusters` identical across ranks in debug |
 | deep-copy cost of two full halo buffers per tick | replaces 125 halo exchanges with 64 + 2 copies; the copies are local memcpy vs network round trips |
 | structural skew floor (19–24 % of wait, flat through rupture) | A1 cannot remove it — if it binds, A1 lands nearer 1.15× than 1.24×. Not a correctness risk, a payoff risk. |
+
+
+## Implementation status (2026-07-24) — A1 code-complete
+
+Steps 1-5 landed: `PrepareClusterSeamExchangeTick` + prepared path (75cffba); merge-window
+hooks + bulk stepper (d3bd683); merged `n_collectives` + `--lts-merge-exchanges` (8e98ae9);
+bitwise ON-vs-OFF gate (1032e68); fault-interleave stepper wiring (this commit).
+
+**Local gate PASSED — bitwise identity is a result, not an argument:**
+
+| fixture | checks | collectives | saving |
+|---|---:|---|---:|
+| np=2, 2 clusters | 138/138 | 38 -> 30 | 1.27x |
+| np=3, 3 clusters | 207/207 | 102 -> 62 | 1.65x |
+| np=4, 4 clusters | 276/276 | 230 -> 126 | 1.83x |
+
+trending to the predicted 125 -> 64 = 1.95x at production Nc=6.
+
+### ⚠ COVERAGE GAP — read before submitting to Expanse
+
+`LtsFaultSyncStepper` has **no test anywhere in the repo** (`grep -l LtsFaultSyncStepper
+tests/` is empty), and the production TPV104 deck runs **that** stepper, not the bulk one.
+So A1's fault-path wiring is **enabled but locally unproven**. Its `BeforeCorrects` is
+line-for-line the bulk stepper's, with the same forecast predicate copied from its own
+`Correct`, and the merge logic it calls lives in the wave operator (which *is* covered) —
+but identical code is not tested code.
+
+**Consequence for the Expanse run:** acceptance item (4), production bitwise identity, is
+**not optional and not merely a scale check** — it is the *only* evidence that will exist for
+the fault path. Run the A/B as ON-vs-OFF and compare fault output bytes **before** reading any
+timing. A speed number from an unverified path is worth nothing.
