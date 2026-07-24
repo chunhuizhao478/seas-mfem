@@ -1,0 +1,142 @@
+# =====================================================================
+#  SCEC TPV104 200 m — Track-A A0 WIGGLE-OFF deck (lambda=1).
+#
+#  This file is byte-identical to
+#    jobs/lts_phase5/tpv104_200m_lts_speed_expanse/tpv104_200m_lts_rate2.toml
+#  EXCEPT for ONE added line in [numerics]:  lts_wiggle = "off".
+#  The Phase-5 rate2 deck sets no lts_wiggle, so it uses the default "scan"
+#  (=> lambda=0.63, the measured baseline job 52344266); this deck forces
+#  lts_wiggle="off" (=> lambda=1).  lts_nc_cap defaults to 6 in BOTH decks, so
+#  BOTH cluster to Nc=6 (the lambda=1 nc_cap merge is verified to fire): rounds/
+#  sync = 125 is identical, and the sync LENGTH T_s ∝ lambda is the only thing
+#  that changes.  So exchange rounds/sim-s falls exactly 1/0.63 = 1.587x and
+#  NOTHING ELSE about the run changes.
+#
+#  PURPOSE (Track A, A0): the highest-value one-line experiment in the plan.
+#  It (a) measures the wiggle lever, and (b) tests the assumption the WHOLE
+#  communication track rests on — whether exposed MPI wait scales with the
+#  exchange-round rate at all (no run has ever varied the round rate).  lambda=1
+#  is also SeisSol's own configuration on this benchmark.  The A/B partner is
+#  the rate2 deck run in the SAME job with identical flags.
+#
+#  SCOPE: A0 measures the BULK seam-exchange wire scaling, which is a steady-
+#  state property — a short PRE-rupture window suffices (the sbatch sets
+#  tfinal=0.6 s; nucleation is at t_0=1.0 s).  A0 does NOT measure fault/friction
+#  skew (that needs the rupture window; see the plan's known-unknowns 4 & 5).
+# =====================================================================
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "SCEC TPV104 200m Phase-5 LTS speed/benchmark (pure upwind, ADER-O4)."
+
+[problem]
+tag = "tpv104"   # selects the SCEC TPV104 on-fault station writer in spatial_dyn_driver
+
+# Material: homogeneous, native TPV104Params (identical to TPV102/205).
+[material_constant_fallback]
+lambda = 32043759360.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+[mesh]
+# 200 m fault-resolution PRODUCTION mesh (~126 MB, 2.46 M tets).  Path is the
+# in-folder symlink, resolved from cwd = miniapps/seas (self-contained).
+path  = "jobs/lts_phase5/tpv104_200m_lts_speed_expanse/mesh_tpv104_200m.msh"
+order = 3
+
+[velocity]
+use_sidecar = false
+
+[stress]
+kind          = "fault_local_prestress"
+tau_strike_pa = 40.0e6     # native TPV104 tau_ini (+ right-lateral)
+tau_dip_pa    = 0.0
+sigma_n_pa    = 120.0e6
+
+[numerics]
+lts            = "rate2"
+lts_wiggle     = "off"     # A0: lambda=1 (the ONE line vs rate2.toml). rate2 omits this => "scan"/lambda=0.63.
+ader_order     = 4
+mixed_flux     = "none"     # LTS requires pure upwind; matched here for a like-for-like scheme
+cfl            = 0.5      # MATCHED to SeisSol CFL=0.5 for the head-to-head (identical h
+                          # formula + order factor 7 => identical dt). SAFS production p3
+                          # upwind+ADER ran 0.5 at safety 1.0; TPV104's historical 0.25 was
+                          # inherited conservatism. The 2 s window incl. rupture is the gate.
+cfl_safety     = "dg"
+interior_flux  = "scalar"
+fault_iterator = "substep"
+use_pml        = false
+
+[time]
+tfinal     = "12.0s"       # full TPV104 rupture window (sbatch overrides per run: GTS short, LTS full)
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.05s"
+
+[output]
+output_dir     = "output_tpv104_200m_phase5"
+restart_prefix = "cp"
+paraview_fault = "vtu"
+paraview_fault_dt = "0.05s"
+
+# Rate-and-state, slip law with strong rate weakening (FVW; native TPV104).
+[friction.rate_state]
+a_default       = 0.01
+b_default       = 0.014
+Dc_default      = 0.4
+V_0_default     = 1.0e-6
+f_0_default     = 0.6
+V_init_default  = 1.0e-16
+sigma_n_default = 120.0e6
+state_evolution = "slip_law_strong_rate_weakening"
+f_w_default     = 0.2
+V_w_default     = 0.1
+eta             = "auto"
+
+# Velocity-strengthening border via the native SCEC smooth boxcar taper.
+[[friction.rate_state.spatial]]
+kind              = "boxcar_taper"
+a_inner           = 0.01
+a_outer           = 0.02
+V_w_inner         = 0.1
+V_w_outer         = 1.0
+boxcar_center_x_m = 0.0
+boxcar_half_x_m   = 15000.0
+boxcar_trans_x_m  = 3000.0
+boxcar_center_z_m = -7500.0
+boxcar_half_z_m   = 7500.0
+boxcar_trans_z_m  = 3000.0
+
+# Nucleation: SCEC compact-bell gradual overstress (TPV104), strike-only.
+[nucleation]
+kind = "gradual_overstress_compact_circular"
+
+[nucleation.gradual_overstress_compact_circular]
+center_x_m   = 0.0
+center_y_m   = 0.0
+center_z_m   = -7500.0
+radius_m     = 3000.0
+delta_tau_pa = 45.0e6
+T_nuc_s      = "1.0s"
+
+[boundary]
+fault_attr      = 3
+natural_attrs   = [1]
+absorbing_attrs = [5]
+
+[fault_geometry]
+ref_normal = [0.0, -1.0, 0.0]
+up         = [0.0,  0.0, 1.0]
+kind       = "vertical_strike_slip"
+
+[hypocenter]
+x_m                 = 0.0
+y_m                 = 0.0
+z_m                 = -7500.0
+nucleation_radius_m = 3000.0
