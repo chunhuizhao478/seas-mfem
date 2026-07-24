@@ -283,16 +283,22 @@ waitall_rows () {   # $1 = report ; echoes verbatim MPI_Waitall row(s)
 # The region name "MPI_Waitall" contains no digits, so ALL numeric tokens on that
 # row are the data columns and Avg is the 3rd numeric token.  A trailing
 # region.count column (if present) comes after Time% and does not shift Avg.
-waitall_avg () {    # $1 = report ; echoes Avg time/rank for the top MPI_Waitall row, or empty
-    local rpt="$1"; [[ -f "${rpt}" ]] || return 0
-    awk 'tolower($0) ~ /mpi_waitall/ && !done {
+# A report contains SEVERAL MPI_Waitall rows at different nesting depths (job
+# 52416603 had a negligible 11-call row AND the real 20336-call row worth 52.6 %
+# of wall).  Taking the FIRST match picked the wrong one and produced a wrong
+# verdict.  Select the row with the LARGEST Avg instead.  $2 selects which column
+# to echo: 3=Avg (default), 1=Min, 2=Max — Min/Max give the rank skew.
+waitall_col () {    # $1 = report, $2 = column index (1=Min 2=Max 3=Avg); echoes value or empty
+    local rpt="$1" col="${2:-3}"; [[ -f "${rpt}" ]] || return 0
+    awk -v col="${col}" 'tolower($0) ~ /mpi_waitall/ {
         n=0; s=$0;
         while (match(s, /[0-9]+\.?[0-9]*/)) {
-            n++; tok[n]=substr(s, RSTART, RLENGTH); s=substr(s, RSTART+RLENGTH);
+            n++; tok[n]=substr(s, RSTART, RLENGTH)+0; s=substr(s, RSTART+RLENGTH);
         }
-        if (n >= 3) { print tok[3]; done=1 }   # Min=1, Max=2, Avg=3
-    }' "${rpt}"
+        if (n >= 3 && tok[3] > bestavg) { bestavg=tok[3]; for(i=1;i<=3;i++) best[i]=tok[i] }
+    } END { if (bestavg > 0) printf "%.6f\n", best[col] }' "${rpt}"
 }
+waitall_avg () { waitall_col "$1" 3; }
 
 echo ""
 echo "=== [a0] RESULT — wiggle A/B (the round-scaling test) ==="
@@ -305,10 +311,34 @@ echo "--- raw MPI_Waitall rows (READ THESE; the ratio below is best-effort) ---"
 echo "  [header] $(report_header "${RPT_M063}")"
 echo "  lambda=0.63:"; waitall_rows "${RPT_M063}" | sed 's/^/    /'
 echo "  lambda=1.00:"; waitall_rows "${RPT_M100}" | sed 's/^/    /'
+# Physics sanity + the run's own step totals (the honest end-to-end wall).
+echo ""
+echo "--- physics / completion sanity ---"
+for pair in "0.63:${LOG_M063}" "1.00:${LOG_M100}"; do
+    lam="${pair%%:*}"; lg="${pair#*:}"
+    printf "  lambda=%s: %s\n" "${lam}" "$(grep -m1 -E '^\[lts\] done:' "${lg}" 2>/dev/null || echo '(no [lts] done line — run may not have completed)')"
+    grep -m1 -iE 'nan|inf|ABORT|diverg' "${lg}" 2>/dev/null | sed 's/^/    WARNING: /' || true
+done
+echo "--- end-to-end wall (Caliper seas::spatial_dyn::step, Avg time/rank) ---"
+for pair in "0.63:${RPT_M063}" "1.00:${RPT_M100}"; do
+    lam="${pair%%:*}"; rp="${pair#*:}"
+    printf "  lambda=%s: %s\n" "${lam}" "$(grep -m1 -E 'seas::spatial_dyn::step' "${rp}" 2>/dev/null | sed 's/  */ /g' || echo '(no step region)')"
+done
+
 W063="$(waitall_avg "${RPT_M063}")"
 W100="$(waitall_avg "${RPT_M100}")"
+# Rank skew through the rupture window (retires the pre-nucleation 24% proxy).
+for pair in "0.63:${RPT_M063}" "1.00:${RPT_M100}"; do
+    lam="${pair%%:*}"; rp="${pair#*:}"
+    mn="$(waitall_col "${rp}" 1)"; mx="$(waitall_col "${rp}" 2)"; av="$(waitall_col "${rp}" 3)"
+    if [[ -n "${mn}" && -n "${av}" ]]; then
+        awk -v l="${lam}" -v mn="${mn}" -v mx="${mx}" -v av="${av}" 'BEGIN{
+            printf "  lambda=%s MPI_Waitall  Min %.1f / Avg %.1f / Max %.1f s   skew (Avg-Min)/Avg = %.1f%%   Max/Avg = %.2f\n",
+                   l, mn, av, mx, 100*(av-mn)/av, mx/av }'
+    fi
+done
 echo ""
-echo "Best-effort MPI_Waitall Avg (VERIFY against the rows above):  lambda=0.63 -> ${W063:-?} s ;  lambda=1.0 -> ${W100:-?} s"
+echo "Best-effort MPI_Waitall Avg (largest-Avg row; VERIFY against the rows above):  lambda=0.63 -> ${W063:-?} s ;  lambda=1.0 -> ${W100:-?} s"
 if [[ -n "${W063}" && -n "${W100}" ]] && awk -v b="${W100}" 'BEGIN{exit !(b>0)}'; then
     awk -v a="${W063}" -v b="${W100}" 'BEGIN{
         d=a/b;
