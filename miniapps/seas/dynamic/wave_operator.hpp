@@ -1455,6 +1455,18 @@ protected:
    /// integrate the wrong sub-interval origin).
    mutable std::vector<long long>                   seam_coarse_dk_epoch_;
 
+   /// LTS Track-A A1 (per-tick exchange merge) state.  When
+   /// `tick_seam_buffers_ready_` is set, `ComputeADERClusterSeamFaceFluxRHS` skips
+   /// its own pack+exchange pair and reads these buffers, which
+   /// `PrepareClusterSeamExchangeTick` filled once for ALL clusters correcting at
+   /// this tick.  Both are DEEP COPIES of `FaceNbrData()`: the second exchange
+   /// overwrites the first's result (the same reason the per-correct path already
+   /// deep-copies its forecast), and they must survive the whole Correct loop.
+   mutable std::vector<mfem::real_t>                tick_fc_all_;   ///< merged ghost forecast
+   mutable std::vector<mfem::real_t>                tick_nbr_all_;  ///< merged ghost time-integral
+   mutable bool tick_seam_buffers_ready_  = false;
+   mutable bool tick_seam_forecast_done_  = false;  ///< a forecast round actually ran this tick
+
 public:
    /// LTS Phase 4a Stage 2 (tests): true iff every coarse-side seam in-tray is
    /// zero (invariant: must hold at every sync point).
@@ -1575,6 +1587,56 @@ private:
       // correcting cluster has a coarser neighbour (c < num_clusters-1) and the
       // bulk-provider exchange is enabled.  False => diff-0-only.
       bool exchange_forecast = false) const;
+
+   /// LTS Track-A A1 (per-tick exchange merge).  Packs the seam forecast and the
+   /// seam time-integral for ALL clusters correcting at this tick into ONE buffer
+   /// each and performs exactly TWO `ExchangeFaceNbrData` collectives, instead of
+   /// the per-correct pair fired inside `ComputeADERClusterSeamFaceFluxRHS`.  At
+   /// Nc=6 that is 2 rounds/tick x 32 ticks = 64/sync, down from 125.
+   ///
+   /// BITWISE IDENTICAL to the per-correct path, because (see
+   /// document/comm_dev/DESIGN_a1_per_tick_merge_2026-07-24.md):
+   ///  (1) each element carries exactly ONE `lts_cluster_id_`, so the merged packs
+   ///      write DISJOINT slots, and the face loop for cluster c reads the ghost I
+   ///      only at ghosts whose cluster == c (its mode-0/2 classification) -- the
+   ///      other clusters' blocks are present but never read;
+   ///  (2) cluster c writes only `seam_coarse_elems_[c+1]`, disjoint across c;
+   ///  (3) every input is FINAL at the end of the tick's predict phase --
+   ///      `I_cluster` is const in AdvanceADERClusterBulk and `seam_coarse_dk_` is
+   ///      written only by PrepareSeamCoarseForecast (predict).  So reading them
+   ///      once up-front yields the same bytes the per-correct packs would read.
+   ///
+   /// MUST be called on EVERY rank at every tick with the same `correct_clusters`
+   /// (the tick table is rank-uniform): `ExchangeFaceNbrData` is a collective and a
+   /// rank that skips it hangs its peers (the recorded R-1600 failure mode).
+   ///
+   /// @param correct_clusters   cluster ids correcting at this tick (ascending).
+   /// @param n_correct          length of `correct_clusters`.
+   /// @param I_per_cluster      I_[c] for each entry of `correct_clusters`.
+   /// @param dt_per_cluster     each correcting cluster's dt_step at this tick.
+   /// @param forecast_per_cluster  per entry: run the premultiplied forecast for it
+   ///                           (the same predicate the stepper passes as
+   ///                           `exchange_forecast` on the per-correct path).
+   void PrepareClusterSeamExchangeTick(
+      const int *correct_clusters, int n_correct,
+      const Vector *const *I_per_cluster,
+      const real_t *dt_per_cluster,
+      const bool *forecast_per_cluster,
+      mfem::real_t t_s, mfem::real_t dt_base, int tick, mfem::real_t T_actual,
+      int dk_order) const;
+
+   /// Drop the A1 per-tick seam buffers.  Call after the tick's Correct loop so a
+   /// stale buffer can never be read by a later tick (fail-loud, not silently wrong).
+   void ClearClusterSeamExchangeTick() const
+   {
+      tick_seam_buffers_ready_ = false;
+      tick_seam_forecast_done_ = false;
+      tick_fc_all_.clear();
+      tick_nbr_all_.clear();
+   }
+
+   /// True while A1's per-tick buffers hold this tick's exchanged data.
+   bool ClusterSeamExchangeTickReady() const { return tick_seam_buffers_ready_; }
 
    /// LTS Phase 4a: build (once, cached) the per-face-neighbour ghost cluster id
    /// from `lts_cluster_id_`, so the seam corrector can classify a seam face as

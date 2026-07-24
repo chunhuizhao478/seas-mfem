@@ -2602,6 +2602,149 @@ void WaveOperator<MeshType>::EnsureGhostClusterIds_() const
    }
 }
 
+// LTS Track-A A1: per-tick merge of the seam exchanges.  See the header for the
+// bitwise-identity argument and document/comm_dev/DESIGN_a1_per_tick_merge_2026-07-24.md.
+// The pack bodies below are line-for-line the per-correct packs in
+// ComputeADERClusterSeamFaceFluxRHS, wrapped in a loop over the correcting clusters;
+// element sets are disjoint across clusters, so the merged buffer holds exactly the
+// same value at every slot any single-cluster pack would have written.
+template <typename MeshType>
+void WaveOperator<MeshType>::PrepareClusterSeamExchangeTick(
+   const int *correct_clusters, int n_correct,
+   const Vector *const *I_per_cluster,
+   const real_t *dt_per_cluster,
+   const bool *forecast_per_cluster,
+   mfem::real_t t_s, mfem::real_t dt_base, int tick, mfem::real_t T_actual,
+   int dk_order) const
+{
+   MFEM_PERF_SCOPE("seas::WaveOperator::PrepareClusterSeamExchangeTick");
+   if constexpr (!IsParallelMesh<MeshType>::value)
+   {
+      (void)correct_clusters; (void)n_correct; (void)I_per_cluster;
+      (void)dt_per_cluster; (void)forecast_per_cluster;
+      (void)t_s; (void)dt_base; (void)tick; (void)T_actual; (void)dk_order;
+      return;   // serial mesh: no rank seams
+   }
+   else
+   {
+#ifdef MFEM_USE_MPI
+      ClearClusterSeamExchangeTick();
+      if (n_correct <= 0) { return; }
+      MFEM_VERIFY(correct_clusters && I_per_cluster && dt_per_cluster
+                  && forecast_per_cluster,
+                  "PrepareClusterSeamExchangeTick: null argument array.");
+
+      auto *pfes = dynamic_cast<ParFiniteElementSpace *>(fes_.get());
+      MFEM_VERIFY(pfes, "FESpace must be ParFiniteElementSpace for ParMesh.");
+      auto &pmesh = static_cast<const ParMesh &>(mesh_);
+      // Same rank-uniform gate as the per-correct path: a rank with no shared
+      // faces has no face-neighbours, so skipping the P2P exchange cannot desync a
+      // peer.  Leaving the buffers "not ready" makes the corrector take its normal
+      // path, which returns immediately on the very same condition.
+      if (pmesh.GetNSharedFaces() == 0) { return; }
+      MFEM_VERIFY(!lts_cluster_id_.empty(),
+                  "PrepareClusterSeamExchangeTick: LTS cluster ids not set.");
+      MFEM_VERIFY(static_cast<int>(lts_cluster_id_.size()) == ne_,
+                  "PrepareClusterSeamExchangeTick: cluster-id size mismatch.");
+      MFEM_VERIFY(ghost_gf_full_state_ && pfes_full_state_,
+                  "PrepareClusterSeamExchangeTick: batched ghost GF unset.");
+      EnsureSeamCoarseElems_();
+
+      ParGridFunction &q_gf_full = *ghost_gf_full_state_;
+      const std::size_t nfull =
+         static_cast<std::size_t>(NUM_STATE) * static_cast<std::size_t>(ndof_total_);
+      const int block = NUM_STATE * ndof_per_el_;
+
+      // ---- 1. merged FORECAST round (ONE collective for every correcting cluster
+      //         that has a coarser neighbour).  Disjoint: cluster c writes only
+      //         seam_coarse_elems_[c+1].
+      bool any_forecast = false;
+      for (int k = 0; k < n_correct; ++k)
+      { if (forecast_per_cluster[k]) { any_forecast = true; break; } }
+      if (any_forecast)
+      {
+         real_t *qd = q_gf_full.GetData();
+         for (std::size_t j = 0; j < nfull; ++j) { qd[j] = 0.0; }
+         std::vector<real_t> fblk(static_cast<std::size_t>(block), 0.0);
+         for (int k = 0; k < n_correct; ++k)
+         {
+            if (!forecast_per_cluster[k]) { continue; }
+            const int cluster_c = correct_clusters[k];
+            const real_t dt     = dt_per_cluster[k];
+            const int c_coarse  = cluster_c + 1;
+            const long long period = 1LL << c_coarse;
+            const real_t t_origin = t_s + dt_base * static_cast<real_t>(period)
+               * std::floor(static_cast<double>(tick) / static_cast<double>(period));
+            const real_t t_tick = t_s + dt_base * static_cast<real_t>(tick);
+            const real_t a = t_tick - t_origin;
+            const real_t b = std::min(t_tick + dt, t_s + T_actual) - t_origin;
+            if (c_coarse < static_cast<int>(seam_coarse_elems_.size())
+                && !seam_coarse_elems_[c_coarse].empty())
+            {
+               MFEM_VERIFY(dk_order > 0 && dt_base > 0.0,
+                           "PrepareClusterSeamExchangeTick: forecast exchange needs "
+                           "the Stage-2 schedule (dt_base>0) + dk_order>0.");
+               // GAP-A3 (no stale D(k)): identical epoch assertion to the
+               // per-correct path.
+               MFEM_VERIFY(c_coarse < static_cast<int>(seam_coarse_dk_epoch_.size())
+                           && seam_coarse_dk_epoch_[c_coarse] == (tick / period) * period,
+                           "PrepareClusterSeamExchangeTick: stale seam-coarse D(k) "
+                           "for cluster " << c_coarse << " (epoch mismatch).");
+               for (int e : seam_coarse_elems_[c_coarse])
+               {
+                  const int slot =
+                     seam_coarse_slot_of_elem_[c_coarse][static_cast<std::size_t>(e)];
+                  const real_t *stack = seam_coarse_dk_[c_coarse].data()
+                     + static_cast<std::size_t>(slot) * dk_order * block;
+                  IntegrateTaylor(a, b, stack, dk_order, block, fblk.data());
+                  const int off = e * ndof_per_el_;
+                  for (int c = 0; c < NUM_STATE; ++c)
+                     for (int i = 0; i < ndof_per_el_; ++i)
+                     { qd[c * ndof_total_ + off + i] = fblk[c * ndof_per_el_ + i]; }
+               }
+            }
+         }
+         q_gf_full.ExchangeFaceNbrData();
+         ++n_ghost_exchanges_;
+         const Vector &s = q_gf_full.FaceNbrData();
+         tick_fc_all_.assign(s.GetData(), s.GetData() + s.Size());   // DEEP COPY
+         tick_seam_forecast_done_ = true;
+      }
+
+      // ---- 2. merged I round (ONE collective for ALL correcting clusters).
+      //         Disjoint: each element has exactly one lts_cluster_id_.
+      {
+         real_t *qd = q_gf_full.GetData();
+         for (std::size_t j = 0; j < nfull; ++j) { qd[j] = 0.0; }
+         for (int k = 0; k < n_correct; ++k)
+         {
+            const int cluster_c = correct_clusters[k];
+            MFEM_VERIFY(I_per_cluster[k], "PrepareClusterSeamExchangeTick: null I.");
+            MFEM_VERIFY(I_per_cluster[k]->Size() == NUM_STATE * ndof_total_,
+                        "PrepareClusterSeamExchangeTick: I size mismatch.");
+            const real_t *I_data = I_per_cluster[k]->GetData();
+            for (int e = 0; e < ne_; ++e)
+            {
+               if (lts_cluster_id_[static_cast<std::size_t>(e)] != cluster_c)
+               { continue; }
+               const int off = e * ndof_per_el_;
+               for (int c = 0; c < NUM_STATE; ++c)
+                  for (int i = 0; i < ndof_per_el_; ++i)
+                  { qd[c * ndof_total_ + off + i] = I_data[c * ndof_total_ + off + i]; }
+            }
+         }
+      }
+      q_gf_full.ExchangeFaceNbrData();   // 1 collective for all NUM_STATE components.
+      ++n_ghost_exchanges_;
+      {
+         const Vector &s = q_gf_full.FaceNbrData();
+         tick_nbr_all_.assign(s.GetData(), s.GetData() + s.Size());  // DEEP COPY
+      }
+      tick_seam_buffers_ready_ = true;
+#endif
+   }
+}
+
 template <typename MeshType>
 void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
    int cluster_c, const Vector &I_cluster, real_t dt, Vector &rhs,
@@ -2666,7 +2809,22 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
       // reuses q_gf_full and overwrites its FaceNbrData.
       std::vector<real_t> fc_all;   // ghost coarse forecast (deep copy); empty if none
       bool have_forecast = false;
-      if (exchange_forecast)
+      // LTS Track-A A1: when the per-tick pre-pass already exchanged BOTH buffers
+      // for every correcting cluster, skip this call's pack+exchange pair entirely
+      // and read the merged buffers.  Bitwise identical (see the header): the
+      // merged packs write disjoint slots and this loop reads only its own
+      // cluster's.  `prepared` is rank-uniform because the pre-pass is.
+      const bool prepared = tick_seam_buffers_ready_;
+      if (prepared && exchange_forecast)
+      {
+         MFEM_VERIFY(tick_seam_forecast_done_,
+                     "ComputeADERClusterSeamFaceFluxRHS: cluster " << cluster_c
+                     << " needs the coarse forecast but the per-tick pre-pass ran "
+                     "no forecast round (forecast_per_cluster disagreed with "
+                     "exchange_forecast).");
+         have_forecast = true;
+      }
+      if (!prepared && exchange_forecast)
       {
          const int c_coarse = cluster_c + 1;
          const long long period = 1LL << c_coarse;
@@ -2714,6 +2872,7 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
       // byte-identical to the 4a per-component exchange; pack ONLY cluster_c's
       // blocks (byNODES == component-major) and zero the rest.  `nbr_all` is aliased
       // and read across the whole face loop (NOT re-exchanged inside it).
+      if (!prepared)
       {
          real_t *qd = q_gf_full.GetData();
          for (std::size_t j = 0; j < nfull; ++j) { qd[j] = 0.0; }
@@ -2727,9 +2886,25 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
                { qd[c * ndof_total_ + off + i] = I_data[c * ndof_total_ + off + i]; }
          }
       }
-      q_gf_full.ExchangeFaceNbrData();   // 1 collective for all NUM_STATE components.
-      ++n_ghost_exchanges_;
-      const Vector &nbr_all = q_gf_full.FaceNbrData();
+      if (!prepared)
+      {
+         q_gf_full.ExchangeFaceNbrData();   // 1 collective for all NUM_STATE components.
+         ++n_ghost_exchanges_;
+      }
+      // A1: read the merged per-tick buffers when the pre-pass ran, else this
+      // call's freshly-exchanged FaceNbrData.  Same bytes either way.
+      const real_t *nbr_data = prepared
+         ? tick_nbr_all_.data()
+         : q_gf_full.FaceNbrData().GetData();
+      const real_t *fc_data  = prepared ? tick_fc_all_.data() : fc_all.data();
+      const std::size_t nbr_sz = prepared
+         ? tick_nbr_all_.size()
+         : static_cast<std::size_t>(q_gf_full.FaceNbrData().Size());
+      MFEM_VERIFY(!prepared || nbr_sz > 0,
+                  "ComputeADERClusterSeamFaceFluxRHS: A1 per-tick I buffer empty.");
+      MFEM_VERIFY(!have_forecast || (fc_data != nullptr),
+                  "ComputeADERClusterSeamFaceFluxRHS: forecast expected but buffer null.");
+      (void)nbr_sz;
 
       real_t *rhs_data = rhs.GetData();
       std::vector<real_t> forecast_blk(static_cast<std::size_t>(block), 0.0);
@@ -2885,7 +3060,7 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
                   { I_self[c] += shape1(i) * I_data[c * ndof_total_ + dof_offset1 + i]; }
                   for (int i = 0; i < ndof2; ++i)
                   { const int vd = nbr_vdofs[c * ndof2 + i];
-                    I_nbr[c] += shape2(i) * nbr_all[vd >= 0 ? vd : -1 - vd]; }
+                    I_nbr[c] += shape2(i) * nbr_data[vd >= 0 ? vd : -1 - vd]; }
                }
             }
             else if (mode == 1)
@@ -2901,7 +3076,7 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
                   { I_self[c] += shape1(i) * I_data[c * ndof_total_ + dof_offset1 + i]; }
                   for (int i = 0; i < ndof2; ++i)
                   { const int vd = nbr_vdofs[c * ndof2 + i];
-                    I_nbr[c] += shape2(i) * fc_all[vd >= 0 ? vd : -1 - vd]; }
+                    I_nbr[c] += shape2(i) * fc_data[vd >= 0 ? vd : -1 - vd]; }
                }
             }
             else   // mode 2
@@ -2913,7 +3088,7 @@ void WaveOperator<MeshType>::ComputeADERClusterSeamFaceFluxRHS(
                   { I_self[c] += shape1(i) * forecast_blk[c * ndof_per_el_ + i]; }
                   for (int i = 0; i < ndof2; ++i)
                   { const int vd = nbr_vdofs[c * ndof2 + i];
-                    I_nbr[c] += shape2(i) * nbr_all[vd >= 0 ? vd : -1 - vd]; }
+                    I_nbr[c] += shape2(i) * nbr_data[vd >= 0 ? vd : -1 - vd]; }
                }
             }
 
