@@ -1588,6 +1588,8 @@ private:
       // bulk-provider exchange is enabled.  False => diff-0-only.
       bool exchange_forecast = false) const;
 
+public:
+   // --- LTS Track-A A1 (per-tick exchange merge): called by the LTS steppers ---
    /// LTS Track-A A1 (per-tick exchange merge).  Packs the seam forecast and the
    /// seam time-integral for ALL clusters correcting at this tick into ONE buffer
    /// each and performs exactly TWO `ExchangeFaceNbrData` collectives, instead of
@@ -1637,6 +1639,8 @@ private:
 
    /// True while A1's per-tick buffers hold this tick's exchanged data.
    bool ClusterSeamExchangeTickReady() const { return tick_seam_buffers_ready_; }
+
+private:   // restore the enclosing access level (private: at the seam-corrector block)
 
    /// LTS Phase 4a: build (once, cached) the per-face-neighbour ghost cluster id
    /// from `lts_cluster_id_`, so the seam corrector can classify a seam face as

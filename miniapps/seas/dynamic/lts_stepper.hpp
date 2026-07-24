@@ -257,6 +257,19 @@ struct ILtsClusterStepper
    virtual void BeginTick(int /*tick*/) {}
    virtual void Predict(int cluster, mfem::real_t dt_step) = 0;
    virtual void Correct(int cluster, mfem::real_t dt_step) = 0;
+
+   /// LTS Track-A A1 (per-tick exchange merge).  Called ONCE per tick, AFTER every
+   /// Predict and BEFORE the first Correct — the only window in which all of this
+   /// tick's pack inputs are final (I_[c] is produced by Predict; seam_coarse_dk_
+   /// is written only by PrepareSeamCoarseForecast, also on the predict path) and
+   /// no Correct has run yet.  A stepper that merges its seam exchanges packs all
+   /// correcting clusters here and fires ONE collective per buffer.
+   /// Default no-op => steppers that do not merge are unaffected.
+   virtual void BeforeCorrects(const std::vector<int>& /*correct_clusters*/,
+                               const std::vector<mfem::real_t>& /*dt_step*/) {}
+   /// Counterpart to BeforeCorrects: drop any per-tick buffers so a later tick can
+   /// never read stale data.  Default no-op.
+   virtual void AfterCorrects() {}
 };
 
 /// Drive ONE sync interval from a precomputed tick table (Normative Scheduling):

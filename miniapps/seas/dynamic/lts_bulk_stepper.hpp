@@ -26,6 +26,7 @@
 #include "lts_stepper.hpp"
 
 #include <cmath>
+#include <array>
 #include <vector>
 
 namespace mfem
@@ -75,6 +76,47 @@ public:
    /// `LtsGlobalMeta.exchange_bulk_provider_dk` (else the matched-collective count
    /// diverges).  Default off (Stage-1 diff-0 / np=1 behaviour).
    void SetExchangeProviderDk(bool v) { exchange_dk_ = v; }
+
+   /// LTS Track-A A1: merge this tick's per-correct seam exchanges into ONE
+   /// collective per buffer (125 -> 64 rounds/sync at Nc=6).  Opt-in; default OFF
+   /// keeps the per-correct path byte-for-byte.  MUST be set identically on every
+   /// rank (it changes the collective count, which the tick table predicts).
+   void SetMergeTickExchanges(bool v) { merge_tick_exchanges_ = v; }
+   bool MergeTickExchanges() const { return merge_tick_exchanges_; }
+
+   /// A1 merge window (see ILtsClusterStepper::BeforeCorrects).  Packs every
+   /// correcting cluster's seam forecast + time-integral and fires exactly two
+   /// collectives; each Correct below then reads the merged buffers instead of
+   /// exchanging for itself.
+   void BeforeCorrects(const std::vector<int>& correct_clusters,
+                       const std::vector<mfem::real_t>& dt_step) override
+   {
+      if (!merge_tick_exchanges_ || correct_clusters.empty()) { return; }
+      const int n = static_cast<int>(correct_clusters.size());
+      const int nc = static_cast<int>(layout_.clusters.size());
+      MFEM_VERIFY(n <= static_cast<int>(fc_pc_.size()),
+                  "BeforeCorrects: more correcting clusters than the A1 scratch holds.");
+      I_ptrs_.resize(n); dt_pc_.resize(n);
+      for (int k = 0; k < n; ++k)
+      {
+         const int c = correct_clusters[k];
+         MFEM_VERIFY(c >= 0 && c < nc && c < static_cast<int>(I_.size()),
+                     "BeforeCorrects: cluster id out of range.");
+         I_ptrs_[k] = &I_[c];
+         dt_pc_[k]  = dt_step[c];
+         // SAME predicate the per-correct path passes as `exchange_forecast`
+         // (see Correct below): this cluster has a coarser neighbour.
+         fc_pc_[k]  = (exchange_dk_ && c < nc - 1);
+      }
+      wave_.PrepareClusterSeamExchangeTick(
+         correct_clusters.data(), n, I_ptrs_.data(), dt_pc_.data(), fc_pc_.data(),
+         t_s_, dt_base_, tick_, T_actual_, order_);
+   }
+
+   void AfterCorrects() override
+   {
+      if (merge_tick_exchanges_) { wave_.ClearClusterSeamExchangeTick(); }
+   }
 
    void Predict(int c, mfem::real_t dt_step) override
    {
@@ -145,6 +187,12 @@ private:
    int tick_ = 0;
    bool exchange_dk_ = false;   // Stage 2: coarse provider-D(k) ghost exchange
 
+   bool merge_tick_exchanges_ = false;    // A1: per-tick merged seam exchanges
+   std::vector<const mfem::Vector *> I_ptrs_;   // A1 scratch (BeforeCorrects)
+   std::vector<mfem::real_t>         dt_pc_;    // A1 scratch
+   // std::vector<bool> is a bitfield with no bool* data(); clusters are capped at
+   // 62 by BuildTickTable, so a fixed array needs no allocation and yields bool*.
+   std::array<bool, 64>              fc_pc_{};   // A1 scratch
    std::vector<mfem::Vector> I_;          // per-cluster time integral
    std::vector<mfem::Vector> Qn_scratch_; // predictor sub-step scratch (unused output)
    LtsDkStore dk_;

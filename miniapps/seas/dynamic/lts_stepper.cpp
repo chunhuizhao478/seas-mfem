@@ -31,7 +31,10 @@ void RunSyncInterval(const std::vector<LtsTick>& table, ILtsClusterStepper& step
       // final sub-interval contribution reaches the coarse accumulate buffer
       // before the coarse cluster consumes it in this same tick.  The tick table
       // already sorts correct_clusters ascending (== FINE→COARSE).
+      // A1: the merge window — all Predicts done, no Correct started yet.
+      stepper.BeforeCorrects(tk.correct_clusters, tk.dt_step);
       for (int c : tk.correct_clusters) { stepper.Correct(c, tk.dt_step[c]); }
+      stepper.AfterCorrects();
    }
 }
 
