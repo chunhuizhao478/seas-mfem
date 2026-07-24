@@ -28,6 +28,33 @@ Three independent reasons, none of which depends on a projection:
   measured: LTS cuts compute 3.21× (87 % of its 3.68× ceiling) yet leads GTS by only **1.13×**,
   because the wait eats the win. We have already paid for LTS; comm is how we collect.
 
+## A0 RESULT (2026-07-24, jobs 52416603 + 52422891) — first measured milestone
+
+Full write-up: `document/comm_dev/RESULTS_a0_wiggle_2026-07-24.md`.
+
+- **Track A GO, on measurement.** Exposed wait scales *super*-proportionally with the exchange-round
+  rate: rounds ×1.5871 (predicted 1.5873 — 4-decimal agreement) → wait ×1.807.
+- **`lts_wiggle="off"` is a measured 1.370× end-to-end speedup for one config line**, stable through
+  rupture (V_max 17.83 vs 17.69 m/s = 0.80 %, no NaN). 4277 → **3123 s/sim-s**; 17.9× → **13.1×**
+  behind SeisSol. Adopt as default for np≥256.
+- **The wait is NOT bandwidth.** `Isend`+`Irecv` = 6.9 s of 4523 s = **0.15 %**. GTS pushes ~2×
+  the rounds/sim-s of LTS yet waits ~0.00002 % of wall. The LTS wait is **ranks arriving at sync
+  points at different times**. A1–A3 remain right, but the mechanism is *fewer exposure events*, not
+  fewer bytes ⇒ **A4 de-prioritised** (it attacks 0.15 %).
+- **Known-unknown #4 RESOLVED, and it points away from fault imbalance:** skew is **flat through
+  rupture** (24.1 → 24.6 %, Max/Avg 1.73 → 1.72), so the imbalance is **structural** (cluster/partition
+  layout), not rupture-driven. This also replaces the earlier 24 % proxy that was withdrawn for having
+  been measured pre-nucleation.
+- **First measured LTS stage split** (commit `884349a` made it possible): true compute is 47.1 % of
+  step; **the predictor is 39.6–46.6 % of compute, not the 56.2 % the plan assumed** from the GTS
+  proxy. Track B gates must be re-derived against this. The seam corrector's *compute* half (12.0 %
+  of step) is a target that appears in no phase yet.
+- **Independent confirmation:** measured true compute at λ=0.63 = **2015 s/sim-s**, exactly the value
+  the budget below carried as a *derived* term.
+- **New item A5:** `lts_clustering.cpp:compute_cost` minimises element updates with **no communication
+  term** — that is why it chose a λ costing 1.37×. Hardcoding λ=1 is right here but may be wrong at
+  another rank count/mesh; add a comm term to the objective.
+
 ## Where we are (measured only)
 
 | | s/sim-s | provenance |
@@ -53,18 +80,19 @@ justified here by a projected payoff.
 
 | # | work | gate (measured) |
 |---|---|---|
-| **A0** | **λ=1 run (`lts_wiggle="off"`, one deck line, no code).** Also the decisive experiment for the whole track — see below. | exchange rounds/sim-s falls 1.587×; report the change in exposed wait |
+| ~~A0~~ | **DONE 2026-07-24.** λ=1 run. | **PASSED:** rounds ×1.5871, wait ×1.807, **1.370× end-to-end**, stable through rupture. Track A GO. |
 | **A1** | merge per-correct exchanges into per-tick rounds (125 → ~32/sync) | bitwise identical output; exposed wait falls |
 | **A2** | one wait phase per tick | bitwise identical; wait falls further |
 | **A3** | split-post overlap (`NbrExchangerSplit`) | bitwise identical; **plus a liveness gate** |
-| **A4** | sparse payload | only if A0/A1 show bytes, not round count, binding |
+| ~~A4~~ | sparse payload | **DE-PRIORITISED by A0** — wire time is 0.15 % of the wait; bytes are not binding. |
+| **A5** | add a communication term to `lts_clustering.cpp:compute_cost` (counts element updates only — why it chose a λ costing 1.37×) | objective-chosen λ matches hand-set λ=1 at np=256 AND adapts at other rank counts |
 
-**A0 is the highest-value action in this document** and it is one config line. It simultaneously (a)
-measures the wiggle lever and (b) tests the assumption the *entire* track rests on — **whether exposed
-wait scales with exchange-round count at all.** No run has ever varied the round rate; the comm plan's
-payoff model was fitted to a hypothetical. If wait does not scale with rounds, A1–A3 are worth far
-less than believed and we learn it in one run instead of after weeks of engineering. λ=1 is also
-SeisSol's own configuration on this benchmark, so it is not an exotic setting.
+**A0 is DONE (2026-07-24) and it PASSED** — see the A0 RESULT section above. It confirmed the
+assumption the entire track rested on: exposed wait does scale with the exchange-round rate, and
+super-proportionally (1.807× per 1.587×). That converts A1–A3 from a fitted model into
+measurement-backed work. It also delivered a 1.370× end-to-end speedup for one config line, and
+redirected the *mechanism*: the wait is synchronisation exposure, not bandwidth (wire time is
+0.15 % of it), so A1–A3 pay off by removing sync points rather than bytes.
 
 **A3 carries a liveness gate, not just a correctness gate.** Bitwise identity cannot detect this
 code's actual recorded failure mode for exchange changes — the R-1600 unmatched-collective hang
@@ -111,12 +139,12 @@ separate `--lts-face-cache`.
 Verification of the previous plan's numbers returned **43 quantities that cannot be derived from any
 existing artifact.** The ones that would change decisions:
 
-1. **Whether exposed wait scales with exchange-round rate.** → A0 answers it.
-2. **The LTS stage split.** Every Track B per-stage number is a GTS proxy. → instrumentation + one short leg.
+1. ~~Whether exposed wait scales with exchange-round rate.~~ **RESOLVED by A0: yes, super-proportionally (1.807× per 1.587×).**
+2. ~~The LTS stage split.~~ **MEASURED by A0** (predictor 39.6–46.6 % of compute, NOT the assumed 56.2 %; seam-corrector compute 12.0 % of step is unclaimed). **Track B gates must be re-derived against it.**
 3. **MFEM's FLOP count.** → one counter leg.
-4. **The comm skew's real size.** The 24 % skew proxy I previously reported as clearing a gate was
-   measured with `--tfinal 0.5` while nucleation is at t=1.0 — it sampled a window where fault work is
-   near zero *by construction*, so it cannot bound fault-related skew. Treat that gate as **not cleared**.
+4. ~~The comm skew's real size.~~ **RESOLVED by A0's 2 s through-rupture leg: skew is FLAT (24.1 →
+   24.6 %, Max/Avg 1.73 → 1.72), so the imbalance is STRUCTURAL, not fault-driven.** This supersedes
+   the withdrawn pre-nucleation proxy.
 5. **Which rank is actually on the critical path.** The fault-imbalance argument assumes the
    max-friction rank is the straggler; nobody has checked. The shared-face stage's spread is *larger*
    in wall-seconds (225.9 s vs 196.3 s excess) and is the better suspect.
