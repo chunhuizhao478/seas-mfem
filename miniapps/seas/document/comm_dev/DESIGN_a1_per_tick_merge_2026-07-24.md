@@ -90,17 +90,30 @@ face loops, their fine→coarse order, step 2c's scatter and step 2d's consume a
 
 ## Acceptance
 
-1. **Bitwise identity** — TPV104-200m, np≥2, flag ON vs OFF: identical fault output bytes and
-   identical final `V_max` digits. This is the primary gate; A1 claims no tolerance.
-2. **Liveness** (per the plan's A3 note, applies here too): the merged pre-pass must fire on **every**
-   rank at every tick, matched. `ExchangeFaceNbrData` is a collective — a rank that skips it because
-   its local `correct_clusters` is empty would hang the job (the recorded R-1600 failure mode,
-   `wave_operator.inl:3661-3672`). The tick table is rank-uniform, so `correct_clusters` is identical
-   on all ranks; **assert it** rather than assume.
-3. **Round count** — `GhostExchangeCount()` must equal 64/sync at Nc=6, and the existing matched
-   -collective `MFEM_VERIFY` in the driver (`spatial_dyn_driver.cpp:~4643`) must be updated to the
-   new expected count or it will abort.
-4. **Wait falls** — re-run the A0 harness; expect ~1.24× end-to-end.
+**A1 needs BOTH a local gate and an Expanse run. They answer different questions.**
+
+*Local (np ≤ 10, small fixture — never the production mesh):*
+1. **Bitwise identity**, flag ON vs OFF, on a small multi-cluster fixture: identical output bytes.
+   Bitwise identity is a *machine-independent* property, so a laptop settles it as well as a
+   supercomputer — this is the primary correctness gate and A1 claims no tolerance. Pattern to follow:
+   `tests/parallel/test_bimaterial_seam_fault_np2.cpp` (there is no LTS-specific parallel test yet;
+   A1 must add one).
+2. **Liveness** at np=2: the merged pre-pass is a collective and must fire on **every** rank at every
+   tick, matched. A rank that skips it because its local `correct_clusters` looks empty hangs the job
+   (the recorded R-1600 mode, `wave_operator.inl:3661-3672`). This reproduces at np=2 — no cluster
+   needed. The tick table is rank-uniform, so assert that rather than assume it.
+3. **Round count** — `GhostExchangeCount()` = 2/tick, and `BuildTickTable`'s `n_collectives` updated
+   to match, else the driver's matched-collective `MFEM_VERIFY` aborts.
+
+*Expanse (np=256, TPV104-200m) — REQUIRED, not optional:*
+4. **Production bitwise identity** at the real scale and rank count. The local fixture cannot exercise
+   the partition, the 6-cluster layout, or rank seams at np=256.
+5. **The payoff.** ~1.24× is a *projection*; wait behaviour at 256 ranks sharing 2 nodes cannot be
+   inferred from 10 local ranks. This project has been burned twice by exactly that transfer — the
+   kernel bench **reversed its verdict** between laptop and Rome, and the stage split inverted between
+   GTS-proxy and the real LTS leg. **No speed claim for A1 is admissible without this run.**
+Reuse the A0 harness for (4)+(5) — same deck, same 256 ranks, flag ON vs OFF as the two legs, so the
+comparison is a same-job A/B with everything else identical (the cleanliness A0 established).
 
 ## Risks
 
