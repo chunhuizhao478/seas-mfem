@@ -141,7 +141,7 @@ bitwise ON-vs-OFF gate (1032e68); fault-interleave stepper wiring (this commit).
 
 trending to the predicted 125 -> 64 = 1.95x at production Nc=6.
 
-### ⚠ COVERAGE GAP — read before submitting to Expanse
+### ~~⚠ COVERAGE GAP~~ — CLOSED 2026-07-24
 
 `LtsFaultSyncStepper` has **no test anywhere in the repo** (`grep -l LtsFaultSyncStepper
 tests/` is empty), and the production TPV104 deck runs **that** stepper, not the bulk one.
@@ -154,3 +154,24 @@ but identical code is not tested code.
 **not optional and not merely a scale check** — it is the *only* evidence that will exist for
 the fault path. Run the A/B as ON-vs-OFF and compare fault output bytes **before** reading any
 timing. A speed number from an unverified path is worth nothing.
+
+
+### Coverage gap CLOSED (2026-07-24)
+
+`tests/unit/test_lts_a1_merge_fault_np2.cpp` now gates the fault-interleave stepper with the
+same ON-vs-OFF `memcmp`. **Both LTS steppers are proven bitwise-identical**, with identical
+results:
+
+| fixture | bulk stepper | fault stepper | collectives |
+|---|---:|---:|---|
+| np=2, 2 clusters | 138/138 | **138/138** | 38 -> 30 (1.27x) |
+| np=3, 3 clusters | 207/207 | **207/207** | 102 -> 62 (1.65x) |
+| np=4, 4 clusters | 276/276 | **276/276** | 230 -> 126 (1.83x) |
+
+The fixture deliberately has **zero fault faces**: A1 does not touch the fault half (D-2 keeps
+fault faces rank-interior, so it fires no seam collectives), so a fault-free fault-stepper
+exercises 100 % of A1's delta there while needing no friction physics. The mock iterator's
+`Advance` aborts if ever reached, so the assumption fails loudly if the fixture drifts.
+
+Consequence: the Expanse production-bitwise check is back to being a *scale* check rather than
+the only evidence for the fault path. Still run it ON-vs-OFF before reading timing.
