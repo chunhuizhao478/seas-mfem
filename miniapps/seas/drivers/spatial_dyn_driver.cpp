@@ -1039,6 +1039,12 @@ int main(int argc, char *argv[])
    // predicted element-update speedups, then exit.  IMPLIES --dry-run (report
    // and quit before any stepping).
    const bool lts_report      = HasFlag(argc, argv, "--lts-report");
+   // LTS Track-A A1: merge the per-correct seam exchanges into ONE collective
+   // per buffer per tick (125 -> 64 rounds/sync at Nc=6).  Opt-in; bitwise
+   // identical by construction (document/comm_dev/DESIGN_a1_per_tick_merge_2026-07-24.md).
+   // Bulk (fault-free) LTS path only -- the fault-interleave stepper is not
+   // wired yet and the flag is refused there rather than silently ignored.
+   const bool lts_merge_exch = HasFlag(argc, argv, "--lts-merge-exchanges");
    const bool dry_run         = HasFlag(argc, argv, "--dry-run") || lts_report;
    const bool verify_dispatch = HasFlag(argc, argv, "--verify-dispatch");
    const bool no_sidecar_material =
@@ -4604,6 +4610,11 @@ int main(int argc, char *argv[])
       // to `lts_meta`, so this update is visible to the loop below.
       lts_meta.exchange_bulk_provider_dk = (nprocs > 1 && cl.num_clusters > 1);
       stepper.SetExchangeProviderDk(lts_meta.exchange_bulk_provider_dk);
+      // A1 (opt-in): the tick table PREDICTS the collective count, so the meta
+      // flag and the stepper flag must be set from the same value or the driver's
+      // matched-collective VERIFY aborts (P-007).
+      lts_meta.merge_tick_seam_exchanges = lts_merge_exch;
+      stepper.SetMergeTickExchanges(lts_merge_exch);
       if (rank == 0)
       {
          std::cout << "[lts] STEPPING (rate2, fault-free bulk): Nc = "
@@ -4729,6 +4740,14 @@ int main(int argc, char *argv[])
       // with >1 cluster (consistent with the tick-table matched-collective count).
       lts_meta.exchange_bulk_provider_dk = (nprocs > 1 && cl.num_clusters > 1);
       stepper.SetExchangeProviderDk(lts_meta.exchange_bulk_provider_dk);
+      // A1 is NOT wired into the fault-interleave stepper yet (it has no
+      // BeforeCorrects override), so enabling the merge here would make the tick
+      // table predict 64 rounds while the stepper still fires 125 -> a
+      // matched-collective ABORT mid-run.  Refuse up front instead.
+      MFEM_VERIFY(!lts_merge_exch,
+                  "spatial_dyn: --lts-merge-exchanges is not supported on the LTS "
+                  "fault-interleave path yet (bulk-only; see document/comm_dev/"
+                  "DESIGN_a1_per_tick_merge_2026-07-24.md).  Re-run without it.");
       if (rank == 0)
       {
          std::cout << "[lts] STEPPING (rate2, fault interleave): Nc = "

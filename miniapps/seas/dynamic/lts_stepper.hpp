@@ -56,6 +56,15 @@ struct LtsGlobalMeta
    /// ader_order collectives each.)  Set by the driver/test for np>1 multi-cluster
    /// runs; false keeps Stage-1 (diff-0) + single-rank counts unchanged.
    bool exchange_bulk_provider_dk = false;
+   /// LTS Track-A A1 (per-tick exchange merge): when true, the seam I-exchange and
+   /// the seam forecast exchange are each fired ONCE PER TICK for ALL correcting
+   /// clusters together, instead of once per correcting cluster.  At Nc=6 that is
+   /// 2 rounds/tick = 64/sync, down from 125.  MUST be set identically to the
+   /// stepper's SetMergeTickExchanges(): this field is what the tick table predicts
+   /// as `n_collectives`, and the driver ABORTS on a mismatch (P-007 matched
+   /// collectives).  Does NOT affect the fault predictor-substep term below, which
+   /// is on the predict path and untouched by A1.
+   bool merge_tick_seam_exchanges = false;
 };
 
 /// One tick of a sync interval (Appendix A.3).
@@ -137,7 +146,12 @@ inline std::vector<LtsTick> BuildTickTable(int num_clusters,
       // collective per correcting cluster (was num_state per-component in 4a), so
       // the I term is 1*|correct|.  Plus ader_order predictor exchanges per
       // predicting cluster with GLOBAL fault faces (dropped under D-2).
-      int nx = static_cast<int>(tk.correct_clusters.size());
+      // A1: the seam I-exchange is ONE batched collective per correcting cluster
+      // (4b), or -- under the per-tick merge -- ONE for the whole tick regardless
+      // of how many clusters correct.
+      int nx = meta.merge_tick_seam_exchanges
+               ? (tk.correct_clusters.empty() ? 0 : 1)
+               : static_cast<int>(tk.correct_clusters.size());
       if (!meta.drop_fault_predictor_exchange)
       {
          for (int c : tk.predict_clusters)
@@ -157,9 +171,22 @@ inline std::vector<LtsTick> BuildTickTable(int num_clusters,
       // fault-predictor term above.)
       if (meta.exchange_bulk_provider_dk)
       {
-         for (int c : tk.correct_clusters)
+         if (meta.merge_tick_seam_exchanges)
          {
-            if (c < num_clusters - 1) { nx += 1; }
+            // A1: one merged forecast round iff ANY correcting cluster has a
+            // coarser neighbour (matches PrepareClusterSeamExchangeTick, which
+            // fires the forecast round iff any forecast_per_cluster is set).
+            bool any_forecast = false;
+            for (int c : tk.correct_clusters)
+            { if (c < num_clusters - 1) { any_forecast = true; break; } }
+            if (any_forecast) { nx += 1; }
+         }
+         else
+         {
+            for (int c : tk.correct_clusters)
+            {
+               if (c < num_clusters - 1) { nx += 1; }
+            }
          }
       }
       tk.n_collectives = nx;

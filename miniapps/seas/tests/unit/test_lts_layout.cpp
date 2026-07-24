@@ -346,6 +346,78 @@ static void test_checkpoint_decision()
    CHECK(LtsCheckpointCheck(2, /*lts*/true,  h, h + 1) == D::RefuseHashMismatch); // mismatch -> refuse
 }
 
+
+// ---------------------------------------------------------------------------
+// LTS Track-A A1: the per-tick exchange merge must be predicted EXACTLY by
+// BuildTickTable, because the driver aborts on a matched-collective mismatch
+// (P-007) -- at np=256 that is a wasted job, so it is pinned here.
+static void test_tick_table_a1_merge()
+{
+   LtsGlobalMeta meta;
+   meta.global_elems.assign(6, 100);
+   meta.global_fault_faces.assign(6, 0);
+   meta.num_state = 9;
+   meta.drop_fault_predictor_exchange = true;
+   meta.exchange_bulk_provider_dk     = true;   // forecast rounds active
+
+   // Nc=6 => 32 ticks/sync: the production TPV104-200m configuration.
+   const int Nc = 6;
+   const mfem::real_t dtb = 1.0;
+   const mfem::real_t T   = static_cast<mfem::real_t>(1 << (Nc - 1)) * dtb;
+
+   meta.merge_tick_seam_exchanges = false;
+   std::vector<LtsTick> per = BuildTickTable(Nc, dtb, T, 4, meta);
+   meta.merge_tick_seam_exchanges = true;
+   std::vector<LtsTick> mrg = BuildTickTable(Nc, dtb, T, 4, meta);
+
+   CHECK_EQ(per.size(), 32u);
+   CHECK_EQ(mrg.size(), 32u);
+
+   long long n_per = 0, n_mrg = 0;
+   for (const auto &tk : per) { n_per += tk.n_collectives; }
+   for (const auto &tk : mrg) { n_mrg += tk.n_collectives; }
+   // The measured production counts: 63 I + 62 forecast = 125/sync per-correct,
+   // and exactly 2/tick x 32 = 64 merged.
+   CHECK_EQ(n_per, 125);
+   CHECK_EQ(n_mrg, 64);
+
+   // Per tick, the merged count is 1 (I) + 1 (forecast) whenever anything
+   // corrects -- independent of HOW MANY clusters correct.  That independence is
+   // the whole point of the merge, so check a tick where many clusters correct.
+   for (std::size_t t = 0; t < mrg.size(); ++t)
+   {
+      const bool any_correct = !mrg[t].correct_clusters.empty();
+      bool any_forecast = false;
+      for (int c : mrg[t].correct_clusters)
+      { if (c < Nc - 1) { any_forecast = true; break; } }
+      const int want = (any_correct ? 1 : 0) + (any_forecast ? 1 : 0);
+      CHECK_EQ(mrg[t].n_collectives, want);
+      // and the merge never costs MORE than the per-correct path
+      CHECK(mrg[t].n_collectives <= per[t].n_collectives);
+   }
+   // The last tick corrects EVERY cluster (all steps close at the sync point):
+   // per-correct pays 6 + 5 = 11 collectives there, merged pays 2.
+   CHECK_EQ(per[31].correct_clusters.size(), static_cast<std::size_t>(Nc));
+   CHECK_EQ(per[31].n_collectives, 11);
+   CHECK_EQ(mrg[31].n_collectives, 2);
+
+   // Merging must NOT touch the fault predictor-substep term (predict path).
+   meta.drop_fault_predictor_exchange = false;
+   meta.global_fault_faces.assign(6, 5);          // every cluster has fault faces
+   meta.merge_tick_seam_exchanges = false;
+   std::vector<LtsTick> pf = BuildTickTable(Nc, dtb, T, 4, meta);
+   meta.merge_tick_seam_exchanges = true;
+   std::vector<LtsTick> mf = BuildTickTable(Nc, dtb, T, 4, meta);
+   long long fault_term_per = 0, fault_term_mrg = 0;
+   for (std::size_t t = 0; t < pf.size(); ++t)
+   {
+      fault_term_per += pf[t].n_collectives - per[t].n_collectives;
+      fault_term_mrg += mf[t].n_collectives - mrg[t].n_collectives;
+   }
+   CHECK_EQ(fault_term_per, fault_term_mrg);      // identical predictor cost
+   CHECK(fault_term_per > 0);                     // and it is actually exercised
+}
+
 int main()
 {
    test_chain_roles();
@@ -353,6 +425,7 @@ int main()
    test_global_meta();
    test_tick_table();
    test_tick_table_ragged();
+   test_tick_table_a1_merge();
    test_layout_hash();
    test_checkpoint_decision();
 
