@@ -1,0 +1,112 @@
+# A1 — per-tick exchange merge (125 → 64 rounds/sync): design + correctness proof
+
+**Date:** 2026-07-24 · **Status: design complete, preconditions VERIFIED IN SOURCE, ready to implement.**
+**Target:** 125 → 64 exchange rounds/sync at Nc=6 (comm plan Phase 1). A2 takes 64 → 32.
+**Estimated payoff:** wait 1251 → ~641 s/sim-s ⇒ **~1.24× end-to-end** (3123 → 2512 s/sim-s,
+13.1× → 10.5× SeisSol). Projected from A0's measured scaling law, linear case.
+
+## Current structure
+
+Per tick, the stepper loops over `tk.correct_clusters` (sorted ascending = fine→coarse). For **each**
+correcting cluster it calls `AdvanceADERClusterBulk` → step 2c → `ComputeADERClusterSeamFaceFluxRHS`,
+which does its **own** pack + `ExchangeFaceNbrData`:
+
+| exchange | fired by | per sync (Nc=6) |
+|---|---|---:|
+| forecast (`wave_operator.inl:2706`) | every Correct(c), c < Nc−1 | 62 |
+| batched I (`:2730`) | every Correct(c) | 63 |
+| **total** | | **125** |
+
+Round count verified against measurement: 171 syncs × 125 × 2 Waitall/round = 42,750 vs the
+**42,686** calls/rank Caliper recorded in job 52422891 (0.15 %; the remainder is the truncated final sync).
+
+## The change
+
+Hoist both packs+exchanges out of the per-cluster call into a **per-tick pre-pass** that packs *all*
+correcting clusters into one buffer and exchanges **once** per buffer:
+
+```
+per tick:
+   ... all Predicts ...
+   PrepareClusterSeamExchangeTick(correct_clusters, {I_[c]}, {dt_step[c]}, ...)   // 2 exchanges
+   for c in correct_clusters:            // unchanged order, fine -> coarse
+       AdvanceADERClusterBulk(c, ...)    // step 2c now READS the pre-exchanged buffers
+```
+
+⇒ **2 rounds/tick × 32 ticks = 64/sync**, independent of how many clusters correct.
+
+New method (`wave_operator.hpp`, implemented in the `.inl`):
+
+```cpp
+void PrepareClusterSeamExchangeTick(
+    const int *correct_clusters, int n_correct,
+    const mfem::Vector *const *I_per_cluster,   // I_[c], one per correcting cluster
+    const real_t *dt_step_per_cluster,
+    real_t t_s, real_t dt_base, int tick, real_t T_actual,
+    const real_t *dk_data, int dk_order, const int *provider_slot_of_elem,
+    bool exchange_forecast) const;
+```
+
+It fills two members, `tick_fc_all_` and `tick_nbr_all_` (deep copies, since the second exchange
+clobbers `FaceNbrData()` — this is why the existing code already deep-copies `fc_all`).
+`ComputeADERClusterSeamFaceFluxRHS` gains a "buffers already prepared" path that skips its own
+pack+exchange and reads those members. Behind an opt-in flag; default = today's per-correct path.
+
+## Why this is bitwise identical — three preconditions, all VERIFIED IN SOURCE
+
+**(1) The I buffer's extra blocks are never read.** The face loop classifies every shared face by
+*both* sides' cluster ids (`wave_operator.inl:~2759`):
+
+```
+if      (c1 == cluster_c     && c_nbr == cluster_c)     mode = 0;   // reads nbr_all @ cluster_c
+else if (c1 == cluster_c     && c_nbr == cluster_c + 1) mode = 1;   // coarse side from fc_all
+else if (c1 == cluster_c + 1 && c_nbr == cluster_c)     mode = 2;   // reads nbr_all @ cluster_c
+else                                                    continue;   // not incident -> skipped
+```
+
+`nbr_all` is read **only** at ghost elements whose cluster == `cluster_c` (modes 0 and 2). Mode 1's
+coarse side comes from the *forecast* buffer, not `nbr_all`. Each element carries exactly one
+`lts_cluster_id_`, so packing other correcting clusters writes **disjoint** slots that cluster c's
+loop never touches.
+
+**(2) The forecast buffer's extra blocks are disjoint.** Cluster `c` writes only
+`seam_coarse_elems_[c+1]`. Different `c` ⇒ different index ⇒ disjoint element sets (one cluster id
+per element). Each cluster keeps its own `[a,b]` sub-interval, applied to its own elements.
+
+**(3) No correct mutates a hoisted pack's inputs.** This is the hazard that would have killed A1 —
+hoisting reads *earlier* than today, so any write by an earlier-correcting cluster would change the
+bytes. Verified it cannot happen:
+- `I_cluster` is **`const Vector &`** in `AdvanceADERClusterBulk` (`:2194`) — a correct never
+  mutates its own or any other cluster's `I`. `I_` is per-cluster storage (`lts_bulk_stepper.hpp:148`).
+- `seam_coarse_dk_` has exactly **one** write site, `PrepareSeamCoarseForecast` (`:3033`), which is
+  called from the **Predict** phase only (`lts_bulk_stepper.hpp:93`, `lts_fault_stepper.hpp:293`).
+
+⇒ Every input to the merged pack is final at the end of the tick's predict phase. **Inserting the
+pre-pass after all Predicts and before the first Correct reads exactly the bytes the per-correct
+packs read today.**
+
+**Ordering is untouched.** Only the pack+exchange (pure data movement) is hoisted. The per-cluster
+face loops, their fine→coarse order, step 2c's scatter and step 2d's consume all stay where they are.
+
+## Acceptance
+
+1. **Bitwise identity** — TPV104-200m, np≥2, flag ON vs OFF: identical fault output bytes and
+   identical final `V_max` digits. This is the primary gate; A1 claims no tolerance.
+2. **Liveness** (per the plan's A3 note, applies here too): the merged pre-pass must fire on **every**
+   rank at every tick, matched. `ExchangeFaceNbrData` is a collective — a rank that skips it because
+   its local `correct_clusters` is empty would hang the job (the recorded R-1600 failure mode,
+   `wave_operator.inl:3661-3672`). The tick table is rank-uniform, so `correct_clusters` is identical
+   on all ranks; **assert it** rather than assume.
+3. **Round count** — `GhostExchangeCount()` must equal 64/sync at Nc=6, and the existing matched
+   -collective `MFEM_VERIFY` in the driver (`spatial_dyn_driver.cpp:~4643`) must be updated to the
+   new expected count or it will abort.
+4. **Wait falls** — re-run the A0 harness; expect ~1.24× end-to-end.
+
+## Risks
+
+| risk | mitigation |
+|---|---|
+| the matched-collective invariant aborts (it hardcodes today's count) | update `n_collectives` in `BuildTickTable` for the merged mode; it is the same code that predicts the count |
+| a rank with no correcting clusters skips the collective → hang | tick table is rank-uniform; assert `correct_clusters` identical across ranks in debug |
+| deep-copy cost of two full halo buffers per tick | replaces 125 halo exchanges with 64 + 2 copies; the copies are local memcpy vs network round trips |
+| structural skew floor (19–24 % of wait, flat through rupture) | A1 cannot remove it — if it binds, A1 lands nearer 1.15× than 1.24×. Not a correctness risk, a payoff risk. |
