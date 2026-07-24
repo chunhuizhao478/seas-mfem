@@ -155,6 +155,39 @@ Fault/friction is **not closed**: it is out of scope as a *kernel* target (0.65 
 
 ## Appendix — projections (NOT load-bearing; wrong here costs nothing)
 
+### Speedup inventory (2026-07-24) — sized against the MEASURED post-A0 stage split
+
+Baseline 4277 s/sim-s = 17.9× SeisSol as-run. Sizes come from the measured LTS split
+(`RESULTS_a0_wiggle_2026-07-24.md`), gains are projections except where marked.
+
+| # | item | targets | saves | running | vs SeisSol | confidence |
+|---|---|---|---:|---:|---:|---|
+| **A0** | `lts_wiggle="off"` | sync count | **1154** | **3123** | **13.1×** | **MEASURED — banked** |
+| **A1** | merge 125→32 rounds/sync | wait (1251) | 931 | 2192 | 9.2× | projected from A0's law |
+| A2 | one wait phase per tick | residual wait | 42 | 2150 | 9.0× | low |
+| A3 | split-post overlap | residual wait | 72 | 2078 | 8.7× | low; anti-synergistic with B |
+| A5 | comm term in objective | — | 0 | 2078 | 8.7× | generalises A0; no new gain at np=256 |
+| **B1+B2** | predictor fusion → tiling | predictor (871) | 653 | 1425 | 6.0× | bench-backed, not in-solver; B1,B2 do NOT add |
+| B3 | face-cache → LTS corrector | corrector-rest | 93 | 1332 | 5.6× | ±2× error bar |
+| B4 | volume tiling | corrector-rest | 143 | 1189 | 5.0× | ASSUMED — no bench of this stage anywhere |
+| — | seam-corrector compute | seam (246) | 82 | 1107 | 4.6× | ASSUMED — in no phase yet |
+
+**Endpoint if everything lands: ~1107 s/sim-s ≈ 4.6× SeisSol.** Read it as "~5×, maybe".
+
+Three structural facts this table encodes:
+1. **A1 + B1/B2 carry ~80 % of the remaining gain** (931 + 653 of ~1900). A2/A3 return 114 combined
+   because A1 already took the round-count win they shared.
+2. **Neither track suffices alone.** Perfect comm / untouched kernels floors at **7.8×**; perfect
+   kernels / untouched comm floors at **5.2×**. Under ~5× needs both.
+3. **Confidence decreases down the table** — A0 measured, A1 one extrapolated data point, B4 and the
+   seam item are unbenchmarked assumptions.
+
+**Not in this table, and it should be:** the structural imbalance A0 found. 19–24 % of the wait is
+rank spread that merging cannot remove, and it is flat through rupture. If that floor binds, A1 lands
+nearer 1.3× than 1.42× and the whole A column shrinks. Only rebalancing touches it; nobody has sized
+it. **Parity with SeisSol is not in this table** — the honest endpoint is ~5×.
+
+
 Recorded so intent is legible, and quarantined so no correction forces a re-issue. Only the predictor
 factor has any benchmark behind it; the face and volume factors are assumptions, and the predictor's
 4× is a point estimate chosen from a 2.3–8.3× contended range.
