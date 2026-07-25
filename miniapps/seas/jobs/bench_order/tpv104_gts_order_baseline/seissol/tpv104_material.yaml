@@ -1,0 +1,8 @@
+!ConstantMap
+# SCEC TPV104 homogeneous elastic half-space (identical to TPV102/TPV103/205).
+#   Vs = sqrt(mu/rho)        = 3464 m/s
+#   Vp = sqrt((lambda+2mu)/rho) = 6000 m/s
+map:
+  rho:    2670
+  mu:     32038120320
+  lambda: 32043759360

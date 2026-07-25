@@ -1,0 +1,271 @@
+! =====================================================================
+! SCEC TPV104 200 m  --  GTS SPEED BASELINE, SeisSol leg  ORDER = 4.
+! Accuracy-matched partner of the MFEM leg  [mesh].order = 3 + [numerics].ader_order = 4
+! (SeisSol convention o = p + 1; both codes carry 20 modes x 9 quantities per tet).
+!
+! ---------------------------------------------------------------------
+! *** ORDER IS COMPILE-TIME IN SEISSOL.  THIS FILE DOES NOT, AND CANNOT,
+! *** SET IT.  There is no ORDER key anywhere below.  Run this par with
+! *** THIS BINARY AND NO OTHER:
+! ***
+! ***   SEISSOL_ROOT=/expanse/projects/qstore/usc143/qwxdev/apps/expanse/rocky8.8/seisol_build
+! ***   $SEISSOL_ROOT/SeisSol/build-rome-o4-elastic/seissol-elastic-o4-f64
+! ***
+! *** This binary ALREADY EXISTS (built 2026-07-14 from commit
+! *** dc6db65133a999eb38c578c14cc443df1000dfd0 = v1.3.1-2135-gdc6db6513; the
+! *** version + commit strings are embedded in the executable and the build job
+! *** now ASSERTS them).  DO NOT git pull / checkout in that source tree before
+! *** the o2 and o3 builds -- o2/o3 must come from this same commit or the order
+! *** comparison is a source-revision comparison.  (Note: build-rome-o5-elastic is
+! *** a DIFFERENT, older commit v1.3.1-2132-gc177eba67 and must not be used as a
+! *** reference here.)
+! *** Launch -- from the staged Lustre run directory, with the baseline's OWN runner:
+! ***   cd /expanse/lustre/projects/lbl107/czhao1/safs/tpv104_gts_order
+! ***   sbatch --export=ALL,BENCH_SS_LEGS="4" run_seissol_gts_orders.sbatch
+! *** (or plain `sbatch run_seissol_gts_orders.sbatch` for all three legs, o2->o3->o4).
+! *** That runner selects THIS deck and the o4 binary itself (par_for / exe_for);
+! *** there is no SEISSOL_EXE override and NO rename to `parameters.par`.  Do NOT
+! *** use jobs/lts_phase5/.../run_tpv104_200m_seissol_expanse.sbatch -- it is the
+! *** LTS + IO-ON experiment's runner, it hard-codes the filename `parameters.par`,
+! *** it gates none of the keys that define this baseline, and it headlines a speed
+! *** number computed from the init-inclusive job wall.
+! ---------------------------------------------------------------------
+!
+! PRE-REGISTERED PREDICTIONS for this leg (gate the run on them; any mismatch
+! means the wrong binary, a drifted mesh, or a changed CFL -- the leg is VOID):
+!   log line  "Minimum timestep: 366.1280 mus"      (dt = 3.66128e-4 s)
+!             = the VERIFIED reference value (o2/o3 are derived from it as
+!               dt x 7/(2*o-1)); MFEM p3 independently computed the same
+!               3.66128e-4 s to 6 digits at CFL 0.5.
+!   steps to EndTime = ceil(2.0 / dt)               = 5463
+!   element-updates  = 2,464,689 tets x 5463        = 1.34646e10
+!   MFEM p3 must print the SAME "[time] dt" to 6 digits (identical CFL formula:
+!   GlobalTimestep.cpp:45-46 cfl*2*insphere/(vp*(2*O-1))  ==  MFEM
+!   wave_operator.inl:7728 x CflSafetyFactor 1/(cfl_dg_safety*(2N+1)), with
+!   MFEM run at --cfl-dg-safety 1.0).
+!
+! GTS GATES (all three must appear in the log, else this is not a GTS run):
+!   1. "GTS has been selected."                                    (LtsWeights.cpp:124)
+!   2. "Theoretical speedup to GTS: ... 1 clustered LTS (current setup)"  -- EXACTLY 1
+!      (the prior LTS run of this deck read 6.60318 clustered)
+!   3. "Cluster histogram (cells, DR faces):" followed by ONE row:  0 : 2464689 , 37904
+!      (the prior LTS run printed 7 rows)
+!   4. EXACTLY ONE "Start simulation epoch. (from 0 s to 2 s)" / "End simulation
+!      epoch. (at 2 s; total 100 % done)" pair -- >1 pair means an output module
+!      survived the IO-off edit and re-introduced sync points (which also clips dt
+!      and inflates the step count).
+!
+! R6 READOUT -- scrape ONLY the terminal lines (Simulator.cpp:149-151):
+!   "Simulation time (total):"        "Simulation time (compute):"   <-- THE WALL
+!   PIN THE STATISTIC: Stopwatch::print (Monitoring/Stopwatch.cpp:69-76) writes
+!   <mean> (per rank: (<mean> +- <std>) s ; range: [<min>, <max>]) -- the LEADING
+!   value is the MEAN over ranks, while MFEM's Caliper wall is a MAX over ranks.
+!   Take `max` from the range field for the HEADLINE cross-code ratio (a bulk-
+!   synchronous step ends when the LAST rank arrives) and report mean-vs-mean
+!   beside it.  Mixing the two credits SeisSol with its ~6.4% load imbalance --
+!   the same magnitude as the 240-vs-256 core caveat below.
+!   "Simulation time (blocking IO):"  "Time spent for initial IO:"
+!   DO NOT scrape "Time spent this epoch (compute)": Stopwatch::split() measures
+!   from epoch start and therefore DOUBLE-COUNTS that epoch's IO.
+!   Cross-checks, all free: LoopStatistics "<region> ( per element )" regression
+!   slopes, "Load imbalance:", "Total calculated HW-FLOP", and the last
+!   "Max cluster / LTS cycle updates since sync: <N>" (require |N - 5463| < 100).
+!   Core denominator: publish BOTH 256 allocated cores and 240 active
+!   (OMP_NUM_THREADS=15 x 16 ranks, SEISSOL_COMMTHREAD=0). Do NOT "fix" that --
+!   the idle comm core is the validated production shape (fairness rule R5).
+!
+! PROVENANCE: cloned verbatim from
+!   jobs/lts_phase5/tpv104_200m_seissol_expanse/parameters.par
+! Same mesh as the MFEM legs: tpv104.puml.h5 is pumgen's conversion of a
+! byte-for-byte copy of miniapps/seas/tpv104/mesh/tpv104_200m.msh
+! (.msh md5 e88ae223205530548b1d3438e6eb17c1; puml md5 5911b0b4ec29a8f61968d5b32ed0a11c;
+!  2,464,689 tets, 37,904 DR faces).  The companion tpv104_{fault,material}.yaml and
+!  tpv104_{receivers,faultreceivers}.dat now live IN THIS FOLDER, so one rsync of
+!  seissol/ + the .puml.h5 stages a complete, self-contained run directory.
+!
+! DELTAS vs that template (10 lines; every one is a fairness-rule requirement):
+!   R1  ClusteredLTS        2 -> 1     GTS (LtsWeights.cpp:123-125). NOTHING ELSE
+!                                      added: with rate 1 the code force-sets
+!                                      maxClusterIdToEnforce = 0 and skips the
+!                                      wiggle/merge branch, so LtsWiggleFactorMin /
+!                                      LtsAutoMergeClusters / LtsMaxNumberOfClusters
+!                                      would be inert or trip isWiggleFactorValid.
+!   R4  OutputPointType     5 -> 0     kills BOTH &Elementwise fault output and the
+!                                      9 &Pickpoint on-fault ascii receivers, which
+!                                      ran INSIDE the compute stopwatch
+!                                      (TimeCluster.cpp:756, 803).
+!   R4  SurfaceOutput       1 -> 0     kills free-surface writes AND the PGV fold,
+!                                      which sampled at EVERY local timestep inside
+!                                      the compute region (TimeCluster.cpp:905;
+!                                      PeakGroundMotion.cpp:38). Confirm the log does
+!                                      NOT contain "Peak ground motion (PGV) enabled".
+!   R4  surfacevtkorder     commented out  -- it is the second half of the PGV trigger
+!                                      (InitIO.cpp:374/525 = enabled && vtkorder >= 0).
+!                                      Belt-and-braces; default is -1 anyway.
+!   R4  ReceiverOutput      (added) 0  the key DEFAULTS TO TRUE (OutputParameters.cpp:158),
+!                                      so the template was sampling off-fault receivers
+!                                      at pickdt = 0.005 implicitly, inside compute.
+!   R4  WaveFieldOutput     (added) 0  explicit belt-and-braces alongside Format = 10.
+!   R4  EnergyOutput        1 -> 0     NOT merely an IO knob: it flips
+!                                      isFrictionEnergyRequired (DRParameters.cpp:154)
+!                                      which adds per-GP work INSIDE the friction
+!                                      kernel (BaseFrictionLaw.h:136,173). Leaving it on
+!                                      would bias the per-element-update comparison
+!                                      against SeisSol at every order.
+!   R4  EnergyTerminalOutput 1 -> 0
+!       Checkpoint = 0                 KEPT EXPLICIT: `checkpoint` reads with default
+!                                      TRUE (OutputParameters.cpp:46); today it is off
+!                                      only because checkpointinterval defaults to 0.
+! UNCHANGED and load-bearing: CFL = 0.5 (R1), EndTime = 2.0 (R1), t_0 = 1.0 (MFEM
+! T_nuc parity), Format = 10, iOutputMask (readOrFail -- MUST stay even with all
+! output off), MeshFile, and every physics key.
+!
+! CONSEQUENCE OF THE ENERGY EDIT: the compute figure from this baseline is NOT
+! comparable to the historical "111 s/sim-s" LTS compute number, which was taken
+! with EnergyOutput = 1, PGV folding on, per-step fault pickpoints and 0.005 s
+! off-fault receivers all inside the compute stopwatch.
+!
+! CONSEQUENCE OF IO-OFF: these three legs produce NO physics artifacts. Validate
+! rupture separately (the IO-ON deck in jobs/lts_phase5/tpv104_200m_seissol_expanse/),
+! never in the same job as a timing leg.
+!
+! IDENTICAL-IO CONTRACT (fairness rule R4): parameters_gts_o2.par,
+! parameters_gts_o3.par and parameters_gts_o4.par have BYTE-IDENTICAL bodies --
+! they differ ONLY in this leading comment header. Verify before trusting any
+! cross-order number:
+!   for f in o3 o4; do diff <(grep -v '^!' parameters_gts_o2.par) \
+!                          <(grep -v '^!' parameters_gts_$f.par) || echo "VOID: $f"; done
+! =====================================================================
+
+&equations
+!yaml file defining spatial dependence of material properties
+MaterialFileName = 'tpv104_material.yaml'
+!TPV104 is purely elastic (no off-fault plasticity)
+Plasticity = 0
+numflux = 'godunov'          ! pure Godunov (also the v1.3.1 default). No
+                             ! numfluxnearfault key -- the run sbatch's pre-flight
+                             ! hard-FAILs on that string, and matched pure-Godunov
+                             ! flux is what the MFEM legs run (interior_flux =
+                             ! "scalar", mixed_flux = "none").
+/
+
+&IniCondition
+/
+
+&DynamicRupture
+! rate-and-state friction, slip law + STRONG velocity weakening (SCEC TPV104)
+FL = 103                                       ! Friction law (103: rate-state + strong velocity weakening)
+!yaml file defining spatial dependence of fault properties
+!(rs_a, rs_srW spatial via LuaMap; rs_sl0 = 0.4 m; stress + nucleation inline)
+ModelFileName = 'tpv104_fault.yaml'
+GPwise = 1                                     ! legacy Fortran key; unknown to v1.3.x (warns only).
+                                               ! GP-wise easi evaluation is unconditional there.
+
+! Rate-and-state constants (SCEC TPV104; spatial rs_a, rs_srW come from the yaml)
+RS_f0  = 0.6
+RS_sr0 = 1d-6
+RS_b   = 0.014
+RS_muW = 0.2                                   ! f_w (fully-weakened friction coefficient)
+RS_iniSlipRate1 = 1d-16                        ! V_init magnitude (sets psi_ini)
+RS_iniSlipRate2 = 0.0
+
+!characteristic time of the forced (smoothStep) nucleation overstress nuc_xy
+!(1.0 s = the SCEC TPV104 ramp; matches the MFEM deck's T_nuc_s and the yaml header)
+t_0 = 1.0
+
+!reference point for defining strike and dip direction (vertical strike-slip fault)
+XRef = 0.0
+YRef = -1.0e5
+ZRef = 0.0
+
+OutputPointType = 0                            ! BASELINE (was 5): 0 = OutputType::None.
+                                               ! Kills the elementwise fault output AND the
+                                               ! &Pickpoint on-fault receivers -- both ran
+                                               ! inside the compute stopwatch.  Expect the log
+                                               ! line "No dynamic rupture output enabled".
+/
+
+! ---------------------------------------------------------------------------
+! The two blocks below are INERT while OutputPointType = 0 (readElementwise/
+! readPickpoint are parsed but the modules are never registered).  Kept verbatim
+! so this deck diffs cleanly against the IO-ON validation deck.
+! ---------------------------------------------------------------------------
+!see: https://seissol.readthedocs.io/en/latest/fault-output.html
+&Elementwise
+printtimeinterval_sec = 0.05
+OutputMask = 1 1 1 1 1 1 1 1 1 1 1
+refinement_strategy = 2
+refinement = 0
+/
+
+&Pickpoint
+PPFileName = 'tpv104_faultreceivers.dat'
+printtimeinterval = 1
+OutputMask = 1 1 1 1
+/
+
+&SourceType
+/
+
+&SpongeLayer
+/
+
+&MeshNml
+MeshFile = 'tpv104.puml.h5'
+meshgenerator = 'PUML'                         ! Name of meshgenerator (Gambit3D-fast, Netcdf or PUML)
+/
+
+&Discretization
+CFL = 0.5                                      ! R1: MATCHED to the MFEM legs' [numerics].cfl = 0.5
+                                               ! (MFEM must also run --cfl-dg-safety 1.0, else its
+                                               !  dt is 1/3 of this and the comparison is void).
+ClusteredLTS = 1                               ! BASELINE (was 2): 1 = GLOBAL time stepping.
+                                               ! Do NOT add LtsWiggleFactorMin / LtsAutoMergeClusters /
+                                               ! LtsMaxNumberOfClusters -- inert or fatal at rate 1.
+/
+
+&Output
+OutputFile = 'outputs/tpv104'                  ! readOrFail; the run sbatch does `mkdir -p outputs`.
+                                               ! With every module below disabled, essentially nothing
+                                               ! is written here.  Run each leg in its OWN directory.
+Format = 10                                    ! 10 = OutputFormat::None -> no volume wavefield output
+WaveFieldOutput = 0                            ! BASELINE (added): explicit, belt-and-braces with Format=10
+!             |stress     |vel
+iOutputMask = 0 0 0 0 0 0 1 1 1                ! MUST STAY: read with readOrFail (OutputParameters.cpp:236)
+                                               ! even when wavefield output is disabled.
+TimeInterval =  0.5                            ! (inert)
+refinement = 1                                 ! (inert; volume refinement)
+
+! Free surface output -- OFF for the baseline.  SurfaceOutput = 1 also switched on
+! the PGV fold, which sampled at EVERY local timestep inside the compute region.
+SurfaceOutput = 0                              ! BASELINE (was 1)
+SurfaceOutputRefinement = 0
+SurfaceOutputInterval = 0.05                   ! (inert)
+! surfacevtkorder = 2                          ! BASELINE: commented out -- second half of the PGV
+!                                              ! trigger (enabled && vtkorder >= 0).
+
+! Off-fault receivers -- OFF for the baseline.  NOTE the key defaults to TRUE,
+! so the template deck was sampling them implicitly at pickdt = 0.005.
+ReceiverOutput = 0                             ! BASELINE (added)
+pickdt = 0.005                                 ! (inert)
+RFileName = 'tpv104_receivers.dat'             ! (inert; readPath never fails, file kept in the deck)
+ReceiverOutputInterval = 0.1                   ! (inert)
+
+EnergyOutput = 0                               ! BASELINE (was 1).  NOT just IO: this flag also
+                                               ! enables extra per-GP work inside the DR friction
+                                               ! kernel (isFrictionEnergyRequired).
+EnergyTerminalOutput = 0                       ! BASELINE (was 1)
+EnergyOutputInterval = 0.5                     ! (inert)
+
+Checkpoint = 0                                 ! KEEP EXPLICIT: `checkpoint` defaults to TRUE.
+/
+
+&AbortCriteria
+EndTime = 2.0                                  ! R1: matched to the MFEM legs' tfinal = 2.0 s
+/
+
+&Analysis
+/
+
+&Debugging
+/

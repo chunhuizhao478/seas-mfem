@@ -1,0 +1,305 @@
+# =====================================================================
+#  SCEC TPV104 200 m — GTS ORDER SPEED BASELINE (MFEM side), one of THREE decks.
+#
+#    tpv104_gts_p1.toml   [mesh].order = 1   [numerics].ader_order = 2
+#    tpv104_gts_p2.toml   [mesh].order = 2   [numerics].ader_order = 3
+#    tpv104_gts_p3.toml   [mesh].order = 3   [numerics].ader_order = 4
+#
+#  The three files differ in EXACTLY THREE LINES — `order`, `ader_order` and
+#  `[output].output_dir`.  Everything else is byte-identical, so polynomial
+#  order is the ONLY variable in the MFEM half of the baseline.  Verify with:
+#      diff tpv104_gts_p1.toml tpv104_gts_p2.toml    # must show 3 '<' + 3 '>'
+#
+#  ACCURACY-MATCHED PAIRING (R2) -----------------------------------------------
+#  SeisSol's ConvergenceOrder counts BASIS FUNCTIONS (o = p + 1), MFEM's
+#  [mesh].order counts POLYNOMIAL DEGREE.  The accuracy-matched pairing is
+#  therefore p_k <-> o_(k+1), and MFEM's ADER time order is set to the same
+#  integer as SeisSol's o:
+#
+#      leg   MFEM order (p)   MFEM ader_order   SeisSol binary   modes/elem
+#      ---   --------------   ---------------   --------------   ----------
+#      p1          1                 2          o2 (elastic)          4
+#      p2          2                 3          o3 (elastic)         10
+#      p3          3                 4          o4 (elastic)         20
+#
+#  At a matched pair the two codes advance state vectors of IDENTICAL size
+#  ((p+1)(p+2)(p+3)/6 modes x 9 elastic quantities) on IDENTICAL geometry with
+#  IDENTICAL step counts.  ader_order is HARD-CONSTRAINED to {2,3,4} by the
+#  driver (MFEM_VERIFY at dynamic/wave_operator.inl:1489,1591), which is exactly
+#  the p1/p2/p3 range — nothing above p3 is reachable here.  NOTE the driver
+#  does NOT cross-check ader_order against mesh.order, AND `--ader-order` on the
+#  CLI unconditionally OVERRIDES this file (drivers/spatial_dyn_driver.cpp:1077
+#  reads it, :1211 merges it over the config with no cross-check).  A TOML-only
+#  grep is therefore NOT a guard by itself: the run sbatch must assert that this
+#  deck's ader_order == [mesh].order + 1 AND that the integer it passes on the
+#  CLI is that same value.  run_mfem_gts_orders.sbatch does exactly that — it
+#  derives ADER=ORD+1 per leg, gates the deck against it, and passes the same
+#  number.  The identical override precedence applies to --output-dir (:1237),
+#  which the sbatch also sets (to an absolute, job-ID-keyed path).
+#
+#  dt IS NOT FIXED ACROSS ORDERS (R3) ------------------------------------------
+#  Each leg gets its OWN CFL-derived dt.  MFEM:
+#      dt = cfl * h_min / (cfl_dg_safety * (2p+1) * cp),   h_min = 6V/A_total
+#           (dynamic/wave_operator.inl:7728 + spatial/code/spatial_friction.hpp:744)
+#  SeisSol:
+#      dt = cfl * 2r_insphere / ((2o-1) * vp)
+#           (SeisSol src/Initializer/TimeStepping/GlobalTimestep.cpp:45-46)
+#  With o = p+1 the order factors coincide ((2o-1) == (2p+1)) and 2r == 6V/A,
+#  so at cfl = 0.5 AND cfl_dg_safety = 1.0 the two codes take the SAME dt and
+#  the SAME number of steps.  Pre-registered predictions for tfinal = 2.0 s on
+#  the 2,464,689-tet 200 m mesh (verified p3 anchor dt = 3.66128e-4 s, scaled
+#  exactly by 7/(2p+1)):
+#
+#      leg   dt [s]          steps to 2.0 s   element-updates
+#      ---   -------------   --------------   ---------------
+#      p1    8.542987e-4          2342          5.7723e9
+#      p2    5.125792e-4          3902          9.6172e9
+#      p3    3.66128e-4           5463          1.34646e10
+#
+#  GATE: if the driver's printed `[time] dt` disagrees with the value above to
+#  6 significant digits, or if `cfl_dg_safety = 1` is absent from the log, that
+#  leg is VOID (the cfl_dg_safety default is 3.0 — see the [numerics] note).
+#  Report BOTH s/sim-s AND microseconds-core per element-update:
+#
+#      us-core/elem-update = 1e6 * T_loop[s] * ncores / (nsteps * 2464689)
+#
+#  NOTE THE 1e6 — without it the expression is SECONDS-core per update.  Sanity
+#  anchor: the published p3 GTS figure is 245.9 us-core/element-update
+#  (document/lts_dev/RESULTS_p5_tpv104_200m_2026-07-21.md:52-55).
+#  The element-update denominator is the GLOBAL 2,464,689 tets — NEVER normalise
+#  by ranks (256 MFEM ranks vs 16 SeisSol ranks would be a 16x error).
+#  `ncores` is AMBIGUOUS BY 6.7% between the two codes and must be published
+#  TWICE, never as a single unqualified number:
+#      C_alloc  = 256 for BOTH codes         <- billing-fair HEADLINE
+#      C_active = 256 MFEM / 240 SeisSol     <- bounds the idle-core effect
+#  MFEM's validated shape is 2 nodes x 128 pure-MPI ranks x 1 core = 256 working
+#  cores.  SeisSol allocates the same 256 but works only 240: its run sbatch sets
+#  OMP_NUM_THREADS = cpus_per_task - 1 = 15 AND SEISSOL_COMMTHREAD=0, so the
+#  reserved 16th core per rank has no consumer at all.  R5 forbids changing
+#  either shape — the 240/256 split is finding M4, to be disclosed, not fixed.
+#  Statistic must also be pinned: MFEM's Caliper wall is a MAX over 256 ranks,
+#  SeisSol's `Simulation time (compute):` leads with the MEAN over 16.  Publish
+#  the cross-code ratio BOTH ways (max-vs-max as the headline, mean-vs-mean
+#  beside it); mixing them credits SeisSol with its ~6% load imbalance.
+#
+#  IO IS OFF (R4) --------------------------------------------------------------
+#  The Caliper region `seas::spatial_dyn::step` (drivers/spatial_dyn_driver.cpp
+#  :4874) wraps the WHOLE loop body including every writer, and MFEM has no
+#  compute/IO split — so IO cannot be subtracted after the fact and must simply
+#  be off.  This deck therefore:
+#    * paraview_fault        = "off"
+#    * paraview_free_surface = "off"  — MANDATORY and easy to miss: the
+#      free-surface slice is NOT under the `paraview_enabled` master gate (that
+#      gate at spatial_dyn_driver.cpp:3628-3632 forces only volume/fault/bulk
+#      false; fs_out is built independently at :3865-3871 and written from inside
+#      paraview_write at :4325, which the loop calls every step at :5121).  Its
+#      default is "vtu" @ 0.05 s, so the phase-5 template silently wrote a
+#      free-surface VTU inside the timed region on every leg.
+#    * [problem].tag         = ""     — R4 SYMMETRY.  tag = "tpv104" wires the
+#      SCEC on-fault station writer (:4467) which `stations_write` calls EVERY
+#      step at :5126, INSIDE the timed scope, and dynamic/tpv104_stations.hpp:229
+#      fflushes each of 9 trace files per step on the <=9 owning ranks of 256 in
+#      a bulk-synchronous loop.  The SeisSol partner legs run OutputPointType = 0
+#      and ReceiverOutput = 0, i.e. ZERO writes inside their compute stopwatch —
+#      keeping the tag would make MFEM's wall carry a per-step Lustre flush that
+#      SeisSol's does not, with a row count that GROWS with order (2342 / 3902 /
+#      5463).  tag drives nothing else (its only consumers are :4449/:4452/:4465)
+#      and the parser defaults it to "" (spatial_friction.cpp:1658), so clearing
+#      it wires no writer and :5126 becomes a branch-not-taken.
+#      Physics evidence is NOT lost: the driver still prints V_max every 100
+#      steps (:5223-5230) and V_max_global at `[spatial_dyn] done.` (:5288).
+#      For the SCEC traces run a SEPARATE tag-on validation leg — the same
+#      IO-off/validate-separately policy the SeisSol decks adopt for themselves.
+#    * checkpoint_every_steps pinned far above every leg's step count, so no
+#      IN-LOOP checkpoint fires at any order.
+#  The run sbatch must NOT pass --paraview / --paraview-fault-vtu /
+#  --paraview-max-snapshots / --checkpoint-every / --time-integrator (anything
+#  other than "ader").
+#
+#  ONE WRITE REMAINS, AND IT IS OUTSIDE THE TIMED REGION: the driver ALWAYS
+#  writes a final full-state checkpoint after the loop (spatial_dyn_driver.cpp
+#  :5265-5274) because the parser forbids checkpoint_every_steps = 0
+#  (spatial_friction.cpp:1408).  It lands at <output_dir>/cp_checkpoint_r<rank>
+#  .txt — 256 ASCII files, roughly 0.7 / 1.8 / 3.6 GB at p1 / p2 / p3.  It costs
+#  T_loop NOTHING (the Caliper scope has already closed) but it does cost disk
+#  and tail wall time, so point --output-dir at scratch.  An R4 file audit must
+#  therefore expect EXACTLY <nranks> cp_checkpoint_r*.txt and flag only .vtu /
+#  .pvd / .vtkhdf, or an excess of checkpoint files.
+#
+#  A KNOWN MFEM-SIDE OVERHEAD THIS BASELINE DOES NOT REMOVE ---------------------
+#  drivers/spatial_dyn_driver.cpp:1733 calls `pmesh.SetCurvature(cfg.mesh.order)`
+#  UNCONDITIONALLY on a straight-sided tet mesh, so every ElementTransformation /
+#  FaceElementTransformation Jacobian goes through an order-p H1 nodal basis:
+#  4 nodes at p1, 10 at p2, 20 at p3, where the map is affine at every order and
+#  SeisSol always evaluates it affinely.  Part of the measured p-scaling and of
+#  the MFEM-vs-SeisSol gap at p3 is therefore a redundant GEOMETRY order, not DG
+#  arithmetic.  `--face-cache` removes it on NON-FAULT INTERIOR faces only
+#  (dynamic/wave_operator.inl:884-905); fault faces and all volume terms still
+#  pay it.  State this beside the headline.  If a number is wanted, run ONE
+#  diagnostic p3 leg with the nodal order forced to 1 — separately, never folded
+#  into the baseline.
+#  Two further MFEM-only, SeisSol-absent costs inside the timed region, both
+#  disclosed rather than removed: a per-step `Q.Norml2()` + 1-value MPI_Allreduce
+#  NaN tripwire (:5190-5199, not disableable, a global sync every step across all
+#  256 ranks), and the R-101 shared-fault consistency check (:5155-5162) which
+#  fires 12 / 20 / 28 times at p1 / p2 / p3 during the nucleation window — the
+#  run sbatch exports SEAS_R101_SKIP=1 uniformly on all three legs to remove that
+#  order-dependent one, and records that it did.
+#
+#  Derived by cloning jobs/lts_phase5/tpv104_200m_lts_speed_expanse/
+#  tpv104_200m_lts_off.toml (the validated p3 GTS deck).  Physics, material,
+#  stress, friction, nucleation, boundary and fault geometry are UNCHANGED.
+# =====================================================================
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "SCEC TPV104 200m GTS order speed baseline (pure upwind, ADER, IO off)."
+
+[problem]
+# R4 (IO symmetry with the SeisSol legs): DELIBERATELY EMPTY.  tag = "tpv104"
+# would wire TPV104StationWriter (drivers/spatial_dyn_driver.cpp:4467), whose
+# WriteStep + per-station fflush (dynamic/tpv104_stations.hpp:229) runs EVERY
+# step INSIDE the Caliper-timed scope, on <=9 of 256 ranks, with a row count that
+# grows with order.  The SeisSol partner legs write nothing at all inside their
+# compute stopwatch (OutputPointType = 0, ReceiverOutput = 0).  An empty tag
+# matches no branch of the if/else chain at :4465-4470, so stations_write stays a
+# null std::function and the call site at :5126 is never taken.  The tag has no
+# other consumer.  Take the SCEC traces from a SEPARATE tag-on validation leg.
+tag = ""
+
+# Material: homogeneous, native TPV104Params (identical to TPV102/205).
+[material_constant_fallback]
+lambda = 32043759360.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+[mesh]
+# 200 m fault-resolution PRODUCTION mesh (~126 MB, 2,464,689 tets).  Path is the
+# in-folder symlink, resolved from cwd = miniapps/seas (self-contained).  This is
+# the SAME mesh SeisSol reads as tpv104.puml.h5 (md5-verified identical geometry).
+path  = "jobs/bench_order/tpv104_gts_order_baseline/mesh_tpv104_200m.msh"
+order = 1
+
+[velocity]
+use_sidecar = false
+
+[stress]
+kind          = "fault_local_prestress"
+tau_strike_pa = 40.0e6     # native TPV104 tau_ini (+ right-lateral)
+tau_dip_pa    = 0.0
+sigma_n_pa    = 120.0e6
+
+[numerics]
+lts            = "off"     # GTS — the baseline is GTS-vs-GTS (SeisSol ClusteredLTS = 1)
+time_integrator = "ader"   # PINNED, not left to the default.  This is the SECOND key that
+                           # silently rescales dt by 3x: the dt branch at
+                           # drivers/spatial_dyn_driver.cpp:3106-3109 uses RkCflFactor =
+                           # 3.0/(2p+1) (spatial_friction.hpp:767) for RK vs CflSafetyFactor
+                           # = 1/(cfl_dg_safety*(2p+1)) for ADER, so an RK leg would take
+                           # dt x3 — 3x FEWER steps than SeisSol — while still printing
+                           # 'cfl_dg_safety = 1' and passing that gate.  ADER is also
+                           # required for R2: the friction sub-step count IS ader_order.
+ader_order     = 2
+mixed_flux     = "none"     # pure upwind; matches SeisSol's Godunov flux
+cfl            = 0.5      # MATCHED to SeisSol CFL=0.5 for the head-to-head (identical h
+                          # formula + order factor (2p+1) => identical dt). SAFS production p3
+                          # upwind+ADER ran 0.5 at safety 1.0; TPV104's historical 0.25 was
+                          # inherited conservatism. The 2 s window incl. rupture is the gate.
+cfl_dg_safety  = 1.0      # SeisSol's validated order-factor floor.  MUST be set here: the
+                          # struct default is 3.0 (spatial/code/spatial_friction.hpp:150),
+                          # which would give dt/3, 3x the steps, and a silently 3x-inflated
+                          # MFEM number vs SeisSol.  Pass --cfl-dg-safety 1.0 as well and
+                          # hard-gate the run on 'cfl_dg_safety = 1 ' in the log.
+cfl_safety     = "dg"
+interior_flux  = "scalar"
+fault_iterator = "substep"
+use_pml        = false
+
+[time]
+tfinal     = "2.0s"        # R1: identical 2.0 s window in both codes (SeisSol EndTime = 2.0)
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.05s"       # non-binding: the largest CFL dt of any leg is 8.54e-4 s
+
+[output]
+output_dir     = "output_tpv104_gts_p1"
+restart_prefix = "cp"
+paraview_fault = "off"          # R4: no fault ParaView inside the timed step region
+paraview_fault_dt = "0.05s"     # inert while paraview_fault = "off" (parser requires > 0)
+paraview_free_surface = "off"   # R4: the free-surface slice is INDEPENDENT of the
+                                # paraview_enabled master gate (spatial_dyn_driver.cpp:3870)
+                                # and defaults to "vtu" @ 0.05 s — it MUST be turned off
+                                # explicitly or it writes inside seas::spatial_dyn::step.
+checkpoint_every_steps = 100000 # R4: above every leg's step count (max 5463), so no
+                                # IN-LOOP checkpoint fires at any order.  The parser
+                                # forbids 0 (spatial_friction.cpp:1408), so a large number
+                                # is the only way to disable the in-loop write.  It does NOT
+                                # disable the post-loop FINAL checkpoint (spatial_dyn_driver
+                                # .cpp:5265-5274), which always fires — 256 ASCII
+                                # cp_checkpoint_r*.txt files, ~0.7/1.8/3.6 GB at p1/p2/p3.
+                                # That write is OUTSIDE the timed Caliper scope, so it does
+                                # not contaminate T_loop, but the sbatch must send
+                                # --output-dir to scratch and the R4 file audit must expect
+                                # exactly <nranks> of them (an EXCESS = an in-loop write).
+
+# Rate-and-state, slip law with strong rate weakening (FVW; native TPV104).
+[friction.rate_state]
+a_default       = 0.01
+b_default       = 0.014
+Dc_default      = 0.4
+V_0_default     = 1.0e-6
+f_0_default     = 0.6
+V_init_default  = 1.0e-16
+sigma_n_default = 120.0e6
+state_evolution = "slip_law_strong_rate_weakening"
+f_w_default     = 0.2
+V_w_default     = 0.1
+eta             = "auto"
+
+# Velocity-strengthening border via the native SCEC smooth boxcar taper.
+[[friction.rate_state.spatial]]
+kind              = "boxcar_taper"
+a_inner           = 0.01
+a_outer           = 0.02
+V_w_inner         = 0.1
+V_w_outer         = 1.0
+boxcar_center_x_m = 0.0
+boxcar_half_x_m   = 15000.0
+boxcar_trans_x_m  = 3000.0
+boxcar_center_z_m = -7500.0
+boxcar_half_z_m   = 7500.0
+boxcar_trans_z_m  = 3000.0
+
+# Nucleation: SCEC compact-bell gradual overstress (TPV104), strike-only.
+[nucleation]
+kind = "gradual_overstress_compact_circular"
+
+[nucleation.gradual_overstress_compact_circular]
+center_x_m   = 0.0
+center_y_m   = 0.0
+center_z_m   = -7500.0
+radius_m     = 3000.0
+delta_tau_pa = 45.0e6
+T_nuc_s      = "1.0s"
+
+[boundary]
+fault_attr      = 3
+natural_attrs   = [1]
+absorbing_attrs = [5]
+
+[fault_geometry]
+ref_normal = [0.0, -1.0, 0.0]
+up         = [0.0,  0.0, 1.0]
+kind       = "vertical_strike_slip"
+
+[hypocenter]
+x_m                 = 0.0
+y_m                 = 0.0
+z_m                 = -7500.0
+nucleation_radius_m = 3000.0
