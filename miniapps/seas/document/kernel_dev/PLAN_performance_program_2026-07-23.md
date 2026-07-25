@@ -14,8 +14,16 @@ Supersedes `PLAN_v2_performance_program_2026-07-22.md` and `PLAN_ader_kernel_eff
 
 ## The direction (settled — not revisited without a measurement that contradicts it)
 
-1. **Communication first.**
-2. **Kernels second**, predictor before faces, cheapest lever first.
+> **Restated 2026-07-24 after A1 (scoped update, not a direction change) — governed by
+> `ANALYSIS_seissol_mechanism_gap_2026-07-24.md`:** comm remains the largest line item (40 % of
+> wall), but after A1 its only live lever is unsized. Next actions, evidence-ranked:
+> **D1** rank-count sweep 256/128/64 + arrival trace + FLOP counters (one job — sizes A6, tests the
+> SeisSol-16-rank hypothesis, decides memory-vs-FLOP);
+> **D2** `--precomputed-face-fluxes` vs `--face-cache` A/B (our own never-measured SeisSol mechanism);
+> **D3 = B1 now** (best-supported code change program-wide). B2 waits on D1's counter leg.
+
+1. ~~Communication first~~ → **D1/D2 measurements + B1 now** (see restatement above).
+2. **Kernels**, predictor before faces, cheapest lever first.
 3. **Face-cache-for-LTS** inside Track B, behind a hard correctness guard.
 
 Three independent reasons, none of which depends on a projection:
@@ -86,7 +94,7 @@ justified here by a projected payoff.
 | ~~A3~~ | split-post overlap | **DEVALUED** — hides wire time, which is 0.15 % of the wait. Nothing to hide. |
 | ~~A4~~ | sparse payload | **DE-PRIORITISED by A0** — wire time is 0.15 % of the wait; bytes are not binding. |
 | **A5** | comm term in `lts_clustering.cpp:compute_cost` | still valid — it generalises A0, the one lever that MEASURED a gain |
-| **A6** | **rank rebalancing (NEW, now the main Track-A item)** | the wait is imbalance at tick boundaries: skew 16.5 %, **Max/Avg 2.18**. Only rebalancing or fewer tick boundaries touch it. Unsized. |
+| **A6** | **rank rebalancing — SIZE BEFORE BUILDING (rides D1)** | bounds from 52472765: **1.07×** (wait→Min-rank floor) to **1.67×** (wait→wire-only), a 9× spread. Sizing gate: per-rank tick-arrival trace — **systematic** lateness → proceed; **jitter** → drop. |
 
 > **A1 RESULT (job 52472765) — the merge is correct and buys NOTHING.** Rounds 12,812 → 6,556
 > (1.954×, exactly as designed); wait 764 → 787 s (**0.971×**); wall 1898 → 1921 s (**0.988×**).
@@ -99,16 +107,11 @@ justified here by a projected payoff.
 > remaining wait is rank imbalance (Max/Avg 2.18) and only rebalancing touches it (new item A6).
 > Full write-up: `document/comm_dev/RESULTS_a1_merge_2026-07-24.md`.
 
-**A0 is DONE (2026-07-24) and it PASSED** — see the A0 RESULT section above. It confirmed the
-assumption the entire track rested on: exposed wait does scale with the exchange-round rate, and
-super-proportionally (1.807× per 1.587×). That converts A1–A3 from a fitted model into
-measurement-backed work. It also delivered a 1.370× end-to-end speedup for one config line, and
-redirected the *mechanism*: the wait is synchronisation exposure, not bandwidth (wire time is
-0.15 % of it), so A1–A3 pay off by removing sync points rather than bytes.
-
-**A3 carries a liveness gate, not just a correctness gate.** Bitwise identity cannot detect this
-code's actual recorded failure mode for exchange changes — the R-1600 unmatched-collective hang
-(`wave_operator.inl:3661-3672`). Deadlock produces no wrong bits; it produces no bits.
+*(Historical note: after A0, this section read A0's result as "wait scales with round rate" and
+declared A1–A3 measurement-backed. A1 falsified that reading — see the banner above. If A3 is ever
+revived it needs a liveness gate in addition to bitwise identity: the recorded R-1600
+unmatched-collective hang, `wave_operator.inl:3661-3672`, produces no wrong bits — it produces no
+bits.)*
 
 ### Track B — kernels
 
@@ -151,7 +154,10 @@ separate `--lts-face-cache`.
 Verification of the previous plan's numbers returned **43 quantities that cannot be derived from any
 existing artifact.** The ones that would change decisions:
 
-1. ~~Whether exposed wait scales with exchange-round rate.~~ **RESOLVED by A0: yes, super-proportionally (1.807× per 1.587×).**
+1. ~~Whether exposed wait scales with exchange-round rate.~~ **RESOLVED by A0+A1 jointly: it does
+   NOT — wait scales with SYNC rate.** A0 (rounds/sync fixed, syncs ×0.63) → wait ×0.55; A1 (syncs
+   fixed, rounds/sync ×0.51) → wait ×1.03 (job 52472765). A0 alone confounded the variables; A1
+   deconfounded them.
 2. ~~The LTS stage split.~~ **MEASURED by A0** (predictor 39.6–46.6 % of compute, NOT the assumed 56.2 %; seam-corrector compute 12.0 % of step is unclaimed). **Track B gates must be re-derived against it.**
 3. **MFEM's FLOP count.** → one counter leg.
 4. ~~The comm skew's real size.~~ **RESOLVED by A0's 2 s through-rupture leg: skew is FLAT (24.1 →
@@ -175,23 +181,24 @@ Baseline 4277 s/sim-s = 17.9× SeisSol as-run. Sizes come from the measured LTS 
 | # | item | targets | saves | running | vs SeisSol | confidence |
 |---|---|---|---:|---:|---:|---|
 | **A0** | `lts_wiggle="off"` | sync count | **1154** | **3123** | **13.1×** | **MEASURED — banked** |
-| **A1** | merge 125→**64** rounds/sync | wait (1251) | 611 | 2512 | 10.5× | projected from A0's law |
-| **A2** | single-round tick, 64→**32** | residual wait | 320 | 2192 | 9.2× | same law; **NOT a minor item** |
-| A3 | split-post overlap | residual wait | 72 | 2120 | 8.9× | low; anti-synergistic with B |
+| ~~A1~~ | merge 125→64 | wait | ~~611~~ **0 — MEASURED** (52472765: wait ×0.971) | 3123 | 13.1× | dead |
+| ~~A2~~ | 64→32 | wait | ~~320~~ ~0 | 3123 | 13.1× | devalued — the mechanism A1 falsified |
+| ~~A3~~ | overlap | wait | ~~72~~ ~0 | 3123 | 13.1× | devalued — wire is 0.15 % of the wait |
+| **A6** | rank rebalancing | wait skew | **0–640, UNSIZED** | 2483–3123 | 10.4–13.1× | bounds only; D1 sizes it |
 | A5 | comm term in objective | — | 0 | 2078 | 8.7× | generalises A0; no new gain at np=256 |
 | **B1+B2** | predictor fusion → tiling | predictor (871) | 653 | 1425 | 6.0× | bench-backed, not in-solver; B1,B2 do NOT add |
 | B3 | face-cache → LTS corrector | corrector-rest | 93 | 1332 | 5.6× | ±2× error bar |
 | B4 | volume tiling | corrector-rest | 143 | 1189 | 5.0× | ASSUMED — no bench of this stage anywhere |
 | — | seam-corrector compute | seam (246) | 82 | 1107 | 4.6× | ASSUMED — in no phase yet |
 
-**Endpoint if everything lands: ~1107 s/sim-s ≈ 4.6× SeisSol.** Read it as "~5×, maybe".
+**Endpoint: ~2110 s/sim-s ≈ 8.8× SeisSol on kernel items alone; [6.2, 8.8]× if A6 delivers its
+unsized upper bound.** The pre-A1 "~5×, maybe" is withdrawn. (Consistent with the analysis doc's
+7.7–8.6× at bench-central kernels + D2.)
 
 Three structural facts this table encodes:
-1. **A1 + A2 + B1/B2 carry ~85 % of the remaining gain** (611 + 320 + 653 of ~1900). *Correction
-   (2026-07-24): an earlier version of this table credited A1 with 125→32 and left A2 at 42. The comm
-   plan stages it 125→**64** (Phase 1 = A1) then 64→**32** (Phase 2 = A2), so the pair splits
-   611/320 — **A2 is the second-largest comm item, not a rounding error.** The A1+A2 endpoint is
-   unchanged at 2192.*
+1. ~~A1 + A2 + B1/B2 carry ~85 % of the remaining gain~~ **Falsified 2026-07-24: A1 measured 0 and
+   A2/A3 fell with it. B1/B2 (653) is now the only sized lever; A6 is the only comm lever and is
+   unsized until D1.**
 2. **Neither track suffices alone.** Perfect comm / untouched kernels floors at **7.8×**; perfect
    kernels / untouched comm floors at **5.2×**. Under ~5× needs both.
 3. **Confidence decreases down the table** — A0 measured, A1 one extrapolated data point, B4 and the
@@ -207,8 +214,8 @@ Recorded so intent is legible, and quarantined so no correction forces a re-issu
 factor has any benchmark behind it; the face and volume factors are assumptions, and the predictor's
 4× is a point estimate chosen from a 2.3–8.3× contended range.
 
-- Track A, if wait scales with rounds: 2341 → ~300 s/sim-s.
+- ~~Track A, if wait scales with rounds: 2341 → ~300 s/sim-s.~~ Falsified by A1 — wait scales with sync rate.
 - Track B, all phases: ~1016 s/sim-s off the compute term.
 - B3 face-cache-for-LTS: ~1.08–1.11× end-to-end, hard ceiling 1.12×; explicitly a factor-of-two error bar.
-- Composed: ~3.8–5.6× behind SeisSol as-run. **Parity is not on the table** at matched order; the
+- ~~Composed: ~3.8–5.6× behind SeisSol as-run.~~ Withdrawn; see the corrected endpoint above. **Parity is not on the table** at matched order; the
   only route past this band is the far-field order drop, which trades accuracy and is a separate proposal.
