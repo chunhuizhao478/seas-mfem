@@ -27,8 +27,18 @@ Going p1→p3 multiplies modes/element by 5 (4→20). **SeisSol's per-step cost 
 (measured GFLOP/s/core **rises** 2.62 → 4.54 → 7.84). **MFEM's grows 10.19×** — *super*-linear,
 consistent with O(modes²) mode-to-mode work executed through generic `DenseMatrix`/AXPY paths.
 
-10.19 / 2.59 = **3.94×**, which is exactly 15.00 / 3.81. **The entire order-dependence of the gap is
-kernel scaling.** Nothing else in the comparison varies with order.
+10.19 / 2.59 = **3.94×**, which is exactly 15.00 / 3.81. **This is an algebraic identity, not a
+cross-check**: 3.94 ≡ gap(p3)/gap(p1) by construction, so the relation holds for any four positive
+numbers and adds no information beyond the three measured gaps.
+
+**The entire order-dependence of the gap is in the per-step cost of the element update.**
+*(Corrected 2026-07-25: an earlier revision read "…is kernel scaling. Nothing else in the comparison
+varies with order." That is false. 3.94 is the order-dependent excess of **whole-step** MFEM cost over
+**whole-step** SeisSol cost, and its attribution is UNMEASURED — it provably contains at least three
+order-dependent non-kernel terms: the unconditional `SetCurvature` below, the MFEM-only per-step NaN
+`Q.Norml2()` + `MPI_Allreduce` whose vector is 5× longer at p3 than p1, and the 256-vs-16 partition
+halo whose face modes grow 3→6→10. Do not name it "kernel scaling" or assign it to Track B until the
+p1+p3 FLOP-counter leg returns — see `PLAN_performance_program_2026-07-23.md` §Target, gate T3.)*
 
 ## What this confirms, and what it refutes
 
@@ -41,9 +51,24 @@ per update (1.354×)"* from the Phase-0 era. This baseline measures **MFEM 3.81�
 figure must not be reused; whatever configuration produced it does not survive a fairness-gated
 GTS comparison. The correct statement is: MFEM is slower at every order tested, least so at p1.
 
-**Sharpens the target.** B1/B2 (predictor fusion → tiling) attack precisely the super-linear term.
-An MFEM kernel that merely scaled *like SeisSol's* from p1 would put p3 at 199.4 × 2.59 = **517
-s/sim-s = 1.6× SeisSol**, not 15×. That is the size of the prize, and it is a kernel prize.
+**Sharpens the target.** An MFEM kernel that merely scaled *like SeisSol's* from its own p1 would put
+p3 at **1205 s/sim-s = 3.81× SeisSol**, not 15×. That is the arithmetic size of the order-dependent
+slice — and it is a *ceiling on order-scaling work*, not an attainability claim.
+
+> **CORRECTION (2026-07-25), load-bearing — the superseded figure must not be reused.** This
+> paragraph previously read *"199.4 × 2.59 = **517 s/sim-s = 1.6× SeisSol**"*. That drops MFEM's own
+> **step-count penalty** at p3 (dt ∝ 1/(2p+1) ⇒ **×2.333** more steps; measured 2.3329 MFEM /
+> 2.3321 SeisSol) — a factor **both codes pay identically** and that no kernel change can remove. It
+> also contradicted this document's own `15.00 = 3.81 × 3.94` identity. Correct two ways:
+> 199.4 × 2.59 × 2.333 = **1204.9**, and 4740.2 / 3.934 = **1204.8**; 1204.8 / 315.9 = **3.81×**.
+> The corrected endpoint is **2.33× larger** than the retracted one; had the program been re-targeted
+> on 1.6×, every future kernel result would have read as a shortfall.
+
+Which levers can claim any of that slice is **undecided**: SeisSol's per-step cost grows 2.59× while
+its achieved rate grows ×2.99, so its FLOP *volume* also grows super-linearly (×7.75). Whether MFEM's
+excess is FLOP **volume** or FLOP **rate** decides between B1/B2/B4 (traffic reduction) and M1/M3
+(element-local dense blocks / per-element GEMM, currently in no phase). One `perf stat` leg at **p1
+and p3** settles it and has not run.
 
 ## Cost (for future planning)
 
@@ -80,6 +105,13 @@ are quoted):
 ## Next
 
 1. **Measure the `SetCurvature` confound** — it is order-dependent, sits in the p3 ratio, and may be
-   removable for a straight-sided mesh. Cheapest possible test of a real slice of the gap.
-2. **B1/B2 now have a target and a prize** (2.59× vs 10.19× scaling; ~517 s/sim-s if closed).
+   removable for a straight-sided mesh. Cheapest possible test of a real slice of the gap. **Adopted
+   as plan item B0 with two arms**: an LTS λ=1 p3 arm (the deciding one — `use_face_cache_`'s only
+   functional read is the *GTS* corrector, so LTS evaluates interior-face transformations every step)
+   and a GTS levers-on p1+p3 arm (prices the confound as it sits inside the published 3.94×). A null
+   in the GTS arm alone means "the levers already mitigated it", **not** "geometry is not in the gap":
+   under `--deriv-cache` both volume paths are quadrature-free and `--face-cache` removes the
+   interior-face transformations, leaving only fault/shared/boundary faces.
+2. **B1/B2's ownership of the slice is UNDECIDED**, pending the p1+p3 FLOP-counter leg (above). The
+   ~517 s/sim-s "prize" is retracted; the arithmetic ceiling is 1205 s/sim-s = 3.81×.
 3. D1 (rank sweep) is unaffected by this result and still sizes the comm/M4 side.
