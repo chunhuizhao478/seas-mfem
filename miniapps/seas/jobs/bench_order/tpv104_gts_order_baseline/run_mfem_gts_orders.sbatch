@@ -1,11 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=tpv104_gts_order_mfem
-#SBATCH --account=usc143             # SAME account as the SeisSol partner job — running the two
-                                     # halves of one baseline on different projects is an avoidable
-                                     # asymmetry in queue priority, and lbl107 (the old default) had
-                                     # only ~4.8k SU left on 2026-07-24 against ~1.2-1.8k SU for
-                                     # these three legs alone, expiring 2026-08-27.  usc143 had
-                                     # ~291k SU free; ddp408 ~719k.  Override: sbatch -A ddp408 ...
+#SBATCH --account=lbl107             # USER-SELECTED (2026-07-24).  SAME account as the SeisSol
+                                     # partner job, so neither code gets a queue-priority edge.
+                                     # BALANCE NOTE (2026-07-24): lbl107 had ~4,557 SU remaining;
+                                     # this 6-leg baseline is ~875-1,375 SU = ~20-30% of it, and the
+                                     # p3 leg alone is ~700-920.  Run p1/p2 FIRST (~100-290 SU) to
+                                     # validate the harness before committing the p3 spend.
+                                     # Alternatives if it runs short: -A usc143 (~90k) / -A ddp408 (~73k).
 #SBATCH --partition=compute
 #SBATCH --constraint="lustre"        # match the SeisSol side (both runs live on /expanse/lustre)
 #SBATCH --nodes=2                    # R5: MFEM's VALIDATED shape — 2 nodes x 128 pure-MPI ranks

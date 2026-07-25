@@ -108,8 +108,9 @@
 #   partition per leg; 3 h is requested as headroom.  ~150 SU total.
 # =============================================================================
 #SBATCH --job-name=tpv104_gts_order_ss
-#SBATCH --account=usc143              # the account the SeisSol qstore build ran under
-                                      # (~291k SU free 2026-07-24); override: sbatch -A lbl107
+#SBATCH --account=lbl107              # USER-SELECTED (2026-07-24); matches the MFEM partner job.
+                                      # lbl107 had ~4,557 SU remaining; the 3 SeisSol legs are cheap
+                                      # (~65-162 SU total).  Override: sbatch -A usc143 / -A ddp408.
 #SBATCH --partition=compute
 #SBATCH --constraint="lustre"         # REQUIRED: this run lives on /expanse/lustre
 #SBATCH --nodes=2                     # R5: SAME node count as the MFEM job (2 nodes)

@@ -238,10 +238,15 @@ Two scheduling notes:
   overrun loses the leg entirely, not just its tail. **Split the MFEM legs into three jobs** so a
   p3 overrun cannot destroy p1/p2.
 
-**Account:** both codes are set to `usc143` (~291 k SU free). `lbl107` had only ~4.7 k SU left
-on 2026-07-24, expiring 2026-08-27 — under 4× margin for this baseline, and running the two
-halves of one experiment on different projects is an avoidable queue-priority asymmetry.
-`ddp408` (~719 k free) is the alternative: `sbatch -A ddp408 ...`.
+**Account:** all six legs and the build are set to **`lbl107`** (user-selected 2026-07-24).
+
+> **Balance check, 2026-07-24:** `lbl107` had **~4,557 SU remaining** (199,000 allocated,
+> 194,443 used). This baseline is **~875–1,375 SU ≈ 20–30 % of what is left**, and the MFEM p3
+> leg alone is **~700–920 SU**. It fits, but with little margin for a re-run of the big leg.
+> **Submit p1 and p2 first** (~100–290 SU, under an hour): they validate the whole harness — deck
+> parsing, IO gates, log formats, post-processor — for ~7 % of the budget, before the p3 spend.
+> Fallbacks with room: `-A usc143` (~90,516 SU) or `-A ddp408` (~73,002 SU) — both accept
+> `sbatch -A <acct> ...` without any file change.
 
 ---
 
