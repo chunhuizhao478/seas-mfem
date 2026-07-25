@@ -81,11 +81,23 @@ justified here by a projected payoff.
 | # | work | gate (measured) |
 |---|---|---|
 | ~~A0~~ | **DONE 2026-07-24.** λ=1 run. | **PASSED:** rounds ×1.5871, wait ×1.807, **1.370× end-to-end**, stable through rupture. Track A GO. |
-| **A1** | merge per-correct exchanges into per-tick rounds (125 → ~32/sync) | bitwise identical output; exposed wait falls |
-| **A2** | one wait phase per tick | bitwise identical; wait falls further |
-| **A3** | split-post overlap (`NbrExchangerSplit`) | bitwise identical; **plus a liveness gate** |
+| ~~A1~~ | merge 125→64 rounds/sync | **DONE, NO GAIN (job 52472765).** Rounds fell 1.954× as designed; wait 0.971×, wall 0.988×. Bitwise-identical at np=256. Code kept, flag OFF. |
+| ~~A2~~ | one wait phase per tick (64→32) | **DEVALUED by A1** — same operation A1 showed does nothing (merging rounds *within* a tick removes no rendezvous). Needs new justification or drop. |
+| ~~A3~~ | split-post overlap | **DEVALUED** — hides wire time, which is 0.15 % of the wait. Nothing to hide. |
 | ~~A4~~ | sparse payload | **DE-PRIORITISED by A0** — wire time is 0.15 % of the wait; bytes are not binding. |
-| **A5** | add a communication term to `lts_clustering.cpp:compute_cost` (counts element updates only — why it chose a λ costing 1.37×) | objective-chosen λ matches hand-set λ=1 at np=256 AND adapts at other rank counts |
+| **A5** | comm term in `lts_clustering.cpp:compute_cost` | still valid — it generalises A0, the one lever that MEASURED a gain |
+| **A6** | **rank rebalancing (NEW, now the main Track-A item)** | the wait is imbalance at tick boundaries: skew 16.5 %, **Max/Avg 2.18**. Only rebalancing or fewer tick boundaries touch it. Unsized. |
+
+> **A1 RESULT (job 52472765) — the merge is correct and buys NOTHING.** Rounds 12,812 → 6,556
+> (1.954×, exactly as designed); wait 764 → 787 s (**0.971×**); wall 1898 → 1921 s (**0.988×**).
+> Bitwise identical at np=256. Per-round wait *doubled* — each surviving round absorbs the wait the
+> removed ones carried, so **the wait was never in the rounds.** A0 worked because it cut the number
+> of **syncs** (271→171 = fewer rendezvous in time); A1 kept every tick boundary and merged
+> back-to-back exchanges *at* those boundaries, removing no rendezvous. **Corrected model: exposed
+> wait scales with HOW OFTEN ranks must meet, not with how many messages they send when they do.**
+> ⇒ A2/A3 devalued by the same mechanism; the Track-A projections have no measured support; the
+> remaining wait is rank imbalance (Max/Avg 2.18) and only rebalancing touches it (new item A6).
+> Full write-up: `document/comm_dev/RESULTS_a1_merge_2026-07-24.md`.
 
 **A0 is DONE (2026-07-24) and it PASSED** — see the A0 RESULT section above. It confirmed the
 assumption the entire track rested on: exposed wait does scale with the exchange-round rate, and
