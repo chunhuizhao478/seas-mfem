@@ -1,0 +1,5 @@
+# Mesh products are multi-GB binaries -- never commit them.
+results/*.puml.h5
+results/*.npy
+build_tmp/*.puml.h5
+__pycache__/

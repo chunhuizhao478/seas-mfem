@@ -1,0 +1,67 @@
+[mesh] 133,327,257 tets, 23,056,983 verts   RSS 5.1 GB
+[fault] 3,852,680 frozen fault edges  RSS 6.0 GB
+[gate]   2,253 failing cells, worst 0.4675
+[target] 17,741 cells below the POOLED target, worst 0.3582   RSS 8.5 GB
+   hop 0: 277,459 tets touched, 103,424 verts   RSS 8.5 GB
+   hop 1: 789,006 tets touched, 221,240 verts   RSS 8.5 GB
+   hop 2: 1,440,399 tets touched, 354,534 verts   RSS 8.5 GB
+   hop 3: 2,162,732 tets touched, 500,206 verts   RSS 8.5 GB
+   hop 4: 2,969,831 tets touched, 663,034 verts   RSS 8.5 GB
+   hop 5: 3,887,117 tets touched, 846,951 verts   RSS 8.5 GB
+   hop 6: 4,922,437 tets touched, 1,053,373 verts   RSS 8.5 GB
+   hop 7: 6,070,893 tets touched, 1,280,954 verts   RSS 8.5 GB
+[patch] 7,325,526 tets (5.49%), 1,053,373 bisectable verts   RSS 8.5 GB
+[leb] round 0: 17,741 marked (worst 0.3582) | 1,370 terminal (froze rim 0 fault 0) | split 6,433 -> patch 7,331,959 | RSS 11.3 GB | 81s
+[leb] round 1: 17,741 marked (worst 0.3582) | 1,599 terminal (froze rim 0 fault 0) | split 8,563 -> patch 7,340,522 | RSS 11.3 GB | 94s
+[leb] round 2: 17,741 marked (worst 0.3582) | 1,845 terminal (froze rim 0 fault 0) | split 10,126 -> patch 7,350,648 | RSS 11.3 GB | 107s
+[leb] round 3: 17,741 marked (worst 0.3582) | 2,035 terminal (froze rim 0 fault 0) | split 11,305 -> patch 7,361,953 | RSS 11.3 GB | 120s
+[leb] round 4: 17,741 marked (worst 0.3582) | 2,230 terminal (froze rim 0 fault 0) | split 12,518 -> patch 7,374,471 | RSS 11.3 GB | 133s
+[leb] round 5: 17,741 marked (worst 0.3582) | 2,405 terminal (froze rim 0 fault 0) | split 13,570 -> patch 7,388,041 | RSS 11.3 GB | 146s
+[leb] round 6: 17,739 marked (worst 0.3582) | 2,559 terminal (froze rim 0 fault 0) | split 14,315 -> patch 7,402,356 | RSS 11.3 GB | 158s
+[leb] round 7: 17,735 marked (worst 0.3582) | 2,740 terminal (froze rim 0 fault 0) | split 15,494 -> patch 7,417,850 | RSS 11.3 GB | 171s
+[leb] round 8: 17,735 marked (worst 0.3582) | 2,887 terminal (froze rim 0 fault 0) | split 16,378 -> patch 7,434,228 | RSS 11.3 GB | 184s
+[leb] round 9: 17,683 marked (worst 0.3582) | 3,020 terminal (froze rim 0 fault 0) | split 17,042 -> patch 7,451,270 | RSS 11.3 GB | 197s
+[leb] round 10: 17,595 marked (worst 0.3582) | 3,133 terminal (froze rim 0 fault 0) | split 17,756 -> patch 7,469,026 | RSS 11.3 GB | 210s
+[leb] round 11: 17,405 marked (worst 0.3582) | 3,281 terminal (froze rim 0 fault 0) | split 18,543 -> patch 7,487,569 | RSS 11.3 GB | 223s
+[leb] round 12: 17,107 marked (worst 0.3582) | 3,284 terminal (froze rim 0 fault 0) | split 18,597 -> patch 7,506,166 | RSS 11.3 GB | 236s
+[leb] round 13: 16,646 marked (worst 0.3582) | 3,282 terminal (froze rim 0 fault 0) | split 18,533 -> patch 7,524,699 | RSS 11.3 GB | 249s
+[leb] round 14: 16,044 marked (worst 0.3582) | 3,234 terminal (froze rim 0 fault 0) | split 18,356 -> patch 7,543,055 | RSS 11.3 GB | 262s
+[leb] round 15: 15,390 marked (worst 0.3762) | 3,176 terminal (froze rim 0 fault 0) | split 17,884 -> patch 7,560,939 | RSS 11.3 GB | 274s
+[leb] round 16: 14,547 marked (worst 0.4289) | 3,046 terminal (froze rim 0 fault 0) | split 17,160 -> patch 7,578,099 | RSS 11.3 GB | 287s
+[leb] round 17: 13,497 marked (worst 0.4665) | 2,867 terminal (froze rim 0 fault 0) | split 16,218 -> patch 7,594,317 | RSS 11.3 GB | 299s
+[leb] round 18: 12,368 marked (worst 0.4864) | 2,680 terminal (froze rim 0 fault 0) | split 15,054 -> patch 7,609,371 | RSS 11.3 GB | 311s
+[leb] round 19: 11,321 marked (worst 0.5078) | 2,442 terminal (froze rim 0 fault 0) | split 13,848 -> patch 7,623,219 | RSS 11.3 GB | 324s
+[leb] round 20: 9,950 marked (worst 0.5149) | 2,226 terminal (froze rim 0 fault 0) | split 12,532 -> patch 7,635,751 | RSS 11.3 GB | 336s
+[leb] round 21: 8,424 marked (worst 0.5291) | 1,928 terminal (froze rim 0 fault 0) | split 10,928 -> patch 7,646,679 | RSS 11.3 GB | 348s
+[leb] round 22: 7,011 marked (worst 0.5291) | 1,697 terminal (froze rim 0 fault 0) | split 9,516 -> patch 7,656,195 | RSS 11.3 GB | 360s
+[leb] round 23: 5,658 marked (worst 0.5291) | 1,415 terminal (froze rim 0 fault 0) | split 7,987 -> patch 7,664,182 | RSS 11.3 GB | 372s
+[leb] round 24: 4,627 marked (worst 0.5295) | 1,179 terminal (froze rim 0 fault 0) | split 6,698 -> patch 7,670,880 | RSS 11.3 GB | 385s
+[leb] round 25: 3,790 marked (worst 0.5342) | 958 terminal (froze rim 0 fault 0) | split 5,452 -> patch 7,676,332 | RSS 11.3 GB | 397s
+[leb] round 26: 3,116 marked (worst 0.5342) | 814 terminal (froze rim 0 fault 0) | split 4,612 -> patch 7,680,944 | RSS 11.3 GB | 409s
+[leb] round 27: 2,608 marked (worst 0.5342) | 681 terminal (froze rim 0 fault 0) | split 3,848 -> patch 7,684,792 | RSS 11.3 GB | 421s
+[leb] round 28: 2,114 marked (worst 0.5342) | 533 terminal (froze rim 0 fault 0) | split 3,079 -> patch 7,687,871 | RSS 11.3 GB | 433s
+[leb] round 29: 1,698 marked (worst 0.5754) | 430 terminal (froze rim 0 fault 0) | split 2,415 -> patch 7,690,286 | RSS 11.3 GB | 445s
+[leb] round 30: 1,297 marked (worst 0.5754) | 321 terminal (froze rim 0 fault 0) | split 1,814 -> patch 7,692,100 | RSS 11.3 GB | 458s
+[leb] round 31: 1,021 marked (worst 0.5754) | 253 terminal (froze rim 0 fault 0) | split 1,438 -> patch 7,693,538 | RSS 11.3 GB | 470s
+[leb] round 32: 822 marked (worst 0.6088) | 206 terminal (froze rim 0 fault 0) | split 1,187 -> patch 7,694,725 | RSS 11.3 GB | 482s
+[leb] round 33: 590 marked (worst 0.6088) | 148 terminal (froze rim 0 fault 0) | split 850 -> patch 7,695,575 | RSS 11.3 GB | 494s
+[leb] round 34: 468 marked (worst 0.6088) | 112 terminal (froze rim 0 fault 0) | split 656 -> patch 7,696,231 | RSS 11.3 GB | 506s
+[leb] round 35: 373 marked (worst 0.6088) | 91 terminal (froze rim 0 fault 0) | split 509 -> patch 7,696,740 | RSS 11.3 GB | 518s
+[leb] round 36: 313 marked (worst 0.6571) | 68 terminal (froze rim 0 fault 0) | split 383 -> patch 7,697,123 | RSS 11.3 GB | 530s
+[leb] round 37: 242 marked (worst 0.6571) | 55 terminal (froze rim 0 fault 0) | split 317 -> patch 7,697,440 | RSS 11.3 GB | 542s
+[leb] round 38: 183 marked (worst 0.6571) | 44 terminal (froze rim 0 fault 0) | split 248 -> patch 7,697,688 | RSS 11.3 GB | 554s
+[leb] round 39: 118 marked (worst 0.6599) | 30 terminal (froze rim 0 fault 0) | split 162 -> patch 7,697,850 | RSS 11.3 GB | 566s
+[leb] round 40: 70 marked (worst 0.6599) | 17 terminal (froze rim 0 fault 0) | split 94 -> patch 7,697,944 | RSS 11.3 GB | 578s
+[leb] round 41: 39 marked (worst 0.6599) | 8 terminal (froze rim 0 fault 0) | split 46 -> patch 7,697,990 | RSS 11.3 GB | 590s
+[leb] round 42: 21 marked (worst 0.6599) | 5 terminal (froze rim 0 fault 0) | split 33 -> patch 7,698,023 | RSS 11.3 GB | 602s
+[leb] round 43: 13 marked (worst 0.6599) | 3 terminal (froze rim 0 fault 0) | split 17 -> patch 7,698,040 | RSS 11.3 GB | 614s
+[leb] round 44: 11 marked (worst 0.6763) | 3 terminal (froze rim 0 fault 0) | split 14 -> patch 7,698,054 | RSS 11.3 GB | 626s
+[leb] round 45: 4 marked (worst 0.7969) | 1 terminal (froze rim 0 fault 0) | split 4 -> patch 7,698,058 | RSS 11.3 GB | 638s
+[leb] round 46: patch CLEAN on the pooled target (worst 0.8000)
+
+[out] 133,699,789 tets (+372,532, +0.28%), 23,123,324 verts (+66,341)   RSS 11.3 GB
+  gate: worst Vs/dx 0.8000  ->  p3 0.6000 Hz, p5 1.0000 Hz;  below 0.8: 0 (was 2,253)
+  inverted 0;  fault vertices unmoved: PASS
+  free surface z [-0.000000, 0.000000]
+  eta min 0.0763, eta<0.1 127, min edge 2.3359 m
+[write] results/safalt_fb200_deep40km_1Hz_p5_leb_p2.puml.h5   peak RSS 11.8 GB   (715s)

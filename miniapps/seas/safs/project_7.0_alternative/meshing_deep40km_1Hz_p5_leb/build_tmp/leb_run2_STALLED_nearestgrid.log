@@ -1,0 +1,22 @@
+[mesh] 122,162,105 tets, 20,920,528 verts   RSS 4.7 GB
+[fault] 3,852,680 frozen fault edges  RSS 5.8 GB
+[gate] 274,299 failing cells, worst 0.6667   RSS 7.3 GB
+   hop 0: 5,011,540 tets touched, 1,821,631 verts   RSS 7.3 GB
+   hop 1: 11,165,771 tets touched, 2,640,460 verts   RSS 7.3 GB
+   hop 2: 13,675,597 tets touched, 2,885,221 verts   RSS 7.3 GB
+[patch] 14,568,297 tets (11.93%), 2,640,460 bisectable verts   RSS 7.3 GB
+[leb] round 0: 274,299 marked (worst 0.6667) | 153,645 terminal (froze rim 2071 fault 0) | split 664,427 -> patch 15,232,724 | RSS 12.4 GB | 70s
+[leb] round 1: 145,436 marked (worst 0.3583) | 87,177 terminal (froze rim 2820 fault 0) | split 417,004 -> patch 15,649,728 | RSS 12.4 GB | 114s
+[leb] round 2: 103,251 marked (worst 0.3583) | 60,844 terminal (froze rim 3228 fault 0) | split 306,532 -> patch 15,956,260 | RSS 12.5 GB | 158s
+[leb] round 3: 86,737 marked (worst 0.3392) | 48,087 terminal (froze rim 3555 fault 0) | split 246,222 -> patch 16,202,482 | RSS 12.5 GB | 204s
+[leb] round 4: 80,202 marked (worst 0.3589) | 41,233 terminal (froze rim 3886 fault 0) | split 212,862 -> patch 16,415,344 | RSS 12.5 GB | 255s
+[leb] round 5: 77,060 marked (worst 0.3827) | 36,954 terminal (froze rim 4178 fault 0) | split 192,260 -> patch 16,607,604 | RSS 12.5 GB | 308s
+[leb] round 6: 75,137 marked (worst 0.3522) | 34,492 terminal (froze rim 4454 fault 0) | split 180,183 -> patch 16,787,787 | RSS 12.5 GB | 360s
+[leb] round 7: 73,502 marked (worst 0.3660) | 32,943 terminal (froze rim 4710 fault 0) | split 173,553 -> patch 16,961,340 | RSS 12.5 GB | 411s
+[leb] round 8: 71,668 marked (worst 0.3660) | 31,655 terminal (froze rim 4963 fault 0) | split 167,611 -> patch 17,128,951 | RSS 12.5 GB | 466s
+[leb] round 9: 69,660 marked (worst 0.3797) | 30,439 terminal (froze rim 5213 fault 0) | split 163,128 -> patch 17,292,079 | RSS 12.5 GB | 524s
+[leb] round 10: 67,974 marked (worst 0.4047) | 29,646 terminal (froze rim 5460 fault 0) | split 160,140 -> patch 17,452,219 | RSS 13.2 GB | 581s
+[leb] round 11: 66,541 marked (worst 0.4055) | 29,139 terminal (froze rim 5691 fault 0) | split 158,215 -> patch 17,610,434 | RSS 13.2 GB | 637s
+[leb] round 12: 65,379 marked (worst 0.4055) | 28,764 terminal (froze rim 5900 fault 0) | split 156,941 -> patch 17,767,375 | RSS 13.2 GB | 693s
+[leb] round 13: 64,270 marked (worst 0.4055) | 28,262 terminal (froze rim 6094 fault 0) | split 155,005 -> patch 17,922,380 | RSS 13.4 GB | 747s
+[leb] round 14: 63,612 marked (worst 0.3805) | 28,010 terminal (froze rim 6289 fault 0) | split 154,007 -> patch 18,076,387 | RSS 13.4 GB | 800s

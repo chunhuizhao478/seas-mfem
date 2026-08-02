@@ -1,0 +1,10 @@
+{
+  "mesh": "results/safalt_fb200_deep40km_1Hz_p5.puml.h5",
+  "cvm": "/Users/chunhuizhao/Downloads/seisol_quakeworx/safs_seisol_v4_0_0_RSSRW_ALT_THERMAL_CASE2_fbrefine2_plast_phi30_40_gradedfw_k1p40_attenuation_deep40km/safs_material_cvm.nc",
+  "gate": 0.8,
+  "n_tets": 133699789,
+  "worst_vs_over_dx": 0.8000001999018544,
+  "resolved_everywhere_p3_Hz": 0.6000001499263908,
+  "resolved_everywhere_p5_Hz": 1.000000249877318,
+  "n_fail": 0
+}

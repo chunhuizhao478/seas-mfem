@@ -1,0 +1,26 @@
+[mesh] 122,162,105 tets, 20,920,528 verts
+[fault] 3,852,680 unique fault edges, 1,288,200 fault vertices  (3s)
+   4,000,000/122,162,105  fails 20  (3s)
+   36,000,000/122,162,105  fails 3,649  (9s)
+   68,000,000/122,162,105  fails 16,859  (15s)
+   100,000,000/122,162,105  fails 52,062  (22s)
+
+[GATE] FAIL -- 274,299 of 122,162,105 cells (0.2245%) below Vs/dx = 0.8
+  worst Vs/dx 0.6667  ->  resolved 0.5000 Hz at p3, 0.8334 Hz at p5
+  classes: fault-edge exempt 0 | fault-vertex pinned 0 | free 274,299
+  shortfall dx/need: med 1.046  p90 1.129  p99 1.190  max 1.200
+  Vs  min 179.2  med 360.1 m/s
+  dx  med 475.7 m   need med 450.1 m
+  z   p05 -5891  med -92  p95 -40 m
+  depth bins (barycenter z):
+     [ -40000, -20000)       2,216    0.8%
+     [ -20000, -10000)       6,627    2.4%
+     [ -10000,  -5000)       7,265    2.6%
+     [  -5000,  -2000)       5,480    2.0%
+     [  -2000,  -1000)         557    0.2%
+     [  -1000,   -500)         154    0.1%
+     [   -500,   -250)          64    0.0%
+     [   -250,   -125)          22    0.0%
+     [   -125,      1)     251,914   91.8%
+
+[out] results/census_round0.json / _failcells.npy / _needdx.npy   (26s)
