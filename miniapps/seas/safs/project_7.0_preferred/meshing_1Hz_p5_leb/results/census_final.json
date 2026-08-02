@@ -1,0 +1,10 @@
+{
+  "mesh": "results/safpref_fb200_refine2_gatefix_1Hz_p5.puml.h5",
+  "cvm": "/Users/chunhuizhao/Downloads/seisol_quakeworx/safs_seisol_v4_0_0_RSSRW_PREFERRED_THERMAL_CASE2_fb200ref2gatefix_plast_phi30_40_fw15pregate_nw08_k1p75_mw783_attenuation/safs_material_cvm.nc",
+  "gate": 0.8,
+  "n_tets": 124232100,
+  "worst_vs_over_dx": 0.800000031398169,
+  "resolved_everywhere_p3_Hz": 0.6000000235486267,
+  "resolved_everywhere_p5_Hz": 1.0000000392477113,
+  "n_fail": 0
+}
