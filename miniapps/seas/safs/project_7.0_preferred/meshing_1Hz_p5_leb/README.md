@@ -20,8 +20,12 @@ Full numbers and the deck verification: `QUALITY_REPORT_1Hz_p5.md`.
 
 ## The one thing that differs from the ALT build
 
-**The PREFERRED lid is TOPOGRAPHIC** (z from −49.92 to +25.82 m); the ALT lid is
-exactly flat. Two checks had to change, and both are now in this folder's `code/`:
+**The PREFERRED lid carries OFF-DATUM vertices** where the ALT lid is exactly flat.
+It is *not* topographic — measured 2026-08-01, only 2,961 of 975,156 top vertices have
+|z| > 1e-6 and 2,417 of those are sub-0.1 m noise; the large ones are the **fault trace**
+where the fault daylights (73 are fault vertices, same 10 coordinates on the small and
+intermediate meshes). Flattening them would move the fault, so it was declined.
+Two checks still had to change, and both are now in this folder's `code/`:
 
 * `check_fault_identity.py` — F4 can no longer assert "exactly flat". It now checks
   the free-surface **total area** and **z-range** are unchanged. LEB inserts edge
@@ -52,7 +56,7 @@ exactly flat. Two checks had to change, and both are now in this folder's `code/
 
     code/census_1Hz_p5.py             locate + classify gate failures (barycenter rule)
     code/leb_refine_1Hz.py            the refiner (chunked, vectorized; fault edges frozen)
-    code/check_fault_identity.py      F1-F5, TOPOGRAPHY-AWARE lid check
+    code/check_fault_identity.py      F1-F5, lid area+range check (any lid)
     code/check_receivers_local_top.py Stage F receivers under the LOCAL lid
     code/puml_io.py                   PUML read/write + packed BC word
     results/                          product + census/stats json + mesh.md5

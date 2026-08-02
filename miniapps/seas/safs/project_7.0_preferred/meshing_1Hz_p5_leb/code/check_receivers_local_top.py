@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""check_receivers_local_top.py -- Stage F receiver containment on a TOPOGRAPHIC lid.
+"""check_receivers_local_top.py -- Stage F receiver containment on a NON-UNIFORM lid.
 
 SeisSol v1.1.3 silently DROPS receivers that sit above their local free surface, so
 "inside the horizontal footprint" is not sufficient on a mesh whose top is not flat
-(the PREFERRED lid runs to z = +25.8 m while receivers are placed at z = -1 m).
+(the PREFERRED lid carries fault-trace vertices from -49.9 to +25.8 m while
+receivers are placed at z = -1 m).
 
 For each receiver this locates the free-surface triangle whose (x,y) projection
 contains it, interpolates the lid height there barycentrically, and checks the

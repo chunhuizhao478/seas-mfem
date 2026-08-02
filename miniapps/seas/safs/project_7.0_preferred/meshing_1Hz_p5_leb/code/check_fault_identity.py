@@ -74,8 +74,9 @@ def area(T):
 def top_stats(P, C, cdx):
     """Free-surface vertex set, TOTAL AREA and z-range.
 
-    TOPOGRAPHY-AWARE.  The PREFERRED lid is topographic (z up to +25.8 m), so
-    "exactly flat" is the wrong invariant.  LEB inserts edge MIDPOINTS, and the
+    Works on ANY lid.  The PREFERRED lid is a FLAT z=0 lid carrying a few OFF-DATUM
+    vertices -- the large ones are FAULT-TRACE vertices where the fault daylights
+    (NOT terrain; measured 2026-08-01) -- so "exactly flat" is the wrong invariant.  LEB inserts edge MIDPOINTS, and the
     midpoint of an edge of a planar triangle lies ON that triangle -- so refining
     the lid must leave its total AREA and z-range bit-unchanged.  Area is the sharp
     test: any motion off the surface changes it.  (On a flat lid this reduces to
@@ -150,7 +151,7 @@ def main():
         f"{ar_p/1e6:.9f} vs {ar_n/1e6:.9f} km^2  (rel {abs(ar_p-ar_n)/max(ar_p,1):.3e})")
     chk("F4b free-surface z-range unchanged",
         abs(zlo_p - zlo_n) < 1e-9 and abs(zhi_p - zhi_n) < 1e-9,
-        f"z in [{zlo_n:.6f}, {zhi_n:.6f}] ({'FLAT lid' if flat else 'TOPOGRAPHIC lid'}), "
+        f"z in [{zlo_n:.6f}, {zhi_n:.6f}] ({'FLAT lid' if flat else 'lid has OFF-DATUM verts'}), "
         f"{len(topv):,} verts")
 
     ninv = 0

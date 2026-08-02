@@ -42,7 +42,7 @@ file, not by the builder's own check.
 Every worst-case shape metric is **bit-identical to the parent**. The extra short
 edges are the intended product.
 
-## 3. Fault identity, PUML contract and the TOPOGRAPHIC lid — all PASS
+## 3. Fault identity, PUML contract and the lid — all PASS
 
 ```
 [PASS] F1 fault triangle multiset identical   5,522,976 vs 5,522,976
@@ -55,9 +55,21 @@ edges are the intended product.
 [PASS] F5 no inverted tets
 ```
 
-**The PREFERRED lid is topographic** (z up to +25.8 m), unlike the flat ALT lid, so
-"free surface exactly flat" is the wrong invariant here and `check_fault_identity.py`
-was extended. LEB inserts edge MIDPOINTS, and the midpoint of an edge of a planar
+**CORRECTION (measured 2026-08-01).**  The PREFERRED lid is NOT topographic -- it is a
+FLAT z = 0 lid carrying a small number of OFF-DATUM vertices.  Of 975,156 top vertices
+only 2,961 have |z| > 1e-6, and 2,417 of those are sub-0.1 m float noise.  The large
+ones cluster in exactly TWO neighbourhoods where the fault DAYLIGHTS -- around
+(528000, 3756450) and (503500, 3759200) -- and 73 of them are FAULT vertices, inherited
+from the shared CFM fault geometry (the small and intermediate meshes carry the SAME 10
+trace vertices at the SAME coordinates).  So the z-range -49.92 .. +25.82 m is set by the
+fault trace, not by terrain.
+Flattening those would MOVE THE FAULT and is therefore not a lid fix at all; it was
+considered and declined 2026-08-01.
+The area + z-range invariant below is still the correct check either way -- it verifies
+the lid did not move, which is what matters -- so nothing about the verification changes.
+
+`check_fault_identity.py` was extended because "free surface exactly flat" is the wrong
+invariant on ANY lid carrying off-datum vertices. LEB inserts edge MIDPOINTS, and the midpoint of an edge of a planar
 triangle lies ON that triangle — so refining the lid must leave its total AREA and
 z-range bit-unchanged. Area is the sharp test (any motion off the surface changes
 it) and it agrees to **1.5e-16 relative**, i.e. machine epsilon.
@@ -79,7 +91,7 @@ Against `..._PREFERRED_THERMAL_CASE2_fb200ref2gatefix_plast_phi30_40_fw15pregate
 
 Receiver containment used barycentric containment under the **local** top triangle
 (`check_receivers_local_top.py`), not a 2-D footprint test — mandatory on a
-topographic lid, because SeisSol v1.1.3 silently DROPS receivers above their local
+non-uniform lid, because SeisSol v1.1.3 silently DROPS receivers above their local
 free surface. The min clearance of **0.290 m reproduces the parent's documented
 value exactly**, which is independent confirmation that the lid did not move.
 
