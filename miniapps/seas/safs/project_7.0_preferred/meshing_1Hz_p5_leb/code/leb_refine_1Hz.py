@@ -98,9 +98,12 @@ def longest_edges(P, T, chunk=CH):
 
     *** THIS TIE-BREAK IS LOAD-BEARING, NOT COSMETIC. ***
     Rivara LEPP terminates only because edge length strictly increases along the
-    chain.  This mesh was built by EXACT RED (1->4) refinement, whose children are
-    geometrically SIMILAR to their parent -- so it contains huge numbers of EXACTLY
-    equal edge lengths.  Breaking ties by local slot index (the obvious
+    chain.  The FAULT TRIANGULATION of this mesh was built by exact red refinement
+    (a TRIANGLE -> 4 similar children; the fault facet count is exactly 16x = 4^2 for
+    the two levels applied).  NOTE a TET red-refines into 8, not 4, and only its 4
+    corner children are similar to the parent -- but what matters here is that the
+    volume inherits the fault's repeated edge lengths, so the mesh contains huge
+    numbers of EXACTLY equal edge lengths.  Breaking ties by local slot index (the obvious
     `E.argmax(1)`) is not globally consistent: two adjacent tets can each name a
     different edge of an equal-length pair, the LEPP chain closes into a CYCLE, and
     no terminal edge is ever found.  Measured with the slot tie-break: only 32,557

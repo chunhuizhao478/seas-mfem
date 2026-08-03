@@ -108,7 +108,7 @@ bound on any child's measured Vs, hence refinement-stable, while a cell wholly
 inside one bin is not penalised at all.
 
 **Failure 3 — LEPP cycling (fixed, but was not the bottleneck).** Ties in
-`E.argmax(1)` broke by local slot. This mesh is built by exact red refinement, whose
+`E.argmax(1)` broke by local slot. This mesh's FAULT is built by exact red refinement of TRIANGLES (1 -> 4; a TET would go 1 -> 8), whose
 children are *similar* to their parent, so exactly-equal edge lengths are everywhere
 and adjacent tets could name each other's edge, closing the LEPP chain into a cycle.
 Ordering ties by the globally unique edge key makes "longest edge" a strict total
