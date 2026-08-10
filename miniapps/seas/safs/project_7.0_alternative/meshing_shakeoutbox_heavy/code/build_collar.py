@@ -49,10 +49,23 @@ REG_TET_VOL = 1.0 / (6.0 * np.sqrt(2.0))
 
 # ----------------------------------------------------------------- sizing ---
 class SizeField:
-    """h(x, y, z) = clip(Vs_pooled / gate, h_min, h_max), or a constant."""
+    """h(x, y, z) = clip(safety * Vs_pooled / gate, h_min, h_max), or a constant.
 
-    def __init__(self, mode, cvm, gate, h_min, h_max, const):
-        self.mode, self.gate = mode, gate
+    THE SAFETY FACTOR IS NOT SLACK -- it corrects a units mismatch.  The size
+    field sets the length of TRIANGLE edges on the lid and the spacing of the
+    interior point cloud, but the gate is judged on each TET's MAXIMUM edge,
+    which is always longer than the base triangle's edge (the vertical and
+    diagonal edges of a well-shaped tet run ~1.2-1.5x its base spacing).
+    Sizing triangles at exactly Vs/gate therefore produces tets that miss it.
+    Measured with safety = 1.0: 2,079,219 of 14,763,187 collar cells below gate,
+    and 2,027,111 of them -- 97.5 % -- in the top 500 m, barycentres clustered
+    at z = -30 to -100 m, i.e. precisely the surface layer whose triangles were
+    sized at the limit.  This is the same reasoning as the campaign rule "judge
+    mmg compliance at 1.25x the spec, never at 1.0x".
+    """
+
+    def __init__(self, mode, cvm, gate, h_min, h_max, const, safety=1.0):
+        self.mode, self.gate, self.safety = mode, gate, safety
         self.h_min, self.h_max, self.const = h_min, h_max, const
         self.vs = VsGrid(cvm) if mode == "gate" and cvm else None
 
@@ -60,7 +73,7 @@ class SizeField:
         if self.mode == "const":
             return np.full(len(xy), self.const)
         v = self.vs.column_min(np.asarray(xy, float), z_lo, z_hi)
-        return np.clip(v / self.gate, self.h_min, self.h_max)
+        return np.clip(self.safety * v / self.gate, self.h_min, self.h_max)
 
 
 def walk_polyline(a, b, h_of):
@@ -81,6 +94,109 @@ def walk_polyline(a, b, h_of):
         out.append(s_next)
         s = s_next
     return a + d * np.array(out)[:, None]
+
+
+def seed_interior(corners, rect_xy, z_top, depth, h_of, h_min, h_max):
+    """Graded interior points for the shallow band, as extra tetgen input.
+
+    WHY THIS EXISTS.  tetgen's only size controls are the boundary point
+    density and ONE global volume cap; it has no 3-D size field.  Given a fine
+    top annulus and a coarse cap it grades away from the surface far faster
+    than the 0.5 Hz gate allows, and the measured result was 1.17M of 8.80M
+    collar cells below gate.  Trying to repair that afterwards by longest-edge
+    bisection does not work -- bisection fixes SIZE, not GRADING: it tripled the
+    collar to 28.9M tets, left MORE gate failures (1.31M) than it started with,
+    and drove the minimum edge from 65 m to 8.0 m.
+
+    Interior points fix it at the source.  tetgen inserts input points that lie
+    in no facet, so a graded cloud sets the local element size directly.  Only
+    the shallow band needs it: below ~2 km the CVM's Vs already permits 2.5-4 km
+    cells, which the global cap delivers on its own.
+
+    Points are laid on a per-level lattice: level h keeps lattice sites whose
+    required size falls in [h, 2h), so each level occupies its own depth band
+    and the cloud is graded rather than uniform.  Sites are kept clear of the
+    PLC (0.4 h from the lid, the wall's footprint and the outer box) so tetgen
+    is never asked to insert a point on top of a frozen facet.
+    """
+    lo = np.array([corners[:, 0].min(), corners[:, 1].min()])
+    hi = np.array([corners[:, 0].max(), corners[:, 1].max()])
+    levels = []
+    h = h_max
+    while h > h_min * 1.01:
+        levels.append(h)
+        h *= 0.5
+    levels.append(h_min)
+
+    def outside_rect(P):
+        """True where P is OUTSIDE the parent footprint (i.e. in the collar)."""
+        c = rect_xy.mean(0)
+        order = np.argsort(np.arctan2(rect_xy[:, 1] - c[1], rect_xy[:, 0] - c[0]))
+        R = rect_xy[order]
+        inside = np.ones(len(P), bool)
+        for i in range(4):
+            a, b = R[i], R[(i + 1) % 4]
+            e = b - a
+            inside &= (e[0] * (P[:, 1] - a[1]) - e[1] * (P[:, 0] - a[0])) >= 0.0
+        return ~inside
+
+    def rect_clear(P, m):
+        """Distance from the parent footprint boundary, for a margin test."""
+        c = rect_xy.mean(0)
+        order = np.argsort(np.arctan2(rect_xy[:, 1] - c[1], rect_xy[:, 0] - c[0]))
+        R = rect_xy[order]
+        d = np.full(len(P), np.inf)
+        for i in range(4):
+            a, b = R[i], R[(i + 1) % 4]
+            e = b - a
+            e = e / np.linalg.norm(e)
+            n = np.array([-e[1], e[0]])
+            d = np.minimum(d, np.abs((P - a) @ n))
+        return d > m
+
+    out = []
+    for h in levels:
+        zs = np.arange(z_top - 0.5 * h, z_top - depth - h, -h)
+        if not len(zs):
+            continue
+        gx = np.arange(lo[0] + 0.5 * h, hi[0], h)
+        gy = np.arange(lo[1] + 0.5 * h, hi[1], h)
+        if len(gx) * len(gy) > 40_000_000:
+            continue
+        X, Y = np.meshgrid(gx, gy, indexing="xy")
+        XY = np.column_stack([X.ravel(), Y.ravel()])
+        keep_xy = (outside_rect(XY) & rect_clear(XY, 0.4 * h)
+                   & (XY[:, 0] > lo[0] + 0.4 * h) & (XY[:, 0] < hi[0] - 0.4 * h)
+                   & (XY[:, 1] > lo[1] + 0.4 * h) & (XY[:, 1] < hi[1] - 0.4 * h))
+        XY = XY[keep_xy]
+        if not len(XY):
+            continue
+        for z in zs:
+            P = np.column_stack([XY, np.full(len(XY), z)])
+            want = h_of(P)
+            sel = (want >= h) & (want < 2.0 * h)
+            if sel.any():
+                out.append(P[sel])
+    if not out:
+        return np.zeros((0, 3))
+    # Enforce a minimum spacing BETWEEN levels.  Each level is a clean lattice,
+    # but two adjacent levels straddling a size transition sit on different
+    # lattices and can land within metres of one another; tetgen then has to
+    # honour both and emits a sliver.  Measured without this filter: collar
+    # min edge 15 m and eta_min 0.0211, against 65 m / 0.0674 unseeded.
+    # Coarse levels are accepted first, so the surviving cloud stays graded.
+    keep = [out[0]]
+    tree = cKDTree(out[0])
+    for blk in out[1:]:
+        h_blk = None
+        d, _ = tree.query(blk)
+        # spacing floor tied to this level's own lattice pitch
+        pitch = np.median(np.linalg.norm(blk[1:] - blk[:-1], axis=1)) if len(blk) > 1 else 0.0
+        ok = d > max(0.45 * pitch, 1.0)
+        if ok.any():
+            keep.append(blk[ok])
+            tree = cKDTree(np.vstack(keep))
+    return np.vstack(keep)
 
 
 def z_ladder(z_top, z_bot, h_start, h_cap, ratio=1.3):
@@ -318,12 +434,25 @@ def main():
     ap.add_argument("--gate", type=float, default=0.6667)
     ap.add_argument("--h-min", type=float, default=250.0)
     ap.add_argument("--h-max", type=float, default=5000.0)
+    ap.add_argument("--h-safety", type=float, default=0.75,
+                    help="triangle-edge to tet-max-edge correction; see SizeField")
+    ap.add_argument("--h-safety-lid", type=float, default=None,
+                    help="tighter safety for the TOP annulus only.  The lid is "
+                         "where the gate binds (93-97 %% of residual failures sit "
+                         "in the top 500 m) because its safety must absorb TWO "
+                         "overshoots: gmsh returns edges ~1.0-1.3x its size field, "
+                         "and a tet max edge exceeds its base triangle edge.  "
+                         "Tightening only the lid avoids paying for both over the "
+                         "whole 40 km column.  Defaults to --h-safety.")
     ap.add_argument("--ratio", type=float, default=1.3)
     ap.add_argument("--margin", type=float, default=10000.0,
                     help="minimum collar width where the parent already reaches "
                          "or exceeds the ShakeOut box (see the box comment)")
     ap.add_argument("--minratio", type=float, default=1.414)
     ap.add_argument("--mindihedral", type=float, default=18.0)
+    ap.add_argument("--seed-top", type=float, default=0.0,
+                    help="seed graded interior points in the top N metres; see "
+                         "seed_interior() for why tetgen needs them")
     ap.add_argument("--plc-only", action="store_true")
     ap.add_argument("--log", default=None)
     a = ap.parse_args()
@@ -382,12 +511,15 @@ def main():
     a_old = abs(signed_area(top_xy)) / 1e6
     print(f"         footprint {a_old:,.0f} -> {a_new:,.0f} km2  (collar {a_new-a_old:,.0f} km2)")
 
-    sf = SizeField(a.h_mode, a.cvm, a.gate, a.h_min, a.h_max, a.h_const)
-    h_top = lambda xy: sf.at_xy(np.asarray(xy)[:, :2], -300.0, 0.0)
+    sf = SizeField(a.h_mode, a.cvm, a.gate, a.h_min, a.h_max, a.h_const, a.h_safety)
+    sf_lid = SizeField(a.h_mode, None, a.gate, a.h_min, a.h_max, a.h_const,
+                       a.h_safety_lid if a.h_safety_lid else a.h_safety)
+    sf_lid.vs = sf.vs
+    h_top = lambda xy: sf_lid.at_xy(np.asarray(xy)[:, :2], -300.0, 0.0)
     h_bot = lambda xy: sf.at_xy(np.asarray(xy)[:, :2], z_bot, z_bot + 500.0)
     h_vol = lambda xyz: np.clip(
         sf.at_xy(np.asarray(xyz)[:, :2], -300.0, 0.0) if sf.mode == "const" else
-        np.clip(sf.vs.at(np.asarray(xyz)) / sf.gate, sf.h_min, sf.h_max),
+        np.clip(sf.safety * sf.vs.at(np.asarray(xyz)) / sf.gate, sf.h_min, sf.h_max),
         sf.h_min, sf.h_max)
 
     # ---- shared 1-D discretisations ----------------------------------------
@@ -472,6 +604,15 @@ def main():
         print(f"[write] PLC only -> {a.out}  ({time.time()-t0:.0f} s)")
         return
 
+    # ---- graded interior seed for the shallow band -------------------------
+    n_plc = len(Vu)
+    if a.seed_top > 0:
+        seed = seed_interior(corners, PW[top_rim][:, :2], z_top, a.seed_top,
+                             h_vol, a.h_min, a.h_max)
+        print(f"[seed]   {len(seed):,} interior points in the top "
+              f"{a.seed_top/1e3:.1f} km", flush=True)
+        Vu = np.vstack([Vu, seed])
+
     # ---- fill ---------------------------------------------------------------
     import tetgen
     shift = Vu.mean(axis=0)
@@ -489,7 +630,7 @@ def main():
     print(f"[collar] {len(ST):,} tets, {len(SP):,} verts  ({time.time()-t0:.0f} s)")
 
     # the wall vertices must have survived -Y untouched
-    d, near = cKDTree(SP).query(Vu[wall_map])
+    d, near = cKDTree(SP).query(Vu[:n_plc][wall_map])
     if d.max() > 1e-6:
         raise RuntimeError(f"tetgen moved wall vertices (max {d.max():.3e} m)")
     print(f"[collar] wall vertices preserved to {d.max():.2e} m")

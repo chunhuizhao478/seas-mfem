@@ -83,6 +83,13 @@ def main():
     ap.add_argument("--cvm", default=None)
     ap.add_argument("--gate", type=float, default=0.6667)
     ap.add_argument("--order", type=int, default=4, help="SeisSol ORDER (p = order-1)")
+    ap.add_argument("--skip-hull", action="store_true",
+                    help="skip the independent hull census.  It sorts 4x nt faces; on the "
+                         "149M-tet heavy mesh that is ~12 GB ON TOP of both meshes. "
+                         "merge_collar already checks the equivalent identity "
+                         "(parent hull - wall) + (collar hull - wall) and it was "
+                         "cross-validated against this census on the small and "
+                         "intermediate meshes.")
     a = ap.parse_args()
 
     G0, C0, B0 = read(a.parent)
@@ -135,9 +142,13 @@ def main():
     # P5 -- BC round trip
     ft = sum(int((face_code(B1, s) == BC_DYNAMIC_RUPTURE).sum()) for s in range(4))
     tagged = sum(int((face_code(B1, s) != 0).sum()) for s in range(4))
-    hf = hull_faces(C1)
-    check("P5 BC round-trip", tagged == hf + ft,
-          f"tagged {tagged:,} == hull {hf:,} + fault x2 {ft:,}")
+    if a.skip_hull:
+        print(f"  [skip] P5 independent hull census (tagged {tagged:,}, fault x2 {ft:,}); "
+              f"merge_collar verified the equivalent identity")
+    else:
+        hf = hull_faces(C1)
+        check("P5 BC round-trip", tagged == hf + ft,
+              f"tagged {tagged:,} == hull {hf:,} + fault x2 {ft:,}")
 
     # P6 -- inverted
     neg = 0
