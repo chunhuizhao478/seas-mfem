@@ -39,7 +39,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from collar_lib import (SHAKEOUT_E, SHAKEOUT_N, VsGrid, as_ccw, boundary_loops,
+from collar_lib import (SHAKEOUT_E, SHAKEOUT_N, TARGET_E, TARGET_N, VsGrid, as_ccw, boundary_loops,
                         check_closed, extract_wall, orient, signed_area,
                         suppress_stdout, tet_edge_lengths, tet_eta,
                         tet_signed_volume)
@@ -491,19 +491,18 @@ def main():
     bot_rim, bot_xy = as_ccw(bot_rim, PW[bot_rim][:, :2])
 
     # ---- the enlarged box ---------------------------------------------------
-    # box = ShakeOut bbox UNION (parent bbox + margin).
+    # box = TARGET_E/N (see collar_lib) UNION (parent bbox + margin).
     #
-    # The margin is not cosmetic.  The ALT footprint is a rectangle rotated 30
-    # deg, and its NORTH corner sits at N 3,996,866.9 -- 3.56 km beyond
-    # ShakeOut's own north edge.  Without a margin the collar pinches to a
-    # single point there and the annulus stops being an annulus: gmsh reports
-    # "2 intersections in the 1D mesh" between the outer north edge and the
-    # inner rim and emits no elements at all.  Trimming the parent instead
-    # would destroy verified mesh, so the box grows on that side.
-    ex = (min(SHAKEOUT_E[0], G[:, 0].min() - a.margin),
-          max(SHAKEOUT_E[1], G[:, 0].max() + a.margin))
-    ny_ = (min(SHAKEOUT_N[0], G[:, 1].min() - a.margin),
-           max(SHAKEOUT_N[1], G[:, 1].max() + a.margin))
+    # TARGET already contains the ShakeOut grid box with margin AND the
+    # PREFERRED domain box; the union with parent+margin is the safety net that
+    # guarantees requirement (2)+(3) for whichever parent is passed -- a
+    # frozen-parent extension can only ADD, and a wall drawn exactly at a
+    # parent corner pinches the collar to zero width, where gmsh reports
+    # "2 intersections in the 1D mesh" and emits no elements at all.
+    ex = (min(TARGET_E[0], G[:, 0].min() - a.margin),
+          max(TARGET_E[1], G[:, 0].max() + a.margin))
+    ny_ = (min(TARGET_N[0], G[:, 1].min() - a.margin),
+           max(TARGET_N[1], G[:, 1].max() + a.margin))
     corners = np.array([[ex[0], ny_[0]], [ex[1], ny_[0]], [ex[1], ny_[1]], [ex[0], ny_[1]]])
     print(f"[box]    E {ex[0]:,.1f} .. {ex[1]:,.1f}  ({(ex[1]-ex[0])/1e3:.3f} km)")
     print(f"         N {ny_[0]:,.1f} .. {ny_[1]:,.1f}  ({(ny_[1]-ny_[0])/1e3:.3f} km)")

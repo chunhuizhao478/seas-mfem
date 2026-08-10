@@ -39,7 +39,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from collar_lib import (SHAKEOUT_E, SHAKEOUT_N, VsGrid, as_ccw, boundary_loops,
+from collar_lib import (SHAKEOUT_E, SHAKEOUT_N, TARGET_E, TARGET_N, VsGrid, as_ccw, boundary_loops,
                         check_closed, extract_wall, orient, signed_area,
                         suppress_stdout, tet_edge_lengths, tet_eta,
                         tet_signed_volume)
@@ -96,7 +96,8 @@ def walk_polyline(a, b, h_of):
     return a + d * np.array(out)[:, None]
 
 
-def seed_interior(corners, rect_xy, z_top, depth, h_of, h_min, h_max):
+def seed_interior(corners, rect_xy, z_top, depth, h_of, h_min, h_max, plc_pts=None,
+                  clear=0.55):
     """Graded interior points for the shallow band, as extra tetgen input.
 
     WHY THIS EXISTS.  tetgen's only size controls are the boundary point
@@ -154,9 +155,18 @@ def seed_interior(corners, rect_xy, z_top, depth, h_of, h_min, h_max):
             d = np.minimum(d, np.abs((P - a) @ n))
         return d > m
 
+    # Clearance against the ACTUAL PLC points, not just the footprint outline.
+    # A seed dropped a few tens of metres from a lid vertex makes a flat tet:
+    # its min EDGE looks ordinary but its INSPHERE collapses, and insphere is
+    # what dt is proportional to.  Measured without this test, on the 714x483 km
+    # box: collar r_insphere min 0.014 m and min r/Vp 2.15e-06 s, against the
+    # parent's 1.394 m / 2.90e-04 s -- a 135x cut in the timestep floor, from
+    # 18 cells.  eta and min-edge both failed to show it.
+    tree = cKDTree(np.asarray(plc_pts, float)) if plc_pts is not None else None
+
     out = []
     for h in levels:
-        zs = np.arange(z_top - 0.5 * h, z_top - depth - h, -h)
+        zs = np.arange(z_top - 0.8 * h, z_top - depth - h, -h)
         if not len(zs):
             continue
         gx = np.arange(lo[0] + 0.5 * h, hi[0], h)
@@ -175,8 +185,14 @@ def seed_interior(corners, rect_xy, z_top, depth, h_of, h_min, h_max):
             P = np.column_stack([XY, np.full(len(XY), z)])
             want = h_of(P)
             sel = (want >= h) & (want < 2.0 * h)
-            if sel.any():
-                out.append(P[sel])
+            if not sel.any():
+                continue
+            Q = P[sel]
+            if tree is not None:
+                d, _ = tree.query(Q, distance_upper_bound=clear * h, workers=-1)
+                Q = Q[~np.isfinite(d)]        # inf => nothing within clear*h
+            if len(Q):
+                out.append(Q)
     if not out:
         return np.zeros((0, 3))
     # Enforce a minimum spacing BETWEEN levels.  Each level is a clean lattice,
@@ -453,6 +469,8 @@ def main():
     ap.add_argument("--seed-top", type=float, default=0.0,
                     help="seed graded interior points in the top N metres; see "
                          "seed_interior() for why tetgen needs them")
+    ap.add_argument("--seed-clear", type=float, default=0.55,
+                    help="minimum seed-to-PLC-point distance, in units of the local h")
     ap.add_argument("--plc-only", action="store_true")
     ap.add_argument("--log", default=None)
     a = ap.parse_args()
@@ -491,19 +509,18 @@ def main():
     bot_rim, bot_xy = as_ccw(bot_rim, PW[bot_rim][:, :2])
 
     # ---- the enlarged box ---------------------------------------------------
-    # box = ShakeOut bbox UNION (parent bbox + margin).
+    # box = TARGET_E/N (see collar_lib) UNION (parent bbox + margin).
     #
-    # The margin is not cosmetic.  The ALT footprint is a rectangle rotated 30
-    # deg, and its NORTH corner sits at N 3,996,866.9 -- 3.56 km beyond
-    # ShakeOut's own north edge.  Without a margin the collar pinches to a
-    # single point there and the annulus stops being an annulus: gmsh reports
-    # "2 intersections in the 1D mesh" between the outer north edge and the
-    # inner rim and emits no elements at all.  Trimming the parent instead
-    # would destroy verified mesh, so the box grows on that side.
-    ex = (min(SHAKEOUT_E[0], G[:, 0].min() - a.margin),
-          max(SHAKEOUT_E[1], G[:, 0].max() + a.margin))
-    ny_ = (min(SHAKEOUT_N[0], G[:, 1].min() - a.margin),
-           max(SHAKEOUT_N[1], G[:, 1].max() + a.margin))
+    # TARGET already contains the ShakeOut grid box with margin AND the
+    # PREFERRED domain box; the union with parent+margin is the safety net that
+    # guarantees requirement (2)+(3) for whichever parent is passed -- a
+    # frozen-parent extension can only ADD, and a wall drawn exactly at a
+    # parent corner pinches the collar to zero width, where gmsh reports
+    # "2 intersections in the 1D mesh" and emits no elements at all.
+    ex = (min(TARGET_E[0], G[:, 0].min() - a.margin),
+          max(TARGET_E[1], G[:, 0].max() + a.margin))
+    ny_ = (min(TARGET_N[0], G[:, 1].min() - a.margin),
+           max(TARGET_N[1], G[:, 1].max() + a.margin))
     corners = np.array([[ex[0], ny_[0]], [ex[1], ny_[0]], [ex[1], ny_[1]], [ex[0], ny_[1]]])
     print(f"[box]    E {ex[0]:,.1f} .. {ex[1]:,.1f}  ({(ex[1]-ex[0])/1e3:.3f} km)")
     print(f"         N {ny_[0]:,.1f} .. {ny_[1]:,.1f}  ({(ny_[1]-ny_[0])/1e3:.3f} km)")
@@ -608,7 +625,7 @@ def main():
     n_plc = len(Vu)
     if a.seed_top > 0:
         seed = seed_interior(corners, PW[top_rim][:, :2], z_top, a.seed_top,
-                             h_vol, a.h_min, a.h_max)
+                             h_vol, a.h_min, a.h_max, plc_pts=Vu, clear=a.seed_clear)
         print(f"[seed]   {len(seed):,} interior points in the top "
               f"{a.seed_top/1e3:.1f} km", flush=True)
         Vu = np.vstack([Vu, seed])

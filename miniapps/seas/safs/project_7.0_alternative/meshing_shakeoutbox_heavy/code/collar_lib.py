@@ -30,13 +30,38 @@ LOCAL_FACES = ((0, 2, 1), (0, 1, 3), (1, 2, 3), (0, 3, 2))
 BC_INTERIOR, BC_FREE_SURFACE, BC_DYNAMIC_RUPTURE, BC_ABSORBING = 0, 1, 3, 5
 PAIRS = ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))
 
-# --- the target box: union of the ALT footprint and the ShakeOut v1 bbox -----
-# ShakeOut v1 (UTM11N, from 04_comparison/HEAVY/shakeout_comparison_HEAVY.json):
-#   E 74,850.144 .. 781,468.938 m ; N 3,542,641.466 .. 3,993,303.385 m
-# The ALT mesh already reaches N 3,996,866.9, i.e. 3.56 km FURTHER north than
-# ShakeOut, so the north edge is KEPT (trimming it would destroy verified mesh).
-SHAKEOUT_E = (74850.14406758995, 781468.9381141155)
-SHAKEOUT_N = (3542641.465638498, 3993303.3849738695)
+# --- the ShakeOut v1 footprint, and the domain box ---------------------------
+#
+# SHAKEOUT_E/N is the DECLARED ShakeMap grid box, densely sampled along its
+# boundary and projected to UTM 11N (EPSG:32611, the SAFS CRS).
+# grid.xml declares lon -121.5 .. -114.0, lat 32.0 .. 36.0 at 0.02 deg
+# (376 x 201 nodes).  Reproduced here to 0.0 m against the PREFERRED build.
+#
+# The boundary must be sampled DENSELY, not just at the four corners: the
+# projected edges bulge, and corners alone understate the SOUTH edge by
+# 3,934 m.  An earlier ALT build instead used the CONTOUR product's bbox from
+# 04_comparison/HEAVY/shakeout_comparison_HEAVY.json (E 74,850.1..781,468.9,
+# N 3,542,641.5..3,993,303.4) -- that is where the contour data actually is,
+# which is smaller, and it left the absorbing wall sitting EXACTLY on the
+# comparison area with zero margin on three sides.
+SHAKEOUT_E = (74758.0, 783423.2)
+SHAKEOUT_N = (3540435.7, 3993324.3)
+
+# TARGET_E/N is the domain box the collar is built to.  Four requirements fix it:
+#   1. contain the ShakeOut grid box with about one far-field cell of margin
+#      (W 2,758 / E 2,577 / S 16,436 / N 13,676 m);
+#   2. contain the parent -- a frozen-parent extension can only ADD;
+#   3. leave a workable collar width everywhere.  The ALT parent's north corner
+#      is at N 3,996,866.9, which is 3,543 m NORTH of the grid box, so the north
+#      wall is pushed 10,133 m above that corner; a wall drawn at the corner
+#      itself pinches the collar to zero width and gmsh emits no elements;
+#   4. CONTAIN THE PREFERRED DOMAIN BOX (E 72,000..786,000,
+#      N 3,524,000..3,996,000) so that ALT n PREF is exactly the PREFERRED box.
+#      That makes the common ALT-vs-PREF-vs-ShakeOut comparison mask carry
+#      PREF's margins on all four sides instead of ALT's zero.
+# Snapped to round km, as the PREFERRED build does.
+TARGET_E = (72000.0, 786000.0)
+TARGET_N = (3524000.0, 4007000.0)
 
 
 @contextmanager
