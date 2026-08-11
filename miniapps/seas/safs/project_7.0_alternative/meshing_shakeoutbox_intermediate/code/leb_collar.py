@@ -263,10 +263,25 @@ def main():
                          "and this removes rim freezing entirely")
     ap.add_argument("--max-rounds", type=int, default=40)
     ap.add_argument("--stats", default=None)
+    ap.add_argument("--vs-source", choices=["deck", "muscal"], default="deck",
+                    help="which velocity model the gate and the target read. "
+                         "'deck' is the run-time nc (1500 m lateral, 250 m "
+                         "UNIFORM vertical); 'muscal' is the source model it was "
+                         "resampled from (0.01 deg, 50 m depth step in the top "
+                         "500 m). They agree at z=0 but the deck file's binning "
+                         "hands every barycentre in the top 125 m the z=0 value, "
+                         "where MUSCAL resolves rock 2.2x faster -- which is "
+                         "~72 %% of this mesh's apparent gate failures.")
     a = ap.parse_args()
     t0 = time.time()
 
-    vs = PoolVs(a.cvm)
+    if a.vs_source == "muscal":
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]
+                               / "meshing_shakeoutbox_gate" / "code"))
+        from muscal_vs import MuscalVs
+        vs = MuscalVs(backup=PoolVs(a.cvm))
+    else:
+        vs = PoolVs(a.cvm)
     S = np.load(a.collar)
     P = S["points"].copy()
     T = S["tets"].astype(np.int32)
