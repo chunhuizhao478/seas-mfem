@@ -57,14 +57,20 @@ zero vertical resampling. **A mesh gated on MUSCAL must be run with that stack**
 | | intermediate | heavy |
 |---|---|---|
 | shipped | `..._shakeoutbox.puml.h5` 29,385,401 | `safalt_fb200_deep40km_refine2_shakeoutbox` 135,567,603 |
-| **new** | `safalt_0d5Hz_p3_deep40km_shakeoutbox_muscal_final.puml.h5` **34,740,308** (+18.2 %) | `safalt_fb200_1Hz_p5_shakeoutbox_muscal_final.puml.h5` **157,721,257** (+16.3 %) |
+| **new** | `safalt_0d5Hz_p3_deep40km_shakeoutbox_muscal.puml.h5` **34,785,799** (+18.4 %) | `safalt_fb200_1Hz_p5_shakeoutbox_muscal.puml.h5` **157,840,519** (+16.4 %) |
 | parent | `safalt_0d5Hz_p3_deep40km` (unchanged) | **swapped** to `safalt_fb200_deep40km_1Hz_p5` |
-| binding gate | 0.6667 | **0.8000** |
-| failures at it (MUSCAL) | 39,281 -> **246** (0.0007 %) | 93,213 -> **486** (0.0003 %) |
-| worst Vs/dx | 0.1275 -> **0.3101** | 0.1275 -> **0.3623** |
+| binding gate | 0.6667 (0.5 Hz @ p3) | **0.8000 (1 Hz @ p5)** |
+| failures at it (MUSCAL) | 39,281 -> **124** (0.0004 %) | 93,213 -> **369** (0.0002 %) |
+| worst Vs/dx | 0.1275 -> **0.3158** | 0.1275 -> **0.4816** |
+| **worst resolved f** | 0.096 -> **0.237 Hz** (target 0.5) | 0.159 -> **0.602 Hz** (target 1.0) |
+| eta_min | — | 0.0545 |
+| min edge | 9.3436 m (= parent's) | 2.3359 m (= parent's) |
 | fault area delta | **exactly 0.000e+00 m2** | **exactly 0.000e+00 m2** |
 | inverted tets | 0 | 0 |
 | fault identity | ALL PASS | ALL PASS |
+
+Min edge equals each parent's exactly, so **no new dt floor from a short edge** —
+but `r_insphere` is the real dt test and is NOT yet measured (see below).
 
 ### The heavy mesh was welded to the wrong parent
 
@@ -115,7 +121,21 @@ when its k-hop patch RIM starts freezing terminal edges):
 | in | — | — | 29,385,401 | 39,281 |
 | 1 | 4 | 40 | 34,127,870 | ~24,783 |
 | 2 | 10 | 60 | 34,650,302 | 886 |
-| 3 | 14 | 90 | **34,740,308** | **246** |
+| 3 | 14 | 90 | 34,740,308 | 246 |
+| 4 | 20 | 140 | **34,785,799** | **124** |
+
+Pass 4 is where the gate target reaches its floor: the count stopped falling and
+began to OSCILLATE (85 -> 94 -> 110) with the worst pinned at 0.32. That is the
+treadmill appearing at the extreme tail, in the few columns slow enough that a
+bisected child lands in slower material than its parent.
+
+A 5th pass was attempted with a HYBRID -- seed the patch on the ~100 measured
+failures (so it is 0.30 % of the mesh instead of 55-66 %) but drive it with the
+pooled bound, which is the treadmill's cure (`--seed-on-gate --pool half`). It
+did not help: the tight patch froze ~375 terminal edges at its own rim and the
+pooled count went sideways. Log kept as `close_tail_int_RIMSTALLED.log`. Closing
+the last ~100 cells needs a wide patch AND the pooled target together, which is
+the expensive combination this campaign exists to avoid.
 
 ## Reproduce
 
@@ -142,15 +162,31 @@ $CODE/close_intermediate.sh      # pass 1   (then _pass2.sh, _pass3.sh)
 $CODE/close_heavy.sh
 ```
 
-## Residual, and what it is
+## Residual — a non-zero count DOES mean "not compliant everywhere"
 
-The intermediate's 246 remaining cells are **not** a structural floor: 99.7 %
-rest on the free surface, the median refinement still needed is 1.10x and the
-ideal bisection bill is ~2,000 cells. They cluster in the far-EASTERN collar
-strip (E 783-786 km), which is **beyond both velocity models' data coverage** --
-MUSCAL's valid box ends at lon -114.02 and the deck nc's grid at E 705 km, so Vs
-there is an edge-clamp value (322 m/s), not a measurement. Refining further
-chases an extrapolation. Each pass costs ~10x the rounds for ~4x fewer cells.
+Each remaining cell resolves less than its target. What they actually resolve
+(`residual_impact.py`):
+
+| | cells | worst | p10 | median | below half the target |
+|---|---:|---:|---:|---:|---:|
+| intermediate, target 0.500 Hz @ p3 | 124 | **0.237 Hz** | 0.317 | 0.388 | 4 cells |
+| heavy, target 1.000 Hz @ p5 | 369 | **0.602 Hz** | 0.626 | 0.790 | **0 cells** |
+
+Every cell in the heavy mesh resolves at least 0.602 Hz at p5, and 217 of the
+369 are already above 0.75 Hz.
+
+**Where they are.** All are shallow free-surface cells (median barycentre
+~-105 m). None is near the fault — the heavy has **zero** in the frozen parent
+block, its nearest is 31 km outside it (median 189 km); the intermediate has 4
+(1.6 %), median 91 km out. But they are NOT confined to dead corners: 82 % and
+73 % respectively lie INSIDE the ShakeOut v1 PGV comparison footprint, so they
+sit where ground motion is read. Only the handful of worst cells fall past
+MUSCAL's lon -114.02 / the deck nc's E 705 km, where Vs is an edge-clamp value
+rather than a measurement.
+
+They are a convergence tail, not a structural class (no fault-edge or
+wall-pinned exempt class was ever needed). Closing them fully is a matter of
+spending a wide-patch pooled pass, not of changing method.
 
 ## Note for the intermediate deck
 

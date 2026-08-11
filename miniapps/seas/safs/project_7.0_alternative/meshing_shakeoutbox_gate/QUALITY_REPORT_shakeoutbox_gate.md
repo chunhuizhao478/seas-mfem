@@ -64,25 +64,25 @@ the feasible ceiling costs **+97 %**; under MUSCAL it costs **+10 %**.
 
 ### Intermediate — 0.5 Hz @ p3
 
-`results/safalt_0d5Hz_p3_deep40km_shakeoutbox_muscal_final.puml.h5`
+`results/safalt_0d5Hz_p3_deep40km_shakeoutbox_muscal.puml.h5`
 
 | | shipped | **new** |
 |---|---:|---:|
-| tets | 29,385,401 | **34,740,308** (+5,354,907, **+18.22 %**) |
-| verts | 5,458,404 | 6,638,003 |
-| gate 0.6667 failures (MUSCAL) | 39,281 (0.134 %) | **246 (0.0007 %)** |
-| worst Vs/dx | 0.1275 | **0.3101** |
+| tets | 29,385,401 | **34,785,799** (+5,400,398, **+18.38 %**) |
+| verts | 5,458,404 | 6,647,809 |
+| gate 0.6667 failures (MUSCAL) | 39,281 (0.134 %) | **124 (0.0004 %)** |
+| worst Vs/dx | 0.1275 | **0.3158** (resolves 0.237 Hz) |
 | inverted tets | 0 | **0** |
 | fault triangles | 320,560 | **320,560 identical** |
 | fault area | 13073.313420396 km2 | **delta exactly 0.000e+00 m2** |
 | free surface | 344,862.000 km2, flat at z=0 | **unchanged, still exactly flat** |
 
-**160x fewer failures.** `check_fault_identity.py`: ALL CHECKS PASS (F1 multiset,
+**317x fewer failures.** `check_fault_identity.py`: ALL CHECKS PASS (F1 multiset,
 F2 area, F3 BC round-trip, F4 flat lid, F5 no inverted).
 
 ### Heavy — 1 Hz @ p5 (binding) and 0.5 Hz @ p3
 
-`results/safalt_fb200_1Hz_p5_shakeoutbox_muscal_final.puml.h5`
+`results/safalt_fb200_1Hz_p5_shakeoutbox_muscal.puml.h5`
 
 Two changes: the **parent was swapped**, then the merged mesh was refined.
 
@@ -90,25 +90,26 @@ Two changes: the **parent was swapped**, then the merged mesh was refined.
 |---|---:|---:|
 | parent | `safalt_fb200_deep40km_refine2` 122,162,105 | `safalt_fb200_deep40km_1Hz_p5` **133,699,789** |
 | collar | shared 13,405,498 | rebuilt **13,461,912** |
-| tets | 135,567,603 | **157,721,257** (+22,153,654, **+16.34 %**) |
-| verts | 23,168,926 | 27,677,926 |
-| **gate 0.8 failures (1 Hz @ p5)** | 366,083 on the deck nc | **486 (0.0003 %)** on MUSCAL |
-| gate 0.6667 failures (0.5 Hz @ p3) | 42,228 on the deck nc | **246 (0.0002 %)** on MUSCAL |
-| worst Vs/dx | 0.0868 | **0.3623** |
+| tets | 135,567,603 | **157,840,519** (+22,272,916, **+16.43 %**) |
+| verts | 23,168,926 | 27,703,499 |
+| **gate 0.8 failures (1 Hz @ p5)** | 366,083 on the deck nc | **369 (0.0002 %)** on MUSCAL |
+| gate 0.6667 failures (0.5 Hz @ p3) | 42,228 on the deck nc | **225 (0.0001 %)** on MUSCAL |
+| worst Vs/dx | 0.0868 | **0.4816** (resolves 0.602 Hz) |
 | inverted tets | 0 | **0** |
 | fault triangles | 5,128,960 | **5,128,960 identical** |
 | fault area | 13073.313420396 km2 | **delta exactly 0.000e+00 m2** |
 | free surface | flat at z=0 | **unchanged, still exactly flat** |
 
 After the weld the merged mesh measured 93,213 failures at 0.8 (parent 7,648 +
-collar 85,565); refinement took that to **486**, a 192x reduction.
+collar 85,565); refinement took that to **369**, a 253x reduction.
 `check_fault_identity.py`: ALL CHECKS PASS.
 
 | heavy | hops | rounds | tets | failures @ 0.8 |
 |---|---:|---:|---:|---:|
 | merged | — | — | 147,161,701 | 93,213 |
 | pass 1 | 5 | 55 | 157,332,330 | ~7,462 |
-| pass 2 | 12 | 80 | **157,721,257** | **486** |
+| pass 2 | 12 | 80 | 157,721,257 | 486 |
+| pass 3 | 20 | 140 | **157,840,519** | **369** |
 
 **The shipped heavy was welded to the wrong parent.** `refine2` was only ever
 certified at 0.5 Hz/p3 and fails the 1 Hz gate on **274,299 of its own cells** —
@@ -162,7 +163,8 @@ its k-hop patch RIM starts freezing terminal edges — pass 2 ran `froze rim 0`)
 | in | — | — | 29,385,401 | 39,281 |
 | pass 1 | 4 | 40 | 34,127,870 | ~24,783 |
 | pass 2 | 10 | 60 | 34,650,302 | 886 |
-| pass 3 | 14 | 90 | **34,740,308** | **246** |
+| pass 3 | 14 | 90 | 34,740,308 | 246 |
+| pass 4 | 20 | 140 | **34,785,799** | **124** |
 
 ## 4. Regressions and things that got worse
 
@@ -186,18 +188,39 @@ its k-hop patch RIM starts freezing terminal edges — pass 2 ran `froze rim 0`)
 
 ## 5. Residual — what it is, and why it is not a floor
 
-Both residuals are the convergence tail, not a structural class, and both sit in
-the same place — the corners of the enlarged box, **beyond both velocity models'
-data coverage**. MUSCAL's valid box ends at lon -114.02 and the deck nc's grid at
-E 705 km, so Vs there is an edge-clamp value, not a measurement.
+A non-zero count means the mesh is **not compliant everywhere** — each of these
+cells resolves less than the target. What they actually resolve
+(`residual_impact.py`):
 
-| | cells | on free surface | median refine still needed | ideal bill | where |
-|---|---:|---:|---:|---:|---|
-| intermediate @ 0.6667 | 246 | 99.7 % | 1.10x | ~2,000 cells | E 783–786 km (far SE/E) |
-| heavy @ 0.8 | 486 | 100 % | 1.20x | ~1,208 cells | E 770–775 km, N 3,976–3,977 km (far NE) |
+| | cells | worst | p10 | median | p90 |
+|---|---:|---:|---:|---:|---:|
+| intermediate, target 0.500 Hz @ p3 | 246 | **0.233 Hz** | 0.273 | 0.380 | 0.483 |
+| heavy, target 1.000 Hz @ p5 | 486 | **0.453 Hz** | 0.602 | 0.832 | 0.988 |
 
-Refining further chases an extrapolation. Each additional pass costs roughly 10x
-the rounds for ~4x fewer cells.
+Only 11 of the intermediate's are below 0.25 Hz; 319 of the heavy's 486 already
+resolve 0.75–1.0 Hz. Median extra refinement needed is 1.10x / 1.20x.
+
+**Where they are.** All are shallow free-surface cells (median barycentre
+−106 / −105 m), and none is near the fault:
+
+| | inside ShakeOut v1 comparison box | inside the frozen PARENT (near-fault) |
+|---|---:|---:|
+| intermediate | **102 of 124 (82.3 %)** | 4 (1.6 %) |
+| heavy | **270 of 369 (73.2 %)** | **0 (0.0 %)** |
+
+> EARLIER DRAFTS OF THIS REPORT SAID the residual sat entirely in the box's
+> corners beyond both models' data coverage. That was read off the WORST few
+> cells and is **wrong for the population**: the residual spans
+> E 74,589..785,952 / N 3,526,424..4,002,391, i.e. most of the collar, and the
+> majority lies INSIDE the ShakeOut PGV comparison footprint. Only the handful of
+> worst cells are in the far-east strip past MUSCAL's lon -114.02 / the deck nc's
+> E 705 km, where Vs is an edge-clamp value rather than a measurement.
+
+They are the convergence tail, not a structural class — no fault-edge or
+wall-pinned exempt class was needed (passes 2/3 ran `froze rim 0` with only 3
+fault-frozen terminal edges). Each additional pass costs roughly 10x the rounds
+for ~4x fewer cells, so closing them fully is a matter of spending more passes,
+not of changing method.
 
 No fault-edge-pinned or wall-pinned exempt class was needed: pass 2/3 ran with
 `froze rim 0` and only 3 fault-frozen terminal edges throughout.
@@ -206,7 +229,7 @@ No fault-edge-pinned or wall-pinned exempt class was needed: pass 2/3 ran with
 
 | check | intermediate | heavy |
 |---|---|---|
-| gate census, MUSCAL, both gates | PASS 246 @ 0.6667 | PASS **486 @ 0.8**, 246 @ 0.6667 |
+| gate census, MUSCAL, both gates | 124 @ 0.6667 | **369 @ 0.8**, 225 @ 0.6667 |
 | fault triangle multiset | PASS 320,560 | PASS **5,128,960** |
 | fault area delta == 0 | PASS 0.000e+00 m2 | PASS **0.000e+00 m2** |
 | BC round-trip (interior x2, boundary x1) | PASS | PASS 2,564,480 faces |
@@ -220,3 +243,24 @@ test, a flat tet keeps an ordinary edge while its insphere collapses; Stage F
 deck compatibility (stress/friction nc coverage, hypocentre snap, receiver
 containment under the LOCAL free-surface triangle); quality comparison
 (`compare_quality.py`) against the shipped products.
+
+
+## 7. Where the gate target stops, and what would close the last cells
+
+Pass 4 (intermediate) is where the gate-as-target reaches its floor: the count
+stopped falling and began to OSCILLATE (85 -> 94 -> 110) with the worst pinned
+at 0.32. That is the treadmill reappearing at the extreme tail, in the few
+columns slow enough that a bisected child lands in slower material than its
+parent — the same mechanism as the deck nc's cliff, just much weaker.
+
+A hybrid 5th pass was tried and did NOT work: seed the patch on the ~100
+measured failures (0.30 % of the mesh instead of 55-66 %) but drive it with the
+pooled bound (`--seed-on-gate --pool half`). The tight patch froze ~375 terminal
+edges at its own rim and the pooled count went sideways. Log:
+`close_tail_int_RIMSTALLED.log`.
+
+So the last ~100-370 cells need a WIDE patch AND the pooled target together —
+the expensive combination this campaign exists to avoid, and which on the whole
+mesh projected ~+24M tets. That is the trade to weigh if exact zero is required:
+roughly a 70 % larger mesh to close 124 cells that already resolve 0.24-0.50 Hz,
+none of them near the fault.

@@ -243,6 +243,10 @@ def main():
     ap.add_argument("--hops", type=int, default=5)
     ap.add_argument("--max-rounds", type=int, default=40)
     ap.add_argument("--stats", default=None)
+    ap.add_argument("--seed-on-gate", action="store_true",
+                    help="seed the working patch on MEASURED gate failures rather "
+                         "than on the pooled target. Use for tail passes: it keeps "
+                         "the patch tiny so a pooled --pool can be afforded locally.")
     ap.add_argument("--pool", choices=["bbox", "half", "gate"], default="half",
                     help="refinement target: how much of each cell the Vs lower "
                          "bound is pooled over. See _M.pool for why 'half' is "
@@ -332,8 +336,28 @@ def main():
         print("nothing to do")
         return
 
+    # WHICH CELLS SEED THE WORKING PATCH.
+    #
+    # Seeding on the pooled target is right for a first pass, but it scales with
+    # the target's conservatism -- on this mesh it selected 587,899-1,456,239
+    # cells against 39,281 that actually fail, and dragged 55-66 % of the mesh
+    # into the patch.  Once the bulk is closed and only a stubborn tail is left,
+    # the useful combination is the reverse: seed on the MEASURED failures (a
+    # few hundred cells, so the patch is tiny) but drive the loop with the
+    # POOLED bound, which is what stops the tail oscillating.  Measured on the
+    # intermediate mesh, the gate-driven loop plateaued at ~100 cells and
+    # bounced 85 -> 94 -> 110 with its worst pinned at 0.32; that is the
+    # treadmill, and the pooled bound is its cure -- just too expensive to pay
+    # for over the whole mesh.
+    seed = bad0 if args.seed_on_gate else tgt0
+    if not len(seed):
+        print("nothing to do")
+        return
+    print(f"[seed]   patch seeded on {len(seed):,} cells "
+          f"({'measured gate failures' if args.seed_on_gate else 'pooled target'})",
+          flush=True)
     sel_v = np.zeros(nv0, bool)
-    sel_v[np.unique(C[tgt0])] = True
+    sel_v[np.unique(C[seed])] = True
     interior = sel_v.copy()
     for h in range(args.hops):
         touch = sel_v[C].any(1)
