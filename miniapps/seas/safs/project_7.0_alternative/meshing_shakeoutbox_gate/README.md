@@ -57,17 +57,17 @@ zero vertical resampling. **A mesh gated on MUSCAL must be run with that stack**
 | | intermediate | heavy |
 |---|---|---|
 | shipped | `..._shakeoutbox.puml.h5` 29,385,401 | `safalt_fb200_deep40km_refine2_shakeoutbox` 135,567,603 |
-| **new** | `safalt_0d5Hz_p3_deep40km_shakeoutbox_muscal.puml.h5` **34,785,799** (+18.4 %) | `safalt_fb200_1Hz_p5_shakeoutbox_muscal.puml.h5` **157,840,519** (+16.4 %) |
+| **new** | `safalt_0d5Hz_p3_deep40km_shakeoutbox_muscal.puml.h5` **38,827,749** (+32.1 %) | `safalt_fb200_1Hz_p5_shakeoutbox_muscal.puml.h5` **157,840,519** (+16.4 %) |
 | parent | `safalt_0d5Hz_p3_deep40km` (unchanged) | **swapped** to `safalt_fb200_deep40km_1Hz_p5` |
 | binding gate | 0.6667 (0.5 Hz @ p3) | **0.8000 (1 Hz @ p5)** |
-| failures at it (MUSCAL) | 39,281 -> **124** (0.0004 %) | 93,213 -> **369** (0.0002 %) |
-| worst Vs/dx | 0.1275 -> **0.3158** | 0.1275 -> **0.4816** |
-| **worst resolved f** | 0.096 -> **0.237 Hz** (target 0.5) | 0.159 -> **0.602 Hz** (target 1.0) |
+| failures at it (MUSCAL) | 39,281 -> **0** | 93,213 -> **369** (0.0002 %) |
+| worst Vs/dx | 0.1275 -> **0.6667 = the gate** | 0.1275 -> **0.4816** |
+| **worst resolved f** | 0.096 -> **0.500 Hz** (target 0.5) | 0.159 -> **0.602 Hz** (target 1.0) |
 | eta_min | — | 0.0545 |
 | min edge | 9.3436 m (= parent's) | 2.3359 m (= parent's) |
 | fault area delta | **exactly 0.000e+00 m2** | **exactly 0.000e+00 m2** |
 | inverted tets | 0 | 0 |
-| fault identity | ALL PASS | ALL PASS |
+| fault identity | area delta 0.000e+00; **+18 fault triangles** | ALL PASS |
 
 Min edge equals each parent's exactly, so **no new dt floor from a short edge** —
 but `r_insphere` is the real dt test and is NOT yet measured (see below).
@@ -122,20 +122,19 @@ when its k-hop patch RIM starts freezing terminal edges):
 | 1 | 4 | 40 | 34,127,870 | ~24,783 |
 | 2 | 10 | 60 | 34,650,302 | 886 |
 | 3 | 14 | 90 | 34,740,308 | 246 |
-| 4 | 20 | 140 | **34,785,799** | **124** |
+| 4 | 20 | 140 | 34,785,799 | 124 |
+| z1 (zpool, seeded) | 25 | 200 | 36,886,920 | 21 |
+| z2 (zpool, seeded) | 25 | 200 | 38,827,189 | **37 — went BACKWARDS** |
+| ig1 (gate, seeded) | 30 | 150 | 38,827,686 | 4 |
+| **zero** (`--allow-fault-split`) | 30 | 6 | **38,827,749** | **0** |
 
-Pass 4 is where the gate target reaches its floor: the count stopped falling and
-began to OSCILLATE (85 -> 94 -> 110) with the worst pinned at 0.32. That is the
-treadmill appearing at the extreme tail, in the few columns slow enough that a
-bisected child lands in slower material than its parent.
-
-A 5th pass was attempted with a HYBRID -- seed the patch on the ~100 measured
-failures (so it is 0.30 % of the mesh instead of 55-66 %) but drive it with the
-pooled bound, which is the treadmill's cure (`--seed-on-gate --pool half`). It
-did not help: the tight patch froze ~375 terminal edges at its own rim and the
-pooled count went sideways. Log kept as `close_tail_int_RIMSTALLED.log`. Closing
-the last ~100 cells needs a wide patch AND the pooled target together, which is
-the expensive combination this campaign exists to avoid.
+Pass 4 LOOKED like the gate target's floor -- the count stopped falling and
+OSCILLATED (85 -> 94 -> 110) with the worst pinned at 0.32. **It was not a
+floor.** It was the k-hop patch RIM: with `--hops 4-20` the chains that would
+have fixed those cells ran into frozen rim edges. Widening the patch while
+seeding it only on the measured failures (`--seed-on-gate --hops 30`) resumed
+progress immediately. See "Closing the intermediate to ZERO" below for the three
+things that were actually wrong and how the gate was closed.
 
 ## Reproduce
 
@@ -196,3 +195,44 @@ has 455,365 failures (1.31 %). That number went UP during this work (121,931 ->
 0.6667 moves its barycentre toward the surface, which is exactly the
 self-reference described above, and the stricter gate then catches it. Use the
 heavy mesh for 1 Hz.
+
+
+## Closing the intermediate to ZERO — what the last cells needed
+
+The gate-as-target passes floored out around 100-124 cells. Three things were
+wrong, in order of discovery:
+
+1. **The patch was too tight.** Passes with `--hops 4-20` stalled with hundreds
+   of terminal edges frozen at the patch RIM, which reads exactly like a
+   convergence floor but is not one. `--seed-on-gate --hops 30` (patch built
+   from the measured failures alone, so it stays ~10 % of the mesh even at 30
+   hops) took 37 -> 4 for **+497 tets**.
+2. **A pooled target must run to COMPLETION or not at all.** A z-pooled pass
+   seeded on failures took 124 -> 21 (+2.1M tets), but the next one went
+   21 -> **37**, i.e. backwards. Conforming propagation bisects compliant cells
+   as part of a LEPP chain, and those children can dip below the gate; the
+   pooled bound only pays that back once every flagged cell reaches its target.
+   Rim-stalled, it never does. Mesh-wide zpool flags 3,182,350 cells and a 78 %
+   patch — the price of the guarantee. Logs: `close_int_z*_*.log`,
+   `close_int_z1_MESHWIDE_TOOBIG.log`.
+3. **The true floor was the FAULT's own triangulation.** The last 4 cells sat at
+   the shallow surface trace (z = -6..-23 m, Vs 189-258 m/s) with dx 290-402 m,
+   needing only 1.03-1.13x. Their LEPP chains terminated on fault edges:
+   `all 3 terminal edges frozen (rim 0, fault 3) -- stop`. That is the
+   fault-edge-pinned structural class.
+
+`--allow-fault-split` releases it. Rivara inserts the MIDPOINT of an edge, and a
+fault edge's midpoint lies exactly on the planar fault triangles sharing it, so
+**the fault surface and its area are preserved bit-for-bit** — measured area
+delta exactly `0.000e+00 m2`. Only the triangulation gets finer. Cost: **63
+tets**, 6 rounds, and **9 of 160,280 fault facets subdivided**
+(320,560 -> 320,578 triangles, +0.006 %).
+
+### Deck impact of the fault split — read this
+
+The DR facet COUNT changed, 160,280 -> 160,289. Spatial fault inputs (stress nc,
+friction nc, nucleation) are FIELDS and resample cleanly, and no fault vertex
+moved (asserted). But anything keyed to the facet LIST rather than to position
+must be re-derived: pickpoint indices, facet-count assertions, and any stored
+per-facet ordering. If that is unacceptable, the alternative is to ship the
+124-cell version and accept 0.237-0.500 Hz on those cells.

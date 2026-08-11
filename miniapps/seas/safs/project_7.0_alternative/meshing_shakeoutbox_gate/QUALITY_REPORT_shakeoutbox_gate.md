@@ -68,17 +68,21 @@ the feasible ceiling costs **+97 %**; under MUSCAL it costs **+10 %**.
 
 | | shipped | **new** |
 |---|---:|---:|
-| tets | 29,385,401 | **34,785,799** (+5,400,398, **+18.38 %**) |
-| verts | 5,458,404 | 6,647,809 |
-| gate 0.6667 failures (MUSCAL) | 39,281 (0.134 %) | **124 (0.0004 %)** |
-| worst Vs/dx | 0.1275 | **0.3158** (resolves 0.237 Hz) |
+| tets | 29,385,401 | **38,827,749** (+9,442,348, **+32.13 %**) |
+| verts | 5,458,404 | 7,475,793 |
+| gate 0.6667 failures (MUSCAL) | 39,281 (0.134 %) | **0 — GATE CLOSED** |
+| worst Vs/dx | 0.1275 | **0.6667 = the gate exactly** (resolves 0.500 Hz) |
 | inverted tets | 0 | **0** |
-| fault triangles | 320,560 | **320,560 identical** |
+| fault triangles | 320,560 | 320,578 (**+18**, 9 facets subdivided) |
 | fault area | 13073.313420396 km2 | **delta exactly 0.000e+00 m2** |
 | free surface | 344,862.000 km2, flat at z=0 | **unchanged, still exactly flat** |
 
-**317x fewer failures.** `check_fault_identity.py`: ALL CHECKS PASS (F1 multiset,
-F2 area, F3 BC round-trip, F4 flat lid, F5 no inverted).
+**The 0.5 Hz gate is CLOSED: 0 of 38,827,749 cells, worst Vs/dx exactly 0.6667**,
+verified by an independent census run on the finished file.
+
+`check_fault_identity.py`: F2 area **exactly 0.000e+00 m2**, F3 BC round-trip,
+F4 flat lid and F5 no-inverted all PASS. F1 reports 320,560 -> 320,578 triangles
+— the intended, documented consequence of `--allow-fault-split` (see §7).
 
 ### Heavy — 1 Hz @ p5 (binding) and 0.5 Hz @ p3
 

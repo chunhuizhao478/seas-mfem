@@ -243,11 +243,18 @@ def main():
     ap.add_argument("--hops", type=int, default=5)
     ap.add_argument("--max-rounds", type=int, default=40)
     ap.add_argument("--stats", default=None)
+    ap.add_argument("--allow-fault-split", action="store_true",
+                    help="permit bisecting FAULT edges. Needed only for the "
+                         "fault-edge-pinned class -- cells whose longest edge is "
+                         "an edge of the fault's own triangulation, which no "
+                         "amount of volume refinement can shorten. Preserves the "
+                         "fault surface and its area exactly; changes the facet "
+                         "COUNT, which is deck-visible.")
     ap.add_argument("--seed-on-gate", action="store_true",
                     help="seed the working patch on MEASURED gate failures rather "
                          "than on the pooled target. Use for tail passes: it keeps "
                          "the patch tiny so a pooled --pool can be afforded locally.")
-    ap.add_argument("--pool", choices=["bbox", "half", "gate"], default="half",
+    ap.add_argument("--pool", choices=["bbox", "half", "gate", "zpool"], default="half",
                     help="refinement target: how much of each cell the Vs lower "
                          "bound is pooled over. See _M.pool for why 'half' is "
                          "enough on MUSCAL and 'bbox' was needed on the deck nc.")
@@ -265,10 +272,43 @@ def main():
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from muscal_vs import MuscalVs
 
-        frac = {"bbox": 0.5, "half": 0.25, "gate": 0.0}[args.pool]
+        frac = {"bbox": 0.5, "half": 0.25, "gate": 0.0, "zpool": -1.0}[args.pool]
 
         class _M(MuscalVs):
             def pool(self, Pc):
+                if frac < 0.0:
+                    return self._zpool(Pc)
+                return self._boxpool(Pc)
+
+            def _zpool(self, Pc):
+                """min Vs over the cell's own VERTICAL extent, at the barycentre's (x,y).
+
+                This is the exact cure for the mechanism that stalls the gate
+                target: a surface cell's children have barycentres nearer z = 0,
+                where Vs is slower, so the gate can demand more after a split
+                than before it.  Vs BOTTOMS OUT at depth 0 -- there is nothing
+                shallower -- so the minimum over [cell top, cell bottom] is a
+                true lower bound on any descendant's measured Vs, and once a
+                cell complies it STAYS compliant.
+
+                Sampling the 4 vertex depths plus the barycentre suffices
+                because MUSCAL's Vs rises monotonically with depth through the
+                top km, so the minimum sits at the shallowest sample.
+
+                Costs 5 nearest-grid lookups and NO minimum_filter, which is why
+                it is affordable where bbox/half pooling was not: those flagged
+                587,899-1,456,239 cells mesh-wide, this one only pays for the
+                vertical direction that actually misbehaves.
+                """
+                b = Pc.mean(1)
+                v = self.at(b)
+                q = b.copy()
+                for k in range(4):
+                    q[:, 2] = Pc[:, k, 2]
+                    np.minimum(v, self.at(q), out=v)
+                return v
+
+            def _boxpool(self, Pc):
                 """Pool Vs over a box of `frac` x the cell's extent about the barycentre.
 
                 frac=0.5 is the FULL bounding box: a strict lower bound on every
@@ -323,6 +363,24 @@ def main():
     fault_keys = np.unique(np.concatenate(fk))
     fault_v0 = np.unique(np.concatenate(fverts))
     P_fault0 = P[fault_v0].copy()
+    if args.allow_fault_split:
+        # THE FAULT SURFACE IS NOT MOVED BY THIS.  Rivara bisection inserts the
+        # MIDPOINT of an edge, and a fault edge's midpoint lies exactly on the
+        # two planar fault triangles that share it, so the fault's geometry and
+        # AREA are preserved bit-for-bit -- only its TRIANGULATION gets finer.
+        # That is "triangulation restructuring within a stated deviation
+        # tolerance" (here the deviation is exactly zero), not a change of fault
+        # shape or topology.
+        #
+        # It is still deck-visible: the DR facet COUNT changes, so anything
+        # keyed to the facet list rather than to position (pickpoint indices,
+        # facet-count assertions) must be re-derived.  Spatial inputs -- stress
+        # nc, friction nc, nucleation -- resample fine because they are fields.
+        # Existing fault VERTICES are still never moved; the assert below holds.
+        print(f"[fault] --allow-fault-split: {len(fault_keys):,} fault edges are "
+              f"BISECTABLE (midpoints lie on the fault, so area is preserved "
+              f"exactly; the facet COUNT will change)", flush=True)
+        fault_keys = np.zeros(0, np.int64)
     del fk, fverts
     print(f"[fault] {len(fault_keys):,} frozen fault edges  RSS {rss_gb():.1f} GB", flush=True)
 
@@ -381,6 +439,7 @@ def main():
     bis_ok = interior.copy()                 # per-vertex; new midpoints inherit True
     hist = []
 
+    stall = 0
     for rd in range(args.max_rounds):
         marked, fmin_p = failing(P, T, vs, args.gate, pooled=True)
         if not len(marked):
@@ -424,8 +483,11 @@ def main():
         # ---- freeze filters ------------------------------------------------
         a = (term_keys // NVMAX).astype(np.int64)
         b = (term_keys % NVMAX).astype(np.int64)
-        fp = np.clip(np.searchsorted(fault_keys, term_keys), 0, len(fault_keys) - 1)
-        is_fault = fault_keys[fp] == term_keys
+        if len(fault_keys):
+            fp = np.clip(np.searchsorted(fault_keys, term_keys), 0, len(fault_keys) - 1)
+            is_fault = fault_keys[fp] == term_keys
+        else:                       # --allow-fault-split: nothing is frozen
+            is_fault = np.zeros(len(term_keys), bool)
         ok = bis_ok[a] & bis_ok[b] & ~is_fault
         n_rim = int((~(bis_ok[a] & bis_ok[b])).sum())
         n_flt = int(is_fault.sum())
@@ -460,6 +522,23 @@ def main():
               f"split {len(sel):,} -> patch {len(T):,} | RSS {rss_gb():.1f} GB "
               f"| {time.time()-t0:.0f}s", flush=True)
         del allk, owner, uk, ustart, uend, n_shell, n_le, terminal, LE, kslot
+
+        # EARLY STOP once the patch RIM is the only thing left.
+        # A seeded patch driven by a pooled target always ends this way: every
+        # remaining LEPP chain runs into the frozen rim, so a round finds ~1
+        # terminal edge and splits a handful of cells.  Measured on grind 1 and
+        # 2, that state was reached at rounds 56 and 60 of 200, and the
+        # remaining 140 rounds cost ~25 s each to accomplish nothing.  The cure
+        # for a rim stall is a FRESH patch (the next pass), not more rounds.
+        if len(term_keys) <= 2 and n_rim > 0:
+            stall += 1
+            if stall >= 3:
+                print(f"[leb] STOP at round {rd}: {n_rim:,} terminal edges frozen at "
+                      f"the patch rim and only {len(term_keys)} free -- reseed a "
+                      f"fresh patch instead of spending more rounds", flush=True)
+                break
+        else:
+            stall = 0
 
     # ---- reassemble ---------------------------------------------------------
     connect = np.vstack([C_keep, T])
