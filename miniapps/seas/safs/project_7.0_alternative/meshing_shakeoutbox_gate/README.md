@@ -238,25 +238,6 @@ per-facet ordering. If that is unacceptable, the alternative is to ship the
 124-cell version and accept 0.237-0.500 Hz on those cells.
 
 
-## ParaView views (`view/`, built by `code/make_views.sh`)
-
-| file | what | size |
-|---|---|---|
-| `intermediate_fault.xdmf` + `.h5` | 160,289 DR triangles, de-duplicated | 6.5 MB |
-| `intermediate_surface.xdmf` + `.h5` | fault + free surface + absorbing hull, `bc` scalar | 140 MB |
-| `intermediate_full.xdmf` | points AT the .puml.h5, zero copy — loads all 38.8M tets | 914 B |
-| `heavy_fault.xdmf` + `.h5` | 2,564,480 DR triangles | 103 MB |
-| `heavy_surface.xdmf` + `.h5` | fault + lid + hull, `bc` scalar | 264 MB |
-| `heavy_full.xdmf` | points AT the .puml.h5 — 157.8M tets, needs the RAM | 904 B |
-
-A PUML stores each fault triangle TWICE (once per side); the fault/surface modes
-de-duplicate, which is why `intermediate_fault` shows 160,289 and not 320,578.
-Colour `surface` by `bc`: 1 = free surface, 3 = dynamic rupture, 5 = absorbing.
-
-**Do not move a `.xdmf` away from the `.h5` it names** — XDMF resolves
-`<DataItem>` paths relative to the XDMF file, and `_full` carries a relative
-path back to `../results/`.
-
 ## What is kept on disk, and what was deleted
 
 Kept: the two final meshes, the six views, and every parent needed to rebuild
@@ -270,3 +251,75 @@ dumps, and the two PREVIOUS shakeoutbox products with their view folders —
 and `meshing_shakeoutbox_heavy/results/safalt_fb200_deep40km_refine2_shakeoutbox.puml.h5`
 (the latter was the one welded to the wrong parent). Both are reproducible from
 the parents plus `code/`. `build_tmp/` now holds only logs and stats JSON.
+
+## ParaView views (`view/`, built by `code/make_views_fields.sh`)
+
+Every view carries these **per-element** cell arrays:
+
+| array | meaning | units |
+|---|---|---|
+| `f_min_p3` | resolved frequency at p3 = `0.75 * Vs/dx` | Hz |
+| `f_min_p5` | resolved frequency at p5 = `1.25 * Vs/dx` | Hz |
+| `Vs` | nearest-grid Vs at the element barycentre (MUSCAL) | m/s |
+| `edge_min` | shortest of the element's 6 edges | m |
+| `edge_max` | longest edge = **dx**, the one in the formula | m |
+| `vs_over_dx` | the raw gate quantity; compare to 0.6667 (p3/0.5 Hz) or 0.8 (p5/1 Hz) | - |
+| `bc` | 1 free surface, 3 dynamic rupture, 5 absorbing (surface/fault views) | - |
+
+### THE EQUATION
+
+    f_min = (p/4) * Vs / dx        [Hz]
+
+      dx = element MAXIMUM edge length  [m]
+      Vs = sqrt(mu/rho), NEAREST-GRID at the element BARYCENTRE  [m/s]
+      p  = polynomial order
+
+`p/4` is the sampling correction: a degree-p element carries p sub-intervals
+across its span and resolving a sine needs ~4 points per wavelength, so the
+shortest resolvable wavelength is `lambda_min = (4/p)*dx` and
+`f = Vs/lambda_min = (p/4)*Vs/dx`. Because `dx` is the MAX edge, `f_min` is the
+element's WORST-direction (hence *minimum*) resolved frequency -- which is
+exactly what the gate is judged on.
+
+| mesh | order / target | formula | gate on `Vs/dx` |
+|---|---|---|---|
+| intermediate | p3 @ 0.5 Hz | `0.75 * Vs/dx` | >= 0.6667 |
+| heavy | p3 @ 0.5 Hz | `0.75 * Vs/dx` | >= 0.6667 |
+| heavy | p5 @ 1.0 Hz | `1.25 * Vs/dx` | >= 0.8000 |
+
+Verified against an independent recomputation on random elements: agreement to
+8.1e-08 Hz (float32 round-off), `edge_min`/`edge_max`/`Vs` exact.
+
+### The files
+
+| file | cells | size | `f_min_p3` min / median |
+|---|---|---|---|
+| `intermediate_fault` | 160,289 tri | 10 MB | **0.655** / 4.531 Hz |
+| `intermediate_surface` | 3,497,359 tri | 224 MB | **0.500** / 1.149 Hz |
+| `intermediate_volume` | 38,827,749 tet | 743 MB sidecar | — |
+| `heavy_fault` | 2,564,480 tri | 164 MB | **1.401** / 27.698 Hz |
+| `heavy_surface` | 6,588,324 tri | 422 MB | **0.361** / 1.502 Hz |
+| `heavy_volume` | 157,840,519 tet | 2,557 MB sidecar | — |
+
+`*_volume` keeps geometry and connectivity **inside the .puml.h5** and stores
+only the fields in a sidecar; the XDMF references BOTH files, which XDMF allows.
+So the 157.8M-cell mesh is not duplicated. (These replace the old `*_full.xdmf`,
+which carried no fields.)
+
+Sanity checks that fall out of the numbers: the intermediate's surface minimum
+is **exactly 0.500 Hz** -- the closed gate -- and the heavy's 0.361 Hz is
+`0.75 x 0.4816`, matching its census worst `Vs/dx` of 0.4816. Both faults are far
+above target (0.655 and 1.401 Hz minimum), so nothing under-resolved touches the
+rupture surface.
+
+**Do not move a `.xdmf` away from the `.h5` it names** -- XDMF resolves
+`<DataItem>` paths relative to the XDMF file, and `*_volume` carries a relative
+path back to `../results/`.
+
+### Performance trap, if you extend this
+
+Do not collect owning-tet indices and re-read them afterwards: h5py
+fancy-indexing a few million SCATTERED rows out of a 10^7-10^8-row dataset is
+orders of magnitude slower than the streaming pass that produced them, and it
+stalled this tool for >20 min on the intermediate surface alone. Compute the
+fields inside the chunk loop and carry them along.
