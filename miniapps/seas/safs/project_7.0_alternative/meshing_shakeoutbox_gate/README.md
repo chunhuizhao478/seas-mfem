@@ -236,3 +236,37 @@ moved (asserted). But anything keyed to the facet LIST rather than to position
 must be re-derived: pickpoint indices, facet-count assertions, and any stored
 per-facet ordering. If that is unacceptable, the alternative is to ship the
 124-cell version and accept 0.237-0.500 Hz on those cells.
+
+
+## ParaView views (`view/`, built by `code/make_views.sh`)
+
+| file | what | size |
+|---|---|---|
+| `intermediate_fault.xdmf` + `.h5` | 160,289 DR triangles, de-duplicated | 6.5 MB |
+| `intermediate_surface.xdmf` + `.h5` | fault + free surface + absorbing hull, `bc` scalar | 140 MB |
+| `intermediate_full.xdmf` | points AT the .puml.h5, zero copy — loads all 38.8M tets | 914 B |
+| `heavy_fault.xdmf` + `.h5` | 2,564,480 DR triangles | 103 MB |
+| `heavy_surface.xdmf` + `.h5` | fault + lid + hull, `bc` scalar | 264 MB |
+| `heavy_full.xdmf` | points AT the .puml.h5 — 157.8M tets, needs the RAM | 904 B |
+
+A PUML stores each fault triangle TWICE (once per side); the fault/surface modes
+de-duplicate, which is why `intermediate_fault` shows 160,289 and not 320,578.
+Colour `surface` by `bc`: 1 = free surface, 3 = dynamic rupture, 5 = absorbing.
+
+**Do not move a `.xdmf` away from the `.h5` it names** — XDMF resolves
+`<DataItem>` paths relative to the XDMF file, and `_full` carries a relative
+path back to `../results/`.
+
+## What is kept on disk, and what was deleted
+
+Kept: the two final meshes, the six views, and every parent needed to rebuild
+them (`meshing_deep40km/safalt_0d5Hz_p3_deep40km`,
+`meshing_deep40km_1Hz_p5_leb/safalt_fb200_deep40km_1Hz_p5`).
+
+Deleted as superseded/temporary: every intermediate pass product, both build
+collars (`collar_1hz_uniform_2500.npz`, `collar_uniform_2500.npz`), the census
+dumps, and the two PREVIOUS shakeoutbox products with their view folders —
+`meshing_shakeoutbox_intermediate/results/safalt_0d5Hz_p3_deep40km_shakeoutbox.puml.h5`
+and `meshing_shakeoutbox_heavy/results/safalt_fb200_deep40km_refine2_shakeoutbox.puml.h5`
+(the latter was the one welded to the wrong parent). Both are reproducible from
+the parents plus `code/`. `build_tmp/` now holds only logs and stats JSON.
