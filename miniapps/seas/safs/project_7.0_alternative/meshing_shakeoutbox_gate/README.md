@@ -367,3 +367,46 @@ the ratio, since both tiers get the same far field.
 LTS: the collar cells are shallow far field and join COARSE clusters. The
 earlier gate-driven collar measured 2.144x the LTS cost for 2.393x the cells
 with `dt_min` unchanged. The LTS delta for THESE meshes is still not measured.
+
+## Is the HEAVY mesh fully resolved at 1 Hz / p5? NO -- and here is why it stays that way
+
+**369 of 157,840,519 cells (0.0002 %) are below the 1 Hz @ p5 gate**, worst
+0.4816 -> resolving **0.602 Hz**. (225 are below the 0.5 Hz @ p3 gate.) All 369
+still resolve at least 0.602 Hz; 217 of them are already above 0.75 Hz.
+
+### Where they are -- this is the whole answer
+
+    bounding box   E 72,663..119,905   N 3,525,192..3,570,364
+    -> lon -121.51..-121.03, lat 31.78..32.21
+    distance from the fault   min 254.4 km, median 261.5 km
+    barycentre depth          median -111 m
+    MUSCAL Vs there           NaN -- NO DATA
+
+That is the **Pacific Ocean offshore Baja California**, in the extreme southwest
+corner of the enlarged box, a quarter of the way to Mexico from the San Andreas.
+MUSCAL does not cover it, so the Vs driving the gate there is the deck nc's
+EDGE-CLAMP EXTRAPOLATION, not a measurement. Refining those cells buys
+resolution of an invented velocity under open ocean, 254 km from the rupture.
+
+**The mesh resolves 1 Hz at p5 everywhere on land and everywhere within 254 km
+of the fault.**
+
+### What it would cost to close anyway, measured not guessed
+
+* **The cheap route DIVERGES at this gate.** `--seed-on-gate --pool gate --hops 30`
+  is what closed the intermediate; on the heavy at 0.8 it went **369 -> 437**
+  failures and the worst DEGRADED 0.494 -> 0.289. Log:
+  `close_heavy_z1_WORSE_369to437.log`. At 0.6667 the intermediate escaped this;
+  at 0.8 the stricter gate means a bisected surface cell's barycentre reaches
+  slow material faster than dx shrinks.
+* **A proper monotone closure is a campaign, not a tail grind.** The z-pooled
+  lower bound flags **5,287,420 cells** on this mesh, worst 0.0631 -- a 12.7x
+  linear reduction on the tail. Extrapolating the intermediate's behaviour that
+  is tens of millions of tets, on a mesh already at 157.8M running 512 nodes x
+  13.4 h and sitting near its cells/rank memory envelope.
+* And per the lesson recorded above, a pooled target **must run to completion or
+  not at all** -- a partial one made the intermediate WORSE (21 -> 37).
+
+**Recommendation: accept and document.** The residual is data-forced, not a build
+defect. If it must go, the honest route is to CLIP the domain: the southwest
+corner is ocean outside every velocity model and contributes nothing to PGV.
