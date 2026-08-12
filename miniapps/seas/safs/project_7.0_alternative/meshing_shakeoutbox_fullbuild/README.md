@@ -1,4 +1,5 @@
-# From-scratch ShakeOut-box HEAVY mesh — design, budget, and build plan
+# From-scratch ShakeOut HEAVY mesh — design, budget, and build plan
+
 
 Goal: rebuild the heavy mesh on the ShakeOut domain **without** inheriting the
 small-domain configuration, keeping the fault-normal refinement, with gradual
@@ -112,3 +113,55 @@ everywhere, at the cost of re-running Stage A–F and re-verifying deck
 compatibility from scratch. That is a real benefit for a mesh meant to outlive
 this campaign — but it should be chosen deliberately, not as a fix for a seam
 problem that measurement says does not exist.
+
+
+## 7. THE DOMAIN BOX WAS WRONG — corrected (`code/shakeout_d_domain.py`)
+
+Everything built in this campaign used `01_source_data/grid.xml`
+(lon -121.5..-114.0, lat 32..36) -> an axis-aligned **714 x 483 km / 344,862 km2**
+box. `~/Downloads/ShakeOut2008/SHAKEOUT_SOURCE_FACTS.md` says in as many words
+that this is the ShakeMap **PRODUCT** grid: a north-up map footprint of
+~307,000 km2, ~1.7x the largest domain anyone simulated. It is where the output
+was gridded, not where the simulation lived. **Those meshes have been deleted.**
+
+The only ShakeOut domain ever published with corner coordinates is **ShakeOut-D**
+(Olsen et al. 2009 GRL, Fig. 1), with the caption's two dropped decimals restored:
+
+| lon | lat | UTM 11N E | UTM 11N N |
+|---|---|---:|---:|
+| -121.000000 | 34.500000 | 132,679.3 | 3,824,866.7 |
+| -118.9511292 | 36.621696 | 325,530.1 | 4,054,679.7 |
+| -116.032285 | 31.082920 | 592,306.0 | 3,439,194.1 |
+| -113.943965 | 33.122341 | 785,142.3 | 3,669,007.5 |
+
+Re-verified here by independent reprojection rather than trusted: sides
+**300.000 / 599.989 / 300.009 / 600.000 km**, corner angles **all 90.00 deg**,
+area **180,001 km2**, long-axis azimuth **130 / 310 deg** — matching the paper's
+own "600 km by 300 km area … to a depth of 80 km".
+
+### What this changes
+
+| | area | long-axis azimuth |
+|---|---:|---:|
+| box built (ShakeMap product grid, axis-aligned) | 344,862 km2 | n/a |
+| **ShakeOut-D (correct)** | **180,001 km2** | **130 deg** |
+| deployed ALT footprint | 106,476 km2 | 120 deg |
+
+The box actually built was **1.92x too large**. Note also that ShakeOut-D and the
+ALT footprint are rotated **10 deg apart** (130 vs 120), and **7.5 % of the ALT
+parent — 7,997 km2 — lies OUTSIDE ShakeOut-D**. A frozen-parent collar can only
+ADD, so a collar route would have to build to ShakeOut-D UNION ALT (~188,000 km2),
+which is not a rectangle.
+
+**This is an argument FOR the from-scratch route**: with no frozen parent to
+contain, the mesh can be built to the ShakeOut-D rectangle exactly, at
+180,001 km2 — 52 % of the footprint that was just deleted, and correctly rotated.
+
+Depth: ShakeOut-D is 80 km deep; the ALT lineage is 40 km. Which to adopt is a
+modelling choice, not a mesh one, and is NOT decided here.
+
+### Status
+
+The rebuild is **NOT started** — held at the user's instruction. What is settled:
+the correct domain rectangle above, the size envelope (§1), the cell budget (§2),
+the grading verdict (§3) and the staged plan (§4).
