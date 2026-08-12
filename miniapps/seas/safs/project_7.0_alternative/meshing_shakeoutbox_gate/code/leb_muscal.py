@@ -254,6 +254,12 @@ def main():
                     help="seed the working patch on MEASURED gate failures rather "
                          "than on the pooled target. Use for tail passes: it keeps "
                          "the patch tiny so a pooled --pool can be afforded locally.")
+    ap.add_argument("--pool-radius", type=int, default=-1,
+                    help="apply the pooled bound only within this many hops of a "
+                         "MEASURED gate failure (-1 = everywhere, the default). "
+                         "The pooled bound flags most of the collar surface; "
+                         "localising it keeps the treadmill cure where it is "
+                         "needed without buying a whole-mesh campaign.")
     ap.add_argument("--pool", choices=["bbox", "half", "gate", "zpool"], default="half",
                     help="refinement target: how much of each cell the Vs lower "
                          "bound is pooled over. See _M.pool for why 'half' is "
@@ -442,6 +448,33 @@ def main():
     stall = 0
     for rd in range(args.max_rounds):
         marked, fmin_p = failing(P, T, vs, args.gate, pooled=True)
+        if args.pool_radius >= 0:
+            # LOCALISE THE POOLED DEMAND.
+            #
+            # The pooled bound is the treadmill cure, but it flags every
+            # free-surface cell coarser than Vs(depth 0)/gate -- 5,287,420 of
+            # them on this mesh, i.e. most of the collar surface. Seeding the
+            # PATCH on the failures bounds the work only until the patch is wide
+            # enough to contain that global demand: at --hops 110 it pulled in
+            # 1.04M marked cells and grew by 500k cells/ROUND, which is the
+            # whole-mesh campaign wearing a local disguise.
+            #
+            # What is actually needed is the pooled bound in the NEIGHBOURHOOD
+            # of a real failure -- close enough to stop that failure's children
+            # from treadmilling, and nowhere else. So: always refine measured
+            # gate failures, and additionally refine pooled-deficient cells only
+            # within `pool_radius` hops of one.
+            bad, _ = failing(P, T, vs, args.gate, pooled=False)
+            if len(bad):
+                near = np.zeros(len(P), bool)
+                near[np.unique(T[bad])] = True
+                for _ in range(max(args.pool_radius, 0)):
+                    near[np.unique(T[near[T].any(1)])] = True
+                keep_m = near[T[marked]].any(1)
+                marked = marked[keep_m]
+                marked = np.union1d(marked, bad)
+            else:
+                marked = bad
         if not len(marked):
             print(f"[leb] round {rd}: patch CLEAN on the pooled target "
                   f"(worst {fmin_p:.4f})", flush=True)

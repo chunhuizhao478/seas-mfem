@@ -368,45 +368,44 @@ LTS: the collar cells are shallow far field and join COARSE clusters. The
 earlier gate-driven collar measured 2.144x the LTS cost for 2.393x the cells
 with `dt_min` unchanged. The LTS delta for THESE meshes is still not measured.
 
-## Is the HEAVY mesh fully resolved at 1 Hz / p5? NO -- and here is why it stays that way
+## BOTH gates are now CLOSED
 
-**369 of 157,840,519 cells (0.0002 %) are below the 1 Hz @ p5 gate**, worst
-0.4816 -> resolving **0.602 Hz**. (225 are below the 0.5 Hz @ p3 gate.) All 369
-still resolve at least 0.602 Hz; 217 of them are already above 0.75 Hz.
+| | intermediate | heavy |
+|---|---|---|
+| file | `safalt_0d5Hz_p3_deep40km_shakeoutbox_muscal.puml.h5` | `safalt_fb200_1Hz_p5_shakeoutbox_muscal.puml.h5` |
+| tets | 38,827,749 | **160,825,939** |
+| binding gate | 0.6667 (0.5 Hz @ p3) | **0.8000 (1 Hz @ p5)** |
+| failures | **0** | **0** |
+| worst Vs/dx | 0.6667 = the gate | **0.8000 = the gate** |
+| fault triangles | 320,578 (+18, 9 facets split) | **5,128,960 — BIT-IDENTICAL** |
+| fault area delta | 0.000e+00 m2 | 0.000e+00 m2 |
+| eta_min / min edge | 0.0636 / 9.3436 m | 0.0545 / 2.3359 m (both = parent's) |
+| inverted | 0 | 0 |
 
-### Where they are -- this is the whole answer
+The heavy also holds 0.5 Hz @ p3 (0 failures at 0.6667), and it closed
+**without any fault modification** -- its DR facet count is unchanged, so every
+fault-referenced deck input transfers untouched. Only the intermediate needed
+`--allow-fault-split` (9 facets).
 
-    bounding box   E 72,663..119,905   N 3,525,192..3,570,364
-    -> lon -121.51..-121.03, lat 31.78..32.21
-    distance from the fault   min 254.4 km, median 261.5 km
-    barycentre depth          median -111 m
-    MUSCAL Vs there           NaN -- NO DATA
+### How the heavy closed: localise the pooled bound
 
-That is the **Pacific Ocean offshore Baja California**, in the extreme southwest
-corner of the enlarged box, a quarter of the way to Mexico from the San Andreas.
-MUSCAL does not cover it, so the Vs driving the gate there is the deck nc's
-EDGE-CLAMP EXTRAPOLATION, not a measurement. Refining those cells buys
-resolution of an invented velocity under open ocean, 254 km from the rupture.
+The heavy at 0.8 is in a regime the intermediate at 0.6667 escaped, and the two
+obvious routes both fail:
 
-**The mesh resolves 1 Hz at p5 everywhere on land and everywhere within 254 km
-of the fault.**
+| attempt | result |
+|---|---|
+| `--pool gate --hops 30` | **369 -> 437**, worst DEGRADED 0.494 -> 0.289. At 0.8 a bisected surface cell's barycentre reaches slow material faster than dx shrinks. |
+| `--pool zpool --hops 30` | 369 -> 340, then **rim-stalled** (`all 222 terminal edges frozen`) -- the chains wander past a 30-hop patch. |
+| `--pool zpool --hops 110` | rim solved, but the patch then contained the pooled bound's GLOBAL demand: **1.04M cells marked, +500k cells/ROUND** -- the whole-mesh campaign in disguise. |
+| **`--pool zpool --pool-radius 4 --hops 60`** | **369 -> 340 -> 145 -> 0** for **+2,985,420 tets (+1.89 %)** |
 
-### What it would cost to close anyway, measured not guessed
+The fix (`--pool-radius`) is one idea: **always refine measured gate failures,
+but apply the pooled lower bound only within k hops of one.** The pooled bound is
+the treadmill cure, yet it flags every free-surface cell coarser than
+Vs(depth 0)/gate -- 5,287,420 of them here, most of the collar surface. The
+treadmill only bites in the immediate neighbourhood of a real failure, so that is
+the only place the bound is worth paying for.
 
-* **The cheap route DIVERGES at this gate.** `--seed-on-gate --pool gate --hops 30`
-  is what closed the intermediate; on the heavy at 0.8 it went **369 -> 437**
-  failures and the worst DEGRADED 0.494 -> 0.289. Log:
-  `close_heavy_z1_WORSE_369to437.log`. At 0.6667 the intermediate escaped this;
-  at 0.8 the stricter gate means a bisected surface cell's barycentre reaches
-  slow material faster than dx shrinks.
-* **A proper monotone closure is a campaign, not a tail grind.** The z-pooled
-  lower bound flags **5,287,420 cells** on this mesh, worst 0.0631 -- a 12.7x
-  linear reduction on the tail. Extrapolating the intermediate's behaviour that
-  is tens of millions of tets, on a mesh already at 157.8M running 512 nodes x
-  13.4 h and sitting near its cells/rank memory envelope.
-* And per the lesson recorded above, a pooled target **must run to completion or
-  not at all** -- a partial one made the intermediate WORSE (21 -> 37).
-
-**Recommendation: accept and document.** The residual is data-forced, not a build
-defect. If it must go, the honest route is to CLIP the domain: the southwest
-corner is ocean outside every velocity model and contributes nothing to PGV.
+Cost: **157,840,519 -> 160,825,939 tets, +1.89 %**, against the "tens of millions"
+a global monotone campaign was heading for -- roughly a 60x saving. Quality did
+not move: `eta_min` and `min edge` are still bit-identical to the parent's.
