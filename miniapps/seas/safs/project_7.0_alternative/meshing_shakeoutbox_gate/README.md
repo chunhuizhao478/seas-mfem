@@ -323,3 +323,47 @@ fancy-indexing a few million SCATTERED rows out of a 10^7-10^8-row dataset is
 orders of magnitude slower than the streaming pass that produced them, and it
 stalled this tool for >20 min on the intermediate surface alone. Compute the
 fields inside the chunk loop and carry them along.
+
+## Element counts: small domain vs ShakeOut box (`code/tet_census_table.py`)
+
+All counts MEASURED from the files on disk. Both domains run 0 .. -40,000 m.
+The small tier is excluded: its ShakeOut product is only -22,101 m deep against
+`safalt_small_deep40km`'s -40,000, so they are different lineages and pairing
+them reads as a collar REMOVING cells (1,804,173 vs 2,131,818).
+
+| domain | mesh | tets | verts | tets/km2 | tets/km3 |
+|---|---|---:|---:|---:|---:|
+| small (106,476 km2) | `safalt_0d5Hz_p3_deep40km` (intermediate) | 15,979,903 | 3,210,006 | 150 | 3.8 |
+| small | `safalt_fb200_deep40km_refine2` (old heavy) | 122,162,105 | 20,920,528 | 1,147 | 28.7 |
+| small | `safalt_fb200_deep40km_1Hz_p5` (heavy parent) | 133,699,789 | 23,123,324 | 1,256 | 31.4 |
+| **box (344,862 km2)** | **intermediate FINAL** | **38,827,749** | 7,475,793 | 113 | 2.8 |
+| **box** | **heavy FINAL** | **157,840,519** | 27,703,499 | 458 | 11.4 |
+| box | intermediate v1 (superseded, deleted) | 29,385,401 | — | 85 | 2.1 |
+| box | heavy v1 (wrong parent, superseded, deleted) | 135,567,603 | — | 393 | 9.8 |
+
+### The comparison
+
+| | intermediate | heavy |
+|---|---|---|
+| small domain | 15,979,903 | 133,699,789 |
+| ShakeOut box | **38,827,749** | **157,840,519** |
+| growth | **x2.43** (+22,847,846) | **x1.18** (+24,140,730) |
+| plan-area growth | x3.24 | x3.24 |
+| tets per km3 | 3.8 -> 2.8 (**x0.75**) | 31.4 -> 11.4 (**x0.36**) |
+| new domain's share of cells | 58.8 % | 15.3 % |
+| new domain's share of area | 69.1 % | 69.1 % |
+
+Read the density row, not the tet row. **Both meshes got COARSER per unit
+volume** even as they grew, because the collar is far field: the heavy tripled
+its plan area for +18 % cells, and its cell density fell to a third. The heavy's
+collar carries 15.3 % of the cells over 69.1 % of the area; the intermediate's
+carries 58.8 %, simply because its parent was 8.4x sparser to begin with.
+
+On the same box the heavy is **x4.07** the intermediate (157,840,519 /
+38,827,749), against x8.37 on the small domain — the shared collar compresses
+the ratio, since both tiers get the same far field.
+
+**Do not turn these into node-hours.** Tet count is not run cost under clustered
+LTS: the collar cells are shallow far field and join COARSE clusters. The
+earlier gate-driven collar measured 2.144x the LTS cost for 2.393x the cells
+with `dt_min` unchanged. The LTS delta for THESE meshes is still not measured.
