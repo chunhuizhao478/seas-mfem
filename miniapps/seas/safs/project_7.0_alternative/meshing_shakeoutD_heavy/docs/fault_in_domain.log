@@ -1,0 +1,17 @@
+[domain] L1 520.000 km along u, L2 300.009 km along v, depth 80 km
+[fault] 1,288,200 distinct fault vertices
+  UTM  E 362,397.7 .. 620,120.2   N 3,689,769.6 .. 3,840,483.4   z -19,100.9 .. -0.0
+
+[rotated frame]  s 165,936.2 .. 460,239.6 m   (domain 0 .. 520,000.0)
+                 t 159,474.8 .. 217,447.7 m   (domain 0 .. 300,009.1)
+
+[clearance to walls]
+  s = 0    (NW end)     165,936.2 m
+  s = L1   (SE end)      59,760.4 m
+  t = 0    (SW side)    159,474.8 m
+  t = L2   (NE side)     82,561.4 m
+  bottom z = -80 km      60,899.1 m
+  top    z = 0                0.0 m
+
+[verdict] fault vertices inside the domain: 1,288,200 / 1,288,200   OUTSIDE: 0
+  the fault is a strictly INTERIOR crack -- PLC is buildable

@@ -1,0 +1,20 @@
+[mesh] fault 2,564,480 unique triangles; free surface 1,114,474 vertices
+[fault boundary] 12,760 vertices, z -19,100.94 .. -0.00
+
+[daylight test] fault-boundary vertices that are ALSO free-surface vertices:
+  daylighting           7,785
+  not daylighting       4,975
+  ... of those, shallow (z > -200 m):      390
+
+[BURIED SHALLOW TIP] 390 vertices
+  z    -142.46 .. -5.03 m
+  E    362,432 .. 620,007
+  N    3,689,774 .. 3,840,254
+    z    -200 .. -100    :      2
+    z    -100 .. -60     :     36
+    z     -60 .. -50     :     63
+    z     -50 .. -25     :    266
+    z     -25 .. -10     :     20
+    z     -10 .. -5      :      3
+
+[DAYLIGHTING TRACE] 7,785 vertices, z -0.000 .. -0.000 m

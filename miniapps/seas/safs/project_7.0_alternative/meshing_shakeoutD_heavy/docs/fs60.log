@@ -1,0 +1,9 @@
+[fault] 2,564,480 triangles  1,288,200 vertices
+  x 362397.7..620120.2  y 3689769.6..3840483.4  z -19100.9..-0.0
+[boundary] 12,760 edges used once  (12,760 vertices)
+  boundary z -19100.94 .. -0.00
+  TOP edge (z>-60): 8,137 vertices, z -59.60..-0.00
+  FLATTENED: 352 of 8,137 trace vertices snapped to z=0 (max move 59.60 m)
+  CLAMPED: 0 interior fault vertices above z=0 pulled down (max move 0.00 m)
+[quality] area 6,537.70 km2   edge min 2.34 med 75.56 max 154.35 m
+[out] build_tmp/fault_surface.npz
