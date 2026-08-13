@@ -81,6 +81,16 @@ def main():
     with h5py.File(mesh) as f:
         nt = f["connect"].shape[0]; nv = f["geometry"].shape[0]
     print(f"[mesh] {nt:,} tets  {nv:,} verts   ORDER {a.order} (p{a.order-1}) -> resolved = {(a.order-1)/4:.2f} x Vs/dx")
+    # source="muscal" is a REQUEST, not a guarantee: Material returns early when
+    # muscal_nc is None, leaving self.M unset, and at() then silently falls back
+    # to the DECK cube -- whose 250 m z-binning manufactures shallow failures and
+    # is ~6x more demanding than native MUSCAL. Omitting --muscal once here made
+    # this mesh look like 942,375 cells below gate when the true MUSCAL count is
+    # 35,353. Fail loudly instead of quietly scoring on the wrong cube.
+    if not a.muscal:
+        raise SystemExit("--muscal is REQUIRED: source='muscal' silently degrades "
+                         "to the deck cube without it (measured: 27x more apparent "
+                         "gate failures). Pass MUSCAL.nc explicitly.")
     mat = Material(a.cvm, a.muscal, box=BOX, source="muscal")
     # resolved f = (p/4) * Vs/dx with p = ORDER - 1 (p3 -> 0.75, p5 -> 1.25).
     # Using order/4 here would inflate the displayed field by 1.33x.
