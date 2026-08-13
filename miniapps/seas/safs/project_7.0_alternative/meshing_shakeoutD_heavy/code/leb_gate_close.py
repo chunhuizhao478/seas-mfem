@@ -110,6 +110,63 @@ class Vs:
         return out
 
 
+class FieldTarget:
+    """Drop-in for Material, driving LEB from a PRE-GRADED target size field.
+
+    This is how ALT reaches the specified gradation g=0.15 WITHOUT a second mmg
+    pass: gradation is a property of the size field, not the mesher, so a field
+    that already satisfies h(y) <= h(x) + g|x-y| makes any mesh refined against it
+    g-graded. The gate term is in the same field, so gate closure and gradation
+    happen in ONE pass instead of two.
+
+    The refinement loop only ever asks `at(p)` (acceptance) and
+    `pooled(v, dx, frac)` (a monotone lower bound), both compared against `dx` as
+    Vs/gate. Returning `h_target * gate` therefore makes the identical code refine
+    until `dx <= h_target`, with no change to the LEPP machinery -- which is the
+    part that is hard to get right and must not be touched.
+
+    `pooled` needs the minimum of the target over the window a descendant's
+    barycentre can reach. Because the field is g-graded, `h(y) >= h(x) - g|x-y|`
+    holds everywhere BY CONSTRUCTION, so `h(x) - g*r` is an exact lower bound and
+    no second lookup is needed. Strictly cheaper AND tighter than pooling over the
+    cell's vertical extent, which is the documented runaway (+505 k tets for a
+    flat failure count).
+    """
+
+    def __init__(self, path, gate):
+        d = np.load(path)
+        self.X, self.Y, self.Z = d["X"], d["Y"], d["Z"]
+        self.H = d["H"]
+        self.g = float(d["g"]); self.gate = float(gate)
+        self.M = None
+        # The field bakes in the gate it was built with (h = Vs/gate), so using it
+        # at a different gate would silently refine to the wrong target.
+        if abs(float(d["gate"]) - self.gate) > 1e-12:
+            raise RuntimeError(f"field built for gate {float(d['gate'])}, asked {self.gate}")
+        self.Zasc = self.Z[::-1]          # Z descends 0 -> -80000; searchsorted needs ascending
+        print(f"[target] {self.H.shape} grid, g={self.g}, "
+              f"h {self.H.min():.0f}..{self.H.max():.0f} m", flush=True)
+
+    def _h(self, p):
+        i = np.clip(np.rint((p[:, 0] - self.X[0]) / (self.X[1] - self.X[0])
+                            ).astype(np.int32), 0, len(self.X) - 1)
+        j = np.clip(np.rint((p[:, 1] - self.Y[0]) / (self.Y[1] - self.Y[0])
+                            ).astype(np.int32), 0, len(self.Y) - 1)
+        kk = np.clip(np.searchsorted(self.Zasc, p[:, 2]), 0, len(self.Zasc) - 1)
+        k = len(self.Z) - 1 - kk
+        return self.H[i, j, k].astype(np.float64)
+
+    def at(self, p):
+        return self._h(p) * self.gate
+
+    def pooled(self, v, dx=None, frac=0.25):
+        b = v.mean(1)
+        h = self._h(b)
+        if dx is not None:
+            h = h - self.g * frac * np.asarray(dx, np.float64)
+        return np.maximum(h, 1.0) * self.gate
+
+
 # ------------------------------------------------------------ geometry ----
 def _edge_keys(T):
     ii = np.array([p[0] for p in PAIRS]); jj = np.array([p[1] for p in PAIRS])
@@ -206,7 +263,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mesh", required=True)
     ap.add_argument("--parent", required=True)
-    ap.add_argument("--cvm", required=True, help="deck safs_material_cvm.nc")
+    ap.add_argument("--cvm", help="deck safs_material_cvm.nc (omit when --target-field)")
+    ap.add_argument("--target-field", default=None,
+                    help="pre-graded target size field (build_graded_field.py). Refines to "
+                         "dx <= h_target, so the gate AND the g=0.15 gradation close in ONE "
+                         "pass. Mutually exclusive with --cvm.")
     ap.add_argument("--muscal", default=None,
                     help="native MUSCAL.nc; the gate is then min(deck, MUSCAL)")
     ap.add_argument("--box", type=float, nargs=4,
@@ -298,7 +359,12 @@ def main():
         raise RuntimeError("parent block mismatch")
     print(f"[mesh] {NT:,} tets / {len(G):,} verts   "
           f"parent {NPAR:,} tets / {NPV:,} verts   collar {len(T):,} tets", flush=True)
-    vs = Material(a.cvm, a.muscal, box=tuple(a.box), source=a.vs_source)
+    if a.target_field:
+        vs = FieldTarget(a.target_field, a.gate)
+    elif a.cvm:
+        vs = Material(a.cvm, a.muscal, box=tuple(a.box), source=a.vs_source)
+    else:
+        raise SystemExit("need --cvm or --target-field")
 
     P = [G]; nv = len(G)
     NT0 = NT
