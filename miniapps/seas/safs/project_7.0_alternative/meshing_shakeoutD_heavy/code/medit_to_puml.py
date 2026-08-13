@@ -23,8 +23,19 @@ import sys
 # working.
 F   = sys.argv[1] if len(sys.argv) > 1 else "build_tmp/s1.mmg_out.mesh"
 OUT = sys.argv[2] if len(sys.argv) > 2 else "build_tmp/shakeoutD_alt_heavy_s1.puml.h5"
-LV, LT, LS = 7, 13428231, 84344339
-NV, NT, NS = 12042113, 70641218, 3049525
+# MEASURED from the file, never hardcoded. These were PREFERRED's byte layout
+# (LV,LT,LS = 7, 13428231, 84344339 / NV,NT,NS = 12042113, 70641218, 3049525);
+# on any other mesh those line numbers land mid-vertex-block and pandas parses
+# whatever is there WITHOUT error -- coordinates read as connectivity, plausible
+# mesh out the far end. medit_hdr reproduces all six of those values exactly on
+# PREFERRED's file, which is how it was validated.
+from medit_hdr import medit_sections
+_sec = medit_sections(F)
+LV, NV = _sec["Vertices"]
+LT, NT = _sec["Tetrahedra"]
+LS, NS = _sec["Triangles"]
+print(f"[hdr] Vertices {NV:,} @ {LV:,}   Tetrahedra {NT:,} @ {LT:,}   "
+      f"Triangles {NS:,} @ {LS:,}")
 BC = {101: 3, 102: 1, 103: 5, 104: 5}
 FACEV = [(0,2,1),(0,1,3),(1,2,3),(0,3,2)]
 REC = np.dtype([('a',np.int32),('b',np.int32),('c',np.int32)])
