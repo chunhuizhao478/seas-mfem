@@ -90,7 +90,13 @@ def main():
     fh5 = out / f"{a.tag}_cellfreq.h5"
     tri_v, tri_bc, tri_f = [], [], []
     with h5py.File(mesh) as f, h5py.File(fh5, "w") as fo:
+        # resolved_Hz alone is not enough to act on: when a cell fails the gate you
+        # need to know WHICH term did it -- a slow-material cell that is correctly
+        # sized reads the same as an oversized cell in fast rock.  dx and Vs are
+        # already computed here, so emit them rather than make them re-derivable.
         d = fo.create_dataset("resolved_Hz", (nt,), np.float32)
+        d_dx = fo.create_dataset("edge_max_m", (nt,), np.float32)
+        d_vs = fo.create_dataset("vs_ms", (nt,), np.float32)
         for s in range(0, nt, CH):
             T = f["connect"][s:s+CH].astype(np.int64)
             B = f["boundary"][s:s+CH].astype(np.int32)
@@ -99,6 +105,8 @@ def main():
             dx = np.max(np.stack([np.linalg.norm(p[:,j]-p[:,i],axis=1) for i,j in PAIRS],1),1)
             vs = mat.at(p.mean(1))
             d[s:s+len(T)] = (scale*np.where(dx > 0, vs/dx, 0.0)).astype(np.float32)
+            d_dx[s:s+len(T)] = dx.astype(np.float32)
+            d_vs[s:s+len(T)] = vs.astype(np.float32)
             fr = (scale*np.where(dx > 0, vs/dx, 0.0)).astype(np.float32)
             for slot in range(4):
                 m = face_code(B, slot) != 0
@@ -137,7 +145,9 @@ def main():
         "volume", "Tetrahedron", nt, nv, f"{rel.as_posix()}:/connect",
         f"{rel.as_posix()}:/geometry",
         [("group", "Int", 4, f"{rel.as_posix()}:/group"),
-         ("resolved_Hz", "Float", 4, f"{fh5.name}:/resolved_Hz")], 4))
+         ("resolved_Hz", "Float", 4, f"{fh5.name}:/resolved_Hz"),
+         ("edge_max_m", "Float", 4, f"{fh5.name}:/edge_max_m"),
+         ("vs_ms", "Float", 4, f"{fh5.name}:/vs_ms")], 4))
     print(f"[full] {out / (a.tag + '_full.xdmf')}")
 
 
