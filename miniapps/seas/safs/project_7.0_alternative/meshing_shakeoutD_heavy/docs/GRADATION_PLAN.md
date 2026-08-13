@@ -138,7 +138,44 @@ Two consequences:
 Why a test grid reads low: it samples typical directions, while the realised
 worst case is set by the one direction where the mask's shortest path deviates
 most from the straight line, and a 218 M-node field has vastly more chances to
-find it. Max-over-a-big-field beats max-over-a-test-grid.
+find it. Max-over-a-big-field beats max-over-a-test-grid -- a general lesson
+about validating on toy grids, not a quirk of this transform.
+
+#### Two traps in running the pair test
+
+**Divide by the SNAPPED node separation, not the sampled distance.** `h` exists
+only at nodes, so pairing a node-to-node `dh` with a continuous separation adds
+the quantisation error (+-0.5 cell per point, ~33 % at a 3-cell separation) into
+the ratio. Measured on PREFERRED, that version reported `1.5 km -> 0.19912`, a
+spurious FAIL by 32.7 %. The give-away is the SHAPE: the bad version decays
+**monotonically** from the shortest separation, while the true curve **peaks at
+~5 km**. If your curve is monotone-decreasing from 1.5 km you are measuring
+quantisation, not gradation.
+
+**Do not expect all separations to agree between builds.** ALT vs PREFERRED:
+
+| sep | ALT | PREFERRED | regime |
+|---|---|---|---|
+| 1.5 km | 0.14858 | 0.14858 | **saturated -- mask-set** |
+| 2.5 km | 0.14982 | 0.14982 | **saturated** |
+| 5.0 km | 0.14990 | 0.14990 | **saturated** |
+| 12.5 km | 0.14982 | 0.14977 | close |
+| 25.0 km | 0.14799 | 0.14784 | close |
+| 50.0 km | 0.14662 | 0.09810 | domain structure |
+
+Three of six identical to five decimals on different domains with different
+faults, then drift, then a 50 % divergence. That is exactly what the theory
+predicts and is *better* evidence than uniform agreement: at short-to-mid
+separation the ratio is **saturated**, pinned by the worst mask direction, which
+is a property of `(radius, dxy, anisotropy)` alone and so must reproduce across
+datasets. At long separation the worst pair is no longer mask-limited but set by
+how far apart the field's own extremes sit -- domain structure. Uniform agreement
+across all six would have been suspicious, implying large-scale structure is also
+mask-determined, which it is not.
+
+So the defensible claim is the narrow one: **the mask-limited plateau (1.5-5 km)
+reproduces exactly on two independent domains, establishing 1.0493 as a property
+of the mask and divisor rather than of either build.**
 
 For contrast, an L1 sweep at g=0.15 on the natural non-uniform z would have read
 ~0.26 on the body diagonal while showing a correct 0.15 on the three axes -- that
