@@ -87,22 +87,62 @@ grade   Euclidean min-plus, R=2 (98 offsets), sweep g = 0.14286 (= 0.15/1.05)
 h       115 .. 5000 m          out: build_tmp/target_g015.npz, 0.81 GB
 ```
 
-The point of the whole exercise is the *delivered* gradation, so it is measured
-rather than assumed -- and measured **on the body diagonal**, which is where an
-L1 or anisotropic-grid field fails while still looking correct on the axes:
+#### A grid-neighbour check proves nothing -- it is tautological
 
-| direction | max abs(dh)/d | 99.99 pct |
+Checking `max abs(dh)/d` over grid neighbours returns **0.14286** on x, y, z and
+the body diagonal. That is *not* validation. The R=2 relaxation enforces
+`h_i <= h_j + g*L` on exactly those offsets, so the check can only ever return the
+swept g. It confirms the relaxation converged and nothing more. An earlier
+revision of this document reported it as spec verification; that was wrong.
+
+#### The real test: random point PAIRS
+
+Between two nodes that are not mask neighbours, the bound holds only through a
+*chain* of mask steps, and the shortest such chain is longer than the straight
+line -- so this probes the property the spec actually asks for. 200 k pairs per
+separation:
+
+| separation | pairs | max abs(dh)/abs(dx)_2 |
 |---|---|---|
-| x | 0.14286 | 0.14286 |
-| y | 0.14286 | 0.14286 |
-| z | 0.14286 | 0.14286 |
-| **body diagonal** | **0.14286** | 0.14286 |
+| 1.5 km | 199,971 | 0.14858 |
+| 2.5 km | 199,987 | 0.14982 |
+| **5.0 km** | 199,997 | **0.14990** |
+| 12.5 km | 200,000 | 0.14982 |
+| 25.0 km | 200,000 | 0.14799 |
+| 50.0 km | 200,000 | 0.14662 |
 
-Uniform at the swept value in every direction, so the delivered Euclidean
-gradation is <= 0.143 < 0.15 everywhere. For contrast, an L1 sweep at g=0.15 on
-the natural non-uniform z would have read ~0.26 on that last row while showing a
-correct 0.15 on the first three -- the failure mode is invisible unless the
-diagonal is checked.
+**PASS -- but the margin is 0.07 %, not 5 %.**
+
+```
+swept g                                0.14286
+theoretical ceiling from 4.46 % mask   0.14923
+MEASURED worst                         0.14990   <-- above that ceiling
+spec                                   0.15      margin 0.07 %
+```
+
+`0.14990 / 0.14286 = 1.0493`, so the mask overestimate realised on the actual
+field is **4.93 %**, not the 4.46 % a test grid gave. The 1.05 divisor was sized
+for 5 % and clears -- by 1e-4 in absolute terms. Had the residual come in at
+5.1 %, both trees would have shipped a field missing the spec, and the
+grid-neighbour check would still have printed a reassuring 0.14286.
+
+Two consequences:
+
+* State the result as "delivered <= 0.1499 against a 0.15 spec, margin 0.07 %",
+  not "graded at 0.15 with 5 % safety". Not worth a rebuild for 0.07 %, but it
+  must not be described as comfortable.
+* **If `--radius`, `--dxy` or the grid anisotropy ever change, re-derive the
+  divisor from a pair test.** It cannot be carried over: at R=1 the residual is
+  ~11.7 % and 1.05 fails outright.
+
+Why a test grid reads low: it samples typical directions, while the realised
+worst case is set by the one direction where the mask's shortest path deviates
+most from the straight line, and a 218 M-node field has vastly more chances to
+find it. Max-over-a-big-field beats max-over-a-test-grid.
+
+For contrast, an L1 sweep at g=0.15 on the natural non-uniform z would have read
+~0.26 on the body diagonal while showing a correct 0.15 on the three axes -- that
+failure mode is invisible unless the diagonal is checked.
 
 ### The z axis is non-uniform
 
