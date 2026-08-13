@@ -24,7 +24,9 @@ import numpy as np, h5py
 from scipy.spatial import cKDTree
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--fault-mesh", required=True)
+ap.add_argument("--fault-mesh")
+ap.add_argument("--fault-npz", default="build_tmp/fault_surface.npz",
+                help="preferred source of fault centroids; avoids re-reading the parent h5")
 ap.add_argument("--muscal", default="/Users/chunhuizhao/Downloads/muscal_nc/MUSCAL.nc")
 ap.add_argument("--gate", type=float, default=0.8)
 ap.add_argument("--hmax", type=float, default=5000.0)
@@ -54,21 +56,32 @@ xy = XY.reshape(-1,2)
 
 # ---- distance to the fault -------------------------------------------------
 FACEV=[(0,2,1),(0,1,3),(1,2,3),(0,3,2)]
-with h5py.File(a.fault_mesh) as f:
-    V=f["geometry"][:].astype(np.float64); C=f["connect"]; B=f["boundary"][:].astype(np.int64)
-    tri=[]
-    for s in range(0, C.shape[0], 8_000_000):
-        c=C[s:s+8_000_000][:].astype(np.int64); b=B[s:s+8_000_000]
-        for k in range(4):
-            m=((b>>(8*k))&0xFF)==3
-            if m.any(): tri.append(c[m][:,list(FACEV[k])])
-    F=np.vstack(tri); Pc=V[F].mean(1)
+# The h5 path re-reads the 5.5 GB parent (boundary alone is 1.07 GB) purely to
+# recover facet centroids.  build_tmp/fault_surface.npz already holds exactly those
+# triangles, deduplicated -- and on this shared box the other build's mmg can be
+# holding 13 GB, which is the one situation that has actually crashed this project.
+# So prefer the npz when it is available; the h5 path stays as the fallback.
+if a.fault_npz:
+    Fn=np.load(a.fault_npz); Pc=Fn["P"][Fn["T"]].mean(1); nfacet=len(Fn["T"])
+else:
+    with h5py.File(a.fault_mesh) as f:
+        V=f["geometry"][:].astype(np.float64); C=f["connect"]; B=f["boundary"][:].astype(np.int64)
+        tri=[]
+        for s in range(0, C.shape[0], 8_000_000):
+            c=C[s:s+8_000_000][:].astype(np.int64); b=B[s:s+8_000_000]
+            for k in range(4):
+                m=((b>>(8*k))&0xFF)==3
+                if m.any(): tri.append(c[m][:,list(FACEV[k])])
+        F=np.vstack(tri); Pc=V[F].mean(1); nfacet=len(F)//2
 # DECIMATE + TIGHT BOUND.  Querying 2.76 M facet centroids with a 60 km bound is the
 # documented KD trap in this project: the bound only helps if it is TIGHT, and at a
 # 1500 m grid the fault's ~115 m facet spacing is absurd resolution for a distance
 # field.  Beyond ~20 km the GATE sets h anyway, so the exact distance is irrelevant.
-Pc = Pc[::13]
-print(f"[fault] {len(F)//2:,} facets -> {len(Pc):,} decimated centroids for the distance field")
+# Decimate to a TARGET COUNT, not a fixed stride: the h5 path yields every facet
+# twice (once per adjacent tet) while the npz is already deduplicated, so a hardcoded
+# ::13 would halve the sample density on the npz path and quietly change the field.
+Pc = Pc[::max(1, len(Pc) // 425_000)]
+print(f"[fault] {nfacet:,} facets -> {len(Pc):,} decimated centroids for the distance field")
 tree=cKDTree(Pc)
 DCAP=25000.0
 
