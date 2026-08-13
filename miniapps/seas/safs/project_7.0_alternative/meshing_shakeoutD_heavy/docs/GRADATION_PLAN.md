@@ -77,6 +77,33 @@ Options, cheapest first:
 3. Felzenszwalb-Huttenlocher is separable and exact for *squared* Euclidean, but our
    cost is linear `g*d`, so it does not drop straight in.
 
+### Built and VERIFIED for ALT
+
+```
+grid    1192 x 1138 x 161 = 218,395,856 nodes (isotropic 500 m)
+fault   2,564,480 facets -> 256,448 decimated centroids
+grade   Euclidean min-plus, R=2 (98 offsets), sweep g = 0.14286 (= 0.15/1.05)
+        converged in 66 iterations (sum drop -> 0)
+h       115 .. 5000 m          out: build_tmp/target_g015.npz, 0.81 GB
+```
+
+The point of the whole exercise is the *delivered* gradation, so it is measured
+rather than assumed -- and measured **on the body diagonal**, which is where an
+L1 or anisotropic-grid field fails while still looking correct on the axes:
+
+| direction | max abs(dh)/d | 99.99 pct |
+|---|---|---|
+| x | 0.14286 | 0.14286 |
+| y | 0.14286 | 0.14286 |
+| z | 0.14286 | 0.14286 |
+| **body diagonal** | **0.14286** | 0.14286 |
+
+Uniform at the swept value in every direction, so the delivered Euclidean
+gradation is <= 0.143 < 0.15 everywhere. For contrast, an L1 sweep at g=0.15 on
+the natural non-uniform z would have read ~0.26 on that last row while showing a
+correct 0.15 on the first three -- the failure mode is invisible unless the
+diagonal is checked.
+
 ### The z axis is non-uniform
 
 The background grid uses 100 m spacing near the surface, 500 m at mid-depth and
