@@ -58,7 +58,12 @@ def edges_of(p):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mesh", required=True); ap.add_argument("--out", required=True)
-    ap.add_argument("--cvm", required=True); ap.add_argument("--muscal")
+    ap.add_argument("--cvm"); ap.add_argument("--muscal")
+    ap.add_argument("--target-field", default=None,
+                    help="pre-graded target size field. REQUIRED when the mesh was "
+                         "refined against one: the apex-move guard must bound against "
+                         "the ACTUAL target, not a raw Vs/gate bound, or it either "
+                         "over-constrains or silently under-protects.")
     ap.add_argument("--gate", type=float, required=True)
     ap.add_argument("--rv-target", type=float, default=2.0)
     ap.add_argument("--iters", type=int, default=120)
@@ -165,7 +170,13 @@ def main():
     eta_min_tet = np.maximum(eta0 * (1.0 - a.qual_tol), eta_floor)
     r_min_tet = r0 * (1.0 - a.qual_tol)
     dx0 = edges_of(p0).max(1)
-    mat = Material(a.cvm, a.muscal, box=BOX, source="muscal")
+    if a.target_field:
+        from leb_gate_close import FieldTarget
+        mat = FieldTarget(a.target_field, a.gate)
+    elif a.cvm:
+        mat = Material(a.cvm, a.muscal, box=BOX, source="muscal")
+    else:
+        raise SystemExit("need --cvm or --target-field")
     # (1+1e-6): where allow == dx0 exactly the guard is knife-edge and ANY
     # floating-point growth trips it, so the backtracking never converges and the
     # whole iteration is discarded -- measured as 0 vertices displaced.
