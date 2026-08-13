@@ -20,6 +20,9 @@ ap.add_argument("--out", required=True)
 ap.add_argument("--minratio", type=float, default=1.4)
 ap.add_argument("--mindihedral", type=float, default=10.0)
 ap.add_argument("--hmax", type=float, default=5000.0)
+ap.add_argument("--shuffle", type=int, default=1,
+                help="permute vertex/facet order before tetgen (0 = input order). "
+                     "REQUIRED on ALT -- input order fails boundary recovery; see below.")
 a = ap.parse_args()
 t0 = time.time()
 
@@ -49,6 +52,36 @@ print(f"[plc] {len(T):,} facets, {len(P):,} vertices "
 sw = "pY" if a.minratio <= 0 else f"pq{a.minratio}/{a.mindihedral}Y"
 if a.hmax > 0:
     sw += f"a{a.hmax**3/(6.0*np.sqrt(2.0)):.6g}"
+# ORDER PERMUTATION -- required on ALT, not cosmetic.
+#
+# In input order this PLC dies with `Internal TetGen error within recoversubfaces`
+# during boundary recovery, under both -d and the real -pY.  Bisection localised it
+# to 67 fault triangles at the SE lateral tip (s 455.0-457.6 km, E 616,573-618,343):
+# removing exactly those fills cleanly, while removing a comparable 88-triangle set
+# elsewhere still fails, so it is those facets and not a size effect.  They are not
+# degenerate -- min edge 80.2 m, min quality 0.768, and the top surface there is min
+# quality 0.644.  The trace simply terminates in mid-surface at that point, and
+# tetgen's recovery is order-dependent: vertices are inserted in input order, so the
+# Delaunay history decides which subfaces are recoverable by flips alone.
+#
+# Relabelling is exact -- same points, same facets, same geometry -- so this is a
+# free fix.  Measured on the full PLC:
+#   input order   -pY   FAIL (recoversubfaces)
+#   seed 1        -pY   PASS  279 Steiner,   6 of 2,564,480 fault facets lost
+#   seed 2        -pY   PASS  297 Steiner,   8 lost
+#   no -Y at all        PASS    1 Steiner, 215,780 LOST (facets re-diagonalised)
+# For scale, PREFERRED's own base fill added 969 Steiner points and lost 2.
+# Dropping -Y is NOT an acceptable alternative: it silently retriangulates 8.4 % of
+# the frozen fault.
+if a.shuffle:
+    rng = np.random.default_rng(a.shuffle)
+    vperm = rng.permutation(len(P))
+    inv = np.empty_like(vperm); inv[vperm] = np.arange(len(vperm))
+    P = P[vperm]; T = inv[T]
+    fperm = rng.permutation(len(T))
+    T = T[fperm]; MARK = MARK[fperm]      # MARK rides with T or every tag is wrong
+    print(f"[shuffle] vertex + facet order permuted with seed {a.shuffle}")
+
 print(f"[tetgen] switches -{sw}", flush=True)
 shift = P.mean(0)
 import tetgen
@@ -61,5 +94,20 @@ d2, _ = cKDTree(TP).query(P, k=1)
 print(f"[check] PLC vertices preserved to {d2.max():.3e} m")
 if d2.max() > 1e-6:
     raise RuntimeError("tetgen moved PLC vertices")
+# Volume is the cheapest end-to-end proof that the PLC closed and the interior was
+# filled once: a leak through the hull, or the fault cutting the domain in two, both
+# show up here long before any face census.
+A = TP[TT[:, 1]] - TP[TT[:, 0]]; B = TP[TT[:, 2]] - TP[TT[:, 0]]; C = TP[TT[:, 3]] - TP[TT[:, 0]]
+vol = np.abs(np.einsum("ij,ij->i", np.cross(A, B), C)).sum() / 6.0
+print(f"[check] volume {vol/1e9:,.0f} km3   (domain 12,480,379 km3)")
+# How much of the FROZEN fault survived as tet faces?  -Y is what guarantees this,
+# so it is asserted, not assumed.
+kd = cKDTree(TP); _, mp = kd.query(P, k=1)
+faces = np.sort(np.concatenate([TT[:, [0,1,2]], TT[:, [0,1,3]], TT[:, [0,2,3]], TT[:, [1,2,3]]]), axis=1)
+fset = set(map(tuple, np.unique(faces, axis=0).tolist()))
+ftri = np.sort(mp[T[MARK == 7]], axis=1)
+surv = sum(1 for t_ in map(tuple, ftri.tolist()) if t_ in fset)
+print(f"[check] fault facets surviving as tet faces: {surv:,} of {len(ftri):,} "
+      f"-> {len(ftri)-surv:,} lost ({100.0*(len(ftri)-surv)/len(ftri):.5f} %)")
 np.savez("build_tmp/fill.npz", P=TP, T=TT, plcP=P, plcT=T, MARK=MARK)
 print(f"[out] build_tmp/fill.npz  ({time.time()-t0:.0f} s)")
