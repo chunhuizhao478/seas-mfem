@@ -34,6 +34,10 @@ ap.add_argument("--depth", type=float, default=80000.0)
 ap.add_argument("--dxy", type=float, default=1500.0)
 ap.add_argument("--k", type=float, default=18.8992)
 ap.add_argument("--grads", default="0.10,0.15,0.20,0.30")
+ap.add_argument("--no-fault", action="store_true",
+                help="drop the fault-proximity term and cost the GATE ALONE -- i.e. what "
+                     "the 1 Hz-at-p5 requirement actually costs, separated from what "
+                     "preserving the fault-zone treatment costs")
 a = ap.parse_args()
 
 Q = np.load("build_tmp/domain_corners_utm.npy")     # W,N,E,S
@@ -120,6 +124,8 @@ for kz,z in enumerate(zs):
     # = 3500 m and silently inflates the count ~2.9x -- the distance cap is a
     # SEARCH optimisation, not a size rule.
     hf=np.where(d>=DCAP-1.0, np.inf, hf)
+    if a.no_fault:
+        hf=np.full_like(hf, np.inf)   # gate-only costing: fault imposes nothing
     kdep=near(mdep, -z)
     vs=VS[kdep, jj, ii]
     hg=np.where(np.isfinite(vs), vs/a.gate, a.hmax)
