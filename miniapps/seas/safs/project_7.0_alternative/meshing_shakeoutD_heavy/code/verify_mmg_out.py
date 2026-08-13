@@ -10,14 +10,19 @@ Reads MEDIT by byte offset + pandas rather than meshio: the file is 3.06 GB ASCI
 and 70.6 M tets, so a generic reader is both too slow and too heavy.
 """
 import numpy as np, pandas as pd, sys
-F = "build_tmp/s1.mmg_out.mesh"
-# line numbers located with grep -n (1-based); data starts 2 lines after the header
-LV, LT, LS = 7, 13428231, 84344339
+F = sys.argv[1] if len(sys.argv) > 1 else "build_tmp/s1.mmg_out.mesh"
+# MEASURED, not hardcoded. These were PREFERRED's byte layout; on any other mesh
+# they land mid-vertex-block and pandas parses whatever is there WITHOUT error.
+from medit_hdr import medit_sections
+_sec = medit_sections(F)
+LV, nv = _sec["Vertices"]
+LT, nt = _sec["Tetrahedra"]
+LS, ns = _sec["Triangles"]
+print(f"[hdr] verts {nv:,} @ {LV:,}   tets {nt:,} @ {LT:,}   tris {ns:,} @ {LS:,}")
 def block(start_hdr, n, ncol, dt):
     return pd.read_csv(F, sep=r"\s+", header=None, skiprows=start_hdr+1,
                        nrows=n, usecols=range(ncol), dtype=dt,
                        engine="c").to_numpy()
-nv, nt, ns = 12042113, 70641218, 3049525
 P = block(LV, nv, 3, np.float64)
 print(f"[verts] {len(P):,}   z {P[:,2].min():.4f} .. {P[:,2].max():.4f} m")
 S = block(LS, ns, 4, np.int32)
