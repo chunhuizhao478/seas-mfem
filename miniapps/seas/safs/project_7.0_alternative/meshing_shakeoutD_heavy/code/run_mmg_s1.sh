@@ -31,8 +31,24 @@ if [ "${1:-}" != "--force" ]; then
 fi
 
 echo "[start] $(date)  swap $(sysctl -n vm.swapusage | sed 's/.*used = //;s/ .*//')"
-setsid nohup $PY -u code/mmg_refine_sizemap.py \
-    build_tmp/base.msh build_tmp/s1.msh build_tmp/metric_s1.sol \
-    --hgrad 1.3 --hausd 30 --hmin 115 --hmax 5000 --mem-mb 20000 --no-freeze \
-    >> $LOG 2>&1 &
-echo "[launched] pid $! -> $LOG"
+# `setsid` does not exist on macOS -- an earlier version used it and silently
+# launched nothing.  zsh's `&!` is background-and-disown, which detaches the job
+# from this shell so it survives the caller exiting.  Python's start_new_session
+# puts it in its own process group as well, so a group-directed signal aimed at
+# whatever invoked this does not take the run with it.
+nohup $PY -c "
+import os, subprocess, sys
+subprocess.Popen(
+    [sys.argv[1], '-u', 'code/mmg_refine_sizemap.py',
+     'build_tmp/base.msh', 'build_tmp/s1.msh', 'build_tmp/metric_s1.sol',
+     '--hgrad', '1.3', '--hausd', '30', '--hmin', '115', '--hmax', '5000',
+     '--mem-mb', '20000', '--no-freeze'],
+    stdout=open('$LOG', 'ab'), stderr=subprocess.STDOUT,
+    start_new_session=True)
+" $PY >> $LOG 2>&1 &!
+sleep 3
+pid=$(pgrep -f "code/mmg_refine_sizemap.py" | head -1)
+if [ -z "$pid" ]; then
+  echo "[FAILED] nothing launched -- see $LOG"; tail -5 $LOG; exit 1
+fi
+echo "[launched] pid $pid -> $LOG"
