@@ -15,6 +15,14 @@
 # Switches match PREFERRED's stage 1 exactly (-hgrad 1.3 -hausd 30 -hmin 115
 # -hmax 5000 -m 20000), fault frozen as RequiredTriangles, --no-freeze so the
 # whole mesh can have its shape repaired -- the base CDT is slivers by construction.
+#
+# --keep-medit IS NOT OPTIONAL.  The driver's fault guard is `count unchanged AND
+# max displacement < tol`, and it exits 2 WITHOUT WRITING if either half fails.
+# Measured on PREFERRED's run: mmg succeeded, moved fault vertices by 2.046e-11 m
+# (tol 1e-3, i.e. passing by eight orders of magnitude), and lost exactly ONE facet
+# of 2,761,486 -- so the guard tripped purely on strict count equality and would
+# have discarded 8h40m of compute. --keep-medit leaves s1.mmg_out.mesh on disk so
+# the run survives its own verdict and the loss can be judged after the fact.
 set -u
 cd "${0:a:h}/.."
 PY=/Users/chunhuizhao/miniforge/envs/pythonenv/bin/python
@@ -42,7 +50,7 @@ subprocess.Popen(
     [sys.argv[1], '-u', 'code/mmg_refine_sizemap.py',
      'build_tmp/base.msh', 'build_tmp/s1.msh', 'build_tmp/metric_s1.sol',
      '--hgrad', '1.3', '--hausd', '30', '--hmin', '115', '--hmax', '5000',
-     '--mem-mb', '20000', '--no-freeze'],
+     '--mem-mb', '20000', '--no-freeze', '--keep-medit'],
     stdout=open('$LOG', 'ab'), stderr=subprocess.STDOUT,
     start_new_session=True)
 " $PY >> $LOG 2>&1 &!
