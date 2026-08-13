@@ -231,13 +231,54 @@ Measured (size_budget, hmax 5000, gate 0.8, k=18.8992), both trees:
 Two independent trees agree on ~1.2x, so g = 0.15 costs roughly **17-18 GB** at
 the measured 14.5 GB / 70.6 M scaling -- inside 36 GB. No cluster needed.
 
-**The gate is not nearly free.** A separate claim that the 1 Hz-at-p5 gate costs
-only 14.64 M, making >93 % of the mesh fault treatment, used the *ungraded*
-integral and compared it against a *graded* total. Like for like, ALT's gate
-alone is 23.6 M at g=0.30 and 43.4 M at g=0.15, so the fault treatment is
-**61-74 %** -- still dominant, but the frequency requirement is ~3x more
-expensive than that framing suggests. This matters if the fault-zone treatment is
-ever put up for negotiation, which is the one thing the build was told to preserve.
+**The gate is not nearly free**, and the split settled at roughly 60/40 only
+after two wrong answers. Recorded so neither is re-derived:
+
+| claim | method | why it was wrong |
+|---|---|---|
+| ">93 % fault treatment" | ungraded gate integral (14.64 M) vs a *graded* total | not like-for-like |
+| "~72 % fault treatment" | sub-500 m band share of the full field | that band also holds gate-driven refinement over slow near-surface material; attributing all of it to the fault double-counts |
+| **"~60 % fault treatment"** | **difference of two separately graded fields** | **the only clean decomposition** |
+
+The fault term is *marginal cost*: `full - gate_alone`, both graded identically.
+
+| | full | gate alone | fault (marginal) |
+|---|---|---|---|
+| ALT, g=0.15 | 110.5 M | 43.4 M | 67.1 M = **60.7 %** |
+| ALT, g=0.30 | 89.7 M | 23.6 M | 66.1 M = 74.3 % |
+| PREFERRED, g=0.15 (field-based) | 145.73 M | 57.85 M | 87.88 M = **60.3 %** |
+
+The g=0.15 rows agree to **0.4 points across independent domains and two different
+cost methods** (ALT: k-calibrated integral on a 1500 m grid; PREFERRED: graded
+field on 500 m). The 74.3 % figure is the g=0.30 build and is *not* comparable --
+reading it as a second estimate at g=0.15 is what makes this look like a "61-74 %
+band" when it is really one number per gradation.
+
+**Figure for the user: fault treatment ~60 %, frequency target ~40 %. Neither
+dominates.**
+
+Sanity check on the gate term: a gate-only field bottoms out at `h = 188 m`, and
+`188 * 0.8 = 150 m/s` against MUSCAL's measured 155 m/s floor. That is also why
+the gate is not cheap -- 188 m cells over slow near-surface material across
+520 x 300 km is a large volume, which the ungraded 14.64 M figure concealed.
+
+### Field-based vs integral costing
+
+| | field-based (500 m) | size_budget integral (1500 m) | ratio |
+|---|---|---|---|
+| ALT | 130.30 M | 110.5 M | 1.179 |
+| PREFERRED | 145.73 M | 123.8 M | 1.177 |
+
+The correction reproduces to 0.2 % across trees, which supports the three stated
+causes -- slab-minimum Vs pooling, the 1.05 divisor, and 500 m vs 1500 m
+integration -- being the whole story. Anything dataset-specific would break the
+agreement. The field-based number is the trustworthy one; all three causes are
+conservative.
+
+Incidental but worth having: ALT's domain mask is **624,016 of 1,356,496 columns
+(46.0 %), 520.0 x 300.0 km** -- identical digit-for-digit to PREFERRED's,
+confirming the corners really are bit-identical between trees. That was assumed
+when ALT copied them and never actually verified until now.
 
 These are k-calibrated integrals, not mmg runs. The single hard datum -- 70.6 M
 actual against a 106.0 M full-field prediction -- says they are the right order
