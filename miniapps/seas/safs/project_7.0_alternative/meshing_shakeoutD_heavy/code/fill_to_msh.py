@@ -12,6 +12,7 @@ vertices three 22-bit fields need 66 bits and silently overflow int64.
 import numpy as np, meshio
 d = np.load("build_tmp/fill.npz")
 P, T, plcT, MARK = d["P"], d["T"], d["plcT"], d["MARK"]
+plcP = d["plcP"]        # needed to derive FAULT_AREA below, rather than hardcode it
 LOCAL = [(0,2,1),(0,1,3),(1,2,3),(0,3,2)]
 REC = np.dtype([('a',np.int32),('b',np.int32),('c',np.int32)])
 def rec(A):
