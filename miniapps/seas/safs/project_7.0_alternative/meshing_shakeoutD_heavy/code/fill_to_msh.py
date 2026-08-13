@@ -71,6 +71,10 @@ print(f"[dedup] fault faces -> {int((gt==101).sum()):,}   total surface {len(fac
 cells=[("triangle", faces), ("tetra", T)]
 cd={"gmsh:physical":[gt, np.ones(len(T),np.int32)],
     "gmsh:geometrical":[gt, np.ones(len(T),np.int32)]}
+# BINARY, not ASCII: the next stage (mmg_refine_sizemap.py) reads this through
+# fastmsh, which is binary-only and exists precisely because meshio.read on a large
+# ASCII .msh materialises per-element Python objects and exhausts 36 GB. ASCII also
+# cost 819 MB here for a 9.6 M-tet mesh.
 meshio.write("build_tmp/base.msh", meshio.Mesh(P, cells, cell_data=cd),
-             file_format="gmsh22", binary=False)
+             file_format="gmsh22", binary=True)
 print("[out] build_tmp/base.msh")
