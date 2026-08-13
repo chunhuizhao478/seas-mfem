@@ -20,11 +20,70 @@ field, so **gate closure and gradation happen in the same refinement pass**.
 Consequence for ALT: the stage-1 mmg running at `-hgrad 1.3` is a **valid base**.
 It is not wasted and does not need repeating.
 
-Method (from PREFERRED, adopted here): exact separable **L1 min-plus transform**,
-forward + backward sweep per axis, on a background grid. L1 is *conservative*
-against the true Euclidean transform -- it can only make the field smaller, never
-larger, so it cannot under-refine. Worth stating explicitly, because "L1 instead
-of Euclidean" otherwise reads like a corner cut.
+Method: a min-plus (distance-transform) grading of the field on a background grid.
+
+### The distance metric is NOT a free choice -- L1 under-refines
+
+A separable forward+backward sweep per axis with additive cost computes the **L1**
+transform, and an earlier revision of this document claimed L1 was "conservative --
+it can only make the field smaller, never larger, so it cannot under-refine."
+**That is backwards.** The transform is
+
+```
+h(x) = min over y of [ h0(y) + g * d(x,y) ]
+```
+
+and since `L1 >= L2`, every candidate `h0(y) + g*d_L1` is >= its Euclidean
+counterpart, so the minimum is too:
+
+```
+h_L1(x)  >=  h_euclid(x)      pointwise -- L1 grading is COARSER
+```
+
+Equivalently `h(x) <= h(y) + g*d_L1` is a *weaker* constraint than the Euclidean
+one, because the bound is larger. Measured, single 115 m seed, g = 0.15:
+
+| offset | L2 | L1 | h_euclid | h_L1 | L1 coarser by |
+|---|---|---|---|---|---|
+| (100,0,0) | 100.0 | 100.0 | 130.0 | 130.0 | 0.0 % |
+| (100,100,0) | 141.4 | 200.0 | 136.2 | 145.0 | 6.5 % |
+| (100,100,100) | 173.2 | 300.0 | 141.0 | 160.0 | 13.5 % |
+| (500,500,500) | 866.0 | 1500.0 | 244.9 | 340.0 | 38.8 % |
+| (2000,2000,2000) | 3464.1 | 6000.0 | 634.6 | 1015.0 | 59.9 % |
+
+A field that is g-Lipschitz in L1 is only `g*(|u|_1/|u|_2)`-Lipschitz in Euclidean,
+so an L1 sweep at g = 0.15 actually delivers
+
+| direction | \|u\|_1/\|u\|_2 | g_eff |
+|---|---|---|
+| axis | 1.000 | 0.150 |
+| face diagonal | 1.414 | 0.212 |
+| body diagonal | 1.732 | **0.260** |
+
+Exact on the grid axes, worst on the body diagonal -- the generic direction away
+from a dipping fault. Since the entire point of this change is to deliver the
+specified g = 0.15 rather than 0.30, an L1 sweep would land at 0.15-0.26 and, worse,
+do so **anisotropically**: transitions look gradual along the grid axes and steep
+along diagonals, which is a nastier artefact than a uniform 0.30.
+
+Options, cheapest first:
+
+1. **Sweep at `g/sqrt(3)` = 0.0866.** Then `g_eff <= 0.15` in every direction. One
+   line, keeps the exact separable transform, but over-refines on the axes by up to
+   sqrt(3) and so costs more than the 110.5 M predicted for true Euclidean g=0.15.
+2. **3-D chamfer (Borgefors) mask** -- 6 face neighbours at 1, 12 edge at sqrt(2),
+   8 corner at sqrt(3), each weighted by the REAL anisotropic spacings.
+   Approximates Euclidean to a few percent instead of 73 %. **Preferred.**
+3. Felzenszwalb-Huttenlocher is separable and exact for *squared* Euclidean, but our
+   cost is linear `g*d`, so it does not drop straight in.
+
+### The z axis is non-uniform
+
+The background grid uses 100 m spacing near the surface, 500 m at mid-depth and
+2000 m deep. The per-axis sweep must use the **actual level spacing**, not a scalar
+`dz`: a constant would over-grade the deep half and under-grade the top 3 km, which
+is exactly where the gate bites. This compounds with the metric choice above -- a
+chamfer mask needs the true anisotropic spacing per neighbour offset.
 
 Because the field is g-graded by construction, the pooled lower bound needed by
 the refinement loop is **exact** and needs no second lookup:
