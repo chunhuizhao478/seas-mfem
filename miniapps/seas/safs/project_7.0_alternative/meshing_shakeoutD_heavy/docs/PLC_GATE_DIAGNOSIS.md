@@ -21,6 +21,33 @@ volume 12,480,379 km3                  (domain 12,480,379 km3 -- exact)
 fault facets surviving as tet faces: 2,564,474 of 2,564,480 -> 6 lost (0.00023 %)
 ```
 
+## The 6 lost facets are the 6 pinholes, not 12
+
+Worth checking rather than assuming, because the two numbers arrive from different
+stages and the failure modes are not equivalent: flat-top clamp residue is confined
+to within ~50 m of the free surface, whereas facets lost to Steiner recovery could
+in principle sit anywhere on the fault.
+
+Recomputed independently of both paths (build the tet face set, ask which PLC fault
+facets are a face of no tet): **exactly 6, and they are the same 6**. `fill_domain.py`'s
+"lost" check and `fill_to_msh.py`'s "pinhole" check measure the identical predicate,
+so both report 2,564,474 surviving. There is no second failure mode.
+
+```
+     idx    area m2    z_cen    z_min    z_max    E, N
+  311401      377.8   -15.01   -18.01    -9.00    392,780 3,826,101
+  561242      377.8   -12.01   -18.01    -9.00    392,756 3,826,113
+  968522      244.1   -29.48   -44.21     0.00    503,213 3,768,162
+ 1131552     1083.3   -34.46   -51.70     0.00    559,540 3,744,031
+ 1650588      244.1   -14.74   -44.21     0.00    503,218 3,768,160
+ 2530518     1083.3   -17.23   -51.70     0.00    559,541 3,744,024
+```
+
+Deepest centroid -34.46 m, deepest vertex -51.70 m; three clusters of two same-area
+facets ~25 m apart, four of the six touching z=0. Total 3,410 m2 = 5.216e-05 % of
+the fault. **So the order permutation cost zero facets that were not already
+flat-top residue** -- same mode as PREFERRED's 2, three clusters instead of one.
+
 ## What the `-d` gate does and does not tell you
 
 `isolate_selfint.py` runs bare `switches="d"`. `-d` only *detects*; it never emits a
