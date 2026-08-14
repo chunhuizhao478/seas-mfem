@@ -78,10 +78,20 @@ faces = np.sort(np.concatenate([TT[:, [0, 1, 2]], TT[:, [0, 1, 3]],
                                 TT[:, [0, 2, 3]], TT[:, [1, 2, 3]]]), axis=1)
 fset = set(map(tuple, np.unique(faces, axis=0).tolist()))
 want = np.sort(mp[FT], axis=1)
-lost = sum(1 for t in map(tuple, want.tolist()) if t not in fset)
+lostm = np.array([t not in fset for t in map(tuple, want.tolist())], bool)
+lost = int(lostm.sum())
 print(f'[check] facets lost: {lost} of {len(FT):,}')
 if lost:
-    raise SystemExit('facet loss -- retry with a different --shuffle seed')
+    # say WHICH facets, so a grow-the-box retry can be judged: a lost 999 (skin)
+    # facet often lands interior to a larger box; a lost 101 (fault) facet is the
+    # same recovery-residue class as the base fill's pinholes.
+    for r in np.unique(ref[lostm]):
+        print(f'  lost ref {r}: {int((ref[lostm] == r).sum())}')
+    A = FP[FT[lostm]]
+    ar = 0.5 * np.linalg.norm(np.cross(A[:, 1] - A[:, 0], A[:, 2] - A[:, 0]), axis=1)
+    for i in range(min(4, lost)):
+        print(f'  lost facet area {ar[i]:.1f} m2  centroid {A[i].mean(0)}')
+    raise SystemExit('facet loss -- retry with a different --shuffle seed or a grown box')
 
 # eta of the refill
 PAIRS = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]

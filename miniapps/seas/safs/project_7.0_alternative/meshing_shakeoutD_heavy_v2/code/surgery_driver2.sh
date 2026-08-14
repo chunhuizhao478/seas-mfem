@@ -35,16 +35,30 @@ while [ $k -lt $NB ]; do
 import json; b=json.load(open('$B/surgery_boxes.json'))[$k]
 print(b[0],b[1],b[2],b[3],b[4],b[5],b[6])")
   echo "--- r2 box $k: $NS slivers at ($CX,$CY) ---" >> $LOG
-  $PY -u code/extract_patch_medit.py --mesh $CUR --out $B/r2b$k.msh \
-      --meta $B/r2b${k}_meta.npz --cx $CX --cy $CY --hx $HX --hy $HY \
-      --z0 $Z0 --z1 $Z1 >> $LOG 2>&1 || { echo "ABORT-extract-$k"; exit 1; }
+  # retry ladder: shuffle seeds, then GROW the box (+400 m per step -- a lost
+  # skin facet usually lands interior to a larger box; a lost fault facet gets a
+  # different local constellation). A box that still refuses is SKIPPED and
+  # recorded, not allowed to kill the whole chain: its slivers stay, the census
+  # at the end reports them honestly.
   ok=0
-  for seed in 0 1 2; do
-    if $PY -u code/refill_box.py --box $B/r2b$k.msh --out $B/r2b${k}_refill.msh \
-         --shuffle $seed >> $LOG 2>&1; then ok=1; break; fi
-    echo "  refill seed $seed failed, retrying" >> $LOG
+  for grow in 0 400 800; do
+    $PY -u code/extract_patch_medit.py --mesh $CUR --out $B/r2b$k.msh \
+        --meta $B/r2b${k}_meta.npz --cx $CX --cy $CY \
+        --hx $((HX + grow)) --hy $((HY + grow)) \
+        --z0 $((Z0 - grow)) --z1 $((Z1 + grow)) >> $LOG 2>&1 || { echo "ABORT-extract-$k"; exit 1; }
+    for seed in 0 1 2 3; do
+      if $PY -u code/refill_box.py --box $B/r2b$k.msh --out $B/r2b${k}_refill.msh \
+           --shuffle $seed >> $LOG 2>&1; then ok=1; break; fi
+      echo "  refill grow=$grow seed=$seed failed" >> $LOG
+    done
+    [ $ok -eq 1 ] && break
   done
-  [ $ok -eq 1 ] || { echo "ABORT-refill-$k"; exit 1; }
+  if [ $ok -ne 1 ]; then
+    echo "SKIP-box-$k (refill unrecoverable after 3 grows x 4 seeds; slivers remain)" >> $LOG
+    rm -f $B/r2b$k.msh $B/r2b${k}_refill.msh
+    k=$((k+1))
+    continue
+  fi
   NXT=$B/v2r2_$k.mesh
   $PY -u code/stitch_patch.py --global-mesh $CUR --patch $B/r2b${k}_refill.msh \
       --meta $B/r2b${k}_meta.npz --out $NXT >> $LOG 2>&1 || { echo "ABORT-stitch-$k"; exit 1; }
