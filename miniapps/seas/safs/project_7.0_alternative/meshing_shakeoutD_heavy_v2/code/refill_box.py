@@ -34,6 +34,11 @@ ap.add_argument('--out', required=True, help='refilled patch .msh (same tags)')
 ap.add_argument('--shuffle', type=int, default=0)
 ap.add_argument('--minratio', type=float, default=1.4)
 ap.add_argument('--mindihedral', type=float, default=10.0)
+ap.add_argument('--edge-target', type=float, default=0.0,
+                help='max edge the refill may produce (m). Converted to a tetgen '
+                     '-a volume cap so the fresh interior CANNOT fail a frequency '
+                     'gate needing dx <= this; the polish then runs with -hmax at '
+                     'the same target so optim cannot coarsen back over it. 0=off.')
 ap.add_argument('--polish', type=int, default=2,
                 help='box-local mmg -optim passes after the refill. Raw tetgen -q '
                      'bounds radius-edge, NOT Joe-Liu eta: measured, unpolished '
@@ -68,6 +73,9 @@ if a.shuffle:
 
 shift = FP.mean(0)
 sw = f'pq{a.minratio}/{a.mindihedral}Y'
+if a.edge_target > 0:
+    vol = a.edge_target ** 3 / (6.0 * np.sqrt(2.0))     # regular-tet volume at that edge
+    sw += f'a{vol:.6g}'
 print(f'[tetgen] -{sw}', flush=True)
 tg = tetgen.TetGen(np.ascontiguousarray(FP - shift), np.ascontiguousarray(FT))
 tg.tetrahedralize(switches=sw)
@@ -150,8 +158,9 @@ if a.polish and int((eta < 0.1).sum()):
                           3: TT[:, 3] + 1, 4: np.ones(len(TT), np.int32)}).to_csv(
                 fo, sep=' ', header=False, index=False)
             fo.write('\nEnd\n')
+        hmax = str(min(200000.0, a.edge_target * 0.98)) if a.edge_target > 0 else '200000'
         r = subprocess.run([MMG, '-in', tmp, '-out', tmpo, '-opnbdy', '-optim',
-                            '-nosurf', '-hmin', '20', '-hmax', '200000',
+                            '-nosurf', '-hmin', '20', '-hmax', hmax,
                             '-hgrad', '3', '-m', '3000', '-v', '0'],
                            capture_output=True)
         if r.returncode != 0 or not os.path.exists(tmpo):
