@@ -34,6 +34,12 @@ ap.add_argument('--out', required=True, help='refilled patch .msh (same tags)')
 ap.add_argument('--shuffle', type=int, default=0)
 ap.add_argument('--minratio', type=float, default=1.4)
 ap.add_argument('--mindihedral', type=float, default=10.0)
+ap.add_argument('--polish', type=int, default=2,
+                help='box-local mmg -optim passes after the refill. Raw tetgen -q '
+                     'bounds radius-edge, NOT Joe-Liu eta: measured, unpolished '
+                     'refills minted 51 new sub-0.05 cells (one at 0.0001) across '
+                     '17 boxes. The minted cells are INTERIOR, which optim eats '
+                     'in seconds at box scale. 0 disables.')
 a = ap.parse_args()
 t0 = time.time()
 
@@ -95,13 +101,91 @@ if lost:
 
 # eta of the refill
 PAIRS = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
-p = TP[TT]
-e = np.stack([np.linalg.norm(p[:, j] - p[:, i], axis=1) for i, j in PAIRS], 1)
-d6 = np.abs(np.einsum('ij,ij->i', np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0]),
-                      p[:, 3] - p[:, 0])) / 6.0
-eta = np.where((e ** 2).sum(1) > 0, 12.0 * np.cbrt((3.0 * d6) ** 2) / (e ** 2).sum(1), 0.0)
-print(f'[eta] min {eta.min():.4f}   <0.05 {int((eta<0.05).sum()):,}   '
+
+
+def eta_of(Pts, Tets):
+    p = Pts[Tets]
+    e = np.stack([np.linalg.norm(p[:, j] - p[:, i], axis=1) for i, j in PAIRS], 1)
+    d6 = np.abs(np.einsum('ij,ij->i', np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0]),
+                          p[:, 3] - p[:, 0])) / 6.0
+    ss = (e ** 2).sum(1)
+    return np.where(ss > 0, 12.0 * np.cbrt((3.0 * d6) ** 2) / ss, 0.0), e
+
+
+eta, e = eta_of(TP, TT)
+print(f'[eta] refill min {eta.min():.4f}   <0.05 {int((eta<0.05).sum()):,}   '
       f'<0.1 {int((eta<0.1).sum()):,}   med {np.median(eta):.3f}   edge_min {e.min():.2f}')
+
+# ---- box-local optim polish -------------------------------------------------
+if a.polish and int((eta < 0.1).sum()):
+    import os
+    import subprocess
+    import pandas as pd
+    sys.path.insert(0, 'code')
+    from medit_hdr import medit_sections
+    MMG = '/Users/chunhuizhao/miniforge/envs/mmg/bin/mmg3d_O3'
+    tmp = a.out + '.polish.mesh'
+    tmpo = a.out + '.polish_o.mesh'
+    for it in range(a.polish):
+        if int((eta < 0.1).sum()) == 0:
+            break
+        for f_ in (tmp, tmpo, tmp[:-5] + '.sol', tmpo[:-5] + '.sol'):
+            try:
+                os.unlink(f_)
+            except OSError:
+                pass
+        with open(tmp, 'w') as fo:
+            fo.write('MeshVersionFormatted 2\nDimension 3\n\nVertices\n%d\n' % len(TP))
+            pd.DataFrame({0: TP[:, 0], 1: TP[:, 1], 2: TP[:, 2], 3: 0}).to_csv(
+                fo, sep=' ', header=False, index=False, float_format='%.17g')
+            tl = mp[FT]
+            fo.write('\nTriangles\n%d\n' % len(tl))
+            pd.DataFrame({0: tl[:, 0] + 1, 1: tl[:, 1] + 1, 2: tl[:, 2] + 1,
+                          3: ref}).to_csv(fo, sep=' ', header=False, index=False)
+            fo.write('\nRequiredTriangles\n%d\n' % len(tl))
+            pd.DataFrame({0: np.arange(1, len(tl) + 1)}).to_csv(
+                fo, sep=' ', header=False, index=False)
+            fo.write('\nTetrahedra\n%d\n' % len(TT))
+            pd.DataFrame({0: TT[:, 0] + 1, 1: TT[:, 1] + 1, 2: TT[:, 2] + 1,
+                          3: TT[:, 3] + 1, 4: np.ones(len(TT), np.int32)}).to_csv(
+                fo, sep=' ', header=False, index=False)
+            fo.write('\nEnd\n')
+        r = subprocess.run([MMG, '-in', tmp, '-out', tmpo, '-opnbdy', '-optim',
+                            '-nosurf', '-hmin', '20', '-hmax', '200000',
+                            '-hgrad', '3', '-m', '3000', '-v', '0'],
+                           capture_output=True)
+        if r.returncode != 0 or not os.path.exists(tmpo):
+            print(f'[polish {it}] mmg failed (rc {r.returncode}) -- keeping pre-polish state')
+            break
+        sec = medit_sections(tmpo)
+        pLV, pNV = sec['Vertices']
+        pLT, pNT = sec['Tetrahedra']
+        TPn = pd.read_csv(tmpo, sep=r'\s+', header=None, skiprows=pLV + 1, nrows=pNV,
+                          usecols=range(3), dtype=np.float64, engine='c').to_numpy()
+        TTn = pd.read_csv(tmpo, sep=r'\s+', header=None, skiprows=pLT + 1, nrows=pNT,
+                          usecols=range(4), dtype=np.int64, engine='c').to_numpy() - 1
+        kd2 = cKDTree(TPn)
+        d2, mp2 = kd2.query(FP, k=1)
+        if d2.max() > 1e-6:
+            print(f'[polish {it}] moved input verts ({d2.max():.2e}) -- keeping pre-polish state')
+            break
+        faces2 = np.sort(np.concatenate([TTn[:, [0, 1, 2]], TTn[:, [0, 1, 3]],
+                                         TTn[:, [0, 2, 3]], TTn[:, [1, 2, 3]]]), axis=1)
+        fset2 = set(map(tuple, np.unique(faces2, axis=0).tolist()))
+        want2 = np.sort(mp2[FT], axis=1)
+        lost2 = sum(1 for t in map(tuple, want2.tolist()) if t not in fset2)
+        if lost2:
+            print(f'[polish {it}] lost {lost2} facets -- keeping pre-polish state')
+            break
+        TP, TT, mp = TPn, TTn, mp2
+        eta, e = eta_of(TP, TT)
+        print(f'[polish {it}] min {eta.min():.4f}   <0.05 {int((eta<0.05).sum()):,}   '
+              f'<0.1 {int((eta<0.1).sum()):,}   tets {len(TT):,}')
+    for f_ in (tmp, tmpo, tmp[:-5] + '.sol', tmpo[:-5] + '.sol'):
+        try:
+            os.unlink(f_)
+        except OSError:
+            pass
 
 out = meshio.Mesh(TP, [('triangle', mp[FT]), ('tetra', TT)],
                   cell_data={'gmsh:physical': [ref, np.ones(len(TT), np.int32)],
