@@ -48,7 +48,7 @@ gk = rec(gtri)
 o = np.argsort(gk, kind='stable')
 gk, gref_s = gk[o], gref[o]
 
-sel = []
+sel, sid = [], []
 for s in range(0, NT, CH):
     n = min(CH, NT - s)
     T = pd.read_csv(a.mesh, sep=r'\s+', header=None, skiprows=LT + 1 + s, nrows=n,
@@ -58,9 +58,11 @@ for s in range(0, NT, CH):
          & (cen[:, 2] > a.z0) & (cen[:, 2] < a.z1))
     if m.any():
         sel.append(T[m])
+        sid.append(np.flatnonzero(m).astype(np.int64) + s)   # global tet ids, for stitch-back
     del T, cen
 T = np.vstack(sel)
-del sel
+tids = np.concatenate(sid)
+del sel, sid
 print(f'[patch] {len(T):,} tets', flush=True)
 
 fc = np.concatenate([T[:, list(FACE[k])] for k in range(4)])
@@ -93,5 +95,5 @@ mesh = meshio.Mesh(Pl, [('triangle', tril), ('tetra', Tl)],
                               'gmsh:geometrical': [rf, np.ones(len(Tl), np.int32)]})
 meshio.write(a.out, mesh, file_format='gmsh22', binary=False)
 np.savez(a.meta, skinP=Pl[skinv], nfault=int((rf == 101).sum()), gids=vid,
-         box=[a.cx, a.cy, a.hx, a.hy, a.z0, a.z1])
+         tids=tids, box=[a.cx, a.cy, a.hx, a.hy, a.z0, a.z1])
 print(f'[out] {a.out}  +  {a.meta}')
