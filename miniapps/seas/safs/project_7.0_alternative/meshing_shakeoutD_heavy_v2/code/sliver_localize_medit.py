@@ -6,13 +6,20 @@ the fault (ref 101 triangles), z structure, hotspots, and how many survivors sit
 on the fault vs free interior -- the inputs for deciding between another global
 pass and targeted patch repair.
 """
+import argparse
 import sys
 import numpy as np, pandas as pd
 sys.path.insert(0, 'code')
 from medit_hdr import medit_sections
 from scipy.spatial import cKDTree
 
-F = sys.argv[1]
+_ap = argparse.ArgumentParser()
+_ap.add_argument('mesh')
+_ap.add_argument('--thr', type=float, default=0.05,
+                 help='eta threshold defining a "sliver" (round 2 of surgery uses 0.1)')
+_a = _ap.parse_args()
+F = _a.mesh
+THR = _a.thr
 PAIRS = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
 CH = 8_000_000
 
@@ -42,7 +49,7 @@ for s in range(0, NT, CH):
                           p[:, 3] - p[:, 0])) / 6.0
     ss = (e ** 2).sum(1)
     eta = np.where(ss > 0, 12.0 * np.cbrt((3.0 * d6) ** 2) / ss, 0.0)
-    m = eta < 0.05
+    m = eta < THR
     if m.any():
         bar.append(p[m].mean(1))
         et.append(eta[m])
@@ -55,7 +62,7 @@ NF = np.concatenate(nfv)
 d, _ = tree.query(Pb, k=1, distance_upper_bound=5000.0, workers=-1)
 d = np.where(np.isfinite(d), d, 5000.0)
 
-print(f'\n[slivers] eta<0.05: {len(Pb):,}')
+print(f'\n[slivers] eta<{THR:g}: {len(Pb):,}')
 for q in (50, 90, 99, 100):
     print(f'  distance-to-fault pct {q:>3}: {np.percentile(d, q):>8.1f} m')
 print(f'  z median {np.median(Pb[:,2]):,.0f}   range {Pb[:,2].min():,.0f} .. {Pb[:,2].max():,.0f}')
