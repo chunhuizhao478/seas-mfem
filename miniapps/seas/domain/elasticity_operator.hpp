@@ -135,6 +135,49 @@ public:
       InitOperator();
    }
 
+   /// @brief Construct with spatially varying Lame coefficients (C-09).
+   ///
+   /// `lambda` and `mu` (e.g. per-element GridFunctionCoefficients) feed
+   /// every bilinear-form integrator and the IP traction integrator; they
+   /// must outlive this operator.  `lambda_fb`/`mu_fb` are the scalar
+   /// fallbacks kept in lambda_val_/mu_val_ for the scalar-only paths.
+   /// IP only: the BR2 branches use the scalars.
+   ElasticityDomainOperator(MeshType &mesh, int order,
+                             Coefficient &lambda, Coefficient &mu,
+                             real_t lambda_fb, real_t mu_fb,
+                             real_t Vp, real_t Wf, real_t lf,
+                             const BoundaryConfig &bdr_config,
+                             DGMethod method,
+                             SolverType solver_type,
+                             const DomainConfig &config = {})
+      : mesh_(mesh), order_(order),
+        lambda_val_(lambda_fb), mu_val_(mu_fb),
+        bdr_config_(bdr_config),
+        Vp_(Vp), Wf_(Wf), lf_(lf),
+        method_(method), solver_type_(solver_type),
+        bc_mode_(BCMode::FarField),
+        check_residual_(config.check_residual),
+        lambda_coeff_(lambda_fb), mu_coeff_(mu_fb),
+        mass_inv_computed_(false),
+        fault_depths_computed_(false),
+        fault_coords_computed_(false),
+        face_basis_type_(config.face_basis_type),
+        penalty_factor_(config.penalty_factor),
+        blr_tol_(config.blr_tol),
+        match_quad_order_(config.match_quad_order)
+   {
+      owned_model_ = std::make_unique<LinearElastic>(lambda_fb, mu_fb);
+      model_ = owned_model_.get();
+      lambda_ptr_ = &lambda;
+      mu_ptr_ = &mu;
+      material_is_constant_ = false;
+      MFEM_VERIFY(material_is_constant_ || method_ == DGMethod::IP,
+                  "ElasticityDomainOperator: spatially varying material "
+                  "requires DGMethod::IP (BR2 uses the scalar moduli only)");
+
+      InitOperator();
+   }
+
    /// @brief Legacy constructor: scalar lambda/mu (deprecated, delegates).
    ///
    /// Creates an internal LinearElastic model and builds BoundaryConfig
@@ -233,6 +276,10 @@ public:
    /// space. This is a test/debug utility for checking K*u against b(slip)
    /// without Dirichlet loading.
    void AssembleSlipOnlyRHS(Vector &rhs, const Vector &slip_bc) const;
+
+   /// Apply the assembled DG stiffness: Ku = K u (C-01).  Assembles K on
+   /// first use.  `u` must have the true-vector layout Solve uses (X_/B_).
+   void ApplyStiffness(const Vector &u, Vector &Ku) const;
 
    /// Assemble only the Dirichlet loading RHS contribution into the DG
    /// displacement space. Debug utility for first-step RHS comparison.
@@ -454,6 +501,11 @@ private:
 
    // Coefficients (mutable: used in const assembly methods, MFEM Coefficient::Eval is non-const)
    mutable ConstantCoefficient lambda_coeff_, mu_coeff_;
+   // Coefficients actually fed to the integrators (C-09).  Default to the
+   // constant members above; the Coefficient constructor repoints them.
+   Coefficient *lambda_ptr_ = &lambda_coeff_;
+   Coefficient *mu_ptr_ = &mu_coeff_;
+   bool material_is_constant_ = true;
 
    // FE spaces
    std::unique_ptr<DG_FECollection> fec_;

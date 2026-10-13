@@ -214,7 +214,7 @@
       std::vector<double> local_pack(ENTRY * n_sh, 0.0);
 
       DGElasticityIPCombinedIntegrator dir_integ(
-         lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
+         *lambda_ptr_, *mu_ptr_, dim, epsilon_, penalty_factor_);
       auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
 
       for (int fi = 0; fi < n_sh; fi++)

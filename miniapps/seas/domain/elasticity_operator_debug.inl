@@ -246,7 +246,7 @@
          if (out)
          {
             out << "source,elem,elem1,elem2,block,row,col,value\n";
-            ElasticityIntegrator vol_integ(lambda_coeff_, mu_coeff_);
+            ElasticityIntegrator vol_integ(*lambda_ptr_, *mu_ptr_);
             for (int elem : target_elems)
             {
                const FiniteElement *fe = scalar_fes_->GetFE(elem);
@@ -267,7 +267,7 @@
          {
             out << "source,face,elem1,elem2,block,row,col,value\n";
             DGElasticityIPCombinedIntegrator face_integ(
-               lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
+               *lambda_ptr_, *mu_ptr_, dim, epsilon_, penalty_factor_);
 
             int nfaces = mesh_.GetNumFaces();
             for (int f = 0; f < nfaces; f++)
@@ -466,7 +466,7 @@
          BuildSlipAtQuadPoints(fi, slip_bc, delta_u_quad);
 
          DGElasticityIPCombinedIntegrator trac_integ(
-            lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
+            *lambda_ptr_, *mu_ptr_, dim, epsilon_, penalty_factor_);
          Vector T_quad, nl_q;
          trac_integ.ComputeTractionAtQuadPoints(
             *fe1, *fe2, *FTr, u1_all, u2_all, delta_u_quad, T_quad, nullptr, &nl_q);
@@ -692,7 +692,7 @@
          BuildSlipAtQuadPoints(logical_fault_idx, slip_bc, delta_u_quad);
 
          DGElasticityIPCombinedIntegrator trac_integ(
-            lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
+            *lambda_ptr_, *mu_ptr_, dim, epsilon_, penalty_factor_);
          Vector T_quad, nl_q;
          trac_integ.ComputeTractionAtQuadPoints(
             *fe1, *fe2, *FTr, u1_all, u2_all, delta_u_quad, T_quad, nullptr, &nl_q);

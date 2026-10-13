@@ -116,7 +116,8 @@ public:
 
          // Penalty (Tandem formula)
          real_t penalty = ComputePenalty(el1, el2, detJ1, detJ2,
-                                         lam1, mu1, nl_q, is_interior);
+                                         lam1, mu1, lam2, mu2, nl_q,
+                                         is_interior);
 
          // Coefficients matching Tandem's assembleSurface
          // Skeleton: c0=-0.5, c1=eps/2, c2=+penalty (same side)
@@ -258,7 +259,7 @@ public:
          real_t mu2 = mu_ptr_->Eval(*Trans.Elem2, eip2);
 
          real_t penalty = ComputePenalty(fe1, fe2, detJ1, detJ2,
-                                          lam1, mu1, nl_q, true);
+                                          lam1, mu1, lam2, mu2, nl_q, true);
 
          // Slip at this quad point
          real_t f_q[3];
@@ -380,7 +381,7 @@ public:
 
          // Boundary penalty: single element (Tandem: penalty_[fctNo] = p(0))
          real_t penalty = ComputePenalty(fe1, fe1, detJ1, detJ1,
-                                          lam1, mu1, nl_q, false);
+                                          lam1, mu1, lam1, mu1, nl_q, false);
 
          // Prescribed Dirichlet value at this quad point
          real_t f_q[3];
@@ -533,7 +534,7 @@ public:
          real_t detJ1 = Trans.Elem1->Weight();
          real_t detJ2 = Trans.Elem2->Weight();
          real_t penalty = ComputePenalty(fe1, fe2, detJ1, detJ2,
-                                          lam1t, mu1t, nl, true);
+                                          lam1t, mu1t, lam2t, mu2t, nl, true);
 
          fe1.CalcShape(eip1, shape1);
          fe2.CalcShape(eip2, shape2);
@@ -658,7 +659,7 @@ public:
          real_t detJ1 = Trans.Elem1->Weight();
          real_t detJ2 = Trans.Elem2->Weight();
          real_t penalty = ComputePenalty(fe1, fe2, detJ1, detJ2,
-                                          lam1t, mu1t, nl, true);
+                                          lam1t, mu1t, lam2t, mu2t, nl, true);
 
          fe1.CalcShape(eip1, shape1);
          fe2.CalcShape(eip2, shape2);
@@ -831,32 +832,51 @@ public:
                      real_t detJ1, real_t detJ2,
                      real_t lam, real_t mu_val, real_t nl_q) const
    {
-      return ComputePenalty(fe1, fe2, detJ1, detJ2, lam, mu_val, nl_q, true);
+      return ComputePenalty(fe1, fe2, detJ1, detJ2, lam, mu_val, lam, mu_val,
+                            nl_q, true);
+   }
+
+   /// Public accessor for diagnostic use: interior-face penalty with
+   /// per-side moduli (side 1: lam1, mu1; side 2: lam2, mu2).
+   real_t GetPenalty(const FiniteElement &fe1, const FiniteElement &fe2,
+                     real_t detJ1, real_t detJ2,
+                     real_t lam1, real_t mu1, real_t lam2, real_t mu2,
+                     real_t nl_q) const
+   {
+      return ComputePenalty(fe1, fe2, detJ1, detJ2, lam1, mu1, lam2, mu2,
+                            nl_q, true);
    }
 
 private:
    /// Compute IP penalty matching Tandem's formula.
    /// penalty = (p0+p1)/4 for interior, p0 for boundary.
-   /// p_i = (D+1) * c_N_1 * (D*nl_q/detJ_i) * (c1^2/c0)
+   /// p_i = (D+1) * c_N_1 * (D*nl_q/detJ_i) * (c1_i^2/c0_i)
+   /// with per-side moduli c0_i = 2 mu_i, c1_i = D lam_i + 2 mu_i.
+   /// With (lam2, mu2) == (lam1, mu1) the arithmetic is identical to the
+   /// former single-moduli form, so constant material is bit-identical.
    real_t ComputePenalty(const FiniteElement &fe1,
                           const FiniteElement &fe2,
                           real_t detJ1, real_t detJ2,
-                          real_t lam, real_t mu_val,
+                          real_t lam1, real_t mu1,
+                          real_t lam2, real_t mu2,
                           real_t nl_q, bool is_interior) const
    {
       int p = std::max(fe1.GetOrder(),
                        is_interior ? fe2.GetOrder() : fe1.GetOrder());
       real_t c_N_1 = p * (p + dim_ - 1.0) / dim_;
-      real_t c0 = 2.0 * mu_val;
-      real_t c1 = dim_ * lam + 2.0 * mu_val;
-      real_t ratio = c1 * c1 / c0;
+      real_t c0_1 = 2.0 * mu1;
+      real_t c1_1 = dim_ * lam1 + 2.0 * mu1;
+      real_t ratio1 = c1_1 * c1_1 / c0_1;
 
-      real_t p0 = (dim_ + 1) * c_N_1 * (real_t(dim_) * nl_q / detJ1) * ratio;
+      real_t p0 = (dim_ + 1) * c_N_1 * (real_t(dim_) * nl_q / detJ1) * ratio1;
       if (!is_interior)
       {
          return penalty_factor_ * p0;
       }
-      real_t p1 = (dim_ + 1) * c_N_1 * (real_t(dim_) * nl_q / detJ2) * ratio;
+      real_t c0_2 = 2.0 * mu2;
+      real_t c1_2 = dim_ * lam2 + 2.0 * mu2;
+      real_t ratio2 = c1_2 * c1_2 / c0_2;
+      real_t p1 = (dim_ + 1) * c_N_1 * (real_t(dim_) * nl_q / detJ2) * ratio2;
       return penalty_factor_ * (p0 + p1) / 4.0;
    }
 

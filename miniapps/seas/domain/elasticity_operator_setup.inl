@@ -652,6 +652,36 @@
       // IP: use the same nodal triangle order as the volume space, matching
       // Tandem's fault discretization even at p=1.
       // BR2: keep the legacy face-averaged path (nbf=1).
+      //
+      // The IP fault DOF layout below is hard-wired to TRIANGLE faces. On a
+      // non-triangular fault face (e.g. a hex mesh) its nodal points cover
+      // only half of the face and ComputeTraction returns silently wrong
+      // values (measured 21% error on the TPV102 hex box), so refuse it.
+      if (method_ == DGMethod::IP)
+      {
+         for (int i = 0; i < fault_interior_faces_.Size(); i++)
+         {
+            const int f = fault_interior_faces_[i];
+            MFEM_VERIFY(mesh_.GetFaceGeometry(f) == Geometry::TRIANGLE,
+               "ERROR: DGMethod::IP requires triangular fault faces "
+               "(tetrahedral mesh); fault face " << f << " has geometry "
+               << Geometry::Name[mesh_.GetFaceGeometry(f)] << ".");
+         }
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            for (int i = 0; i < fault_shared_faces_.Size(); i++)
+            {
+               const int f = mesh_.GetSharedFace(fault_shared_faces_[i]);
+               MFEM_VERIFY(mesh_.GetFaceGeometry(f) == Geometry::TRIANGLE,
+                  "ERROR: DGMethod::IP requires triangular fault faces "
+                  "(tetrahedral mesh); shared fault face " << f
+                  << " has geometry "
+                  << Geometry::Name[mesh_.GetFaceGeometry(f)] << ".");
+            }
+#endif
+         }
+      }
       int face_fe_order = (method_ == DGMethod::IP) ? order_ : 0;
       face_quad_ = std::make_unique<FaceQuadrature>(face_fe_order,
                                                      std::max(order_, 1),

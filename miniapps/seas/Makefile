@@ -3017,6 +3017,26 @@ seas_test_nitsche_gates: $(TEST_NITSCHE_GATES_OBJ) \
 test-nitsche-gates: seas_test_nitsche_gates
 	./seas_test_nitsche_gates
 
+# Nitsche dynamic rupture P1 (C-01 ApplyStiffness, C-09 spatially varying
+# Lame coefficients, per-element material sample): T-01, T-19(a), penalty.
+TEST_NITSCHE_P1_SRC = tests/verification/test_nitsche_p1.cpp
+TEST_NITSCHE_P1_OBJ = $(TEST_NITSCHE_P1_SRC:.cpp=.o)
+$(TEST_NITSCHE_P1_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             domain/nitsche_wave_operator.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_p1: $(TEST_NITSCHE_P1_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_P1_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-p1: seas_test_nitsche_p1
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_p1
+
 # =====================================================================
 #  Phase 10 (TPV31) unit tests
 # =====================================================================

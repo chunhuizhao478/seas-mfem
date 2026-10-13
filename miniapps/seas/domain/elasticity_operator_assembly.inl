@@ -35,7 +35,7 @@
 
       // Volume term: ∫_Ω σ(u):ε(v) dV
       cached_a_->AddDomainIntegrator(
-         new ElasticityIntegrator(lambda_coeff_, mu_coeff_));
+         new ElasticityIntegrator(*lambda_ptr_, *mu_ptr_));
 
       if (method_ == DGMethod::BR2)
       {
@@ -46,14 +46,14 @@
          // BR2 interior face integrator with elasticity tensor coupling
          cached_a_->AddInteriorFaceIntegrator(
             new DGElasticityBR2Integrator(
-               lambda_coeff_, mu_coeff_, epsilon_, elem_mass_inv_, 3));
+               *lambda_ptr_, *mu_ptr_, epsilon_, elem_mass_inv_, 3));
 
          // BR2 boundary face integrator for Dirichlet walls
          if (dirichlet_bdr_marker_.Size() > 0)
          {
             cached_a_->AddBdrFaceIntegrator(
                new DGElasticityBR2BoundaryIntegrator(
-                  lambda_coeff_, mu_coeff_, epsilon_, elem_mass_inv_, 3),
+                  *lambda_ptr_, *mu_ptr_, epsilon_, elem_mass_inv_, 3),
                dirichlet_bdr_marker_);
          }
       }
@@ -66,13 +66,13 @@
          // recovery all use this same integrator.
          cached_a_->AddInteriorFaceIntegrator(
             new DGElasticityIPCombinedIntegrator(
-               lambda_coeff_, mu_coeff_, 3, epsilon_, penalty_factor_));
+               *lambda_ptr_, *mu_ptr_, 3, epsilon_, penalty_factor_));
 
          if (dirichlet_bdr_marker_.Size() > 0)
          {
             cached_a_->AddBdrFaceIntegrator(
                new DGElasticityIPCombinedIntegrator(
-                  lambda_coeff_, mu_coeff_, 3, epsilon_, penalty_factor_),
+                  *lambda_ptr_, *mu_ptr_, 3, epsilon_, penalty_factor_),
                dirichlet_bdr_marker_);
          }
       }
@@ -452,7 +452,7 @@
       // v55: Use the combined integrator's AssembleSlipFaceRHS to guarantee
       // K-b consistency. Same traction operator, quadrature, and penalty as K.
       DGElasticityIPCombinedIntegrator slip_integrator(
-         lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
+         *lambda_ptr_, *mu_ptr_, dim, epsilon_, penalty_factor_);
 
       for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
       {
@@ -793,7 +793,7 @@
 
          // v55: Use combined integrator for K-b consistency (shared faces)
          DGElasticityIPCombinedIntegrator slip_integrator(
-            lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
+            *lambda_ptr_, *mu_ptr_, dim, epsilon_, penalty_factor_);
 
          for (int i = 0; i < fault_shared_faces_.Size(); i++)
          {
@@ -1132,7 +1132,7 @@
             // v55: Use combined integrator's AssembleBoundaryFaceRHS
             // (same formula as K's boundary face, Tandem's rhs_boundary)
             DGElasticityIPCombinedIntegrator dir_integ(
-               lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
+               *lambda_ptr_, *mu_ptr_, dim, epsilon_, penalty_factor_);
 
             int quad_order_dir = 2 * fe->GetOrder() + 1;
             const IntegrationRule &ir_dir = IntRules.Get(
@@ -1354,7 +1354,7 @@
          if (method_ == DGMethod::IP)
          {
             DGElasticityIPCombinedIntegrator dir_integ(
-               lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
+               *lambda_ptr_, *mu_ptr_, dim, epsilon_, penalty_factor_);
 
             int quad_order_dir = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;
             const IntegrationRule &ir_dir = IntRules.Get(
@@ -1673,7 +1673,7 @@
             if (method_ == DGMethod::IP)
             {
                DGElasticityIPCombinedIntegrator dir_integ(
-                  lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
+                  *lambda_ptr_, *mu_ptr_, dim, epsilon_, penalty_factor_);
 
                int quad_order_dir = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;
                const IntegrationRule &ir_dir = IntRules.Get(
