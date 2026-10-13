@@ -3037,6 +3037,28 @@ seas_test_nitsche_p1: $(TEST_NITSCHE_P1_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
 test-nitsche-p1: seas_test_nitsche_p1
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_p1
 
+# Nitsche dynamic rupture P2 (C-02 NitscheMass, density-weighted inverse DG
+# vector mass): T-02(a) contrast, T-02(b) bit-identity, operator layout.
+TEST_NITSCHE_P2_SRC = tests/verification/test_nitsche_p2.cpp
+TEST_NITSCHE_P2_OBJ = $(TEST_NITSCHE_P2_SRC:.cpp=.o)
+$(TEST_NITSCHE_P2_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             domain/nitsche_wave_operator.hpp \
+                             domain/nitsche_mass.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_p2: $(TEST_NITSCHE_P2_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_P2_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-p2: seas_test_nitsche_p2
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_p2
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_p2
+
 # =====================================================================
 #  Phase 10 (TPV31) unit tests
 # =====================================================================

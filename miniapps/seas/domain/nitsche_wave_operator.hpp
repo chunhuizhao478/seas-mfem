@@ -11,7 +11,7 @@
 // constant (order-0 L2) ParGridFunctions with face-neighbour data
 // exchanged, wrapped as GridFunctionCoefficients.
 //
-// Scope (Andy, 2026-10-13): the Nitsche path uses tetrahedral meshes only.
+// Scope (Chunhui Zhao, 2026-10-13): the Nitsche path uses tetrahedral meshes only.
 
 #ifndef MFEM_SEAS_NITSCHE_WAVE_OPERATOR_HPP
 #define MFEM_SEAS_NITSCHE_WAVE_OPERATOR_HPP
