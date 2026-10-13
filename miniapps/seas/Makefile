@@ -2982,6 +2982,41 @@ seas_test_constant_tensor_sign: $(TEST_CONSTANT_TENSOR_SIGN_OBJ) \
 test-constant-tensor-sign: seas_test_constant_tensor_sign
 	./seas_test_constant_tensor_sign
 
+# Nitsche dynamic rupture P0 (gates G0.2, G0.5): read-only probes of the
+# quasi-static ElasticityDomainOperator on the TPV102 inline box + the
+# tpv102_spatial.toml material check.  Run from miniapps/seas.
+TEST_NITSCHE_GATES_SRC = tests/verification/test_nitsche_gates.cpp
+TEST_NITSCHE_GATES_OBJ = $(TEST_NITSCHE_GATES_SRC:.cpp=.o)
+$(TEST_NITSCHE_GATES_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                spatial/code/spatial_friction.hpp \
+                                $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+seas_test_nitsche_gates: $(TEST_NITSCHE_GATES_OBJ) \
+                         $(SPATIAL_STRESS_OBJ) \
+                         $(SPATIAL_FRICTION_OBJ) \
+                         $(STRESS_FIELD_3D_OBJ) \
+                         $(DATA_FIELD_3D_OBJ) \
+                         $(FIELD_COEFFICIENT_OBJ) \
+                         $(HETEROGENEOUS_MATERIAL_OBJ) \
+                         $(MATERIAL_COEFFICIENTS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_GATES_OBJ) \
+	    $(SPATIAL_STRESS_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(STRESS_FIELD_3D_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) \
+	    $(FIELD_COEFFICIENT_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MATERIAL_COEFFICIENTS_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-gates: seas_test_nitsche_gates
+	./seas_test_nitsche_gates
+
 # =====================================================================
 #  Phase 10 (TPV31) unit tests
 # =====================================================================
