@@ -630,11 +630,53 @@
       }
    }
 
+   /// C-03 (Nitsche P4): collect the exterior boundary faces tagged with an
+   /// absorbing attribute.  Additive: absorbing faces stay FacetBC::None for
+   /// K (natural, zero traction); the dashpot C is assembled separately from
+   /// this list.  Also asserts absorbing attrs are disjoint from the Dirichlet attrs
+   /// and the fault attr.
+   void CollectAbsorbingFaces()
+   {
+      const auto &abs_attrs = bdr_config_.absorbing_attrs;
+      const auto &dir_attrs = bdr_config_.dirichlet_attrs;
+      for (int a : abs_attrs)
+      {
+         MFEM_VERIFY(dir_attrs.count(a) == 0,
+            "ERROR: boundary attr " << a << " is both absorbing and "
+            "Dirichlet; absorbing_attrs, dirichlet_attrs and fault_attr "
+            "must be disjoint.");
+         MFEM_VERIFY(a != bdr_config_.fault_attr,
+            "ERROR: boundary attr " << a << " is both absorbing and the "
+            "fault attr; absorbing_attrs, dirichlet_attrs and fault_attr "
+            "must be disjoint.");
+      }
+      // (fault vs Dirichlet overlap is not checked here: the legacy
+      // BCMode::AllDirichlet path puts the fault attr in dirichlet_attrs on
+      // purpose and BuildFacetBCTables resolves it with fault priority.)
+
+      absorbing_bdr_faces_.SetSize(0);
+      absorbing_bdr_elems_.SetSize(0);
+      if (abs_attrs.empty()) { return; }
+      for (int be = 0; be < mesh_.GetNBE(); be++)
+      {
+         const int attr = mesh_.GetBdrAttribute(be);
+         if (!abs_attrs.count(attr)) { continue; }
+         const int f = mesh_.GetBdrElementFaceIndex(be);
+         MFEM_VERIFY(mesh_.GetFaceInformation(f).IsBoundary(),
+            "ERROR: absorbing boundary element " << be << " (attr " << attr
+            << ") lies on an interior or shared face " << f
+            << "; absorbing attrs must tag exterior boundary faces only.");
+         absorbing_bdr_faces_.Append(f);
+         absorbing_bdr_elems_.Append(be);
+      }
+   }
+
    void SetupFaultInfo()
    {
       // Build facet BC tables (single source of truth) and derive
       // legacy face arrays. Includes exact canonical-key validation.
       BuildFacetBCTables();
+      CollectAbsorbingFaces();
 
       num_fault_faces_ = fault_interior_faces_.Size() + fault_shared_faces_.Size();
 

@@ -6,6 +6,17 @@
 //
 //    M a = F(t) - K u,    a = d2u/dt2,
 //
+// P4: optional first-order absorbing (dashpot) boundary on
+// BoundaryConfig::absorbing_attrs, adding a velocity-only damping C:
+//
+//    M a + C v + K u = F(t).
+//
+// With central difference (gamma = 1/2) the step solves
+// (M + dt/2 C) A^{n+1} = F(t_{n+1}) - K U^{n+1} - C U*  (U* = predicted
+// velocity), so that M A^{n+1} + C Udot^{n+1} = F - K U^{n+1} holds exactly
+// with Udot^{n+1} = U* + dt/2 A^{n+1}.  Without absorbing faces nothing
+// changes (bit-identical to P3).
+//
 // as an MFEM SecondOrderTimeDependentOperator, to be advanced by MFEM's
 // CentralDifferenceSolver (Newmark beta = 0, gamma = 1/2; see
 // solver/nitsche_cfl.hpp).  K is the IP stiffness of ElasticityDomainOperator
@@ -25,6 +36,7 @@
 #include "nitsche_material_sample.hpp"
 #include "nitsche_mass.hpp"
 #include "elasticity_operator.hpp"
+#include "../integrator/dg_absorbing_bc_integrator.hpp"
 
 #include <cmath>
 #include <limits>
@@ -76,9 +88,9 @@ public:
                   "faces; found " << elast_->GetNumFaultDOFs()
                   << " fault DOFs.");
 
-      Vector rho_e;
-      RhoPerElement(*sample_, rho_e);
-      mass_ = std::make_unique<NitscheMass>(mesh, order, rho_e);
+      RhoPerElement(*sample_, rho_e_);
+      mass_ = std::make_unique<NitscheMass>(mesh, order, rho_e_);
+      BuildDampingBlocks_();
 
       const int n = elast_->GetFESpace().GetVSize();
       MFEM_VERIFY(mass_->VSize() == n,
@@ -90,7 +102,16 @@ public:
    }
 
    /// Time step used to check the Newmark coefficients in ImplicitSolve.
-   void SetTimeStep(real_t dt) { dt_ = dt; }
+   /// With absorbing faces it also builds (M + dt/2 C)^{-1}.
+   void SetTimeStep(real_t dt)
+   {
+      dt_ = dt;
+      if (!damping_blocks_.empty())
+      {
+         mass_damped_ = std::make_unique<NitscheMass>(
+            mesh_, order_, rho_e_, &damping_blocks_, 0.5 * dt);
+      }
+   }
    real_t GetTimeStep() const { return dt_; }
 
    /// First-order form (Operator::Mult) is not used: second-order solvers
@@ -106,7 +127,7 @@ public:
    /// for the initial acceleration A^0; advances nothing.
    void Mult(const Vector &x, const Vector &dxdt, Vector &y) const override
    {
-      Acceleration_(x, y);
+      Acceleration_(x, &dxdt, *mass_, y);
    }
 
    /// Central difference (beta = 0, gamma = 1/2): fac0 = beta dt^2 = 0 and
@@ -130,7 +151,19 @@ public:
                   "NitscheWaveOperator::ImplicitSolve called twice at t = "
                   << t << "; exactly one call per time step is allowed.");
       last_solve_time_ = t;
-      Acceleration_(x, k);
+      if (damping_blocks_.empty())
+      {
+         Acceleration_(x, nullptr, *mass_, k);
+      }
+      else
+      {
+         MFEM_VERIFY(mass_damped_ && mass_damped_->HalfDt() == fac1,
+                     "NitscheWaveOperator::ImplicitSolve: the damped mass "
+                     "(M + dt/2 C) was built for dt/2 = "
+                     << (mass_damped_ ? mass_damped_->HalfDt() : 0.0)
+                     << " but fac1 = " << fac1 << "; call SetTimeStep(dt).");
+         Acceleration_(x, &dxdt, *mass_damped_, k);
+      }
    }
 
    const NitscheMaterialSample &Sample() const { return *sample_; }
@@ -138,16 +171,82 @@ public:
    int GetOrder() const { return order_; }
    ElasticityDomainOperator<ParMesh> &Elasticity() { return *elast_; }
    const NitscheMass &Mass() const { return *mass_; }
+   /// (M + dt/2 C)^{-1}; null without absorbing faces or before SetTimeStep.
+   const NitscheMass *DampedMass() const { return mass_damped_.get(); }
+   /// Per-element dashpot blocks C_e (element-local byNODES, 3 nd x 3 nd).
+   const std::map<int, DenseMatrix> &DampingBlocks() const { return damping_blocks_; }
+   bool HasDamping() const { return !damping_blocks_.empty(); }
+
+   /// Cv = C v (zero without absorbing faces).
+   void ApplyDamping(const Vector &v, Vector &Cv) const
+   {
+      Cv.SetSize(v.Size());
+      Cv = 0.0;
+      if (damping_blocks_.empty()) { return; }
+      const int n = mass_->NumScalarDofs();
+      Vector x, y;
+      for (const auto &kv : damping_blocks_)
+      {
+         const Array<int> &dofs = mass_->ElementScalarDofs(kv.first);
+         const int nd = dofs.Size();
+         x.SetSize(3 * nd);
+         y.SetSize(3 * nd);
+         for (int c = 0; c < 3; ++c)
+            for (int k = 0; k < nd; ++k) { x(c * nd + k) = v(c * n + dofs[k]); }
+         kv.second.Mult(x, y);
+         for (int c = 0; c < 3; ++c)
+            for (int k = 0; k < nd; ++k) { Cv(c * n + dofs[k]) += y(c * nd + k); }
+      }
+   }
 
 private:
    /// Shared by Mult and ImplicitSolve so both give identical bits:
-   /// a = M^{-1}(F(t) - K x) with t = GetTime().
-   void Acceleration_(const Vector &x, Vector &a) const
+   /// a = Minv (F(t) - K x - C v) with t = GetTime().  Without absorbing
+   /// faces the C v term is skipped entirely (P3 bits).
+   void Acceleration_(const Vector &x, const Vector *v,
+                      const NitscheMass &Minv, Vector &a) const
    {
       elast_->ApplyStiffness(x, Kx_);
       elast_->AssembleDirichletOnlyRHS(F_, GetTime());
       F_ -= Kx_;
-      mass_->Apply(F_, a);
+      if (!damping_blocks_.empty() && v)
+      {
+         ApplyDamping(*v, Cv_);
+         F_ -= Cv_;
+      }
+      Minv.Apply(F_, a);
+   }
+
+   /// C_e for every element with an absorbing face (N-06), material from the
+   /// sample (not the operator's fallback scalars).
+   void BuildDampingBlocks_()
+   {
+      damping_blocks_.clear();
+      const auto &fes = elast_->GetFESpace();
+      const ParFiniteElementSpace *mfes = sample_->RhoGF().ParFESpace();
+      Array<int> mdofs;
+      for (int be : elast_->GetAbsorbingBdrElements())
+      {
+         FaceElementTransformations *Tr = mesh_.GetBdrFaceTransformations(be);
+         MFEM_VERIFY(Tr != nullptr, "NitscheWaveOperator: no face "
+                     "transformation for absorbing boundary element " << be);
+         const int e = Tr->Elem1No;
+         const FiniteElement &fe = *fes.GetFE(e);
+         mfes->GetElementDofs(e, mdofs);
+         const real_t lam = sample_->LambdaGF()(mdofs[0]);
+         const real_t mu  = sample_->MuGF()(mdofs[0]);
+         const real_t rho = sample_->RhoGF()(mdofs[0]);
+         const real_t cp = std::sqrt((lam + 2.0 * mu) / rho);
+         const real_t cs = std::sqrt(mu / rho);
+         const int nd = fe.GetDof();
+         auto it = damping_blocks_.find(e);
+         if (it == damping_blocks_.end())
+         {
+            it = damping_blocks_.emplace(e, DenseMatrix(3 * nd)).first;
+            it->second = 0.0;
+         }
+         DGAbsorbingBCIntegrator::AddFaceBlock(fe, *Tr, rho, cp, cs, it->second);
+      }
    }
 
    ParMesh &mesh_;
@@ -155,9 +254,12 @@ private:
    std::unique_ptr<NitscheMaterialSample> sample_;
    std::unique_ptr<ElasticityDomainOperator<ParMesh>> elast_;
    std::unique_ptr<NitscheMass> mass_;
+   std::unique_ptr<NitscheMass> mass_damped_;
+   std::map<int, DenseMatrix> damping_blocks_;
+   Vector rho_e_;
    real_t dt_ = 0.0;
    real_t last_solve_time_ = std::numeric_limits<real_t>::quiet_NaN();
-   mutable Vector Kx_, F_;
+   mutable Vector Kx_, F_, Cv_;
 };
 
 #endif // MFEM_USE_MPI

@@ -318,6 +318,11 @@ public:
 
    const Array<int> &GetFaultInteriorFaces() const { return fault_interior_faces_; }
    const Array<int> &GetFaultSharedFaces() const { return fault_shared_faces_; }
+   /// C-03: exterior boundary faces (face index / boundary-element index)
+   /// tagged with an absorbing attr.  They are natural (zero traction) in K.
+   const Array<int> &GetAbsorbingBdrFaces() const { return absorbing_bdr_faces_; }
+   const Array<int> &GetAbsorbingBdrElements() const { return absorbing_bdr_elems_; }
+   const BoundaryConfig &GetBoundaryConfig() const { return bdr_config_; }
    const Array<int> &GetOwnedFaultFaceMap() const
    { return owned_fault_face_to_local_face_; }
    int GetNumOwnedFaultFaces() const { return num_owned_fault_faces_; }
@@ -493,6 +498,9 @@ private:
    // Per-face boundary attr (parallel to dirichlet_interior/shared_faces_)
    Array<int> dirichlet_interior_attrs_;
    Array<int> dirichlet_shared_attrs_;
+   // C-03: absorbing exterior boundary faces (not part of K)
+   Array<int> absorbing_bdr_faces_;
+   Array<int> absorbing_bdr_elems_;
 
    // Element-pair keys for fault faces (populated during BC table build)
    std::set<long> fault_face_keys_;

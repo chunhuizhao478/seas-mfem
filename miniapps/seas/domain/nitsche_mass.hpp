@@ -22,8 +22,12 @@
 // c of scalar dof i sits at c * ndofs + i (ndofs = scalar NDofs).
 // Element-local: no face-neighbour data, no communication.
 //
-// The damping-block variant (M + dt/2 C)^{-1} (plan rev 7) is not part of
-// P2; it arrives with the absorbing boundary in P4.
+// Damping blocks (C-02, P4): for elements that own an absorbing-boundary
+// dashpot block C_e (3 nd x 3 nd, element-local byNODES, see
+// integrator/dg_absorbing_bc_integrator.hpp), the constructor optionally
+// inverts the dense SPD block  rho_e M_e (x) I_3 + half_dt * C_e  once, and
+// Apply uses it there.  Every other element keeps the scalar path; with no
+// blocks the result is bit-identical to P2/P3.
 //
 // Scope (Chunhui Zhao, 2026-10-13): tetrahedral meshes only.
 
@@ -33,6 +37,7 @@
 #include "mfem.hpp"
 #include "nitsche_material_sample.hpp"
 
+#include <map>
 #include <vector>
 
 namespace mfem
@@ -45,9 +50,11 @@ namespace seas
 class NitscheMass
 {
 public:
-   NitscheMass(ParMesh &mesh, int order, const Vector &rho_per_elem)
+   NitscheMass(ParMesh &mesh, int order, const Vector &rho_per_elem,
+               const std::map<int, DenseMatrix> *damping_blocks = nullptr,
+               real_t half_dt = 0.0)
       : fec_(order, mesh.Dimension(), BasisType::GaussLobatto),
-        fes_(&mesh, &fec_)
+        fes_(&mesh, &fec_), half_dt_(half_dt)
    {
       const int ne = mesh.GetNE();
       MFEM_VERIFY(rho_per_elem.Size() == ne,
@@ -99,6 +106,32 @@ public:
          DenseMatrixInverse M_inv(M);
          M_inv.GetInverseMatrix(minv_[e]);
 
+         if (damping_blocks)
+         {
+            auto it = damping_blocks->find(e);
+            if (it != damping_blocks->end())
+            {
+               const DenseMatrix &Ce = it->second;
+               MFEM_VERIFY(Ce.Height() == 3 * nd && Ce.Width() == 3 * nd,
+                           "NitscheMass: damping block of element " << e
+                           << " is " << Ce.Height() << " x " << Ce.Width()
+                           << ", expected " << 3 * nd << " x " << 3 * nd);
+               DenseMatrix B(3 * nd);
+               B = 0.0;
+               for (int c = 0; c < 3; ++c)
+                  for (int k = 0; k < nd; ++k)
+                     for (int l = 0; l < nd; ++l)
+                     {
+                        B(c * nd + k, c * nd + l) = rho_per_elem(e) * M(k, l);
+                     }
+               B.Add(half_dt, Ce);
+               DenseMatrix &Binv = block_inv_[e];
+               Binv.SetSize(3 * nd);
+               DenseMatrixInverse B_inv(B);
+               B_inv.GetInverseMatrix(Binv);
+            }
+         }
+
          fes_.GetElementDofs(e, elem_dofs_[e]);
          inv_rho_(e) = 1.0 / rho_per_elem(e);
       }
@@ -118,6 +151,28 @@ public:
       {
          const Array<int> &dofs = elem_dofs_[e];
          const int nd = dofs.Size();
+         if (!block_inv_.empty())
+         {
+            auto it = block_inv_.find(static_cast<int>(e));
+            if (it != block_inv_.end())
+            {
+               // Damped element: (rho_e M_e (x) I_3 + half_dt C_e)^{-1}.
+               x.SetSize(3 * nd);
+               y.SetSize(3 * nd);
+               for (int c = 0; c < 3; ++c)
+                  for (int k = 0; k < nd; ++k)
+                  {
+                     x(c * nd + k) = r(c * ndofs_ + dofs[k]);
+                  }
+               it->second.Mult(x, y);
+               for (int c = 0; c < 3; ++c)
+                  for (int k = 0; k < nd; ++k)
+                  {
+                     a(c * ndofs_ + dofs[k]) = y(c * nd + k);
+                  }
+               continue;
+            }
+         }
          x.SetSize(nd);
          y.SetSize(nd);
          for (int c = 0; c < 3; ++c)
@@ -134,12 +189,17 @@ public:
    int VSize() const { return 3 * ndofs_; }
    const Array<int> &ElementScalarDofs(int e) const { return elem_dofs_[e]; }
    const DenseMatrix &ElementMassInverse(int e) const { return minv_[e]; }
+   /// half_dt the damping blocks were built with (0 without blocks).
+   real_t HalfDt() const { return half_dt_; }
+   int NumDampedElements() const { return static_cast<int>(block_inv_.size()); }
 
 private:
    DG_FECollection fec_;
    ParFiniteElementSpace fes_;
    int ndofs_ = 0;
+   real_t half_dt_ = 0.0;
    Vector inv_rho_;
+   std::map<int, DenseMatrix> block_inv_;
    std::vector<DenseMatrix> minv_;
    std::vector<Array<int>> elem_dofs_;
 };

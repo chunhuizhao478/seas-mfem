@@ -3083,6 +3083,31 @@ test-nitsche-p3: seas_test_nitsche_p3
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_p3
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_p3 --np2
 
+# Nitsche dynamic rupture P4 (dashpot absorbing boundary: C-03, N-06, C-02
+# damping block): T-03, T-12(a)-(d).
+TEST_NITSCHE_P4_SRC = tests/verification/test_nitsche_p4.cpp
+TEST_NITSCHE_P4_OBJ = $(TEST_NITSCHE_P4_SRC:.cpp=.o)
+$(TEST_NITSCHE_P4_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             domain/nitsche_material_sample.hpp \
+                             domain/nitsche_wave_operator.hpp \
+                             domain/nitsche_mass.hpp \
+                             integrator/dg_absorbing_bc_integrator.hpp \
+                             solver/nitsche_cfl.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_p4: $(TEST_NITSCHE_P4_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_P4_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-p4: seas_test_nitsche_p4
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_p4
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_p4
+
 # =====================================================================
 #  Phase 10 (TPV31) unit tests
 # =====================================================================
