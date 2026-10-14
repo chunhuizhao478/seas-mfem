@@ -604,11 +604,15 @@ static PetscErrorCode bp5_ts_monitor_callback(
    if (mon->write_every_step)
    {
       mon->bench_out->ForceWrite(time, state, *mon->fault_op,
-                                 mon->seas_op->GetTraction(), V_max);
+                                 mon->seas_op->GetTraction(),
+                                 mon->seas_op->GetFrictionNormalTraction(),
+                                 V_max);
       mon->bench_out->Flush();
    }
    else if (mon->bench_out->Write(time, state, *mon->fault_op,
-                                  mon->seas_op->GetTraction(), V_max))
+                                  mon->seas_op->GetTraction(),
+                                  mon->seas_op->GetFrictionNormalTraction(),
+                                  V_max))
    {
       mon->bench_out->Flush();
    }
@@ -2370,7 +2374,8 @@ int main(int argc, char *argv[])
    };
 
    // Write initial state
-   bench_out.ForceWrite(0.0, state, fault_op, seas_op.GetTraction(), V_init);
+   bench_out.ForceWrite(0.0, state, fault_op, seas_op.GetTraction(),
+                        seas_op.GetFrictionNormalTraction(), V_init);
    bench_out.Flush();
    // t=0 IC write: always triggers because last_write_time_ starts at -1e30.
    paraview_write(0, 0.0, V_init);
@@ -2989,11 +2994,11 @@ int main(int argc, char *argv[])
          if (write_every_step)
          {
             bench_out.ForceWrite(t, state, fault_op, seas_op.GetTraction(),
-                                 V_max);
+                                 seas_op.GetFrictionNormalTraction(), V_max);
             bench_out.Flush();
          }
          else if (bench_out.Write(t, state, fault_op, seas_op.GetTraction(),
-                                  V_max))
+                                  seas_op.GetFrictionNormalTraction(), V_max))
          {
             bench_out.Flush();
          }
@@ -3116,6 +3121,7 @@ int main(int argc, char *argv[])
    face_tracer.Finalize();
 
    bench_out.ForceWrite(t, state, fault_op, seas_op.GetTraction(),
+                        seas_op.GetFrictionNormalTraction(),
                         seas_op.GetMaxSlipRate());
    bench_out.Close();
    if (mpi.IsRoot() && global_out)

@@ -146,11 +146,15 @@ static PetscErrorCode driver_ts_monitor_callback(
    if (mon->write_every_step)
    {
       mon->bench_out->ForceWrite(time, state, *mon->fault_op,
-                                 mon->seas_op->GetTraction(), V_max);
+                                 mon->seas_op->GetTraction(),
+                                 mon->seas_op->GetFrictionNormalTraction(),
+                                 V_max);
       mon->bench_out->Flush();
    }
    else if (mon->bench_out->Write(time, state, *mon->fault_op,
-                                  mon->seas_op->GetTraction(), V_max))
+                                  mon->seas_op->GetTraction(),
+                                  mon->seas_op->GetFrictionNormalTraction(),
+                                  V_max))
    {
       mon->bench_out->Flush();
    }
@@ -513,7 +517,8 @@ int main(int argc, char *argv[])
    }
 
    // Write initial state (t=0)
-   bench_out.ForceWrite(0.0, state, fault_op, seas_op.GetTraction(), V_init);
+   bench_out.ForceWrite(0.0, state, fault_op, seas_op.GetTraction(),
+                        seas_op.GetFrictionNormalTraction(), V_init);
    bench_out.Flush();
    if (global_out)
    {
@@ -617,10 +622,12 @@ int main(int argc, char *argv[])
          // I/O: adaptive schedule or every step
          if (write_every_step)
          {
-            bench_out.ForceWrite(t, state, fault_op, seas_op.GetTraction(), V_max);
+            bench_out.ForceWrite(t, state, fault_op, seas_op.GetTraction(),
+                                 seas_op.GetFrictionNormalTraction(), V_max);
             bench_out.Flush();
          }
-         else if (bench_out.Write(t, state, fault_op, seas_op.GetTraction(), V_max))
+         else if (bench_out.Write(t, state, fault_op, seas_op.GetTraction(),
+                                  seas_op.GetFrictionNormalTraction(), V_max))
          {
             bench_out.Flush();
          }
@@ -658,7 +665,8 @@ int main(int argc, char *argv[])
    // =========================================================================
    // Stage 9: Final output
    // =========================================================================
-   bench_out.ForceWrite(t, state, fault_op, seas_op.GetTraction(), V_max);
+   bench_out.ForceWrite(t, state, fault_op, seas_op.GetTraction(),
+                        seas_op.GetFrictionNormalTraction(), V_max);
    bench_out.Close();
 
    if (mpi.IsRoot())
