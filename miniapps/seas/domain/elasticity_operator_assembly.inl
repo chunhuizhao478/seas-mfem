@@ -1074,8 +1074,6 @@
       //   b[k,i] += c0 * [σ(φ_k e_i)·n]_u * u_D_u * (1/detJ)
       //           + penalty * φ_k * u_D_i
 
-      if (std::abs(time * Vp_) < 1e-30) { return; }
-
       int dim = 3;
 
       // Build set of face indices already handled as interior/shared Dirichlet.

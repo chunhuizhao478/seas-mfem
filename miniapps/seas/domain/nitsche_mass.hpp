@@ -31,7 +31,7 @@
 #define MFEM_SEAS_NITSCHE_MASS_HPP
 
 #include "mfem.hpp"
-#include "nitsche_wave_operator.hpp"
+#include "nitsche_material_sample.hpp"
 
 #include <vector>
 
