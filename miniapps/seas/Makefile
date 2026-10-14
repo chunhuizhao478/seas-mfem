@@ -3011,7 +3011,7 @@ seas_test_nitsche_gates: $(TEST_NITSCHE_GATES_OBJ) \
 	    $(FIELD_COEFFICIENT_OBJ) \
 	    $(HETEROGENEOUS_MATERIAL_OBJ) \
 	    $(MATERIAL_COEFFICIENTS_OBJ) \
-	    $(MFEM_LIBS) $(HDF5_LIBS)
+	    $(MFEM_LIBS) $(HDF5_LIBS) $(SEAS_FS_LIB)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 test-nitsche-gates: seas_test_nitsche_gates
@@ -3186,6 +3186,7 @@ NITSCHE_P6_ABORT_MODES = --abort-fac0:fac0 --abort-fac1:fac1 \
 test-nitsche-tpv102-inline: seas_test_nitsche_tpv102_inline
 	for np in 1 2 4 8; do $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_nitsche_tpv102_inline || exit 1; done
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_tpv102_inline --t04-curved
+	for np in 2 4 8; do $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_nitsche_tpv102_inline --interior-rank || exit 1; done
 	for np in 1 2; do for mm in $(NITSCHE_P6_ABORT_MODES); do \
 	  m=$${mm%%:*}; msg=$${mm#*:}; \
 	  if $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_nitsche_tpv102_inline $$m > p6_abort.log 2>&1; \
@@ -3193,6 +3194,29 @@ test-nitsche-tpv102-inline: seas_test_nitsche_tpv102_inline
 	  if grep -q "$$msg" p6_abort.log; then echo "PASSED: $$m (np $$np) aborted: $$msg"; \
 	  else echo "FAILED: $$m (np $$np) aborted without '$$msg'"; exit 1; fi; \
 	done; done; rm -f p6_abort.log
+
+# Nitsche dynamic rupture P7: the driver (plan N-07).  Reads the SAFS deck
+# through spatial::LoadSpatialFrictionConfig (toml11) and the constant
+# material; links the friction parser, the material and the nucleation
+# objects (no HDF5 objects: the sidecar materials are P8).
+NITSCHE_DYN_DRIVER_SRC = drivers/nitsche_dyn_driver.cpp
+NITSCHE_DYN_DRIVER_OBJ = $(NITSCHE_DYN_DRIVER_SRC:.cpp=.o)
+$(NITSCHE_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             domain/nitsche_wave_operator.hpp \
+                             domain/nitsche_energy.hpp \
+                             spatial/code/spatial_friction.hpp \
+                             dynamic/tpv102_stations.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) $(TOML_FLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_nitsche_dyn_driver: $(NITSCHE_DYN_DRIVER_OBJ) $(SPATIAL_FRICTION_OBJ) \
+                         $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(NITSCHE_DYN_DRIVER_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # P6 long checks (minutes each; np=8 unless noted): T-15 energy balance and
 # its NIPG control, T-20 coupled dt refinement (dt0/4..dt0/16 vs dt0/64),

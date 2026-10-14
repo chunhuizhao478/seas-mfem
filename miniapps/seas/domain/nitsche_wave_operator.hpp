@@ -168,6 +168,17 @@ public:
       RhoPerElement(*sample_, rho_e_);
       mass_ = std::make_unique<NitscheMass>(mesh, order, rho_e_);
       BuildDampingBlocks_();
+      // The damped mass (M + dt/2 C) is built in SetTimeStep, and the
+      // NitscheMass constructor is COLLECTIVE (it builds a
+      // ParFiniteElementSpace).  Whether to build it must therefore be a
+      // global decision: a rank that owns no absorbing face (empty
+      // damping_blocks_) still builds it (with C = 0 it equals M).  Found by
+      // the P7 driver on the Gmsh mesh, where such ranks deadlocked the run.
+      {
+         int local = damping_blocks_.empty() ? 0 : 1, global = 0;
+         MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_LOR, mesh.GetComm());
+         has_damping_global_ = (global != 0);
+      }
 
       const int n = elast_->GetFESpace().GetVSize();
       MFEM_VERIFY(mass_->VSize() == n,
@@ -185,7 +196,7 @@ public:
    void SetTimeStep(real_t dt)
    {
       dt_ = dt;
-      if (!damping_blocks_.empty())
+      if (has_damping_global_)
       {
          mass_damped_ = std::make_unique<NitscheMass>(
             mesh_, order_, rho_e_, &damping_blocks_, 0.5 * dt);
@@ -768,6 +779,7 @@ private:
    std::unique_ptr<NitscheMass> mass_;
    std::unique_ptr<NitscheMass> mass_damped_;
    std::map<int, DenseMatrix> damping_blocks_;
+   bool has_damping_global_ = false;   ///< any rank has absorbing faces
    Vector rho_e_;
    real_t dt_ = 0.0;
    real_t last_solve_time_ = std::numeric_limits<real_t>::quiet_NaN();

@@ -128,9 +128,40 @@ static Mesh *TPV102Box(int nx, int ny, int nz, bool graded = false)
 /// ranks [0, np/2), Y > 0 to [np/2, np), each half split into np/2 slabs
 /// along X.  Every fault face is then shared.  The choice is printed.
 static std::string g_partition = "metis";
+/// P7 regression (Chunhui Zhao, 2026-10-14): when set, the LAST rank gets
+/// every element that has no face on the domain boundary (so it owns no
+/// absorbing or free-surface face) and the others split the rest in X
+/// slabs.  NitscheWaveOperator::SetTimeStep used to build the collective
+/// damped mass only on ranks with absorbing faces and deadlocked here.
+static bool g_interior_rank = false;
 static std::unique_ptr<ParMesh> MakeParMesh(Mesh &m)
 {
    const int np = Mpi::WorldSize();
+   if (g_interior_rank && np >= 2)
+   {
+      std::vector<bool> on_bdr(m.GetNE(), false);
+      for (int b = 0; b < m.GetNBE(); b++)
+      {
+         int e1, e2;
+         m.GetFaceElements(m.GetBdrElementFaceIndex(b), &e1, &e2);
+         if (e2 < 0 && m.GetBdrAttribute(b) != 3) { on_bdr[e1] = true; }
+      }
+      int *part = new int[m.GetNE()];
+      int ninner = 0;
+      for (int e = 0; e < m.GetNE(); e++)
+      {
+         if (!on_bdr[e]) { part[e] = np - 1; ninner++; continue; }
+         Vector c(3);
+         m.GetElementCenter(e, c);
+         int slab = static_cast<int>(std::floor((c(0) + kL) / (2.0 * kL) * (np - 1)));
+         part[e] = std::min(std::max(slab, 0), np - 2);
+      }
+      MFEM_VERIFY(ninner > 0, "interior-rank partition: the mesh has no interior element");
+      g_partition = "interior-only last rank (" + std::to_string(ninner) + " elements)";
+      auto pm = std::make_unique<ParMesh>(MPI_COMM_WORLD, m, part);
+      delete [] part;
+      return pm;
+   }
    if (np == 1)
    {
       g_partition = "serial";
@@ -1794,6 +1825,26 @@ int main(int argc, char *argv[])
       // --t15-nipg nx ny nz p tfinal
       TestT15Nipg(std::atoi(argv[2]), std::atoi(argv[3]), std::atoi(argv[4]), std::atoi(argv[5]),
                   std::atof(argv[6]));
+      return (num_failed == 0) ? 0 : 1;
+   }
+   if (mode == "--interior-rank")
+   {
+      // P7 regression: a rank with no absorbing face must not deadlock
+      // SetTimeStep (collective damped mass); 20 steps of the rupture run.
+      g_interior_rank = true;
+      RunConfig rc;
+      rc.nx = 8; rc.ny = 8; rc.nz = 4; rc.p = 1;
+      const real_t dt1 = 0.0;
+      (void)dt1;
+      rc.tfinal = 0.2;
+      const RunResult R = RunRupture(rc);
+      if (g_rank == 0)
+      {
+         std::cout << "  interior-rank partition: " << g_partition << "; " << R.steps
+                   << " steps completed, finite " << R.finite << "\n";
+      }
+      TEST_ASSERT(R.finite && R.steps > 0,
+                  "P7 regression: a rank with no absorbing face runs (no deadlock in SetTimeStep)");
       return (num_failed == 0) ? 0 : 1;
    }
    if (mode == "--t20")
