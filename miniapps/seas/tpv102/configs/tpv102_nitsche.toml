@@ -83,7 +83,18 @@ dt_max     = "0.05s"
 [output]
 output_dir     = "output_tpv102_nitsche"
 restart_prefix = "cp"
-paraview_fault = "off"
+# Fault ParaView output: ONE <output_dir>/fault.vtkhdf per run (VTKHDF, all
+# snapshots appended), each fault face split into 4 sub-triangles carrying
+# the mean of their corner values.  "vtu" (one file per snapshot) aborts in
+# the Nitsche driver.  zfp_tol = 0 keeps lossless deflate and needs no H5Z-ZFP
+# plugin at run time; deflate level 1 instead of the writer's default 6
+# (1000 m test: 0.071 vs 0.160 s per snapshot on rank 0, 26.3 vs 24.7 MB).
+paraview_enabled       = true
+paraview_fault         = "hdf5"
+paraview_fault_dt      = "0.02s"
+paraview_fault_zfp_tol = 0.0
+paraview_fault_deflate_level = 1
+paraview_free_surface  = "off"   # the Nitsche driver writes no free-surface slice
 
 # Rate-and-state, aging law (native TPV102Params).
 #   VW core a = 0.008, VS border a = 0.016 (boxcar_taper rule),

@@ -43,6 +43,10 @@
 #include "../spatial/code/spatial_friction.hpp"
 #include "../dynamic/spatial_nucleation.hpp"
 #include "../dynamic/tpv102_stations.hpp"
+#ifdef MFEM_USE_HDF5
+#include "../io/fault_vtkhdf_writer.hpp"
+#include "../io/paraview_output.hpp"   // ParaViewOutput::ProbeH5ZZfpPluginOrAbort
+#endif
 
 #include <toml.hpp>
 
@@ -159,6 +163,226 @@ void MakeDirs(const std::string &d)
    MPI_Barrier(MPI_COMM_WORLD);
 }
 
+#ifdef MFEM_USE_HDF5
+/// Fault ParaView output, [output] paraview_fault = "hdf5": ONE
+/// <output_dir>/fault.vtkhdf per run through the SAFS writer's generic
+/// entry point vtkhdf::WriteFaultPackHdf (rank-0 gather, one appended step
+/// per frame).  Each owned fault face is split at its edge midpoints into 4
+/// sub-triangles; every field is evaluated through the face's own nodal
+/// basis at the 3 vertices and 3 edge midpoints (at p = 2 these are exactly
+/// the 6 nodes, at p = 1 the midpoints are linear interpolants) and each
+/// sub-triangle carries the mean of its 3 corner values as cell data.
+/// Every sub-triangle has its own 3 vertices (the writer's layout), so the
+/// output stays discontinuous like the DG field.  Owned faces only: a
+/// shared fault face is written once.  Sub-triangles are wound so that
+/// their normal agrees with the fault frame nhat.  Scope: Chunhui Zhao,
+/// 2026-10-14 (P7).
+class FaultVTKHDFOutput
+{
+public:
+   FaultVTKHDFOutput(NitscheWaveOperator &op, ParMesh &pmesh, int order,
+                     const std::string &dir,
+                     ParaViewHDFDataCollection::HDFCompression alg, double param)
+      : op_(op), E_(op.Elasticity()), dir_(dir), fe_(order, BasisType::GaussLobatto)
+   {
+      state_.compression_alg = alg;
+      state_.compression_param = param;
+      nbf_ = E_.GetNbfPerFace();
+      // the face basis must be the one the fault DOFs are nodal values of
+      const IntegrationRule &nir = E_.GetFaceQuadrature()->GetNodalRule();
+      MFEM_VERIFY(nir.GetNPoints() == nbf_ && fe_.GetDof() == nbf_,
+                  "fault ParaView output: face basis has " << fe_.GetDof()
+                  << " functions, fault DOFs per face " << nbf_);
+      for (int k = 0; k < nbf_; k++)
+      {
+         MFEM_VERIFY(std::abs(nir.IntPoint(k).x - fe_.GetNodes().IntPoint(k).x) < 1e-12 &&
+                     std::abs(nir.IntPoint(k).y - fe_.GetNodes().IntPoint(k).y) < 1e-12,
+                     "fault ParaView output: face node " << k << " differs from "
+                     "the fault DOF nodal rule");
+      }
+      // 3 vertices, then the midpoints of edges 01, 12, 20
+      const real_t ref[6][2] = {{0, 0}, {1, 0}, {0, 1}, {0.5, 0}, {0.5, 0.5}, {0, 0.5}};
+      phi_.SetSize(6, nbf_);
+      Vector sh(nbf_);
+      for (int c = 0; c < 6; c++)
+      {
+         IntegrationPoint ip;
+         ip.Set2(ref[c][0], ref[c][1]);
+         fe_.CalcShape(ip, sh);
+         for (int k = 0; k < nbf_; k++) { phi_(c, k) = sh(k); }
+      }
+      // geometry and a check of the face map against the DOF positions
+      Vector Xl, Fl;
+      E_.ExpandOwnedToLocalFault(op.FaultPositions(), Xl, 3);
+      E_.ExpandOwnedToLocalFault(op.FaultFrames(), Fl, 9);
+      const Array<int> &omap = E_.GetOwnedFaultFaceMap();
+      const Array<int> &fint = E_.GetFaultInteriorFaces();
+      const Array<int> &fsh = E_.GetFaultSharedFaces();
+      const int nint = fint.Size();
+      local_faces_.resize(E_.GetNumOwnedFaultFaces());
+      real_t pos_err = 0.0;
+      int nflip = 0;
+      for (int o = 0; o < E_.GetNumOwnedFaultFaces(); o++)
+      {
+         const int fi = omap[o];
+         local_faces_[o] = fi;
+         const int mf = (fi < nint) ? fint[fi] : pmesh.GetSharedFace(fsh[fi - nint]);
+         ElementTransformation *T = pmesh.GetFaceTransformation(mf);
+         real_t P[6][3];
+         for (int c = 0; c < 6; c++)
+         {
+            IntegrationPoint ip;
+            ip.Set2(ref[c][0], ref[c][1]);
+            T->SetIntPoint(&ip);
+            Vector x(3);
+            T->Transform(ip, x);
+            for (int i = 0; i < 3; i++) { P[c][i] = x(i); }
+         }
+         for (int k = 0; k < nbf_; k++)
+         {
+            Vector x(3);
+            T->Transform(nir.IntPoint(k), x);
+            for (int i = 0; i < 3; i++)
+            {
+               pos_err = std::max(pos_err, std::abs(x(i) - Xl(3 * (fi * nbf_ + k) + i)));
+            }
+         }
+         real_t e1[3], e2[3];
+         for (int i = 0; i < 3; i++) { e1[i] = P[1][i] - P[0][i]; e2[i] = P[2][i] - P[0][i]; }
+         const real_t nx[3] = {e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2],
+                               e1[0] * e2[1] - e1[1] * e2[0]};
+         const real_t *nh = &Fl(9 * (fi * nbf_));
+         const bool flip = (nx[0] * nh[0] + nx[1] * nh[1] + nx[2] * nh[2]) < 0.0;
+         nflip += flip ? 1 : 0;
+         for (int s = 0; s < 4; s++)
+         {
+            int c0 = kSub[s][0], c1 = kSub[s][1], c2 = kSub[s][2];
+            if (flip) { std::swap(c1, c2); }
+            const int b = static_cast<int>(pack_.vertices.size());
+            for (int c : {c0, c1, c2}) { pack_.vertices.push_back({P[c][0], P[c][1], P[c][2]}); }
+            pack_.triangles.push_back({b, b + 1, b + 2});
+            corners_.push_back({c0, c1, c2});
+         }
+      }
+      MPI_Allreduce(MPI_IN_PLACE, &pos_err, 1, MPITypeMap<real_t>::mpi_type, MPI_MAX,
+                    MPI_COMM_WORLD);
+      long long cnt[2] = {E_.GetNumOwnedFaultFaces(), nflip};
+      MPI_Allreduce(MPI_IN_PLACE, cnt, 2, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+      MFEM_VERIFY(pos_err < 1e-6, "fault ParaView output: the face map does not reproduce "
+                  "the fault DOF positions (max error " << pos_err << " m)");
+      if (g_rank == 0)
+      {
+         std::cout << "  fault ParaView output: " << dir_ << "/fault.vtkhdf, " << cnt[0]
+                   << " fault faces x 4 sub-triangles (" << cnt[1] << " faces re-wound to"
+                   << " nhat); face map vs DOF positions max error " << pos_err << " m\n";
+      }
+      pack_.field_names = {"slip_dip", "slip_strike", "slip_rate_dip", "slip_rate_strike",
+                           "slip_rate", "traction_dip", "traction_strike", "state_variable",
+                           "normal_stress", "param_a", "param_Dc"};
+      pack_.field_arrays.assign(pack_.field_names.size(), std::vector<double>());
+   }
+
+   /// Collective.  tau = -(X* + gamma V) and sigma_n_eff as the stations;
+   /// at t = 0 (no step yet) the projected background traction.
+   void Write(int cycle, real_t t, real_t dt)
+   {
+      const auto t0 = std::chrono::steady_clock::now();
+      const int no = op_.FaultDc().Size();
+      const Vector &d = op_.Slip(), &V = op_.SlipRate(), &psi = op_.State();
+      const Vector &Fr = op_.FaultFrames();
+      Vector Xs = op_.LastShear(), sg = op_.LastSigmaEff();
+      const bool have_x = Xs.Size() == 2 * no;
+      if (!have_x)
+      {
+         Vector S;
+         op_.BackgroundTraction(op_.GetTime(), S);
+         Xs.SetSize(2 * no);
+         sg.SetSize(no);
+         for (int j = 0; j < no; j++)
+         {
+            fault_frame::ToLocal(&S(3 * j), 0.0, &Fr(9 * j), &Fr(9 * j + 3), &Fr(9 * j + 6),
+                                 Xs(2 * j), Xs(2 * j + 1), sg(j));
+         }
+      }
+      constexpr int nc = 10;   // sd ss vd vs td ts psi sn a Dc
+      Vector own(nc * no), loc;
+      for (int j = 0; j < no; j++)
+      {
+         const real_t *dd = &Fr(9 * j + 3), *ss = &Fr(9 * j + 6);
+         real_t *q = &own(nc * j);
+         q[0] = fault_frame::Dot(&d(3 * j), dd);
+         q[1] = fault_frame::Dot(&d(3 * j), ss);
+         q[2] = fault_frame::Dot(&V(3 * j), dd);
+         q[3] = fault_frame::Dot(&V(3 * j), ss);
+         const real_t g = have_x ? 0.5 * op_.FaultSigmaF()(j) * dt : 0.0;
+         q[4] = -(Xs(2 * j) + g * q[2]);
+         q[5] = -(Xs(2 * j + 1) + g * q[3]);
+         q[6] = psi(j);
+         q[7] = sg(j);
+         q[8] = op_.FaultA()(j);
+         q[9] = op_.FaultDc()(j);
+      }
+      E_.ExpandOwnedToLocalFault(own, loc, nc);
+      for (auto &a : pack_.field_arrays) { a.clear(); }
+      for (std::size_t o = 0; o < local_faces_.size(); o++)
+      {
+         const int fi = local_faces_[o];
+         real_t cv[6][nc];
+         for (int c = 0; c < 6; c++)
+         {
+            for (int m = 0; m < nc; m++)
+            {
+               real_t v = 0.0;
+               for (int k = 0; k < nbf_; k++) { v += phi_(c, k) * loc(nc * (fi * nbf_ + k) + m); }
+               cv[c][m] = v;
+            }
+         }
+         for (int s = 0; s < 4; s++)
+         {
+            const auto &cr = corners_[4 * o + s];
+            auto mean = [&](int m) { return (cv[cr[0]][m] + cv[cr[1]][m] + cv[cr[2]][m]) / 3.0; };
+            auto speed = [&](int c) { return std::hypot(cv[c][2], cv[c][3]); };
+            pack_.field_arrays[0].push_back(mean(0));
+            pack_.field_arrays[1].push_back(mean(1));
+            pack_.field_arrays[2].push_back(mean(2));
+            pack_.field_arrays[3].push_back(mean(3));
+            pack_.field_arrays[4].push_back((speed(cr[0]) + speed(cr[1]) + speed(cr[2])) / 3.0);
+            for (int m = 4; m < nc; m++) { pack_.field_arrays[m + 1].push_back(mean(m)); }
+         }
+      }
+      const auto t1 = std::chrono::steady_clock::now();
+      vtkhdf::WriteFaultPackHdf(state_, dir_, cycle, t, pack_, g_rank, Mpi::WorldSize(),
+                                MPI_COMM_WORLD);
+      frames_++;
+      const auto t2 = std::chrono::steady_clock::now();
+      pack_seconds_ += std::chrono::duration<double>(t1 - t0).count();
+      seconds_ += std::chrono::duration<double>(t2 - t0).count();
+   }
+
+   int Frames() const { return frames_; }
+   double Seconds() const { return seconds_; }
+   double PackSeconds() const { return pack_seconds_; }
+
+private:
+   /// sub-triangles of the 6 corners (0,1,2 vertices; 3,4,5 midpoints of
+   /// edges 01, 12, 20), each wound like the face (0,1,2)
+   static constexpr int kSub[4][3] = {{0, 3, 5}, {3, 1, 4}, {5, 4, 2}, {3, 4, 5}};
+
+   NitscheWaveOperator &op_;
+   ElasticityDomainOperator<ParMesh> &E_;
+   std::string dir_;
+   H1_TriangleElement fe_;
+   int nbf_ = 0;
+   DenseMatrix phi_;
+   std::vector<int> local_faces_;
+   std::vector<std::array<int, 3>> corners_;
+   vtu::LocalFaultPack pack_;
+   vtkhdf::FaultHDFState state_;
+   int frames_ = 0;
+   double seconds_ = 0.0, pack_seconds_ = 0.0;
+};
+#endif // MFEM_USE_HDF5
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -203,6 +427,43 @@ int main(int argc, char *argv[])
    MFEM_VERIFY(p >= 1 && p <= 4, "order p must be in 1..4 (P3 constants); got " << p);
    MFEM_VERIFY(cfl > 0.0 && cfl <= 1.0, "[numerics] cfl (fraction of C(p)) must be in (0,1]");
    MakeDirs(out_dir);
+
+   // [output] ParaView keys, SAFS semantics (spatial_dyn_driver): the master
+   // gate paraview_enabled switches the ParaView collections; the fault
+   // surface is written as ONE fault.vtkhdf per run.  Every key this driver
+   // cannot honour aborts instead of being ignored.
+   const auto &ocfg = cfg.output;
+   const bool pv_fault = ocfg.paraview_enabled && ocfg.paraview_fault != "off";
+   MFEM_VERIFY(ocfg.paraview_fault == "off" || ocfg.paraview_fault == "hdf5"
+               || ocfg.paraview_fault == "vtu",
+               "[output] paraview_fault = '" << ocfg.paraview_fault
+               << "': expected \"off\", \"hdf5\" or \"vtu\"");
+   MFEM_VERIFY(!(pv_fault && ocfg.paraview_fault == "vtu"),
+               "[output] paraview_fault = \"vtu\" writes one file per snapshot; the "
+               "Nitsche driver writes the fault as ONE file per run: use \"hdf5\" "
+               "(VTKHDF) or \"off\"");
+   MFEM_VERIFY(ocfg.paraview_free_surface == "off",
+               "[output] paraview_free_surface = '" << ocfg.paraview_free_surface
+               << "': the Nitsche driver writes no free-surface slice; set it to \"off\" "
+               "(the parser's default is \"vtu\")");
+   if (ocfg.paraview_enabled)
+   {
+      MFEM_VERIFY(ocfg.paraview_volume == "off" && ocfg.paraview_bulk == "off",
+                  "[output] paraview_volume / paraview_bulk: the Nitsche driver writes "
+                  "only the fault surface; set both to \"off\"");
+      MFEM_VERIFY(!ocfg.paraview_fault_legacy_ascii,
+                  "[output] paraview_fault_legacy_ascii: not supported by the Nitsche "
+                  "driver (single VTKHDF file only)");
+      MFEM_VERIFY(ocfg.paraview_coseismic_dt <= 0.0 && ocfg.paraview_nucleation_dt <= 0.0
+                  && ocfg.paraview_interseismic_dt <= 0.0,
+                  "[output] paraview_{coseismic,nucleation,interseismic}_dt: the Nitsche "
+                  "driver writes at the fixed cadence paraview_fault_dt (or "
+                  "paraview_every_steps); remove the regime-adaptive keys");
+   }
+#ifndef MFEM_USE_HDF5
+   MFEM_VERIFY(!pv_fault, "[output] paraview_fault = \"hdf5\" needs MFEM built with "
+               "MFEM_USE_HDF5=YES");
+#endif
 
    if (g_rank == 0)
    {
@@ -551,6 +812,41 @@ int main(int argc, char *argv[])
    }
    std::vector<real_t> trupt(no, -1.0);
 
+   // fault ParaView output (one fault.vtkhdf per run)
+#ifdef MFEM_USE_HDF5
+   std::unique_ptr<FaultVTKHDFOutput> pv;
+#endif
+   int pv_every = 0;
+   bool pv_capped = false;
+   if (pv_fault)
+   {
+#ifdef MFEM_USE_HDF5
+      pv_every = ocfg.paraview_every_steps > 0
+                 ? ocfg.paraview_every_steps
+                 : std::max(1, static_cast<int>(std::lround(ocfg.paraview_fault_dt / dt)));
+      auto alg = ParaViewHDFDataCollection::HDFCompression::Deflate;
+      double param = 6.0;   // the writer's default (lossless deflate level 6)
+      if (ocfg.paraview_fault_zfp_tol > 0.0)
+      {
+         ParaViewOutput<ParMesh>::ProbeH5ZZfpPluginOrAbort();
+         alg = ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy;
+         param = ocfg.paraview_fault_zfp_tol;
+      }
+      else if (ocfg.paraview_fault_deflate_level >= 0)
+      {
+         param = ocfg.paraview_fault_deflate_level;
+      }
+      pv = std::make_unique<FaultVTKHDFOutput>(op, pmesh, p, out_dir, alg, param);
+      if (g_rank == 0)
+      {
+         std::cout << "  fault ParaView output every " << pv_every << " steps (" << pv_every * dt
+                   << " s), " << (alg == ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy
+                                  ? "ZFP accuracy " : "deflate level ") << param
+                   << ", at most " << ocfg.max_snapshots << " snapshots\n";
+      }
+#endif
+   }
+
    std::unique_ptr<NitscheEnergyMonitor> mon;
 
    const long nsteps = std::lround(std::ceil((tfinal - cfg.time.t_initial) / dt - 1e-9));
@@ -623,6 +919,22 @@ int main(int argc, char *argv[])
                   << "," << psi(j) << "," << Xs(2 * j) << "," << Xs(2 * j + 1) << "," << sg(j) << "\n";
          }
       }
+#ifdef MFEM_USE_HDF5
+      if (pv && s % pv_every == 0)
+      {
+         // Frames() is the same on every rank, so the collective Write is uniform
+         if (pv->Frames() < ocfg.max_snapshots) { pv->Write(static_cast<int>(s), t, dt); }
+         else if (!pv_capped)
+         {
+            pv_capped = true;
+            if (g_rank == 0)
+            {
+               std::cout << "  fault ParaView output: max_snapshots = " << ocfg.max_snapshots
+                         << " reached at t = " << t << " s; no further frames\n";
+            }
+         }
+      }
+#endif
       if (g_rank == 0 && (s % log_every == 0 || s == nsteps))
       {
          const real_t wall = std::chrono::duration<real_t>(std::chrono::steady_clock::now() - wall0).count();
@@ -646,6 +958,19 @@ int main(int argc, char *argv[])
          rt << X(3 * j) << " " << X(3 * j + 1) << " " << X(3 * j + 2) << " " << trupt[j] << "\n";
       }
    }
+#ifdef MFEM_USE_HDF5
+   if (pv && g_rank == 0)
+   {
+      std::cout << std::setprecision(6) << "  fault ParaView output: " << pv->Frames()
+                << " frames in " << out_dir << "/fault.vtkhdf; on rank 0 "
+                << pv->Seconds() << " s ("
+                << (pv->Frames() ? pv->Seconds() / pv->Frames() : 0.0) << " s/frame: pack "
+                << (pv->Frames() ? pv->PackSeconds() / pv->Frames() : 0.0)
+                << ", gather + HDF write "
+                << (pv->Frames() ? (pv->Seconds() - pv->PackSeconds()) / pv->Frames() : 0.0)
+                << ")\n";
+   }
+#endif
    const real_t wall = std::chrono::duration<real_t>(std::chrono::steady_clock::now() - wall0).count();
    if (g_rank == 0)
    {
