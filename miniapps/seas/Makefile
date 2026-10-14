@@ -3154,6 +3154,57 @@ test-nitsche-pf: seas_test_nitsche_pf
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_pf
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_pf
 
+# Nitsche dynamic rupture P6 (first rupture, TPV102 on the inline mesh; plan
+# N-01 fault path, C-04, N-10 fixture): T-04, T-13(a), T-15, T-20, T-21.
+# The abort modes must exit non-zero (MFEM_USE_EXCEPTIONS=NO: tested by exit
+# status and message).
+TEST_NITSCHE_TPV102_INLINE_SRC = tests/verification/test_nitsche_tpv102_inline.cpp
+TEST_NITSCHE_TPV102_INLINE_OBJ = $(TEST_NITSCHE_TPV102_INLINE_SRC:.cpp=.o)
+$(TEST_NITSCHE_TPV102_INLINE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             domain/nitsche_wave_operator.hpp \
+                             domain/elasticity_operator_penalty.inl \
+                             fault/fault_orientation.hpp \
+                             fault/fault_frame.hpp \
+                             friction/rate_state_closure.hpp \
+                             solver/nitsche_cfl.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_tpv102_inline: $(TEST_NITSCHE_TPV102_INLINE_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_TPV102_INLINE_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# mode:expected-message pairs; a mode passes only if it exits non-zero AND
+# prints its own abort message.
+NITSCHE_P6_ABORT_MODES = --abort-fac0:fac0 --abort-fac1:fac1 \
+                         --abort-twice:called.twice --abort-linacc:fac0 \
+                         --t04-curved-n01:not.constant.on.fault.face
+test-nitsche-tpv102-inline: seas_test_nitsche_tpv102_inline
+	for np in 1 2 4 8; do $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_nitsche_tpv102_inline || exit 1; done
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_tpv102_inline --t04-curved
+	for np in 1 2; do for mm in $(NITSCHE_P6_ABORT_MODES); do \
+	  m=$${mm%%:*}; msg=$${mm#*:}; \
+	  if $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_nitsche_tpv102_inline $$m > p6_abort.log 2>&1; \
+	  then echo "FAILED: $$m (np $$np) did not abort"; exit 1; fi; \
+	  if grep -q "$$msg" p6_abort.log; then echo "PASSED: $$m (np $$np) aborted: $$msg"; \
+	  else echo "FAILED: $$m (np $$np) aborted without '$$msg'"; exit 1; fi; \
+	done; done; rm -f p6_abort.log
+
+# P6 long checks (minutes each; np=8 unless noted): T-15 energy balance and
+# its NIPG control, T-20 coupled dt refinement (dt0/4..dt0/16 vs dt0/64),
+# T-21(c) hand loop (np 1, 2), and the L2 gate on the widened graded box
+# (TPV102 p=1 to 5.5 s; decision Chunhui Zhao 2026-10-14).
+test-nitsche-tpv102-inline-long: seas_test_nitsche_tpv102_inline
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_tpv102_inline --t15 8 8 4 2 2.0
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_nitsche_tpv102_inline --t15-nipg 8 8 4 2 2.0
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 8 ./seas_test_nitsche_tpv102_inline --t20 8 8 4 2 1.5 4
+	for np in 1 2; do $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_nitsche_tpv102_inline --t21c 8 8 4 2 1000 || exit 1; done
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 8 ./seas_test_nitsche_tpv102_inline --graded 1000 1 5.5 - 8 1.2 10000
+
 # =====================================================================
 #  Phase 10 (TPV31) unit tests
 # =====================================================================

@@ -339,6 +339,18 @@ public:
    int GetNbfPerFace() const override { return nbf_per_face_; }
    const FaceQuadrature *GetFaceQuadrature() const { return face_quad_.get(); }
 
+   /// C-04: interior-penalty coefficient sigma_F [Pa/m] of each fault face,
+   /// in the face order of GetFaultInteriorFaces() followed by
+   /// GetFaultSharedFaces() -- the order ComputeTraction fills fault DOFs,
+   /// nbf_per_face_ per face.
+   /// sigma_F_face(f): mean over the face's traction quadrature points of the
+   ///                  value ComputePenalty uses there.
+   /// spread(f):       max_q |sigma_F(q) - mean| / mean.  The Nitsche path's
+   ///                  scalar gamma_F is the kernel's derivative only where
+   ///                  this is round-off (plan, "The scalar gamma").
+   /// IP only.  Implementation: elasticity_operator_penalty.inl.
+   void GetFaultFacePenalties(Vector &sigma_F_face, Vector &spread) const;
+
    /// Access the constitutive model.
    const ConstitutiveModel &GetModel() const { return *model_; }
 
@@ -653,6 +665,7 @@ private:
 
 
 #include "elasticity_operator_traction.inl"
+#include "elasticity_operator_penalty.inl"
 
 
 // Convenience type alias
