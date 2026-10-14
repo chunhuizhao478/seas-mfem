@@ -4130,6 +4130,241 @@ void TestMultiDOFOutputFromSEASP2()
 }
 
 // =============================================================================
+// Test: BP5 station slip rate uses the solver's elastic sigma_n
+//
+// The station writers re-solve friction at output time (RecomputeSlipRate).
+// With elastic sigma_n on, the re-solve must get the normal traction from the
+// same evaluation as the cached traction, so it uses the same
+// sigma_n_eff = sigma_n_pre + T_n as ComputeRHS().  Without it, station V at
+// a locked DOF is off by about exp(-(f/a) * T_n / sigma_n).
+// =============================================================================
+
+// Max over entries of |a_i - b_i| / max(|b_i|, floor).
+static real_t MaxRelDiff(const Vector &a, const Vector &b,
+                         real_t floor = 1e-300)
+{
+   real_t m = 0.0;
+   for (int i = 0; i < a.Size(); i++)
+   {
+      m = std::max(m, std::abs(a(i) - b(i)) / std::max(std::abs(b(i)), floor));
+   }
+   return m;
+}
+
+// Read the first data row (8 columns) of a BP5 station file.
+static bool ReadFirstStationRow(const std::string &filename, double vals[8])
+{
+   std::ifstream file(filename);
+   std::string line;
+   while (std::getline(file, line))
+   {
+      if (line.empty() || line[0] == '#') { continue; }
+      std::istringstream iss(line);
+      for (int c = 0; c < 8; c++)
+      {
+         if (!(iss >> vals[c])) { return false; }
+      }
+      return true;
+   }
+   return false;
+}
+
+void TestStationSlipRateUsesElasticSigmaN()
+{
+   std::cout << "\n--- Test: Station slip rate uses elastic sigma_n ---\n";
+
+   // km-scale box with the fault at y = 0 (as in TestNormalTractionLeakageIP)
+   real_t Lx = 100.0e3, Ly = 60.0e3, Lz = 50.0e3;
+   Mesh mesh = CreateTestMesh3DTet(2, 1, 1, Lx, Ly, Lz);
+
+   BP5Params params;
+
+   auto domain_op = std::make_unique<ElasticityDomainOperator<Mesh>>(
+      mesh, 1, params.lambda(), params.mu(),
+      params.Vp, Lz, 2.0 * Ly, DGMethod::IP);
+
+   if (domain_op->GetNumFaultDOFs() == 0)
+   {
+      std::cout << "  (Skipped: no fault faces found)\n";
+      return;
+   }
+
+   auto geom = std::make_unique<FaultGeometry<Mesh>>(*domain_op, params);
+
+   DieterichRuinaFriction::Constants fc;
+   fc.V0 = params.V0; fc.f0 = params.f0; fc.b = params.b; fc.Dc = params.L0;
+   auto friction = std::make_unique<DieterichRuinaFriction>(fc);
+   auto evolution = std::make_unique<AgingLawPsi>(params.b, params.V0, params.f0);
+
+   auto fault_op = std::make_unique<RateStateFaultOperator<Mesh, 2>>(
+      geom.get(), friction.get(), evolution.get(), params);
+
+   BP5SEASOp seas_op(domain_op.get(), fault_op.get());
+   TEST_ASSERT(seas_op.ElasticSigmaNEnabled(),
+               "station sigma_n: elastic sigma_n is on by default");
+
+   const int N = fault_op->NumNodes();
+   Vector state(fault_op->StateSize());
+   seas_op.SetInitialCondition(state);
+
+   // 1. SetInitialCondition solves friction with the constant sigma_n.
+   TEST_ASSERT(seas_op.GetFrictionNormalTraction() == nullptr,
+               "station sigma_n: none after SetInitialCondition");
+   {
+      Vector V;
+      fault_op->RecomputeSlipRate(seas_op.GetTraction(), state, V,
+                                  seas_op.GetFrictionNormalTraction());
+      TEST_ASSERT(MaxRelDiff(V, fault_op->GetSlipRate()) <= 1e-12,
+                  "station sigma_n: re-solve matches solver V at t = 0");
+   }
+
+   // 2. Add slip.  Traction is linear in slip, so scale a trial pattern
+   //    until max|dT_n| is 2% of sigma_n (0.5 MPa): enough to move V at a
+   //    locked DOF by orders of magnitude, while sigma_n_eff stays positive.
+   const Vector &x2 = geom->GetCoordsX2();
+   const Vector &x3 = geom->GetCoordsX3();
+   Vector pattern(N);
+   for (int i = 0; i < N; i++)
+   {
+      pattern(i) = 1.0 + 0.5 * x2(i) / Lx + 0.25 * x3(i) / Lz;
+   }
+
+   Vector rate(fault_op->StateSize());
+   seas_op.Mult(state, rate);
+   const Vector Tn0(seas_op.GetNormalTraction());
+   const Vector state0(state);
+
+   for (int i = 0; i < N; i++)
+   {
+      state(3 * i + 0) += 1.0e-3 * pattern(i);   // dip
+      state(3 * i + 1) += 2.0e-3 * pattern(i);   // strike
+   }
+   seas_op.Mult(state, rate);
+   real_t dTn_max = 0.0;
+   for (int i = 0; i < N; i++)
+   {
+      dTn_max = std::max(dTn_max,
+                         std::abs(seas_op.GetNormalTraction()(i) - Tn0(i)));
+   }
+   TEST_ASSERT(dTn_max > 0.0,
+               "station sigma_n: trial slip gives a non-zero normal traction");
+   if (!(dTn_max > 0.0)) { return; }
+
+   const real_t scale = 0.02 * params.sigma_n / dTn_max;
+   state = state0;
+   for (int i = 0; i < N; i++)
+   {
+      state(3 * i + 0) += scale * 1.0e-3 * pattern(i);
+      state(3 * i + 1) += scale * 2.0e-3 * pattern(i);
+   }
+   seas_op.Mult(state, rate);
+
+   // 3. Mult used the elastic normal traction; the re-solve must too.
+   const Vector *Tn = seas_op.GetFrictionNormalTraction();
+   TEST_ASSERT(Tn == &seas_op.GetNormalTraction() && Tn->Size() == N,
+               "station sigma_n: Mult exposes its normal traction");
+   if (Tn == nullptr || Tn->Size() != N) { return; }
+
+   real_t Tn_max = 0.0;
+   for (int i = 0; i < N; i++) { Tn_max = std::max(Tn_max, std::abs((*Tn)(i))); }
+
+   const Vector &traction = seas_op.GetTraction();
+   const Vector &V_solver = fault_op->GetSlipRate();
+   Vector V_new, V_old;
+   fault_op->RecomputeSlipRate(traction, state, V_new, Tn);
+   fault_op->RecomputeSlipRate(traction, state, V_old, nullptr);
+   const real_t err_new = MaxRelDiff(V_new, V_solver);
+   const real_t err_old = MaxRelDiff(V_old, V_solver);
+
+   std::cout << std::scientific << std::setprecision(3)
+             << "  scale=" << scale << "  max|T_n|=" << Tn_max << " Pa"
+             << "  rel err with T_n=" << err_new
+             << "  without=" << err_old << "\n";
+
+   TEST_ASSERT(err_new <= 1e-12,
+               "station sigma_n: re-solve with T_n matches solver V");
+   TEST_ASSERT(err_old > 1e-3,
+               "station sigma_n: re-solve without T_n does not (old path)");
+
+   // 4. Station file.  Put the station on the DOF where dropping T_n moves V
+   //    most, and compare the writer's row against one written from the
+   //    solver's own V through the same interpolation.
+   int k = 0;
+   real_t worst = -1.0;
+   for (int i = 0; i < N; i++)
+   {
+      const real_t vs = std::hypot(V_solver(2 * i), V_solver(2 * i + 1));
+      const real_t vo = std::hypot(V_old(2 * i), V_old(2 * i + 1));
+      if (vs > 0.0 && vo > 0.0 && std::abs(std::log(vo / vs)) > worst)
+      {
+         worst = std::abs(std::log(vo / vs));
+         k = i;
+      }
+   }
+
+   std::vector<Probe2DInterpolator::Station> stations = {
+      {"sn_check", x2(k), x3(k)},
+   };
+
+   const Vector &tau_pre = geom->GetTauPre();
+   Vector slip, theta;
+   fault_op->GetSlip(state, slip);
+   fault_op->GetTheta(state, theta);
+   Vector slip_dip(N), slip_strike(N), V_dip(N), V_strike(N);
+   Vector trac_dip(N), trac_strike(N), tau_pre_dip(N), tau_pre_strike(N);
+   for (int i = 0; i < N; i++)
+   {
+      slip_dip(i) = slip(2 * i);         slip_strike(i) = slip(2 * i + 1);
+      V_dip(i) = V_solver(2 * i);        V_strike(i) = V_solver(2 * i + 1);
+      trac_dip(i) = traction(2 * i);     trac_strike(i) = traction(2 * i + 1);
+      tau_pre_dip(i) = tau_pre(2 * i);   tau_pre_strike(i) = tau_pre(2 * i + 1);
+   }
+
+   const real_t V_max = seas_op.GetMaxSlipRate();
+   {
+      BP5BenchmarkOutput<Mesh> out_ref("test_sn_ref", params, stations, x2, x3);
+      out_ref.SetTauPre(tau_pre_dip, tau_pre_strike);
+      out_ref.WriteFromGlobalData(0.0, slip_dip, slip_strike, theta,
+                                  V_dip, V_strike, trac_dip, trac_strike);
+      out_ref.Flush();
+
+      BP5BenchmarkOutput<Mesh> out_new("test_sn_new", params, stations, x2, x3);
+      out_new.ForceWrite(0.0, state, *fault_op, traction, Tn, V_max);
+
+      BP5BenchmarkOutput<Mesh> out_old("test_sn_old", params, stations, x2, x3);
+      out_old.ForceWrite(0.0, state, *fault_op, traction, nullptr, V_max);
+   }
+
+   double ref[8], row_new[8], row_old[8];
+   const bool ok = ReadFirstStationRow("test_sn_ref_sn_check.txt", ref) &&
+                   ReadFirstStationRow("test_sn_new_sn_check.txt", row_new) &&
+                   ReadFirstStationRow("test_sn_old_sn_check.txt", row_old);
+   TEST_ASSERT(ok, "station sigma_n: three station files written and parsed");
+   if (ok)
+   {
+      // Columns 1-7: slip (2), log10 V (2), shear stress in MPa (2), log10 state
+      real_t diff_new = 0.0, diff_old = 0.0;
+      for (int c = 1; c < 8; c++)
+      {
+         const real_t s = std::max(1.0, std::abs(ref[c]));
+         diff_new = std::max(diff_new, std::abs(row_new[c] - ref[c]) / s);
+         diff_old = std::max(diff_old, std::abs(row_old[c] - ref[c]) / s);
+      }
+      std::cout << "  station DOF " << k << " (x2=" << x2(k) << ", x3=" << x3(k)
+                << "): row diff with T_n=" << diff_new
+                << "  without=" << diff_old << "\n";
+      TEST_ASSERT(diff_new <= 1e-10,
+                  "station sigma_n: station row matches the solver's V");
+      TEST_ASSERT(diff_old > 1e-6,
+                  "station sigma_n: row without T_n differs (old path)");
+   }
+
+   std::remove("test_sn_ref_sn_check.txt");
+   std::remove("test_sn_new_sn_check.txt");
+   std::remove("test_sn_old_sn_check.txt");
+}
+
+// =============================================================================
 // Test: Per-quad-point fault basis (Tandem AdapterBase convention)
 // Verifies that ComputeQPBasis populates qp_data with valid normals/tangents
 // that agree with the centroid-based basis on flat faces.
@@ -4581,6 +4816,7 @@ int main()
    // TestMultiDOFStressEquilibriumP2(); // v55: disabled (depends on RK4)
    TestMultiDOFSEASP1Regression();
    TestMultiDOFOutputFromSEASP2();
+   TestStationSlipRateUsesElasticSigmaN();
 
    // v55: Per-quad-point fault basis (Tandem AdapterBase convention)
    TestPerQPFaultBasis();

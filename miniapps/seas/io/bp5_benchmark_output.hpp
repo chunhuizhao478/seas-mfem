@@ -574,11 +574,16 @@ public:
    /// @param state Full state vector
    /// @param fault Fault operator (BP5, SlipComponents=2)
    /// @param traction Traction from domain solve [2*N interleaved]
+   /// @param normal_traction Elastic normal traction from the same
+   ///        evaluation as @a traction [N], or nullptr when that evaluation
+   ///        used the constant sigma_n (pass SEAS operator's
+   ///        GetFrictionNormalTraction())
    /// @param V_max Maximum slip rate [m/s]
    /// @return true if data was written
    bool Write(real_t time, const Vector &state,
               const RateStateFaultOperator<MeshType, 2> &fault,
-              const Vector &traction, real_t V_max)
+              const Vector &traction, const Vector *normal_traction,
+              real_t V_max)
    {
       real_t dt_out = OutputInterval(V_max);
       if (time - last_write_time_ < dt_out * kOutputTimeTolerance)
@@ -593,9 +598,10 @@ public:
       // Matches Tandem's RateAndState::state() — see bp5_parallel_output.hpp.
       // NOTE: traction is still cached from the last RK stage, not the
       // accepted state.  Traction staleness is negligible compared to the
-      // psi sensitivity that this fix addresses.
+      // psi sensitivity that this fix addresses.  The normal traction from
+      // the same evaluation enters sigma_n_eff as in ComputeRHS().
       Vector slip_rate;
-      fault.RecomputeSlipRate(traction, state, slip_rate);
+      fault.RecomputeSlipRate(traction, state, slip_rate, normal_traction);
 
       const Vector &tau_pre = fault.GetGeometry()->GetTauPre(); // [2*N]
 
@@ -608,10 +614,11 @@ public:
    /// @brief Force a write at the current state (always flushes).
    void ForceWrite(real_t time, const Vector &state,
                    const RateStateFaultOperator<MeshType, 2> &fault,
-                   const Vector &traction, real_t V_max)
+                   const Vector &traction, const Vector *normal_traction,
+                   real_t V_max)
    {
       last_write_time_ = -1e30;
-      Write(time, state, fault, traction, V_max);
+      Write(time, state, fault, traction, normal_traction, V_max);
       Flush();
    }
 

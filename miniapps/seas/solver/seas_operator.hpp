@@ -112,6 +112,20 @@ public:
    /// @brief Whether elastic sigma_n feedback is active.
    bool ElasticSigmaNEnabled() const { return elastic_sigma_n_; }
 
+   /// @brief Normal traction used by the last friction solve, or nullptr.
+   ///
+   /// Pairs with GetTraction(): both come from the same evaluation.  Returns
+   /// &GetNormalTraction() when that evaluation passed elastic normal
+   /// traction to the fault RHS (Mult() with elastic sigma_n on), and
+   /// nullptr when it used the constant pre-stress sigma_n
+   /// (SetInitialCondition(), or elastic sigma_n off).  Output code passes
+   /// this to RateStateFaultOperator::RecomputeSlipRate() so the re-solved
+   /// slip rate uses the same sigma_n_eff as the solver.
+   const Vector *GetFrictionNormalTraction() const
+   {
+      return friction_used_normal_traction_ ? &normal_traction_ : nullptr;
+   }
+
    /// @brief Get maximum slip rate from last evaluation (global in parallel).
    real_t GetMaxSlipRate() const
    {
@@ -181,6 +195,9 @@ private:
    // v54: default ON to match Tandem's DieterichRuinaBase.h:87
    // (sigma_n = -sn_elastic + SnPre). Previously off by default (v51).
    bool elastic_sigma_n_ = true;
+   /// Whether the last fault_->ComputeRHS() call received normal_traction_
+   /// (see GetFrictionNormalTraction()).
+   mutable bool friction_used_normal_traction_ = false;
    bool diag_coseismic_dip_ = false;
    mutable bool diag_coseismic_dip_done_ = false;
    real_t coseismic_v_threshold_ = 0.1;
@@ -248,6 +265,7 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::SetInitialCo
    // Compute RHS to populate slip rates
    Vector rate_temp(fault_->StateSize());
    fault_->ComputeRHS(traction_, state, rate_temp);
+   friction_used_normal_traction_ = false;
 
    // Use global V_max in parallel, local in serial
    V_max = GetMaxSlipRate();
@@ -471,6 +489,7 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
    // v51: pass elastic normal traction for sigma_n feedback (nullptr = use constant)
    fault_->ComputeRHS(traction_, state, rate,
                        elastic_sigma_n_ ? &normal_traction_ : nullptr);
+   friction_used_normal_traction_ = elastic_sigma_n_;
 
    // Per-stage coupling loop norms (first 10 evaluations)
    {
