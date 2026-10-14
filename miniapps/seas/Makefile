@@ -3132,6 +3132,28 @@ test-nitsche-p5: seas_test_nitsche_p5
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_p5
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_p5
 
+# Nitsche dynamic rupture PF (fault coordinate layer: N-08 orientation, N-09
+# frame, the kernel dictionary): T-14, T-16, spec T11(a)/T12.
+TEST_NITSCHE_PF_SRC = tests/verification/test_nitsche_pf.cpp
+TEST_NITSCHE_PF_OBJ = $(TEST_NITSCHE_PF_SRC:.cpp=.o)
+$(TEST_NITSCHE_PF_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             fault/fault_orientation.hpp \
+                             fault/fault_frame.hpp \
+                             friction/rate_state_closure.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_pf: $(TEST_NITSCHE_PF_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_NITSCHE_PF_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-pf: seas_test_nitsche_pf
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_pf
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_pf
+
 # =====================================================================
 #  Phase 10 (TPV31) unit tests
 # =====================================================================
