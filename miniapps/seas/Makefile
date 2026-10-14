@@ -3108,6 +3108,30 @@ test-nitsche-p4: seas_test_nitsche_p4
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_p4
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_p4
 
+# Nitsche dynamic rupture P5 (N-03 fault closure interface, N-04 rate-and-
+# state adapter): T-06, T-07, T-11.
+TEST_NITSCHE_P5_SRC = tests/verification/test_nitsche_p5.cpp
+TEST_NITSCHE_P5_OBJ = $(TEST_NITSCHE_P5_SRC:.cpp=.o)
+$(TEST_NITSCHE_P5_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             friction/fault_closure.hpp \
+                             friction/rate_state_closure.hpp \
+                             domain/nitsche_wave_operator.hpp \
+                             solver/nitsche_cfl.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_p5: $(TEST_NITSCHE_P5_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_P5_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-p5: seas_test_nitsche_p5
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_p5
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_p5
+
 # =====================================================================
 #  Phase 10 (TPV31) unit tests
 # =====================================================================

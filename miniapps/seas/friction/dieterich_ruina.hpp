@@ -455,10 +455,11 @@ public:
    /// Algorithm (following Tandem's DieterichRuinaAgeing::slip_rate):
    /// 1. tau_abs = ||tau_vec||
    /// 2. V_abs = SolveSlipRatePsi(tau_abs, psi, sigma_n, eta, a)
-   /// 3. V_vec = (V_abs / tau_abs) * tau_vec
+   /// 3. V_vec = -(tau_vec / tau_abs) * V_abs
    ///
-   /// Slip velocity is parallel to traction
-   /// (slip occurs in the direction of driving stress).
+   /// Slip velocity is ANTI-parallel to the traction tau_vec (see the code
+   /// below; debug v55 D8, matching Tandem DieterichRuinaBase.h:174).  The
+   /// direction is fixed by the fault normal and the slip-jump convention.
    ///
    /// @param[in] tau_vec Traction vector (2 components) [Pa]
    /// @param[in] psi Logarithmic state variable [-]
