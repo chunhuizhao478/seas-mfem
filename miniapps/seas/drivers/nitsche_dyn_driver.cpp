@@ -18,7 +18,8 @@
 //   <prefix>_station_<name>.dat   TPV102StationWriter (column layout of the
 //                                 existing runs) through a DOFData adapter;
 //   <prefix>_station_conventions.txt  frame, pin and sign map (I3);
-//   <prefix>_fault_r<rank>.csv    fault-field dump every --dump-every steps;
+//   <prefix>_fault_r<rank>.csv    fault-field dump every --dump-every steps
+//                                 (with Prakash-Clifton one more column, sigma*);
 //   <prefix>_rupture_time_r<rank>.csv  first |V| > 1 mm/s per fault DOF;
 //   stdout log every --log-every steps.
 //
@@ -29,6 +30,13 @@
 //   sigma_n = -T.nhat (compression positive, Pa),
 // with T the total traction (Nitsche traction at the end of the step plus
 // prestress plus nucleation) on the face with normal nhat.
+//
+// Optional [friction.prakash_clifton] table (Chunhui Zhao, 2026-10-14): v_star
+// (m/s) and length (m), both required and > 0; its presence switches on the
+// operator's Prakash-Clifton regularization of the normal stress the law
+// sees, seeded with the initial sigma_n per DOF.  Absent = every bit as
+// before.  The station files are unchanged (sigma_n there stays sigma_eff);
+// sigma* goes to the fault CSV dump and to fault.vtkhdf (normal_stress_pc).
 //
 // Scope (Chunhui Zhao, 2026-10-14): tetrahedral meshes; constant material
 // (the sidecar / depth-profile / halfspace selections are P8);
@@ -279,6 +287,7 @@ public:
       pack_.field_names = {"slip_dip", "slip_strike", "slip_rate_dip", "slip_rate_strike",
                            "slip_rate", "traction_dip", "traction_strike", "state_variable",
                            "normal_stress", "param_a", "param_Dc"};
+      if (op_.HasPrakashClifton()) { pack_.field_names.push_back("normal_stress_pc"); nc_ = 11; }
       pack_.field_arrays.assign(pack_.field_names.size(), std::vector<double>());
    }
 
@@ -304,7 +313,7 @@ public:
                                  Xs(2 * j), Xs(2 * j + 1), sg(j));
          }
       }
-      constexpr int nc = 10;   // sd ss vd vs td ts psi sn a Dc
+      const int nc = nc_;   // sd ss vd vs td ts psi sn a Dc [sigma*]
       Vector own(nc * no), loc;
       for (int j = 0; j < no; j++)
       {
@@ -321,13 +330,14 @@ public:
          q[7] = sg(j);
          q[8] = op_.FaultA()(j);
          q[9] = op_.FaultDc()(j);
+         if (nc == 11) { q[10] = op_.PrakashCliftonSigma()(j); }
       }
       E_.ExpandOwnedToLocalFault(own, loc, nc);
       for (auto &a : pack_.field_arrays) { a.clear(); }
       for (std::size_t o = 0; o < local_faces_.size(); o++)
       {
          const int fi = local_faces_[o];
-         real_t cv[6][nc];
+         real_t cv[6][11];
          for (int c = 0; c < 6; c++)
          {
             for (int m = 0; m < nc; m++)
@@ -373,6 +383,7 @@ private:
    std::string dir_;
    H1_TriangleElement fe_;
    int nbf_ = 0;
+   int nc_ = 10;   ///< packed fields per DOF (11 with Prakash-Clifton)
    DenseMatrix phi_;
    std::vector<int> local_faces_;
    std::vector<std::array<int, 3>> corners_;
@@ -411,6 +422,9 @@ int main(int argc, char *argv[])
    const toml::value *t_num = DeckTable(root, "numerics");
    const toml::value *t_fg = DeckTable(root, "fault_geometry");
    const toml::value *t_diag = DeckTable(root, "diagnostics");
+   const toml::value *t_fric = DeckTable(root, "friction");
+   const toml::value *t_pc = (t_fric && t_fric->contains("prakash_clifton"))
+                             ? &t_fric->at("prakash_clifton") : nullptr;
 
    const std::string mesh_path = ArgStr(argc, argv, "--mesh", cfg.mesh.path);
    const int p = ArgInt(argc, argv, "--order", cfg.mesh.order);
@@ -424,6 +438,19 @@ int main(int argc, char *argv[])
    const real_t cfl = cfg.numerics.cfl;
    const real_t penalty_factor = TomlReal(t_num, "penalty_factor", 1.0);
    const bool energy_on = TomlBool(t_diag, "energy_balance", false);
+   const bool pc_on = t_pc != nullptr;
+   real_t pc_vstar = 0.0, pc_len = 0.0;
+   if (pc_on)
+   {
+      MFEM_VERIFY(t_pc->is_table(), "[friction.prakash_clifton] must be a table");
+      MFEM_VERIFY(t_pc->contains("v_star") && t_pc->contains("length"),
+                  "[friction.prakash_clifton] needs both v_star (m/s) and length (m); "
+                  "there are no defaults");
+      pc_vstar = TomlReal(t_pc, "v_star", 0.0);
+      pc_len = TomlReal(t_pc, "length", 0.0);
+      MFEM_VERIFY(pc_vstar > 0.0 && pc_len > 0.0, "[friction.prakash_clifton] v_star = "
+                  << pc_vstar << ", length = " << pc_len << "; both must be > 0");
+   }
    MFEM_VERIFY(p >= 1 && p <= 4, "order p must be in 1..4 (P3 constants); got " << p);
    MFEM_VERIFY(cfl > 0.0 && cfl <= 1.0, "[numerics] cfl (fraction of C(p)) must be in (0,1]");
    MakeDirs(out_dir);
@@ -630,7 +657,7 @@ int main(int argc, char *argv[])
    // at the projected prestress, V = V_init along -X_tan (C-07)
    const int no = op.NumOwnedFaultDOFs();
    {
-      Vector d(3 * no), V(3 * no), psi(no), S0;
+      Vector d(3 * no), V(3 * no), psi(no), S0, sig0(no);
       d = 0.0;
       op.BackgroundTraction(cfg.time.t_initial, S0);
       Vector xc(3);
@@ -656,8 +683,15 @@ int main(int argc, char *argv[])
          real_t Vl[2] = {0.0, 0.0};
          if (xm > 0.0) { Vl[0] = -Vi * X[0] / xm; Vl[1] = -Vi * X[1] / xm; }
          ff::Embed(Vl[0], Vl[1], dd, ss, &V(3 * j));
+         sig0(j) = sig;
       }
       op.SetFaultState(d, V, psi);
+      if (pc_on)
+      {
+         // sigma*^0 = the initial sigma_n per DOF
+         op.SetPrakashClifton(pc_vstar, pc_len);
+         op.SetPrakashCliftonState(sig0);
+      }
       // initial fault state per owned DOF (generic; e.g. to check psi^0
       // against a benchmark's closed form outside the driver)
       std::ofstream ini(out_dir + "/" + prefix + "_initial_r" + std::to_string(g_rank) + ".csv");
@@ -860,6 +894,12 @@ int main(int argc, char *argv[])
                 << " -> " << dt_cfl << "; dt_max " << cfg.time.dt_max << "), " << nsteps
                 << " steps to t = " << tfinal << " s; penalty_factor " << penalty_factor
                 << "; energy balance " << (energy_on ? "on" : "off") << "\n";
+      if (pc_on)
+      {
+         std::cout << "  Prakash-Clifton regularization of the law's normal stress: v_star = "
+                   << pc_vstar << " m/s, length = " << pc_len << " m (L/v_star = "
+                   << pc_len / pc_vstar << " s); sigma*^0 = initial sigma_n\n";
+      }
       (void)nloc;
    }
 
@@ -881,6 +921,7 @@ int main(int argc, char *argv[])
    ode.Init(op);
    if (stations) { fill_dofdata(); stations->WriteStep(t, dofdata); }
    real_t max_ratio_run = 0.0, max_V_run = 0.0, min_sig_run = 1e300, max_sig_run = -1e300;
+   real_t min_pc_run = 1e300, max_pc_run = -1e300;
    for (long s = 1; s <= nsteps; s++)
    {
       real_t h = dt;
@@ -890,6 +931,11 @@ int main(int argc, char *argv[])
       max_V_run = std::max(max_V_run, rec.max_V);
       min_sig_run = std::min(min_sig_run, rec.min_sigma_eff);
       max_sig_run = std::max(max_sig_run, rec.max_sigma_eff);
+      if (pc_on)
+      {
+         min_pc_run = std::min(min_pc_run, rec.min_sigma_pc);
+         max_pc_run = std::max(max_pc_run, rec.max_sigma_pc);
+      }
       MFEM_VERIFY(std::isfinite(rec.max_V), "non-finite slip rate at step " << s);
       const Vector &V = op.SlipRate();
       for (int j = 0; j < no; j++)
@@ -916,7 +962,9 @@ int main(int argc, char *argv[])
                   << "," << cf(3 * j) << "," << cf(3 * j + 1) << "," << cf(3 * j + 2)
                   << "," << d(3 * j) << "," << d(3 * j + 1) << "," << d(3 * j + 2)
                   << "," << V(3 * j) << "," << V(3 * j + 1) << "," << V(3 * j + 2)
-                  << "," << psi(j) << "," << Xs(2 * j) << "," << Xs(2 * j + 1) << "," << sg(j) << "\n";
+                  << "," << psi(j) << "," << Xs(2 * j) << "," << Xs(2 * j + 1) << "," << sg(j);
+            if (pc_on) { *dump << "," << op.PrakashCliftonSigma()(j); }
+            *dump << "\n";
          }
       }
 #ifdef MFEM_USE_HDF5
@@ -941,6 +989,10 @@ int main(int argc, char *argv[])
          std::cout << std::setprecision(6) << "  step " << s << " t = " << t << "  max|V| = "
                    << rec.max_V << "  max|V|dt/Dc = " << rec.max_V_dt_over_Dc
                    << "  sigma_n_eff in [" << rec.min_sigma_eff << ", " << rec.max_sigma_eff << "]";
+         if (pc_on)
+         {
+            std::cout << "  sigma_pc in [" << rec.min_sigma_pc << ", " << rec.max_sigma_pc << "]";
+         }
          if (mon) { std::cout << "  E_h = " << er.E_h << "  sum rho = " << mon->SumRho(); }
          std::cout << "  wall " << wall << " s\n" << std::flush;
          (void)rho;
@@ -976,8 +1028,9 @@ int main(int argc, char *argv[])
    {
       std::cout << std::setprecision(6) << "=== done: " << nsteps << " steps, t = " << t
                 << " s; max|V| " << max_V_run << " m/s; max|V|dt/Dc " << max_ratio_run
-                << "; sigma_n_eff in [" << min_sig_run << ", " << max_sig_run << "] Pa; wall "
-                << wall << " s ===\n";
+                << "; sigma_n_eff in [" << min_sig_run << ", " << max_sig_run << "] Pa";
+      if (pc_on) { std::cout << "; sigma_pc in [" << min_pc_run << ", " << max_pc_run << "] Pa"; }
+      std::cout << "; wall " << wall << " s ===\n";
    }
    return 0;
 }

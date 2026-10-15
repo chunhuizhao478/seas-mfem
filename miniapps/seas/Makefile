@@ -3195,6 +3195,37 @@ test-nitsche-tpv102-inline: seas_test_nitsche_tpv102_inline
 	  else echo "FAILED: $$m (np $$np) aborted without '$$msg'"; exit 1; fi; \
 	done; done; rm -f p6_abort.log
 
+# Nitsche dynamic rupture: Prakash-Clifton regularization of the normal
+# stress the law sees (NitscheWaveOperator::SetPrakashClifton; Chunhui Zhao,
+# 2026-10-14).  PC-b exact update, PC-c L -> 0 == off bitwise, PC-d
+# equilibrium, PC-s active; --abort-unseeded must abort.
+TEST_NITSCHE_PC_SRC = tests/verification/test_nitsche_pc.cpp
+TEST_NITSCHE_PC_OBJ = $(TEST_NITSCHE_PC_SRC:.cpp=.o)
+$(TEST_NITSCHE_PC_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             domain/nitsche_wave_operator.hpp \
+                             domain/elasticity_operator_penalty.inl \
+                             fault/fault_orientation.hpp \
+                             fault/fault_frame.hpp \
+                             friction/rate_state_closure.hpp \
+                             solver/nitsche_cfl.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_pc: $(TEST_NITSCHE_PC_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_PC_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-pc: seas_test_nitsche_pc
+	for np in 1 2 4; do $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_nitsche_pc || exit 1; done
+	if $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_pc --abort-unseeded > pc_abort.log 2>&1; \
+	then echo "FAILED: --abort-unseeded did not abort"; exit 1; fi; \
+	if grep -q "never seeded" pc_abort.log; then echo "PASSED: --abort-unseeded aborted: never seeded"; \
+	else echo "FAILED: --abort-unseeded aborted without 'never seeded'"; exit 1; fi; rm -f pc_abort.log
+
 # Nitsche dynamic rupture P7: the driver (plan N-07).  Reads the SAFS deck
 # through spatial::LoadSpatialFrictionConfig (toml11) and the constant
 # material; links the friction parser, the material and the nucleation

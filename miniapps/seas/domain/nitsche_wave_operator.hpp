@@ -52,6 +52,20 @@
 //
 // Without fault faces boxes 3-11 are absent and every bit is P3/P4's.
 //
+// Optional Prakash-Clifton regularization (Chunhui Zhao, 2026-10-14), set by
+// SetPrakashClifton: the law in box 9 sees a regularized normal stress
+// sigma* instead of sigma_eff,
+//
+//    d sigma*/dt = -(|V| + v_star) / L (sigma* - sigma_eff),
+//
+// advanced once per step with the exact exponential of SeisSol's
+// BiMaterialFault::strengthHook (LinearSlipWeakening.h) and the previous
+// step's slip rate:  x = (|V^n| + v_star) dt / L,
+//    sigma*^{n+1} = e^{-x} sigma*^n + (1 - e^{-x}) sigma_eff^{n+1}.
+// The closure interface is unchanged (any law).  The range check and the
+// recorded sigma_eff stay on the actual sigma_eff.  Off (the default) every
+// bit is unchanged.
+//
 // NitscheMaterialSample lives in nitsche_material_sample.hpp (moved there in
 // P3 to break an include cycle with nitsche_mass.hpp); it is re-exported here.
 //
@@ -112,6 +126,8 @@ struct NitscheStepRecord
    real_t max_sigma_eff = 0.0;
    real_t max_V = 0.0;
    real_t max_V_dt_over_Dc = 0.0;   ///< predictor stability: abort above 2
+   real_t min_sigma_pc = 0.0;       ///< Prakash-Clifton sigma* (0 when off)
+   real_t max_sigma_pc = 0.0;
 };
 
 /// Explicit elastodynamics d2u/dt2 = M^{-1} (F(t) - K u - C v + G d), with
@@ -330,6 +346,33 @@ public:
    const Vector &LastTrialTraction() const { return Town_; }
    /// A^{n+1} returned by the last ImplicitSolve (energy diagnostics).
    const Vector &LastAcceleration() const { return last_accel_; }
+
+   /// Prakash-Clifton regularization of the normal stress the law sees
+   /// (header).  v_star in m/s, length in m, both > 0.  Seed sigma* with
+   /// SetPrakashCliftonState before the first step.
+   void SetPrakashClifton(real_t v_star, real_t length)
+   {
+      MFEM_VERIFY(has_fault_, "SetPrakashClifton: the operator has no fault");
+      MFEM_VERIFY(v_star > 0.0 && length > 0.0, "SetPrakashClifton: v_star = "
+                  << v_star << ", length = " << length << "; both must be > 0");
+      pc_ = true;
+      pc_vstar_ = v_star;
+      pc_len_ = length;
+   }
+   /// sigma*^0 per owned fault DOF (size no; e.g. the initial sigma_n).
+   void SetPrakashCliftonState(const Vector &sigma_pc)
+   {
+      MFEM_VERIFY(pc_, "SetPrakashCliftonState: call SetPrakashClifton first");
+      MFEM_VERIFY(sigma_pc.Size() == no_, "SetPrakashCliftonState: size "
+                  << sigma_pc.Size() << " != " << no_);
+      sigpc_ = sigma_pc;
+      pc_seeded_ = true;
+   }
+   bool HasPrakashClifton() const { return pc_; }
+   real_t PrakashCliftonVStar() const { return pc_vstar_; }
+   real_t PrakashCliftonLength() const { return pc_len_; }
+   /// sigma* per owned fault DOF (no), after the last advance.
+   const Vector &PrakashCliftonSigma() const { return sigpc_; }
    /// Projected prestress (3 no) and nucleation spatial traction (3 no);
    /// the nucleation enters as NucleationFactor(t) * NucleationTraction().
    const Vector &PrestressTraction() const { return S0_own_; }
@@ -382,9 +425,12 @@ public:
 
    /// Box 9 at one owned DOF j: X = (T + S) in the frame, the range check,
    /// the closure with gamma_F = 1/2 sigma_F dt and state psi.  Returns the
-   /// global slip rate in V[3], sigma_eff and X_tan in the frame.
+   /// global slip rate in V[3], sigma_eff and X_tan in the frame.  With
+   /// sigma_pc (Prakash-Clifton) *sigma_pc = E *sigma_pc + omE sigma_eff on
+   /// return and the closure sees that value instead of sigma_eff.
    void CloseDOF(int j, const real_t TS[3], real_t psi, real_t V[3],
-                 real_t &sigma_eff, real_t X[2]) const
+                 real_t &sigma_eff, real_t X[2], real_t *sigma_pc = nullptr,
+                 real_t E = 0.0, real_t omE = 1.0) const
    {
       const real_t *n = &frame_own_(9 * j), *dv = &frame_own_(9 * j + 3),
                     *sv = &frame_own_(9 * j + 6);
@@ -402,8 +448,14 @@ public:
       st.psi = psi;
       st.a = a_own_(j);
       st.Dc = Dc_own_(j);
+      real_t sig_law = sigma_eff;
+      if (sigma_pc)
+      {
+         *sigma_pc = E * (*sigma_pc) + omE * sigma_eff;
+         sig_law = *sigma_pc;
+      }
       real_t Vl[2];
-      closure_->SolveSlipRate(X, 0.5 * sigF_own_(j) * dt_, sigma_eff, st, Vl);
+      closure_->SolveSlipRate(X, 0.5 * sigF_own_(j) * dt_, sig_law, st, Vl);
       fault_frame::Embed(Vl[0], Vl[1], dv, sv, V);
    }
 
@@ -453,6 +505,8 @@ private:
    /// Boxes 3-11 at t = t_{n+1}, x = U^{n+1}.
    void AdvanceFault_(const Vector &x, real_t t)
    {
+      MFEM_VERIFY(!pc_ || pc_seeded_, "NitscheWaveOperator: Prakash-Clifton is on "
+                  "but sigma* was never seeded (SetPrakashCliftonState)");
       ++steps_;
       const real_t dt = dt_;
       // 3, 4
@@ -474,13 +528,26 @@ private:
       real_t min_sig = std::numeric_limits<real_t>::infinity();
       real_t max_sig = -std::numeric_limits<real_t>::infinity();
       real_t max_V = 0.0, max_ratio = 0.0;
+      real_t min_pc = std::numeric_limits<real_t>::infinity();
+      real_t max_pc = -std::numeric_limits<real_t>::infinity();
       Xlast_.SetSize(2 * no_);
       siglast_.SetSize(no_);
       for (int j = 0; j < no_; j++)
       {
          real_t TS[3], Vn[3], X[2], sig;
          for (int c = 0; c < 3; c++) { TS[c] = Town_(3 * j + c) + S_(3 * j + c); }
-         CloseDOF(j, TS, psistar_(j), Vn, sig, X);
+         if (pc_)
+         {
+            // previous step's slip rate (SeisSol: slipRateMagnitude before the solve)
+            const real_t *Vo = &V_(3 * j);
+            const real_t Vo_abs = std::sqrt(Vo[0] * Vo[0] + Vo[1] * Vo[1] + Vo[2] * Vo[2]);
+            const real_t xpc = -(Vo_abs + pc_vstar_) * dt / pc_len_;
+            CloseDOF(j, TS, psistar_(j), Vn, sig, X, &sigpc_(j), std::exp(xpc),
+                     -std::expm1(xpc));
+            min_pc = std::min(min_pc, sigpc_(j));
+            max_pc = std::max(max_pc, sigpc_(j));
+         }
+         else { CloseDOF(j, TS, psistar_(j), Vn, sig, X); }
          const real_t Vabs = std::sqrt(Vn[0] * Vn[0] + Vn[1] * Vn[1] + Vn[2] * Vn[2]);
          // C-07 anti-parallel: V . X_tan < 0 wherever |V| > 0.
          const real_t *dv = &frame_own_(9 * j + 3), *sv = &frame_own_(9 * j + 6);
@@ -519,6 +586,14 @@ private:
       record_.max_sigma_eff = red[1];
       record_.max_V = red[2];
       record_.max_V_dt_over_Dc = red[3];
+      if (pc_)
+      {
+         real_t rpc[2] = {-min_pc, max_pc};
+         MPI_Allreduce(MPI_IN_PLACE, rpc, 2, MPITypeMap<real_t>::mpi_type, MPI_MAX,
+                       mesh_.GetComm());
+         record_.min_sigma_pc = -rpc[0];
+         record_.max_sigma_pc = rpc[1];
+      }
    }
 
    /// Kernel triad (n_k, t1_k, t2_k) of local fault DOF k.
@@ -798,6 +873,9 @@ private:
    Vector sigF_face_, spread_face_;
    Vector S0_own_, Snuc_own_;
    Vector d_, V_, psi_;
+   bool pc_ = false, pc_seeded_ = false;   // Prakash-Clifton (header)
+   real_t pc_vstar_ = 0.0, pc_len_ = 0.0;
+   Vector sigpc_;                          // sigma* per owned DOF
    long steps_ = 0;
    NitscheStepRecord record_;
    std::unique_ptr<ParGridFunction> u_gf_;
