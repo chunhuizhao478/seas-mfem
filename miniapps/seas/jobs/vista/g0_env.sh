@@ -54,8 +54,10 @@ G0_V63_FLAGS=(
 
 # Meshes (relative to miniapps/seas).
 G0_MESH_PROD="bp5/mesh/reference/bp5_tandem_exact.msh"   # 62,874 tets
-G0_MESH_500M="bp5/mesh/bp5_500m.msh"                     # 235,493 tets
-G0_MESH_250M="bp5/mesh/bp5_250m.msh"                     # 958,952 tets
+# 500 m / 250 m: the same Tandem bp5.geo at res_f 0.5 / 0.25 (fault y=0,
+# tags 1/3/5, km).  bp5/mesh/bp5_{500m,250m}.msh use the old x=0 convention.
+G0_MESH_500M="bp5/mesh/reference/bp5_tandem_500m.msh"    # 233,783 tets
+G0_MESH_250M="bp5/mesh/reference/bp5_tandem_250m.msh"    # 935,485 tets
 
 g0_check_binary() {
    if [ ! -x "${SEAS_DIR}/seas_bp5_full" ]; then

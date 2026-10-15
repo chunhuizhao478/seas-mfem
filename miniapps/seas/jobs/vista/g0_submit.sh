@@ -5,6 +5,8 @@
 #   bash jobs/vista/g0_submit.sh                    # dry run: print the sbatch lines
 #   SUBMIT=1 bash jobs/vista/g0_submit.sh           # submit them
 #   SUBMIT=1 STEPS="goldens timing" BUILD_JOB=none bash jobs/vista/g0_submit.sh
+#   SUBMIT=1 STEPS="counts factor" MESHES="500m 250m" BUILD_JOB=none \
+#      bash jobs/vista/g0_submit.sh
 #
 # STEPS (default "build goldens timing counts factor accst"):
 #   build    jobs/vista/g0_build.sbatch (deps, MFEM, driver, unit test)
@@ -15,6 +17,8 @@
 #            500m_p1 -> 250m_p1 -> 500m_p2 -> 250m_p2, each after the last
 #            succeeded (a failure cancels the rest)
 #   accst    accepted-state check, 50 fresh steps, p=1 on 8 ranks
+# MESHES (default "prod 500m 250m") limits the counts and factor jobs to
+# those meshes.
 # Every job after the build waits for it (afterok) unless BUILD_JOB=none
 # (build already done) or BUILD_JOB=<jobid>.
 #
@@ -26,6 +30,7 @@ set -euo pipefail
 SUBMIT="${SUBMIT:-0}"
 STEPS="${STEPS:-build goldens timing counts factor accst}"
 BUILD_JOB="${BUILD_JOB:-}"
+MESHES="${MESHES:-prod 500m 250m}"
 
 if [ ! -f jobs/vista/g0_env.sh ]; then
    echo "ERROR: run from miniapps/seas" >&2
@@ -61,6 +66,7 @@ sub() {
 }
 
 has() { [[ " ${STEPS} " == *" $1 "* ]]; }
+has_mesh() { [[ " ${MESHES} " == *" $1 "* ]]; }
 
 if has build; then
    sub build jobs/vista/g0_build.sbatch
@@ -89,6 +95,7 @@ fi
 
 if has counts; then
    for m in prod 500m 250m; do
+      has_mesh "${m}" || continue
       for p in 1 2; do
          if [ "${m}" = 250m ] && [ "${p}" = 2 ]; then
             sub "counts ${m} p${p}" "${DEP[@]}" -N 4 -n 8 -t 06:00:00 \
@@ -105,6 +112,7 @@ fi
 
 if has factor; then
    for c in prod_p1 prod_p2; do
+      has_mesh prod || continue
       sub "factor ${c}" "${DEP[@]}" -N 1 -n 144 -t 02:00:00 \
          --export=ALL,CASE="${c}" jobs/vista/g0_factor_size.sbatch
    done
@@ -113,6 +121,7 @@ if has factor; then
    for spec in 500m_p1:2:72:02:00:00 250m_p1:8:288:04:00:00 \
                500m_p2:8:288:04:00:00 250m_p2:32:1152:06:00:00; do
       IFS=: read -r c nodes ranks hh mm ss <<< "${spec}"
+      has_mesh "${c%_p*}" || continue
       chain=()
       if [ -n "${prev}" ] && [ "${prev}" != none ]; then
          chain=(--dependency="afterok:${prev}" --kill-on-invalid-dep=yes)
