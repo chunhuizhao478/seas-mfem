@@ -40,7 +40,17 @@ sub() {
    local name="$1"; shift
    n=$((n + 1))
    if [ "${SUBMIT}" = 1 ]; then
-      JOB="$(sbatch --parsable "$@")"
+      # Vista's sbatch prints a banner on stdout even with --parsable; the
+      # job id ("id" or "id;cluster") is the last line.
+      local out
+      out="$(sbatch --parsable "$@")"
+      JOB="$(printf '%s\n' "${out}" | tail -n 1)"
+      JOB="${JOB%%;*}"
+      if ! [[ "${JOB}" =~ ^[0-9]+$ ]]; then
+         echo "ERROR: ${name}: no job id in sbatch output:" >&2
+         printf '%s\n' "${out}" >&2
+         exit 1
+      fi
       echo "${name}: job ${JOB}"
    else
       JOB="JOB${n}"
