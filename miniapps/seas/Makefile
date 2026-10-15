@@ -374,6 +374,8 @@ TEST_PARAVIEW_SCHEDULE_CAP_SRC             = tests/unit/test_paraview_schedule_c
 TEST_KINEMATICS_FIELD_SET_SRC              = tests/unit/test_kinematics_field_set.cpp
 # R-003 of REVIEW.md 2026-05-16 — zero-fault-DOF rank PETSc TS lifecycle
 TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_SRC      = tests/unit/test_bp5_petsc_ts_zero_fault_rank.cpp
+# GPU plan G0 — matrix-only assembly (--exit-after-assembly) statistics
+TEST_G0_MATRIX_ONLY_SRC                    = tests/unit/test_g0_matrix_only.cpp
 # Phase 1 of petsc_ts_restart_plan_2026-05-16 — V2 checkpoint round-trip + restart-state restoration
 TEST_BP5_PETSC_TS_RESTART_SRC              = tests/unit/test_bp5_petsc_ts_restart.cpp
 # Phase 4 TPV104 port — V1 checkpoint round-trip
@@ -760,6 +762,7 @@ TEST_VOLUME_HDF_COMPRESSION_OBJ            = $(TEST_VOLUME_HDF_COMPRESSION_SRC:.
 TEST_PARAVIEW_SCHEDULE_CAP_OBJ             = $(TEST_PARAVIEW_SCHEDULE_CAP_SRC:.cpp=.o)
 TEST_KINEMATICS_FIELD_SET_OBJ              = $(TEST_KINEMATICS_FIELD_SET_SRC:.cpp=.o)
 TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_OBJ      = $(TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_SRC:.cpp=.o)
+TEST_G0_MATRIX_ONLY_OBJ                    = $(TEST_G0_MATRIX_ONLY_SRC:.cpp=.o)
 TEST_BP5_PETSC_TS_RESTART_OBJ              = $(TEST_BP5_PETSC_TS_RESTART_SRC:.cpp=.o)
 TEST_TPV104_CHECKPOINT_OBJ                 = $(TEST_TPV104_CHECKPOINT_SRC:.cpp=.o)
 TEST_PARAVIEW_RANK0_WARNING_GATE_OBJ       = $(TEST_PARAVIEW_RANK0_WARNING_GATE_SRC:.cpp=.o)
@@ -858,6 +861,7 @@ FRICTION_HEADERS = friction/friction_law.hpp \
 # Phase 2: Domain operator
 DOMAIN_HEADERS = common/seas_types.hpp \
                  common/mpi_context.hpp \
+                 common/stage_timers.hpp \
                  domain/domain_operator.hpp \
                  domain/antiplane_operator.hpp \
                  domain/antiplane_bdrload_operator.hpp \
@@ -867,6 +871,7 @@ DOMAIN_HEADERS = common/seas_types.hpp \
                  domain/elasticity_operator_setup.inl \
                  domain/elasticity_operator_assembly.inl \
                  domain/elasticity_operator_traction.inl \
+                 domain/matrix_stats.hpp \
                  domain/boundary_config.hpp \
                  domain/domain_config.hpp \
                  domain/seas_boundary_tags.hpp \
@@ -2037,6 +2042,11 @@ seas_test_kinematics_field_set: $(TEST_KINEMATICS_FIELD_SET_OBJ)
 # R-003 of REVIEW.md 2026-05-16 — zero-fault-DOF rank padded-shrink invariant
 seas_test_bp5_petsc_ts_zero_fault_rank: $(TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# GPU plan G0 — matrix-only assembly statistics equal the solver path's
+seas_test_g0_matrix_only: $(TEST_G0_MATRIX_ONLY_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_G0_MATRIX_ONLY_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Phase 1 of petsc_ts_restart_plan_2026-05-16 — V2 checkpoint round-trip
@@ -3985,6 +3995,10 @@ $(TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_OBJ): %.o: $(SRC)%.cpp $(MFEM_LIB_FILE) $(CO
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+$(TEST_G0_MATRIX_ONLY_OBJ): %.o: $(SRC)%.cpp $(DOMAIN_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_USE_MPI -c $< -o $@
+
 $(TEST_BP5_PETSC_TS_RESTART_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
@@ -4523,6 +4537,15 @@ test-elasticity-br2: seas_test_elasticity_br2
 
 test-elasticity-operator: seas_test_elasticity_operator
 	./seas_test_elasticity_operator
+
+# GPU plan G0: the BP5 gate checker (bp5/bp5_gate_check.py), Python only.
+test-bp5-gate-check:
+	python3 tests/unit/test_bp5_gate_check.py
+
+# GPU plan G0: --exit-after-assembly statistics, on 1 and 2 ranks.
+test-g0-matrix-only: seas_test_g0_matrix_only
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_g0_matrix_only
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_g0_matrix_only
 
 test-bp5-fault-operator: seas_test_bp5_fault_operator
 	./seas_test_bp5_fault_operator

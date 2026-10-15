@@ -226,7 +226,7 @@
             const int vdim = fes_->GetVDim();
             MatrixStats stats =
                ComputeMatrixStats(*K, dofs_per_elem, vdim, mesh_.GetComm(),
-                                  /*do_symmetry=*/true);
+                                  /*do_symmetry=*/!assemble_matrix_only_);
             int my_rank = 0;
             MPI_Comm_rank(mesh_.GetComm(), &my_rank);
             if (my_rank == 0)
@@ -311,6 +311,9 @@
                mfem::out << "  [K-DIAG] ||K·1||_inf = " << global_norminf << "\n";
             }
          }
+
+         // --exit-after-assembly: K and its statistics only, no solver.
+         if (assemble_matrix_only_) { return; }
 
 #ifdef MFEM_USE_MUMPS
          const int mumps_print_level = matrix_stats_enabled_ ? 2 : 1;
@@ -431,6 +434,7 @@
       }
       else
       {
+         if (assemble_matrix_only_) { return; }
          SparseMatrix &A = cached_a_->SpMat();
          serial_prec_ = std::make_unique<GSSmoother>(A);
          static_cast<CGSolver*>(solver_.get())->SetPreconditioner(*serial_prec_);
@@ -1073,8 +1077,6 @@
       // DG Dirichlet BC contribution:
       //   b[k,i] += c0 * [σ(φ_k e_i)·n]_u * u_D_u * (1/detJ)
       //           + penalty * φ_k * u_D_i
-
-      if (std::abs(time * Vp_) < 1e-30) { return; }
 
       int dim = 3;
 

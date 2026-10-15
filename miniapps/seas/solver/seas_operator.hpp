@@ -21,6 +21,7 @@
 #include "../trace/face_trace_logger.hpp"
 #include <iomanip>
 #include "../common/mpi_context.hpp"
+#include "../common/stage_timers.hpp"
 
 #include <memory>
 #include <cmath>
@@ -157,6 +158,11 @@ public:
    /// instead of constant sigma_n. Matches Tandem's DieterichRuinaAgeing.
    void SetElasticSigmaN(bool v) { elastic_sigma_n_ = v; }
 
+   /// Time the parts of Mult() into @a timers (nullptr = no timing).  The
+   /// domain solve's own parts are timed by the domain operator, which the
+   /// caller points at the same object.
+   void SetStageTimers(StageTimers *timers) { stage_timers_ = timers; }
+
    /// Set face tracer (non-owning pointer, caller manages lifetime).
    void SetFaceTracer(FaceTraceLogger<MeshType> *tracer)
    {
@@ -178,6 +184,8 @@ private:
    mutable Vector local_traction_;
    mutable Vector normal_traction_;  // v51: elastic T_n for sigma_n feedback
    mutable Vector local_normal_traction_;
+
+   StageTimers *stage_timers_ = nullptr;
 
    // Face tracer decomposition vectors (allocated only when tracer is active)
    FaceTraceLogger<MeshType> *face_tracer_ = nullptr;
@@ -336,7 +344,10 @@ template <typename MeshType, typename DomainOpType, typename FaultOpType>
 void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
    const Vector &state, Vector &rate) const
 {
+   ScopedStageTimer stage_timer(stage_timers_, StageTimers::StageTotal);
+
    // 1. Extract slip from state vector
+   if (stage_timers_) { stage_timers_->Start(StageTimers::SlipExpand); }
    fault_->GetSlip(state, slip_);
 
    // Debug: check for NaN in slip before domain solve
@@ -350,10 +361,12 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
 
    // 2. Solve domain problem with slip BC
    domain_->ExpandOwnedToLocalFault(slip_, local_slip_, domain_->NumSlipComponents());
+   if (stage_timers_) { stage_timers_->Stop(StageTimers::SlipExpand); }
    domain_->Solve(t, local_slip_, *u_gf_);
 
    // 3. Compute traction at fault from displacement
    // v51: optionally compute elastic normal traction for sigma_n feedback
+   if (stage_timers_) { stage_timers_->Start(StageTimers::Traction); }
    if (face_tracer_ && face_tracer_->IsActive())
    {
       // Decomposed traction for face tracer (including normal decomposition)
@@ -396,6 +409,7 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
                                        normal_traction_);
       }
    }
+   if (stage_timers_) { stage_timers_->Stop(StageTimers::Traction); }
 
    // v57 MPI diagnostic: print norms on first non-zero-slip evaluation
    if (!mpi_diag_done_)
@@ -487,8 +501,11 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
 
    // 4. Compute fault RHS (slip rate and state rate)
    // v51: pass elastic normal traction for sigma_n feedback (nullptr = use constant)
-   fault_->ComputeRHS(traction_, state, rate,
-                       elastic_sigma_n_ ? &normal_traction_ : nullptr);
+   {
+      ScopedStageTimer timer(stage_timers_, StageTimers::Friction);
+      fault_->ComputeRHS(traction_, state, rate,
+                          elastic_sigma_n_ ? &normal_traction_ : nullptr);
+   }
    friction_used_normal_traction_ = elastic_sigma_n_;
 
    // Per-stage coupling loop norms (first 10 evaluations)

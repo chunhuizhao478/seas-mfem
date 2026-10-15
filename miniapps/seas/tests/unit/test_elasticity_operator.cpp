@@ -4365,6 +4365,105 @@ void TestStationSlipRateUsesElasticSigmaN()
 }
 
 // =============================================================================
+// Test: --stage-timers (GPU plan G0).  The StageTimers attached to the SEAS
+// operator and its domain operator count each part of a stage once per call,
+// keep the one-off matrix setup across ResetStageParts(), stop counting when
+// detached, and do not change what Mult() computes.
+// =============================================================================
+void TestStageTimers()
+{
+   std::cout << "\n--- Test: Stage timers (G0) ---\n";
+
+   real_t Lx = 100.0e3, Ly = 60.0e3, Lz = 50.0e3;
+   Mesh mesh = CreateTestMesh3DTet(2, 1, 1, Lx, Ly, Lz);
+   BP5Params params;
+
+   auto domain_op = std::make_unique<ElasticityDomainOperator<Mesh>>(
+      mesh, 1, params.lambda(), params.mu(),
+      params.Vp, Lz, 2.0 * Ly, DGMethod::IP);
+   if (domain_op->GetNumFaultDOFs() == 0)
+   {
+      std::cout << "  (Skipped: no fault faces found)\n";
+      return;
+   }
+   auto geom = std::make_unique<FaultGeometry<Mesh>>(*domain_op, params);
+   DieterichRuinaFriction::Constants fc;
+   fc.V0 = params.V0; fc.f0 = params.f0; fc.b = params.b; fc.Dc = params.L0;
+   auto friction = std::make_unique<DieterichRuinaFriction>(fc);
+   auto evolution = std::make_unique<AgingLawPsi>(params.b, params.V0, params.f0);
+   auto fault_op = std::make_unique<RateStateFaultOperator<Mesh, 2>>(
+      geom.get(), friction.get(), evolution.get(), params);
+   BP5SEASOp seas_op(domain_op.get(), fault_op.get());
+
+   StageTimers timers;
+   seas_op.SetStageTimers(&timers);
+   domain_op->SetStageTimers(&timers);
+
+   // The first domain solve (inside SetInitialCondition) assembles K.
+   Vector state(fault_op->StateSize());
+   seas_op.SetInitialCondition(state);
+   TEST_ASSERT(timers.Calls(StageTimers::MatrixSetup) == 1,
+               "stage timers: matrix setup timed once");
+   TEST_ASSERT(timers.Calls(StageTimers::Solve) >= 1,
+               "stage timers: initial-condition solve timed");
+
+   timers.ResetStageParts();
+   TEST_ASSERT(timers.Calls(StageTimers::MatrixSetup) == 1 &&
+               timers.Calls(StageTimers::Solve) == 0 &&
+               timers.Seconds(StageTimers::Solve) == 0.0,
+               "stage timers: reset keeps matrix setup, zeroes the rest");
+
+   // Some slip, so every part of the stage does real work.
+   const int N = fault_op->NumNodes();
+   const Vector &x2 = geom->GetCoordsX2();
+   for (int i = 0; i < N; i++)
+   {
+      state(3 * i + 0) += 1.0e-4 * (1.0 + 0.5 * x2(i) / Lx);
+      state(3 * i + 1) += 2.0e-4 * (1.0 + 0.5 * x2(i) / Lx);
+   }
+
+   Vector rate_on(fault_op->StateSize()), rate_off(fault_op->StateSize());
+   seas_op.Mult(state, rate_on);
+   const StageTimers::Part once[] =
+   {
+      StageTimers::StageTotal, StageTimers::SlipExpand, StageTimers::SlipRHS,
+      StageTimers::DirichletRHS, StageTimers::Solve, StageTimers::SolvePost,
+      StageTimers::Traction, StageTimers::Friction
+   };
+   bool all_once = true;
+   for (StageTimers::Part p : once)
+   {
+      if (timers.Calls(p) != 1)
+      {
+         all_once = false;
+         std::cout << "  " << StageTimers::Name(p) << ": "
+                   << timers.Calls(p) << " calls\n";
+      }
+   }
+   TEST_ASSERT(all_once, "stage timers: one Mult times each stage part once");
+   TEST_ASSERT(timers.Calls(StageTimers::MatrixSetup) == 1,
+               "stage timers: no second matrix setup");
+   TEST_ASSERT(timers.Calls(StageTimers::MonitorTotal) == 0,
+               "stage timers: monitor parts untouched by Mult");
+   TEST_ASSERT(timers.Seconds(StageTimers::StageTotal) >=
+               timers.Seconds(StageTimers::Solve) &&
+               timers.Seconds(StageTimers::Solve) >= 0.0,
+               "stage timers: the solve lies inside the stage");
+
+   // Detached: nothing more is counted, and the result is the same.
+   seas_op.SetStageTimers(nullptr);
+   domain_op->SetStageTimers(nullptr);
+   seas_op.Mult(state, rate_off);
+   TEST_ASSERT(timers.Calls(StageTimers::StageTotal) == 1 &&
+               timers.Calls(StageTimers::Solve) == 1,
+               "stage timers: detached timers count nothing");
+   const real_t d = MaxRelDiff(rate_on, rate_off);
+   std::cout << std::scientific << std::setprecision(3)
+             << "  rate with timers vs without: max rel diff " << d << "\n";
+   TEST_ASSERT(d <= 1e-12, "stage timers: Mult result unchanged by timing");
+}
+
+// =============================================================================
 // Test: Per-quad-point fault basis (Tandem AdapterBase convention)
 // Verifies that ComputeQPBasis populates qp_data with valid normals/tangents
 // that agree with the centroid-based basis on flat faces.
@@ -4817,6 +4916,7 @@ int main()
    TestMultiDOFSEASP1Regression();
    TestMultiDOFOutputFromSEASP2();
    TestStationSlipRateUsesElasticSigmaN();
+   TestStageTimers();
 
    // v55: Per-quad-point fault basis (Tandem AdapterBase convention)
    TestPerQPFaultBasis();

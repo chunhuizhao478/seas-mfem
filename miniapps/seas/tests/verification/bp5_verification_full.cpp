@@ -47,6 +47,17 @@
 //   --regression-tolerance TOL Regression test: fail if any per-field relative
 //                              L2 error exceeds TOL (negative = skip check)
 //   --ref-prefix PFX           Reference file prefix (auto-detected if omitted)
+//   --stage-timers N           Time the parts of each stage and of the step
+//                              monitor; print a table every N accepted steps
+//                              and at exit (GPU plan G0)
+//   --exit-after-assembly      Assemble K, write its statistics JSON (as
+//                              --matrix-stats, without the symmetry check),
+//                              then exit without factorizing (GPU plan G0)
+//   --perturb-initial-state S  Test only: scale every initial state entry by
+//                              1 + 1e-15 r, r uniform in [-1, 1], seed S
+//   --check-accepted-state     After each accepted step, compare the cached
+//                              traction, sigma_n, V and V_max with a fresh
+//                              evaluation at the accepted state (GPU plan G0)
 
 #include "mfem.hpp"
 #ifdef MFEM_USE_PETSC
@@ -87,6 +98,9 @@
 #include <algorithm>
 #include <set>
 #include <map>
+#include <random>
+#include <cstdint>
+#include <limits>
 #include <dirent.h>
 
 using namespace mfem;
@@ -373,7 +387,10 @@ int RunComparison(const std::string &output_dir,
          const auto &sim_field = GetBP5Field(sim_data, f);
          double err = RelativeL2Error(sim_field, ref_interp);
 
-         bool field_fail = (regression_tol >= 0.0 && err > regression_tol);
+         // A NaN error compares false against the tolerance, so a
+         // non-finite error is counted as a failure explicitly.
+         bool field_fail = (regression_tol >= 0.0 &&
+                            (!std::isfinite(err) || err > regression_tol));
          const char *status = field_fail ? "FAIL" : "ok";
 
          std::cout << "    " << std::setw(16) << BP5FieldNames[f]
@@ -401,7 +418,8 @@ int RunComparison(const std::string &output_dir,
    {
       auto ref_gv_interp = InterpolateOnto(ref_gt, ref_gv, sim_gt);
       double err = RelativeL2Error(sim_gv, ref_gv_interp);
-      bool g_fail = (regression_tol >= 0.0 && err > regression_tol);
+      bool g_fail = (regression_tol >= 0.0 &&
+                     (!std::isfinite(err) || err > regression_tol));
       const char *status = g_fail ? "FAIL" : "ok";
 
       std::cout << "  Global log10(Vmax): L2_rel = " << std::scientific
@@ -476,6 +494,189 @@ int RunComparison(const std::string &output_dir,
 }
 
 // ============================================================================
+// GPU plan G0 measurements: --stage-timers and --check-accepted-state
+// ============================================================================
+
+/// Measurement state shared by the PETSc TS monitor and the built-in loop.
+struct G0Measure
+{
+   seas::StageTimers timers;
+   int timer_interval = 0;            // --stage-timers N (0 = off)
+   double loop_start = 0.0;           // MPI_Wtime() when time stepping began
+   bool check_accepted_state = false; // --check-accepted-state
+   real_t check_max = 0.0;            // largest difference over all checks
+   int check_count = 0;
+
+   bool TimersOn() const { return timer_interval > 0; }
+   seas::StageTimers *Timers() { return TimersOn() ? &timers : nullptr; }
+};
+
+/// Print the stage-timer table.  Collective: every rank calls it at the same
+/// accepted step.  "max" is the slowest rank, "mean" the average over ranks;
+/// per-call and per-step figures use the slowest rank.  monitor_step is the
+/// monitor minus its output and checkpoint parts; ts_other is the loop wall
+/// time outside the operator and the monitor (PETSc's RK vector updates and
+/// step control).
+static void PrintStageTimers(const G0Measure &g0, int accepted_steps,
+                             const char *when, MPIContext &mpi)
+{
+   using ST = seas::StageTimers;
+   const int np = ST::NumParts;
+   const int n = np + 2;  // + monitor_step, ts_other
+   std::vector<double> sec(n), sec_max(n), sec_sum(n);
+   std::vector<long long> calls(n, 0), calls_max(n);
+   for (int p = 0; p < np; p++)
+   {
+      sec[p] = g0.timers.Seconds(p);
+      calls[p] = g0.timers.Calls(p);
+   }
+   const double loop = MPI_Wtime() - g0.loop_start;
+   sec[np] = sec[ST::MonitorTotal] - sec[ST::MonitorOutput]
+             - sec[ST::MonitorCheckpoint];
+   calls[np] = calls[ST::MonitorTotal];
+   sec[np + 1] = loop - sec[ST::StageTotal] - sec[ST::MonitorTotal];
+   calls[np + 1] = accepted_steps;
+   double loop_max = 0.0;
+   MPI_Comm comm = mpi.GetComm();
+   MPI_Reduce(sec.data(), sec_max.data(), n, MPI_DOUBLE, MPI_MAX, 0, comm);
+   MPI_Reduce(sec.data(), sec_sum.data(), n, MPI_DOUBLE, MPI_SUM, 0, comm);
+   MPI_Reduce(calls.data(), calls_max.data(), n, MPI_LONG_LONG, MPI_MAX, 0,
+              comm);
+   MPI_Reduce(&loop, &loop_max, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
+   if (!mpi.IsRoot()) { return; }
+
+   const int nranks = mpi.Size();
+   const int steps = std::max(accepted_steps, 1);
+   std::ostringstream o;
+   o << "\n[STAGE-TIMERS] " << when << ": " << accepted_steps
+     << " accepted steps, " << calls_max[ST::StageTotal]
+     << " stages, loop wall " << std::fixed << std::setprecision(3)
+     << loop_max << " s (" << std::scientific << std::setprecision(4)
+     << loop_max / steps << " s/step), " << nranks << " ranks\n";
+   o << "[STAGE-TIMERS] matrix_setup (assembly + solver setup, once): max "
+     << std::fixed << std::setprecision(3) << sec_max[ST::MatrixSetup]
+     << " s, mean " << sec_sum[ST::MatrixSetup] / nranks << " s\n";
+   o << "[STAGE-TIMERS] " << std::left << std::setw(20) << "part"
+     << std::right << std::setw(10) << "calls" << std::setw(14) << "max s"
+     << std::setw(14) << "mean s" << std::setw(14) << "ms/call"
+     << std::setw(14) << "s/step" << std::setw(9) << "% loop" << "\n";
+   auto row = [&](const char *name, int p)
+   {
+      const double per_call = calls_max[p] > 0
+                              ? 1e3 * sec_max[p] / calls_max[p] : 0.0;
+      o << "[STAGE-TIMERS] " << std::left << std::setw(20) << name
+        << std::right << std::setw(10) << calls_max[p]
+        << std::scientific << std::setprecision(4)
+        << std::setw(14) << sec_max[p] << std::setw(14) << sec_sum[p] / nranks
+        << std::setw(14) << per_call << std::setw(14) << sec_max[p] / steps
+        << std::fixed << std::setprecision(2) << std::setw(9)
+        << (loop_max > 0.0 ? 100.0 * sec_max[p] / loop_max : 0.0) << "\n";
+   };
+   for (int p = ST::SlipExpand; p <= ST::StageTotal; p++)
+   {
+      row(ST::Name(p), p);
+   }
+   row("monitor_step", np);
+   row(ST::Name(ST::MonitorOutput), ST::MonitorOutput);
+   row(ST::Name(ST::MonitorCheckpoint), ST::MonitorCheckpoint);
+   row(ST::Name(ST::MonitorTotal), ST::MonitorTotal);
+   row("ts_other", np + 1);
+   std::cout << o.str();
+   std::cout.flush();
+}
+
+/// --check-accepted-state: compare what the monitor and the station writers
+/// take from the operator's caches (left by its last call) with one fresh
+/// evaluation at the accepted state: displacement, shear and normal
+/// traction, slip rate, the station slip rate re-solved from the cached
+/// traction, and local and global V_max.  Each difference is
+/// max|cached - fresh| / max|fresh|, reduced over ranks.  Called after the
+/// step's output, so the run's output is unchanged; the fresh call refreshes
+/// the caches, which the next step's stages overwrite before the monitor
+/// reads them again.  Collective.
+static void CheckAcceptedState(G0Measure &g0, PBP5SEASOp &seas_op,
+                               RateStateFaultOperator<ParMesh, 2> &fault_op,
+                               const Vector &state, real_t time, int step,
+                               MPIContext &mpi)
+{
+   Vector u_c(seas_op.GetDisplacement());
+   const Vector T_c(seas_op.GetTraction());
+   const Vector *Tn_c_ptr = seas_op.GetFrictionNormalTraction();
+   Vector Tn_c;
+   if (Tn_c_ptr) { Tn_c = *Tn_c_ptr; }
+   const Vector V_c(fault_op.GetSlipRate());
+   const real_t vmax_local_c = fault_op.GetMaxSlipRate();
+   const real_t vmax_global_c = seas_op.GetMaxSlipRate();
+   Vector Vst_c;
+   fault_op.RecomputeSlipRate(T_c, state, Vst_c,
+                              Tn_c_ptr ? &Tn_c : nullptr);
+
+   Vector rate(state.Size());
+   seas_op.SetTime(time);
+   seas_op.Mult(state, rate);
+
+   const Vector &u_f = seas_op.GetDisplacement();
+   const Vector &T_f = seas_op.GetTraction();
+   const Vector *Tn_f_ptr = seas_op.GetFrictionNormalTraction();
+   const Vector &V_f = fault_op.GetSlipRate();
+   const real_t vmax_local_f = fault_op.GetMaxSlipRate();
+   const real_t vmax_global_f = seas_op.GetMaxSlipRate();
+   Vector Vst_f;
+   fault_op.RecomputeSlipRate(T_f, state, Vst_f, Tn_f_ptr);
+
+   auto rel = [&](const Vector &a, const Vector &b) -> real_t
+   {
+      real_t num = 0.0, den = 0.0;
+      if (a.Size() != b.Size())
+      {
+         num = std::numeric_limits<real_t>::infinity();
+      }
+      else
+      {
+         for (int i = 0; i < a.Size(); i++)
+         {
+            num = std::max(num, std::abs(a(i) - b(i)));
+            den = std::max(den, std::abs(b(i)));
+         }
+      }
+      num = mpi.GlobalMax(num);
+      den = mpi.GlobalMax(den);
+      return den > 0.0 ? num / den : num;
+   };
+   auto rel_scalar = [](real_t a, real_t b) -> real_t
+   {
+      return std::abs(b) > 0.0 ? std::abs(a - b) / std::abs(b)
+                               : std::abs(a - b);
+   };
+
+   const real_t d_u = rel(u_c, u_f);
+   const real_t d_T = rel(T_c, T_f);
+   // The initial-condition solve does not pass sigma_n to the friction
+   // solve; there is then no cached normal traction to compare (-1).
+   const int have_Tn = mpi.GlobalMaxInt((Tn_c_ptr && Tn_f_ptr) ? 1 : 0);
+   const real_t d_Tn = have_Tn ? rel(Tn_c, *Tn_f_ptr) : -1.0;
+   const real_t d_V = rel(V_c, V_f);
+   const real_t d_Vst = rel(Vst_c, Vst_f);
+   const real_t d_vl = mpi.GlobalMax(rel_scalar(vmax_local_c, vmax_local_f));
+   const real_t d_vg = rel_scalar(vmax_global_c, vmax_global_f);
+   const real_t d_max = std::max({d_u, d_T, d_Tn, d_V, d_Vst, d_vl, d_vg});
+   g0.check_max = std::max(g0.check_max, d_max);
+   g0.check_count++;
+
+   if (mpi.IsRoot())
+   {
+      std::cout << std::scientific << std::setprecision(3)
+                << "[ACCEPTED-STATE] step " << step << " t "
+                << time / BP5Params::seconds_per_year << " yr V_max "
+                << vmax_global_f << ": u " << d_u << " T " << d_T
+                << " Tn " << d_Tn << " V " << d_V << " V_station " << d_Vst
+                << " Vmax_local " << d_vl << " Vmax_global " << d_vg
+                << (d_max > 1e-12 ? "  ABOVE 1e-12" : "  ok") << "\n";
+      std::cout.flush();
+   }
+}
+
+// ============================================================================
 // TSSolve monitor context and callback (Tandem-style time stepping)
 // ============================================================================
 #ifdef MFEM_USE_PETSC
@@ -522,15 +723,18 @@ struct BP5MonitorCtx
    // restart chains (R-005).
    seas::ParaViewOutput<ParMesh> *pv_out = nullptr;     // may be nullptr
    int restart_rejections_carryover = 0;                 // R-303 / R-005
+
+   G0Measure *g0 = nullptr;  // --stage-timers / --check-accepted-state
 };
 
-/// PETSc TSMonitor callback — called after every accepted step inside TSSolve.
+/// Body of the PETSc TSMonitor callback below.
 /// Matches Tandem's MonitorQD::monitor pattern: read state, do I/O.
-static PetscErrorCode bp5_ts_monitor_callback(
+static PetscErrorCode bp5_ts_monitor_body(
    TS ts, PetscInt step, PetscReal time, Vec u, void *ctx)
 {
    PetscFunctionBeginUser;
    auto *mon = static_cast<BP5MonitorCtx*>(ctx);
+   seas::StageTimers *timers = mon->g0 ? mon->g0->Timers() : nullptr;
 
    // state already reflects the accepted step (PlaceMemory shares memory).
    Vector &state  = *mon->state;
@@ -601,6 +805,7 @@ static PetscErrorCode bp5_ts_monitor_callback(
    }
 
    // I/O: adaptive schedule or every step
+   if (timers) { timers->Start(seas::StageTimers::MonitorOutput); }
    if (mon->write_every_step)
    {
       mon->bench_out->ForceWrite(time, state, *mon->fault_op,
@@ -629,11 +834,14 @@ static PetscErrorCode bp5_ts_monitor_callback(
       mon->global_out->WriteStep(
          {time, V_max > 0.0 ? std::log10(V_max) : -300.0});
    }
+   if (timers) { timers->Stop(seas::StageTimers::MonitorOutput); }
 
    // Checkpoint
    int istep = static_cast<int>(step);
    if (mon->checkpoint_interval > 0 && istep % mon->checkpoint_interval == 0)
    {
+      seas::ScopedStageTimer ckpt_timer(timers,
+                                        seas::StageTimers::MonitorCheckpoint);
       Vector u_vec;
       u_vec = mon->seas_op->GetDisplacement();
       Vector empty_k0;
@@ -713,6 +921,37 @@ static PetscErrorCode bp5_ts_monitor_callback(
    }
 
    PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+/// PETSc TSMonitor callback — called after every accepted step inside TSSolve
+/// (and once at step 0 before the first step).  Runs the monitor body, then
+/// the G0 measurements, which stay outside the monitor's own timer.
+static PetscErrorCode bp5_ts_monitor_callback(
+   TS ts, PetscInt step, PetscReal time, Vec u, void *ctx)
+{
+   auto *mon = static_cast<BP5MonitorCtx*>(ctx);
+   G0Measure *g0 = mon->g0;
+   PetscErrorCode ierr;
+   {
+      seas::ScopedStageTimer timer(g0 ? g0->Timers() : nullptr,
+                                   seas::StageTimers::MonitorTotal);
+      ierr = bp5_ts_monitor_body(ts, step, time, u, ctx);
+   }
+   if (ierr != PETSC_SUCCESS || !g0) { return ierr; }
+   TSConvergedReason reason;
+   TSGetConvergedReason(ts, &reason);
+   if (reason < 0) { return ierr; }  // NaN abort in the body
+   if (g0->check_accepted_state)
+   {
+      CheckAcceptedState(*g0, *mon->seas_op, *mon->fault_op, *mon->state,
+                         time, static_cast<int>(step), *mon->mpi);
+   }
+   if (g0->TimersOn() && step > 0 && step % g0->timer_interval == 0)
+   {
+      PrintStageTimers(*g0, static_cast<int>(step), "every N steps",
+                       *mon->mpi);
+   }
+   return ierr;
 }
 
 #endif // MFEM_USE_PETSC
@@ -831,6 +1070,11 @@ int main(int argc, char *argv[])
    // One-shot stiffness-matrix analysis (writes JSON, optional early exit).
    bool matrix_stats = false;
    bool exit_after_factorize = false;
+   // GPU plan G0 measurements.
+   int stage_timer_interval = 0;       // --stage-timers N (0 = off)
+   bool exit_after_assembly = false;   // --exit-after-assembly
+   long long perturb_seed = -1;        // --perturb-initial-state SEED
+   bool check_accepted_state = false;  // --check-accepted-state
 
    for (int i = 1; i < argc; i++)
    {
@@ -898,6 +1142,20 @@ int main(int argc, char *argv[])
       if (arg == "--verify") { verify_parallel = true; }
       if (arg == "--matrix-stats") { matrix_stats = true; }
       if (arg == "--exit-after-factorize") { exit_after_factorize = true; }
+      if (arg == "--stage-timers" && i + 1 < argc)
+      {
+         stage_timer_interval = std::atoi(argv[++i]);
+         MFEM_VERIFY(stage_timer_interval > 0,
+                     "--stage-timers N needs N > 0");
+      }
+      if (arg == "--exit-after-assembly") { exit_after_assembly = true; }
+      if (arg == "--perturb-initial-state" && i + 1 < argc)
+      {
+         perturb_seed = std::atoll(argv[++i]);
+         MFEM_VERIFY(perturb_seed >= 0,
+                     "--perturb-initial-state SEED needs SEED >= 0");
+      }
+      if (arg == "--check-accepted-state") { check_accepted_state = true; }
       if (arg == "--bc-mode" && i + 1 < argc) { bc_mode_str = argv[++i]; }
       if (arg == "--psi-init-mode" && i + 1 < argc)
       {
@@ -1132,6 +1390,17 @@ int main(int argc, char *argv[])
       no_v_guard = true;
       no_psi_clamp = true;
    }
+
+   // G0 measurement flags that do not combine.
+   MFEM_VERIFY(!(stage_timer_interval > 0 && check_accepted_state),
+               "--stage-timers and --check-accepted-state do not combine: "
+               "the check's extra operator call would be timed as a stage");
+   MFEM_VERIFY(!(exit_after_assembly && exit_after_factorize),
+               "--exit-after-assembly and --exit-after-factorize do not "
+               "combine");
+   MFEM_VERIFY(perturb_seed < 0 || restart_prefix.empty(),
+               "--perturb-initial-state applies to a fresh start only, "
+               "not to --restart");
 
 #ifndef MFEM_USE_PETSC
    if (use_petsc_ts)
@@ -1593,6 +1862,34 @@ int main(int argc, char *argv[])
                 << " (rank 0)\n";
    }
 
+   // Matrix-count mode (GPU plan G0): assemble K, write its statistics, and
+   // exit before any factorization, so meshes whose factor may not fit can
+   // still be counted.
+   if (exit_after_assembly)
+   {
+      const std::string stats_path =
+         output_dir + "/" + output_prefix + "_matrix_stats.json";
+      domain.SetMatrixStatsConfig(true, stats_path);
+      if (mpi.IsRoot())
+      {
+         std::cout << "  [matrix-stats] --exit-after-assembly: assembling K "
+                   << "(no factorization); JSON -> " << stats_path << "\n";
+      }
+      const double t0 = MPI_Wtime();
+      domain.AssembleMatrixOnly();
+      const double t_asm = mpi.GlobalMax(MPI_Wtime() - t0);
+      if (mpi.IsRoot())
+      {
+         std::cout << "  [matrix-stats] K assembled in " << t_asm
+                   << " s (slowest rank); exiting.\n";
+      }
+      MPI_Barrier(MPI_COMM_WORLD);
+#ifdef MFEM_USE_PETSC
+      if (petsc_initialized) { MFEMFinalizePetsc(); }
+#endif
+      return 0;
+   }
+
    // =========================================================================
    // Fault components
    // =========================================================================
@@ -1645,6 +1942,15 @@ int main(int argc, char *argv[])
    // SEAS quasi-dynamic operator
    // =========================================================================
    PBP5SEASOp seas_op(&domain, &fault_op, &mpi);
+
+   G0Measure g0;
+   g0.timer_interval = stage_timer_interval;
+   g0.check_accepted_state = check_accepted_state;
+   if (g0.TimersOn())
+   {
+      domain.SetStageTimers(g0.Timers());
+      seas_op.SetStageTimers(g0.Timers());
+   }
 
    // v51: dip traction diagnostics
    if (zero_dip_traction)
@@ -1802,6 +2108,32 @@ int main(int argc, char *argv[])
 #endif
       return 0;
    }
+
+   // Round-off perturbation of the initial state (test only, GPU plan G0
+   // floors): every entry is scaled by 1 + 1e-15 r, r uniform in [-1, 1].
+   // The initial slip is zero, so in practice this perturbs the state
+   // variable.  The generator is seeded per rank, so the pattern depends on
+   // the partition; any pattern serves to show how far a reordering of the
+   // arithmetic can move a 50-step result.
+   if (perturb_seed >= 0)
+   {
+      std::mt19937_64 gen(static_cast<std::uint64_t>(perturb_seed)
+                          + 1000003ULL * static_cast<std::uint64_t>(mpi.Rank()));
+      std::uniform_real_distribution<double> dist(-1.0, 1.0);
+      for (int i = 0; i < state.Size(); i++)
+      {
+         state(i) *= 1.0 + 1e-15 * dist(gen);
+      }
+      if (mpi.IsRoot())
+      {
+         std::cout << "  [perturb] initial state scaled by 1 + 1e-15 r "
+                   << "(seed " << perturb_seed << ")\n";
+      }
+   }
+
+   // Stage timers: keep the one-off matrix setup, drop the two
+   // initial-condition solves from the per-stage figures.
+   if (g0.TimersOn()) { g0.timers.ResetStageParts(); }
 
    real_t V_init = seas_op.GetMaxSlipRate();
    if (mpi.IsRoot())
@@ -2545,6 +2877,8 @@ int main(int argc, char *argv[])
       petsc_mon_ctx.pv_out = pv_out.get();
       petsc_mon_ctx.restart_rejections_carryover =
          restart_rejections_carryover;
+      petsc_mon_ctx.g0 = (g0.TimersOn() || g0.check_accepted_state)
+                         ? &g0 : nullptr;
 
       ierr = TSMonitorSet(ts, bp5_ts_monitor_callback, &petsc_mon_ctx,
                           nullptr);
@@ -2782,6 +3116,7 @@ int main(int argc, char *argv[])
    // =========================================================================
    // Main time-stepping loop
    // =========================================================================
+   g0.loop_start = MPI_Wtime();
 #ifdef MFEM_USE_PETSC
    if (use_petsc_ts)
    {
@@ -2871,6 +3206,8 @@ int main(int argc, char *argv[])
          if (!accepted) { continue; }
          current_dt = ode_solver.GetDt();
          step++;
+         seas::StageTimers *timers = g0.Timers();
+         if (timers) { timers->Start(seas::StageTimers::MonitorTotal); }
 
          // Post-step psi clamping is MFEM-specific. Tandem does not do this,
          // so keep it switchable and instrumented while debugging.
@@ -2991,6 +3328,7 @@ int main(int argc, char *argv[])
          }
 
          // I/O: adaptive schedule or every step
+         if (timers) { timers->Start(seas::StageTimers::MonitorOutput); }
          if (write_every_step)
          {
             bench_out.ForceWrite(t, state, fault_op, seas_op.GetTraction(),
@@ -3012,10 +3350,13 @@ int main(int argc, char *argv[])
             global_out->WriteStep(
                {t, V_max > 0.0 ? std::log10(V_max) : -300.0});
          }
+         if (timers) { timers->Stop(seas::StageTimers::MonitorOutput); }
 
          // Checkpoint
          if (checkpoint_interval > 0 && step % checkpoint_interval == 0)
          {
+            seas::ScopedStageTimer ckpt_timer(
+               timers, seas::StageTimers::MonitorCheckpoint);
             Vector u_vec;
             u_vec = seas_op.GetDisplacement();
             WriteCheckpoint(full_prefix, t, current_dt,
@@ -3042,6 +3383,18 @@ int main(int argc, char *argv[])
             std::cout.flush();
          }
 
+         if (timers) { timers->Stop(seas::StageTimers::MonitorTotal); }
+
+         // G0 measurements, outside the monitor's own timer.
+         if (g0.check_accepted_state)
+         {
+            CheckAcceptedState(g0, seas_op, fault_op, state, t, step, mpi);
+         }
+         if (g0.TimersOn() && step % g0.timer_interval == 0)
+         {
+            PrintStageTimers(g0, step, "every N steps", mpi);
+         }
+
          // Intentional early exit: dump only the first accepted step for
          // cross-verification with Tandem (v59 diagnostic).
          if (debug_first_step_dump)
@@ -3053,6 +3406,19 @@ int main(int argc, char *argv[])
             break;
          }
       }
+   }
+
+   if (g0.TimersOn())
+   {
+      PrintStageTimers(g0, step, "end of run", mpi);
+   }
+   if (g0.check_accepted_state && mpi.IsRoot())
+   {
+      std::cout << "[ACCEPTED-STATE] summary: " << g0.check_count
+                << " checks, largest difference " << std::scientific
+                << std::setprecision(3) << g0.check_max
+                << (g0.check_max > 1e-12 ? " (ABOVE 1e-12)" : " (<= 1e-12)")
+                << "\n";
    }
 
    // =========================================================================
@@ -3181,6 +3547,10 @@ int main(int argc, char *argv[])
    mpi.Bcast(regression_rc);
 
 #ifdef MFEM_USE_PETSC
+   // Destroy the TS before PetscFinalize(): destroyed afterwards (at the end
+   // of main), it queries a freed communicator and MPI aborts the run with
+   // exit code 1 after all output is written.
+   petsc_ode.reset();
    if (petsc_initialized)
    {
       MFEMFinalizePetsc();

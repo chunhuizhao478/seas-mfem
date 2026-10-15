@@ -27,6 +27,7 @@
 #include "../integrator/dg_elasticity_ip_combined_integrator.hpp"
 #include "../fault/face_quadrature.hpp"
 #include "matrix_stats.hpp"
+#include "../common/stage_timers.hpp"
 
 #include <memory>
 #include <cmath>
@@ -309,6 +310,23 @@ public:
    }
    bool MatrixStatsEnabled() const { return matrix_stats_enabled_; }
 
+   /// Assemble K (and write the matrix statistics when enabled) without
+   /// creating or factorizing the linear solver, for counting matrix sizes
+   /// on meshes whose factorization may not fit (seas_bp5_full
+   /// --exit-after-assembly).  The symmetry check of the statistics is
+   /// skipped here, since it holds a transposed copy of K.  Solve() aborts
+   /// afterwards.
+   void AssembleMatrixOnly()
+   {
+      MFEM_VERIFY(!stiffness_assembled_ && !assemble_matrix_only_,
+                  "AssembleMatrixOnly: K is already assembled");
+      assemble_matrix_only_ = true;
+      AssembleStiffness();
+   }
+
+   /// Time the parts of Solve() into @a timers (nullptr = no timing).
+   void SetStageTimers(StageTimers *timers) { stage_timers_ = timers; }
+
    struct FirstStepDebugConfig
    {
       bool enabled = false;
@@ -411,6 +429,10 @@ private:
    // One-shot matrix analysis (enabled via SetMatrixStatsConfig).
    bool matrix_stats_enabled_ = false;
    std::string matrix_stats_path_;
+   // Set by AssembleMatrixOnly(): stop after assembly, no solver.
+   bool assemble_matrix_only_ = false;
+
+   StageTimers *stage_timers_ = nullptr;
 
    enum class DebugAssemblePhase { None, Slip, Dirichlet };
    mutable FirstStepDebugConfig first_step_debug_;

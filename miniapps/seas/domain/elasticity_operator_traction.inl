@@ -394,12 +394,16 @@ template <typename MeshType>
 void ElasticityDomainOperator<MeshType>::Solve(
    real_t time, const Vector &slip_bc, GridFuncType &displacement)
 {
+   MFEM_VERIFY(!assemble_matrix_only_,
+               "Solve() after AssembleMatrixOnly(): no solver was set up");
    if (!stiffness_assembled_)
    {
+      ScopedStageTimer timer(stage_timers_, StageTimers::MatrixSetup);
       AssembleStiffness();
    }
 
    // Build RHS
+   if (stage_timers_) { stage_timers_->Start(StageTimers::SlipRHS); }
    LinFormType b(fes_.get());
    b.Assemble();
    Vector &rhs = b;
@@ -433,13 +437,22 @@ void ElasticityDomainOperator<MeshType>::Solve(
       rhs_slip_snapshot = rhs;  // copy before Dirichlet is added
    }
 
+   if (stage_timers_) { stage_timers_->Stop(StageTimers::SlipRHS); }
+
    // Add Dirichlet loading
-   AssembleDirichletLoading(rhs, time);
+   {
+      ScopedStageTimer timer(stage_timers_, StageTimers::DirichletRHS);
+      AssembleDirichletLoading(rhs, time);
+   }
 
    X_ = 0.0;
    B_ = rhs;
 
-   solver_->Mult(B_, X_);
+   {
+      ScopedStageTimer timer(stage_timers_, StageTimers::Solve);
+      solver_->Mult(B_, X_);
+   }
+   if (stage_timers_) { stage_timers_->Start(StageTimers::SolvePost); }
 
    // Post-solve residual check: ||K*x - b|| / ||b|| (global norms)
    if (check_residual_)
@@ -506,6 +519,7 @@ void ElasticityDomainOperator<MeshType>::Solve(
    }
 
    displacement = X_;
+   if (stage_timers_) { stage_timers_->Stop(StageTimers::SolvePost); }
 
    // Debug dumps: rank-local file I/O only, no MPI collectives.
    // Placed AFTER displacement = X_ so the GridFunction has the current solution.
