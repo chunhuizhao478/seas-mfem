@@ -18,10 +18,19 @@
 //   <prefix>_station_<name>.dat   TPV102StationWriter (column layout of the
 //                                 existing runs) through a DOFData adapter;
 //   <prefix>_station_conventions.txt  frame, pin and sign map (I3);
+//   <prefix>_station_<name>_copies.dat  per station, the min/max over the DG
+//                                 copies at the station point (--station-copies
+//                                 average, the default);
 //   <prefix>_fault_r<rank>.csv    fault-field dump every --dump-every steps
 //                                 (with Prakash-Clifton one more column, sigma*);
 //   <prefix>_rupture_time_r<rank>.csv  first |V| > 1 mm/s per fault DOF;
 //   stdout log every --log-every steps.
+//
+// Station copies (Chunhui Zhao, 2026-10-14): a station sits on a fault point
+// that carries one DOF per adjacent fault face (DG copies).  With
+// --station-copies average (default) the station files hold the face-area-
+// weighted average over those copies (summed on rank 0 in face-centroid
+// order); --station-copies first keeps the writer's single nearest copy.
 //
 // Station columns (SCEC map, plan "The SCEC conventions, mapped"):
 //   slip1 = delta.dhat (v-slip), slip2 = delta.shat (h-slip),
@@ -122,6 +131,186 @@ bool TomlBool(const toml::value *t, const char *key, bool def)
    if (!t || !t->contains(key)) { return def; }
    return t->at(key).as_boolean();
 }
+
+/// Station copy average (header, "Station copies").  Every owned DOF within
+/// kTie of the globally nearest station distance (the writer's own metric)
+/// gets the face-area-weighted average over all DOFs at the station point P
+/// (P = the lexicographically smallest such position, copies within kTie of
+/// P); rank 0 sums in face-centroid order, so the sum does not depend on the
+/// partition, and writes the envelope (min/max over copies).  Collective.
+class StationCopyAverage
+{
+public:
+   static constexpr real_t kTie = 1e-6;   // m
+   StationCopyAverage(NitscheWaveOperator &op, const std::vector<TPV102Station> &st,
+                      const std::string &dir, const std::string &prefix)
+      : ns_(static_cast<int>(st.size()))
+   {
+      ElasticityDomainOperator<ParMesh> &E = op.Elasticity();
+      const int nd = E.GetNumFaultDOFs(), nbf = E.GetNbfPerFace();
+      const int no = op.NumOwnedFaultDOFs();
+      // face centroid and area per local DOF, vertices in a canonical order
+      Vector cl(4 * nd);
+      for (int k = 0; k < nd; k++)
+      {
+         long long key[3];
+         real_t xv[3][3];
+         op.Orientation().FaceVertexData(k / nbf, key, xv);
+         std::array<std::array<real_t, 3>, 3> v;
+         for (int i = 0; i < 3; i++) { for (int c = 0; c < 3; c++) { v[i][c] = xv[i][c]; } }
+         std::sort(v.begin(), v.end());
+         real_t e1[3], e2[3];
+         for (int c = 0; c < 3; c++)
+         {
+            cl(4 * k + c) = (v[0][c] + v[1][c] + v[2][c]) / 3.0;
+            e1[c] = v[1][c] - v[0][c];
+            e2[c] = v[2][c] - v[0][c];
+         }
+         const real_t cx = e1[1] * e2[2] - e1[2] * e2[1], cy = e1[2] * e2[0] - e1[0] * e2[2],
+                      cz = e1[0] * e2[1] - e1[1] * e2[0];
+         cl(4 * k + 3) = 0.5 * std::sqrt(cx * cx + cy * cy + cz * cz);
+      }
+      E.RestrictToOwnedFault(cl, ca_, 4);
+      const Vector &X = op.FaultPositions();
+      auto dist = [&](int s, int j) {
+         const real_t dx = X(3 * j) - st[s].along_strike;
+         const real_t dz = std::abs(X(3 * j + 2)) - st[s].down_dip;
+         return std::sqrt(dx * dx + dz * dz);
+      };
+      std::vector<real_t> dmin(ns_, std::numeric_limits<real_t>::max());
+      for (int s = 0; s < ns_; s++)
+      {
+         for (int j = 0; j < no; j++) { dmin[s] = std::min(dmin[s], dist(s, j)); }
+      }
+      MPI_Allreduce(MPI_IN_PLACE, dmin.data(), ns_, MPITypeMap<real_t>::mpi_type, MPI_MIN,
+                    MPI_COMM_WORLD);
+      cand_.assign(ns_, {});
+      copy_.assign(ns_, {});
+      for (int s = 0; s < ns_; s++)
+      {
+         // P: the lexicographically smallest candidate position over all ranks
+         real_t P[3] = {std::numeric_limits<real_t>::max(), 0.0, 0.0};
+         for (int j = 0; j < no; j++)
+         {
+            if (dist(s, j) > dmin[s] + kTie) { continue; }
+            cand_[s].push_back(j);
+            const real_t *x = &X(3 * j);
+            if (std::lexicographical_compare(x, x + 3, P, P + 3)) { for (int c = 0; c < 3; c++) { P[c] = x[c]; } }
+         }
+         int nr = 0;
+         MPI_Comm_size(MPI_COMM_WORLD, &nr);
+         std::vector<real_t> all(3 * nr);
+         MPI_Allgather(P, 3, MPITypeMap<real_t>::mpi_type, all.data(), 3,
+                       MPITypeMap<real_t>::mpi_type, MPI_COMM_WORLD);
+         for (int r = 0; r < nr; r++)
+         {
+            if (std::lexicographical_compare(&all[3 * r], &all[3 * r] + 3, P, P + 3))
+            {
+               for (int c = 0; c < 3; c++) { P[c] = all[3 * r + c]; }
+            }
+         }
+         for (int j = 0; j < no; j++)
+         {
+            const real_t *x = &X(3 * j);
+            if (std::hypot(x[0] - P[0], x[1] - P[1], x[2] - P[2]) <= kTie) { copy_[s].push_back(j); }
+         }
+         int nc = static_cast<int>(copy_[s].size());
+         MPI_Allreduce(MPI_IN_PLACE, &nc, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+         MFEM_VERIFY(nc > 0, "station copy average: no DOF at the point of station " << st[s].name);
+         if (g_rank == 0)
+         {
+            env_.emplace_back(dir + "/" + prefix + "_station_" + st[s].name + "_copies.dat");
+            env_.back() << "# station " << st[s].name << ": " << nc << " DG copies at ("
+                        << std::setprecision(12) << P[0] << ", " << P[1] << ", " << P[2]
+                        << "); the station file holds their face-area-weighted average\n"
+                        << "# t ncopies sigma_n_min sigma_n_max tau1_min tau1_max tau2_min tau2_max"
+                        << " V1_min V1_max V2_min V2_max  (station columns' units and signs)\n";
+         }
+      }
+   }
+
+   /// Replace the station DOFs' data by the copy average; write the envelope.
+   void Apply(real_t t, std::vector<DOFData> &dd)
+   {
+      constexpr int nf = 8;   // slip1 slip2 V1 V2 tau1 tau2 sigma_n psi
+      std::vector<real_t> loc;
+      for (int s = 0; s < ns_; s++)
+      {
+         for (int j : copy_[s])
+         {
+            const DOFData &q = dd[j];
+            const real_t row[5 + nf] = {real_t(s), ca_(4 * j), ca_(4 * j + 1), ca_(4 * j + 2),
+                                        ca_(4 * j + 3), q.slip1, q.slip2, q.V1, q.V2,
+                                        q.tau1_corr, q.tau2_corr, q.sigma_n_corr, q.psi};
+            loc.insert(loc.end(), row, row + 5 + nf);
+         }
+      }
+      int nr = 0, n = static_cast<int>(loc.size());
+      MPI_Comm_size(MPI_COMM_WORLD, &nr);
+      std::vector<int> cnt(nr), dsp(nr, 0);
+      MPI_Gather(&n, 1, MPI_INT, cnt.data(), 1, MPI_INT, 0, MPI_COMM_WORLD);
+      std::vector<real_t> all;
+      if (g_rank == 0)
+      {
+         for (int r = 1; r < nr; r++) { dsp[r] = dsp[r - 1] + cnt[r - 1]; }
+         all.resize(dsp[nr - 1] + cnt[nr - 1]);
+      }
+      MPI_Gatherv(loc.data(), n, MPITypeMap<real_t>::mpi_type, all.data(), cnt.data(), dsp.data(),
+                  MPITypeMap<real_t>::mpi_type, 0, MPI_COMM_WORLD);
+      std::vector<real_t> avg(ns_ * nf, 0.0);
+      if (g_rank == 0)
+      {
+         const int w = 5 + nf, nrow = static_cast<int>(all.size()) / w;
+         std::vector<int> ord(nrow);
+         for (int i = 0; i < nrow; i++) { ord[i] = i; }
+         std::sort(ord.begin(), ord.end(), [&](int a, int b) {
+            return std::lexicographical_compare(&all[w * a], &all[w * a] + 4, &all[w * b], &all[w * b] + 4);
+         });
+         for (int s = 0; s < ns_; s++)
+         {
+            real_t wsum = 0.0, lo[nf], hi[nf];
+            for (int f = 0; f < nf; f++) { lo[f] = std::numeric_limits<real_t>::max(); hi[f] = -lo[f]; }
+            int nc = 0;
+            for (int i : ord)
+            {
+               const real_t *r = &all[w * i];
+               if (static_cast<int>(r[0]) != s) { continue; }
+               nc++;
+               wsum += r[4];
+               for (int f = 0; f < nf; f++)
+               {
+                  avg[s * nf + f] += r[4] * r[5 + f];
+                  lo[f] = std::min(lo[f], r[5 + f]);
+                  hi[f] = std::max(hi[f], r[5 + f]);
+               }
+            }
+            for (int f = 0; f < nf; f++) { avg[s * nf + f] /= wsum; }
+            env_[s] << std::scientific << std::setprecision(10) << t << " " << nc << " "
+                    << lo[6] << " " << hi[6] << " " << lo[4] << " " << hi[4] << " " << lo[5] << " "
+                    << hi[5] << " " << lo[2] << " " << hi[2] << " " << lo[3] << " " << hi[3] << "\n";
+            env_[s].flush();
+         }
+      }
+      MPI_Bcast(avg.data(), ns_ * nf, MPITypeMap<real_t>::mpi_type, 0, MPI_COMM_WORLD);
+      for (int s = 0; s < ns_; s++)
+      {
+         const real_t *a = &avg[s * nf];
+         for (int j : cand_[s])
+         {
+            DOFData &q = dd[j];
+            q.slip1 = a[0]; q.slip2 = a[1]; q.V1 = a[2]; q.V2 = a[3];
+            q.tau1_corr = a[4]; q.tau2_corr = a[5]; q.sigma_n_corr = a[6]; q.psi = a[7];
+            q.slip_rate = std::hypot(a[2], a[3]);
+         }
+      }
+   }
+
+private:
+   int ns_;
+   Vector ca_;                                   // owned: centroid (3) + area
+   std::vector<std::vector<int>> cand_, copy_;   // owned DOFs overwritten / averaged
+   std::vector<std::ofstream> env_;              // rank 0
+};
 
 /// Friction-law factory keyed on [meta] law (plan N-07, Generality).
 struct ClosureBundle
@@ -411,7 +600,8 @@ int main(int argc, char *argv[])
       {
          std::cerr << "usage: seas_nitsche_dyn_driver --config deck.toml [--mesh m.msh]"
                       " [--order p] [--tfinal s] [--output-dir d] [--prefix name]"
-                      " [--station-every n] [--dump-every n] [--log-every n]\n";
+                      " [--station-every n] [--dump-every n] [--log-every n]"
+                      " [--station-copies average|first]\n";
       }
       return 1;
    }
@@ -435,6 +625,9 @@ int main(int argc, char *argv[])
    const int station_every = ArgInt(argc, argv, "--station-every", 1);
    const int dump_every = ArgInt(argc, argv, "--dump-every", 0);
    const int log_every = ArgInt(argc, argv, "--log-every", 100);
+   const std::string station_copies = ArgStr(argc, argv, "--station-copies", "average");
+   MFEM_VERIFY(station_copies == "average" || station_copies == "first",
+               "--station-copies " << station_copies << ": expected average or first");
    const real_t cfl = cfg.numerics.cfl;
    const real_t penalty_factor = TomlReal(t_num, "penalty_factor", 1.0);
    const bool energy_on = TomlBool(t_diag, "energy_balance", false);
@@ -763,10 +956,15 @@ int main(int argc, char *argv[])
       for (int c = 0; c < 3; c++) { fcoords[j](c) = op.FaultPositions()(3 * j + c); }
    }
    std::unique_ptr<TPV102StationWriter> stations;
+   std::unique_ptr<StationCopyAverage> station_avg;
    if (cfg.problem.tag == "tpv102")
    {
       stations = std::make_unique<TPV102StationWriter>();
       stations->Open(out_dir, prefix, DefaultStations(), fcoords, no, MPI_COMM_WORLD);
+      if (station_copies == "average")
+      {
+         station_avg = std::make_unique<StationCopyAverage>(op, DefaultStations(), out_dir, prefix);
+      }
       if (g_rank == 0)
       {
          std::ofstream h(out_dir + "/" + prefix + "_station_conventions.txt");
@@ -919,7 +1117,12 @@ int main(int argc, char *argv[])
    }
    CentralDifferenceSolver ode;
    ode.Init(op);
-   if (stations) { fill_dofdata(); stations->WriteStep(t, dofdata); }
+   if (stations)
+   {
+      fill_dofdata();
+      if (station_avg) { station_avg->Apply(t, dofdata); }
+      stations->WriteStep(t, dofdata);
+   }
    real_t max_ratio_run = 0.0, max_V_run = 0.0, min_sig_run = 1e300, max_sig_run = -1e300;
    real_t min_pc_run = 1e300, max_pc_run = -1e300;
    for (long s = 1; s <= nsteps; s++)
@@ -950,7 +1153,12 @@ int main(int argc, char *argv[])
          er = mon->Evaluate(U, Ud, op.LastAcceleration(), t);
          rho = mon->Step(er);
       }
-      if (stations && s % station_every == 0) { fill_dofdata(); stations->WriteStep(t, dofdata); }
+      if (stations && s % station_every == 0)
+      {
+         fill_dofdata();
+         if (station_avg) { station_avg->Apply(t, dofdata); }
+         stations->WriteStep(t, dofdata);
+      }
       if (dump && s % dump_every == 0)
       {
          const Vector &d = op.Slip(), &psi = op.State();
