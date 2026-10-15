@@ -658,6 +658,37 @@
                                                      Geometry::TRIANGLE,
                                                      face_basis_type_);
       nbf_per_face_ = face_quad_->NumBasisFunctions();
+
+      // The IP layout maps the sorted face vertices onto triangle nodes
+      // (BuildOwnedFaultLayout). A quadrilateral fault face has 4 vertices
+      // for 3 slots at p=1, so its owned->local map would index past the
+      // fault vectors. BR2 (nbf=1) does not use the vertex permutation.
+      if (nbf_per_face_ > 1)
+      {
+         auto verify_triangle = [&](int face, const char *kind)
+         {
+            const Geometry::Type g = mesh_.GetFaceGeometry(face);
+            MFEM_VERIFY(g == Geometry::TRIANGLE,
+                        "IP fault layout needs triangular fault faces "
+                        "(tetrahedral mesh); " << kind << " fault face "
+                        << face << " is " << Geometry::Name[g]);
+         };
+         for (int i = 0; i < fault_interior_faces_.Size(); i++)
+         {
+            verify_triangle(fault_interior_faces_[i], "interior");
+         }
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            for (int i = 0; i < fault_shared_faces_.Size(); i++)
+            {
+               verify_triangle(mesh_.GetSharedFace(fault_shared_faces_[i]),
+                               "shared");
+            }
+#endif
+         }
+      }
+
       num_fault_dofs_ = num_fault_faces_ * nbf_per_face_;
       BuildOwnedFaultLayout();
 

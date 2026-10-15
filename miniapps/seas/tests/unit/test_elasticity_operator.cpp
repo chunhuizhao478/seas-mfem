@@ -229,7 +229,7 @@ void TestZeroSlipEquilibrium()
    std::cout << "\n--- Test: Zero Slip + Zero Loading → Zero Displacement ---\n";
 
    real_t Lx = 2.0, Ly = 2.0, Lz = 2.0;
-   Mesh mesh = CreateTestMesh3D(1, 1, 1, Lx, Ly, Lz);
+   Mesh mesh = CreateTestMesh3DTet(1, 1, 1, Lx, Ly, Lz);
 
    // Use IP method for simpler testing
    ElasticityDomainOperator<Mesh> op(mesh, 1, 1.0, 1.0, 0.0, Lz, 2.0 * Lx,
@@ -262,7 +262,7 @@ void TestTractionExtraction()
    std::cout << "\n--- Test: Traction Extraction ---\n";
 
    real_t Lx = 2.0, Ly = 2.0, Lz = 2.0;
-   Mesh mesh = CreateTestMesh3D(1, 1, 1, Lx, Ly, Lz);
+   Mesh mesh = CreateTestMesh3DTet(1, 1, 1, Lx, Ly, Lz);
 
    ElasticityDomainOperator<Mesh> op(mesh, 1, 1.0, 1.0, 0.0, Lz, 2.0 * Lx,
                                       DGMethod::IP);
@@ -302,7 +302,7 @@ void TestStiffnessAssembly()
    std::cout << "\n--- Test: Stiffness Assembly (IP and BR2) ---\n";
 
    real_t Lx = 2.0, Ly = 2.0, Lz = 2.0;
-   Mesh mesh = CreateTestMesh3D(1, 1, 1, Lx, Ly, Lz);
+   Mesh mesh = CreateTestMesh3DTet(1, 1, 1, Lx, Ly, Lz);
 
    // IP method
    {
@@ -346,7 +346,7 @@ void TestFaultGeometry3D()
 
    real_t Lx = 50e3, Ly = 60e3, Lz = 40e3;
    // Coarse mesh
-   Mesh mesh = CreateTestMesh3D(1, 1, 1, Lx, Ly, Lz);
+   Mesh mesh = CreateTestMesh3DTet(1, 1, 1, Lx, Ly, Lz);
 
    BP5Params params;
 
@@ -471,7 +471,7 @@ void TestNonZeroSlipIP()
    std::cout << "\n--- Test: Non-Zero Slip Displacement (IP) ---\n";
 
    real_t Lx = 2.0, Ly = 2.0, Lz = 2.0;
-   Mesh mesh = CreateTestMesh3D(1, 1, 1, Lx, Ly, Lz);
+   Mesh mesh = CreateTestMesh3DTet(1, 1, 1, Lx, Ly, Lz);
 
    real_t lambda = 1.0, mu = 1.0;
    ElasticityDomainOperator<Mesh> op(mesh, 1, lambda, mu, 0.0, Lz, 2.0 * Lx,
@@ -572,7 +572,7 @@ void TestDirichletLoading()
    std::cout << "\n--- Test: Dirichlet Loading (time > 0) ---\n";
 
    real_t Lx = 2.0, Ly = 2.0, Lz = 2.0;
-   Mesh mesh = CreateTestMesh3D(1, 1, 1, Lx, Ly, Lz);
+   Mesh mesh = CreateTestMesh3DTet(1, 1, 1, Lx, Ly, Lz);
 
    real_t Vp = 1.0;  // Large Vp so loading is significant
    real_t lambda = 1.0, mu = 1.0;
@@ -751,7 +751,7 @@ void TestBR2vsIP()
    std::cout << "\n--- Test: BR2 vs IP Comparison ---\n";
 
    real_t Lx = 2.0, Ly = 2.0, Lz = 2.0;
-   Mesh mesh = CreateTestMesh3D(1, 1, 1, Lx, Ly, Lz);
+   Mesh mesh = CreateTestMesh3DTet(1, 1, 1, Lx, Ly, Lz);
 
    real_t lambda = 1.0, mu = 1.0;
 
@@ -861,7 +861,7 @@ void TestTractionWithPenaltyCorrection()
    std::cout << "\n--- Test: Traction With DG Penalty Correction ---\n";
 
    real_t Lx = 4.0, Ly = 2.0, Lz = 2.0;
-   Mesh mesh = CreateTestMesh3D(2, 1, 1, Lx, Ly, Lz);
+   Mesh mesh = CreateTestMesh3DTet(2, 1, 1, Lx, Ly, Lz);
    real_t lambda = 1.0, mu = 1.0;
 
    real_t ip_avg_strike = 0.0, br2_avg_strike = 0.0;
@@ -1302,7 +1302,7 @@ void TestMultiDOFProperties()
    std::cout << "\n--- Test: Multi-DOF Fault Properties at p=2 IP ---\n";
 
    real_t Lx = 2.0, Ly = 2.0, Lz = 2.0;
-   Mesh mesh = CreateTestMesh3D(1, 1, 1, Lx, Ly, Lz);
+   Mesh mesh = CreateTestMesh3DTet(1, 1, 1, Lx, Ly, Lz);
 
    // p=2 IP: should have multi-DOF
    ElasticityDomainOperator<Mesh> op_p2(mesh, 2, 1.0, 1.0, 0.0, Lz, 2.0 * Lx,
@@ -1348,7 +1348,7 @@ void TestMultiDOFZeroSlip()
    std::cout << "\n--- Test: Multi-DOF Zero Slip → Zero Displacement (p=2 IP) ---\n";
 
    real_t Lx = 2.0, Ly = 2.0, Lz = 2.0;
-   Mesh mesh = CreateTestMesh3D(1, 1, 1, Lx, Ly, Lz);
+   Mesh mesh = CreateTestMesh3DTet(1, 1, 1, Lx, Ly, Lz);
 
    ElasticityDomainOperator<Mesh> op(mesh, 2, 1.0, 1.0, 0.0, Lz, 2.0 * Lx,
                                       DGMethod::IP);
@@ -1398,7 +1398,7 @@ void TestMultiDOFUniformSlip()
    std::cout << "\n--- Test: Multi-DOF Uniform Slip at p=2 IP ---\n";
 
    real_t Lx = 2.0, Ly = 2.0, Lz = 2.0;
-   Mesh mesh = CreateTestMesh3D(1, 1, 1, Lx, Ly, Lz);
+   Mesh mesh = CreateTestMesh3DTet(1, 1, 1, Lx, Ly, Lz);
 
    ElasticityDomainOperator<Mesh> op(mesh, 2, 1.0, 1.0, 0.0, Lz, 2.0 * Lx,
                                       DGMethod::IP);
@@ -1453,7 +1453,7 @@ void TestMultiDOFBackwardCompatP1()
    std::cout << "\n--- Test: Multi-DOF Tandem-Style Fault Space at p=1 IP ---\n";
 
    real_t Lx = 2.0, Ly = 2.0, Lz = 2.0;
-   Mesh mesh = CreateTestMesh3D(1, 1, 1, Lx, Ly, Lz);
+   Mesh mesh = CreateTestMesh3DTet(1, 1, 1, Lx, Ly, Lz);
 
    ElasticityDomainOperator<Mesh> op(mesh, 1, 1.0, 1.0, 0.0, Lz, 2.0 * Lx,
                                       DGMethod::IP);
@@ -1493,7 +1493,7 @@ void TestMultiDOFVaryingSlip()
    std::cout << "\n--- Test: Multi-DOF Varying vs Uniform Slip at p=2 IP ---\n";
 
    real_t Lx = 2.0, Ly = 2.0, Lz = 2.0;
-   Mesh mesh = CreateTestMesh3D(1, 1, 1, Lx, Ly, Lz);
+   Mesh mesh = CreateTestMesh3DTet(1, 1, 1, Lx, Ly, Lz);
 
    ElasticityDomainOperator<Mesh> op(mesh, 2, 1.0, 1.0, 0.0, Lz, 2.0 * Lx,
                                       DGMethod::IP);
