@@ -3079,6 +3079,29 @@ seas_test_nitsche_p3: $(TEST_NITSCHE_P3_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
 	    $(MFEM_LIBS) $(HDF5_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
+# Kelvin-Voigt layer prototype (Chunhui Zhao, 2026-10-14): fault-free box,
+# CFL with damping, P_kv <= 0, energy balance, smooth vs grid-scale damping.
+TEST_NITSCHE_KV_SRC = tests/verification/test_nitsche_kv.cpp
+TEST_NITSCHE_KV_OBJ = $(TEST_NITSCHE_KV_SRC:.cpp=.o)
+$(TEST_NITSCHE_KV_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             domain/nitsche_material_sample.hpp \
+                             domain/nitsche_wave_operator.hpp \
+                             domain/nitsche_mass.hpp \
+                             solver/nitsche_cfl.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_kv: $(TEST_NITSCHE_KV_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_KV_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-kv: seas_test_nitsche_kv
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_kv
+
 test-nitsche-p3: seas_test_nitsche_p3
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_p3
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_p3 --np2

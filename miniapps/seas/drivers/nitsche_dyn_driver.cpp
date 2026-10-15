@@ -512,7 +512,7 @@ public:
          q[1] = fault_frame::Dot(&d(3 * j), ss);
          q[2] = fault_frame::Dot(&V(3 * j), dd);
          q[3] = fault_frame::Dot(&V(3 * j), ss);
-         const real_t g = have_x ? 0.5 * op_.FaultSigmaF()(j) * dt : 0.0;
+         const real_t g = have_x ? op_.ClosureGamma(j) : 0.0;   // + sigma_F^eta with Kelvin-Voigt
          q[4] = -(Xs(2 * j) + g * q[2]);
          q[5] = -(Xs(2 * j + 1) + g * q[3]);
          q[6] = psi(j);
@@ -846,6 +846,43 @@ int main(int argc, char *argv[])
    const real_t dt = std::min(dt_cfl, cfg.time.dt_max);
    op.SetTimeStep(dt);
 
+   // Kelvin-Voigt damping (Day et al. 2005 eq. A8): [numerics] kv_eta =
+   // eta_bar (default 0 = off), kv_scale = "node" (default; beta_e =
+   // eta_bar (1/3) (h_e/p) / c_s,e) | "dt" (beta = eta_bar dt), kv_layer_width
+   // (m, optional; absent = every element), kv_length = "inscribed" (default; h_e
+   // = 6 V / A, the CFL length) | "edge" (h_e = mean edge length).
+   {
+      MFEM_VERIFY(!(t_num && t_num->contains("kv_eta_over_dt")),
+                  "[numerics] kv_eta_over_dt is gone; use kv_eta with kv_scale = \"dt\"");
+      const real_t eta_bar = TomlReal(t_num, "kv_eta", 0.0);
+      MFEM_VERIFY(eta_bar >= 0.0, "[numerics] kv_eta must be >= 0");
+      const std::string scale_s = TomlStr(t_num, "kv_scale", "node");
+      MFEM_VERIFY(scale_s == "node" || scale_s == "dt",
+                  "[numerics] kv_scale = \"" << scale_s << "\"; use \"node\" or \"dt\"");
+      const std::string len_s = TomlStr(t_num, "kv_length", "inscribed");
+      MFEM_VERIFY(len_s == "edge" || len_s == "inscribed",
+                  "[numerics] kv_length = \"" << len_s << "\"; use \"edge\" or \"inscribed\"");
+      if (eta_bar > 0.0)
+      {
+         const bool has_w = t_num && t_num->contains("kv_layer_width");
+         const real_t width = has_w ? TomlReal(t_num, "kv_layer_width", 0.0) : -1.0;
+         MFEM_VERIFY(!has_w || width > 0.0, "[numerics] kv_layer_width must be > 0 m");
+         op.SetKelvinVoigt(eta_bar, scale_s == "node" ? NitscheWaveOperator::KVScale::Node
+                                                      : NitscheWaveOperator::KVScale::Dt,
+                           width, len_s == "edge" ? NitscheWaveOperator::KVLength::MeanEdge
+                                                  : NitscheWaveOperator::KVLength::Inscribed);
+         if (g_rank == 0)
+         {
+            std::cout << "  Kelvin-Voigt: eta_bar = " << eta_bar << ", scale " << scale_s
+                      << (scale_s == "node" ? " (h_e " + len_s + ")" : std::string())
+                      << ", beta " << op.KelvinVoigtBetaMin() << " .. "
+                      << op.KelvinVoigtBetaMax() << " s (dt = " << dt << " s), "
+                      << (has_w ? "width " + std::to_string(width) + " m, " : std::string("whole domain, "))
+                      << op.KelvinVoigtLayerElements() << " of " << ne_global << " elements\n";
+         }
+      }
+   }
+
    // initial fault state: d = 0, psi from the continuous friction condition
    // at the projected prestress, V = V_init along -X_tan (C-07)
    const int no = op.NumOwnedFaultDOFs();
@@ -1010,7 +1047,7 @@ int main(int argc, char *argv[])
          q.slip2 = ff::Dot(&d(3 * j), ss);
          q.V1 = ff::Dot(&V(3 * j), dd);
          q.V2 = ff::Dot(&V(3 * j), ss);
-         const real_t g = have_x ? 0.5 * op.FaultSigmaF()(j) * dt : 0.0;
+         const real_t g = have_x ? op.ClosureGamma(j) : 0.0;   // + sigma_F^eta with Kelvin-Voigt
          // endpoint traction tangential components in the frame: X* + gamma V
          const real_t X1 = Xs(2 * j) + g * q.V1;
          const real_t X2 = Xs(2 * j + 1) + g * q.V2;
@@ -1114,6 +1151,31 @@ int main(int argc, char *argv[])
       Vector A0(n);
       op.Mult(U, Ud, A0);
       mon->Start(mon->Evaluate(U, Ud, A0, t));
+   }
+   // --kv-station-sigma 1: write, per station, the Kelvin-Voigt fault penalty sigma_F^eta (Pa s/m)
+   // averaged over the DG copies exactly as the station traction is (columns tau1 = tau2 =
+   // sigma_F^eta, sigma_n = sigma_F dt/2), then stop.  Offline correction of runs whose station
+   // traction missed the damping part (before ClosureGamma, 2026-10-15):
+   //    tau_true = tau_written - sigma_F^eta V   (per component).
+   if (ArgInt(argc, argv, "--kv-station-sigma", 0) != 0)
+   {
+      MFEM_VERIFY(stations && op.HasKelvinVoigt(),
+                  "--kv-station-sigma needs the station writer and [numerics] kv_eta > 0");
+      fill_dofdata();
+      for (int j = 0; j < no; j++)
+      {
+         DOFData &q = dofdata[j];
+         q.tau1_corr = q.tau2_corr = op.FaultSigmaFKV()(j);
+         q.sigma_n_corr = 0.5 * op.FaultSigmaF()(j) * dt;
+      }
+      if (station_avg) { station_avg->Apply(t, dofdata); }
+      stations->WriteStep(t, dofdata);
+      if (g_rank == 0)
+      {
+         std::cout << "  --kv-station-sigma: station files hold sigma_F^eta (tau columns) and "
+                      "sigma_F dt/2 (sigma_n column); stopping\n";
+      }
+      return 0;
    }
    CentralDifferenceSolver ode;
    ode.Init(op);

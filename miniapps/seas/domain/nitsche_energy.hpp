@@ -17,6 +17,12 @@
 //    P_pre  = -int_F S_0 . V                    (prestress)
 //    P_nuc  = -G(t) int_F S_nuc . V             (nucleation)
 //    P_fric =  int_F (T_h + S) . V              (friction, <= 0: E4)
+//    P_kv   = -(v.K_eta v - 2 v.G_eta V + int_F sigma_F^eta |V|^2)
+//                                               (Kelvin-Voigt layer, <= 0)
+//
+// With the Kelvin-Voigt layer the friction power uses the total traction
+// T_h + T_eta(v, V) + S that the closure sees (P_fric stays <= 0 node by
+// node), and the remaining damping power is P_kv = -2 E_el^eta(v, V).
 //
 // since dE_el/dd = T_h (the kernel's numerical-flux traction), the fault
 // power is int_F T_h . V = P_fric + P_pre + P_nuc.  No eta_s V^2 term (E6).
@@ -49,13 +55,14 @@ struct NitscheEnergyRecord
    real_t E_kin = 0.0, E_el = 0.0, E_mod = 0.0, E_h = 0.0;
    real_t E_sipg = 0.0, E_cons = 0.0, E_pen = 0.0;   ///< parts of E_el
    real_t P_ext = 0.0, P_abs = 0.0, P_pre = 0.0, P_nuc = 0.0, P_fric = 0.0;
+   real_t P_kv = 0.0;   ///< Kelvin-Voigt layer (0 without it)
    /// E4 at the nodes: max over fault DOFs of (T_h + S).V (<= 0 up to
    /// round-off).  The integral P_fric of the two face interpolants is not
    /// sign-definite at p >= 2 (the P2 vertex functions integrate to zero),
    /// so E4 is a nodal statement.
    real_t fric_node_max = 0.0;
    real_t fric_node_scale = 0.0;   ///< max |T_h + S| |V| over DOFs
-   real_t P() const { return P_ext + P_abs + P_pre + P_nuc + P_fric; }
+   real_t P() const { return P_ext + P_abs + P_pre + P_nuc + P_fric + P_kv; }
 };
 
 class NitscheEnergyMonitor
@@ -110,6 +117,16 @@ public:
       Vector TS(T);
       TS += S0;
       if (g != 0.0) { TS.Add(g, Sn); }
+      if (op_.HasKelvinVoigt())
+      {
+         Vector KvU, GvV, Tkv;
+         op_.ApplyKVStiffness(Ud, KvU);
+         op_.KVSlipLoad(V, GvV);
+         op_.KVTrialTraction(Ud, V, Tkv);
+         TS += Tkv;
+         r.P_kv = -(Dot_(Ud, KvU) - 2.0 * Dot_(Ud, GvV)
+                    + FaultDot_(V, V, true, &op_.FacePenaltyKV()));
+      }
       r.P_fric = FaultDot_(TS, V, false);
       real_t nm[2] = {-1e300, 0.0};
       for (int j = 0; j < op_.NumOwnedFaultDOFs(); j++)
@@ -164,7 +181,8 @@ private:
 
    /// int_F a . b over owned fault faces, a and b on owned DOFs (3 comps).
    /// sigma = true weights by sigma_F of the face.
-   real_t FaultDot_(const Vector &a, const Vector &b, bool sigma) const
+   real_t FaultDot_(const Vector &a, const Vector &b, bool sigma,
+                    const Vector *face_weight = nullptr) const
    {
       Vector al, bl;
       E_.ExpandOwnedToLocalFault(a, al, 3);
@@ -176,7 +194,8 @@ private:
       {
          const int lf = own[of];
          const DenseMatrix &M = MF_[lf];
-         const real_t w = sigma ? op_.FacePenalty()(lf) : 1.0;
+         const real_t w = sigma ? (face_weight ? (*face_weight)(lf) : op_.FacePenalty()(lf))
+                                : 1.0;
          real_t fs = 0.0;
          for (int i = 0; i < nbf; i++)
             for (int j = 0; j < nbf; j++)

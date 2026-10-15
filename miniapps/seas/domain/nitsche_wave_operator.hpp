@@ -66,6 +66,31 @@
 // recorded sigma_eff stay on the actual sigma_eff.  Off (the default) every
 // bit is unchanged.
 //
+// Kelvin-Voigt damping (SetKelvinVoigt; Day et al. 2005 eq. A8; decisions
+// Chunhui Zhao 2026-10-14/15): a stiffness-proportional damping
+// sigma_damp = beta(x) C : eps(v), element-wise constant beta_e, in every
+// element (width < 0) or in a layer of elements within a width w of the
+// fault (a 1e-12 beta_e floor outside).  Two scalings of beta_e:
+//    KVScale::Node  beta_e = eta_bar gamma (h_e / p) / c_s,e,  gamma = 1/3,
+//                   h_e = 6 V / A (default; or the mean edge length),
+//                   c_s,e = local S speed (the node
+//                   spacing h_e/p crossed at c_s in Day's dt = gamma dx/c_s);
+//    KVScale::Dt    beta_e = eta_bar dt (the 2026-10-14 prototype).
+// K_eta, G_eta are a second SIPG operator with the moduli beta_e lambda_e,
+// beta_e mu_e (C-09 Coefficient constructor); its face terms (consistency
+// and penalty) combine the two sides' beta-weighted moduli, i.e. the average
+// of the two sides' beta for a face inside one material.  With the half-step
+// velocity Udot* = v^n + dt/2 a^n (the Newmark predictor; the damping term is
+// lagged, first order) box 13 becomes
+//    M A = F - K U^{n+1} + G d^{n+1} - (K_eta Udot* - G_eta V^{n+1})
+// and the friction closure sees the total traction
+//    T_tot = T_h(U^{n+1}, d^{n+1}) + T_eta(Udot*, V^{n+1}),
+// i.e. X* gains T_eta(Udot*, 0) and gamma = 1/2 sigma_F dt + sigma_F^eta
+// (sigma_F^eta the damping operator's own fault-face penalty).  The damping
+// acts on the elastic strain RATE (v and the slip rate V enter as the pair
+// the elastic energy has for (u, d)), so it does not resist slip itself.
+// eta_bar = 0 (never calling SetKelvinVoigt) leaves every bit unchanged.
+//
 // NitscheMaterialSample lives in nitsche_material_sample.hpp (moved there in
 // P3 to break an include cycle with nitsche_mass.hpp); it is re-exported here.
 //
@@ -88,6 +113,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <vector>
 
 namespace mfem
 {
@@ -147,7 +173,7 @@ public:
                        const DomainConfig &config = {},
                        const NitscheFaultSetup *fault = nullptr)
       : SecondOrderTimeDependentOperator(0, 0.0),
-        mesh_(mesh), order_(order)
+        mesh_(mesh), order_(order), bc_(bc), config_(config)
    {
       sample_ = std::make_unique<NitscheMaterialSample>(mesh, material);
 
@@ -164,6 +190,8 @@ public:
                     MPI_SUM, mesh.GetComm());
       const real_t lam_fb = sums[0] / sums[2];
       const real_t mu_fb  = sums[1] / sums[2];
+      lam_fb_ = lam_fb;
+      mu_fb_ = mu_fb;
 
       elast_ = std::make_unique<ElasticityDomainOperator<ParMesh>>(
          mesh, order, sample_->Lambda(), sample_->Mu(), lam_fb, mu_fb,
@@ -258,10 +286,14 @@ public:
                   "NitscheWaveOperator::ImplicitSolve called twice at t = "
                   << t << "; exactly one call per time step is allowed.");
       last_solve_time_ = t;
-      if (has_fault_) { AdvanceFault_(x, t); }
+      if (has_fault_) { AdvanceFault_(x, t, &dxdt); }
       if (damping_blocks_.empty())
       {
-         Acceleration_(x, nullptr, has_fault_ ? &d_ : nullptr, *mass_, k);
+         // the Kelvin-Voigt layer needs Udot* (at t_{n+1/2}); without it
+         // the call is P6's
+         kv_tv_shift_ = 0.5 * dt_;
+         Acceleration_(x, kv_ ? &dxdt : nullptr, has_fault_ ? &d_ : nullptr, *mass_, k);
+         kv_tv_shift_ = 0.0;
       }
       else
       {
@@ -270,7 +302,9 @@ public:
                      "(M + dt/2 C) was built for dt/2 = "
                      << (mass_damped_ ? mass_damped_->HalfDt() : 0.0)
                      << " but fac1 = " << fac1 << "; call SetTimeStep(dt).");
+         kv_tv_shift_ = 0.5 * dt_;
          Acceleration_(x, &dxdt, has_fault_ ? &d_ : nullptr, *mass_damped_, k);
+         kv_tv_shift_ = 0.0;
       }
       if (has_fault_) { last_accel_ = k; }
    }
@@ -455,7 +489,8 @@ public:
          sig_law = *sigma_pc;
       }
       real_t Vl[2];
-      closure_->SolveSlipRate(X, 0.5 * sigF_own_(j) * dt_, sig_law, st, Vl);
+      const real_t gamma = ClosureGamma(j);
+      closure_->SolveSlipRate(X, gamma, sig_law, st, Vl);
       fault_frame::Embed(Vl[0], Vl[1], dv, sv, V);
    }
 
@@ -474,9 +509,269 @@ public:
    void AccelerationWithSlip(const Vector &x, const Vector &v, const Vector &d,
                              Vector &k) const
    {
-      if (damping_blocks_.empty()) { Acceleration_(x, nullptr, &d, *mass_, k); }
+      if (damping_blocks_.empty()) { Acceleration_(x, kv_ ? &v : nullptr, &d, *mass_, k); }
       else { Acceleration_(x, &v, &d, *mass_damped_, k); }
    }
+
+   // ------------------------------------------------------------------
+   // Kelvin-Voigt damping.  eta_bar dimensionless; width in metres
+   // (elements whose centroid lies within `width` of the nearest fault-face
+   // centroid; width < 0 = every element).  KVScale::Dt needs SetTimeStep
+   // first.  Collective.  Call once, before the first step; eta_bar = 0 is a
+   // no-op.
+   // ------------------------------------------------------------------
+   enum class KVScale { Node, Dt };
+   /// h_e for KVScale::Node: the inscribed diameter of the CFL (6 V / A for a
+   /// tet, 4 A / P for a triangle; default, decision Chunhui Zhao 2026-10-15:
+   /// its stable-dt factor is mesh-scale and sliver invariant) or the mean
+   /// edge length.
+   enum class KVLength { MeanEdge, Inscribed };
+   static constexpr real_t kKVGamma = 1.0 / 3.0;   ///< Day's dt = gamma dx / c_s
+
+   /// bc_velocity (optional): Dirichlet data for the damping term, i.e. the
+   /// velocity du_D/dt on the Dirichlet faces, evaluated at the time of the
+   /// velocity it damps (t_{n+1/2} for Udot*).  Without it the damping term
+   /// takes v_D = 0 there (static Dirichlet data, the production case).
+   void SetKelvinVoigt(real_t eta_bar, KVScale scale, real_t width,
+                       KVLength length = KVLength::Inscribed,
+                       const BoundaryConfig *bc_velocity = nullptr)
+   {
+      MFEM_VERIFY(!kv_, "SetKelvinVoigt: already set");
+      MFEM_VERIFY(eta_bar >= 0.0, "SetKelvinVoigt: eta_bar = " << eta_bar << " < 0");
+      if (eta_bar == 0.0) { return; }
+      MFEM_VERIFY(scale != KVScale::Dt || dt_ > 0.0,
+                  "SetKelvinVoigt: KVScale::Dt needs SetTimeStep first");
+      MFEM_VERIFY(width < 0.0 || has_fault_, "SetKelvinVoigt: a layer width "
+                  "needs fault faces; use width < 0 for the whole domain");
+      kv_eta_bar_ = eta_bar;
+      kv_scale_ = scale;
+      kv_width_ = width;
+      // fault-face centroids of all ranks
+      std::vector<real_t> cl;
+      if (has_fault_ && width >= 0.0)
+      {
+         for (int fi = 0; fi < nloc_faces_; fi++)
+         {
+            long long key[3];
+            real_t xv[3][3];
+            orient_->FaceVertexData(fi, key, xv);
+            for (int c = 0; c < 3; c++) { cl.push_back((xv[0][c] + xv[1][c] + xv[2][c]) / 3.0); }
+         }
+      }
+      MPI_Comm comm = mesh_.GetComm();
+      int nr = 0;
+      MPI_Comm_size(comm, &nr);
+      int nloc = static_cast<int>(cl.size());
+      std::vector<int> cnt(nr), dsp(nr, 0);
+      MPI_Allgather(&nloc, 1, MPI_INT, cnt.data(), 1, MPI_INT, comm);
+      for (int r = 1; r < nr; r++) { dsp[r] = dsp[r - 1] + cnt[r - 1]; }
+      std::vector<real_t> cg(dsp[nr - 1] + cnt[nr - 1]);
+      MPI_Allgatherv(cl.data(), nloc, MPITypeMap<real_t>::mpi_type, cg.data(), cnt.data(),
+                     dsp.data(), MPITypeMap<real_t>::mpi_type, comm);
+      const int nf = static_cast<int>(cg.size()) / 3;
+      real_t lo[3] = {1e300, 1e300, 1e300}, hi[3] = {-1e300, -1e300, -1e300};
+      for (int f = 0; f < nf; f++)
+         for (int c = 0; c < 3; c++)
+         {
+            lo[c] = std::min(lo[c], cg[3 * f + c]);
+            hi[c] = std::max(hi[c], cg[3 * f + c]);
+         }
+      // per-element beta_e in the layer, a floor outside (no 0/0 in the
+      // penalty ratio (D lam + 2 mu)^2 / (2 mu), which is linear in beta);
+      // kv_in_gf_ = 1 in the layer, 0 outside (fault-face check below)
+      const ParFiniteElementSpace *mfes = sample_->RhoGF().ParFESpace();
+      kv_lam_gf_ = std::make_unique<ParGridFunction>(const_cast<ParFiniteElementSpace *>(mfes));
+      kv_mu_gf_ = std::make_unique<ParGridFunction>(const_cast<ParFiniteElementSpace *>(mfes));
+      kv_in_gf_ = std::make_unique<ParGridFunction>(const_cast<ParFiniteElementSpace *>(mfes));
+      Array<int> mdofs, ev;
+      Vector xc(3);
+      long long nin = 0;
+      real_t bmm[2] = {std::numeric_limits<real_t>::infinity(),
+                       std::numeric_limits<real_t>::infinity()};   // {min, -max}
+      real_t bsum[2] = {0.0, 0.0};   // {sum beta, count} over the layer
+      for (int e = 0; e < mesh_.GetNE(); e++)
+      {
+         bool in = (width < 0.0);
+         if (!in)
+         {
+            ElementTransformation *T = mesh_.GetElementTransformation(e);
+            T->Transform(Geometries.GetCenter(mesh_.GetElementBaseGeometry(e)), xc);
+            bool near_box = true;
+            for (int c = 0; c < 3; c++)
+            {
+               if (xc(c) < lo[c] - width || xc(c) > hi[c] + width) { near_box = false; }
+            }
+            if (near_box)
+            {
+               const real_t w2 = width * width;
+               for (int f = 0; f < nf && !in; f++)
+               {
+                  const real_t dx = xc(0) - cg[3 * f], dy = xc(1) - cg[3 * f + 1],
+                               dz = xc(2) - cg[3 * f + 2];
+                  in = (dx * dx + dy * dy + dz * dz <= w2);
+               }
+            }
+         }
+         mfes->GetElementDofs(e, mdofs);
+         real_t beta = eta_bar * dt_;
+         if (scale == KVScale::Node)
+         {
+            const Geometry::Type g = mesh_.GetElementBaseGeometry(e);
+            MFEM_VERIFY(g == Geometry::TETRAHEDRON || g == Geometry::TRIANGLE,
+                        "SetKelvinVoigt: element " << e << " is a " << Geometry::Name[g]
+                        << "; tetrahedra and triangles only");
+            const real_t h_e = KVElementLength(e, length);
+            const real_t cs = std::sqrt(sample_->MuGF()(mdofs[0]) / sample_->RhoGF()(mdofs[0]));
+            beta = eta_bar * kKVGamma * (h_e / order_) / cs;
+         }
+         if (in)
+         {
+            bmm[0] = std::min(bmm[0], beta);
+            bmm[1] = std::min(bmm[1], -beta);
+            bsum[0] += beta;
+            bsum[1] += 1.0;
+         }
+         const real_t b = in ? beta : kKVFloorRel * beta;
+         (*kv_lam_gf_)(mdofs[0]) = b * sample_->LambdaGF()(mdofs[0]);
+         (*kv_mu_gf_)(mdofs[0]) = b * sample_->MuGF()(mdofs[0]);
+         (*kv_in_gf_)(mdofs[0]) = in ? 1.0 : 0.0;
+         nin += in ? 1 : 0;
+      }
+      kv_lam_gf_->ExchangeFaceNbrData();
+      kv_mu_gf_->ExchangeFaceNbrData();
+      kv_in_gf_->ExchangeFaceNbrData();
+      MPI_Allreduce(&nin, &kv_layer_elems_, 1, MPI_LONG_LONG, MPI_SUM, comm);
+      MPI_Allreduce(MPI_IN_PLACE, bmm, 2, MPITypeMap<real_t>::mpi_type, MPI_MIN, comm);
+      MPI_Allreduce(MPI_IN_PLACE, bsum, 2, MPITypeMap<real_t>::mpi_type, MPI_SUM, comm);
+      MFEM_VERIFY(kv_layer_elems_ > 0, "SetKelvinVoigt: no element in the layer (width "
+                  << width << " m)");
+      kv_beta_min_ = bmm[0];
+      kv_beta_max_ = -bmm[1];
+      const real_t beta_mean = bsum[0] / bsum[1];
+      kv_lam_coef_ = std::make_unique<GridFunctionCoefficient>(kv_lam_gf_.get());
+      kv_mu_coef_ = std::make_unique<GridFunctionCoefficient>(kv_mu_gf_.get());
+      // the scalar fallbacks feed BR2-only paths (IP uses the coefficients)
+      kv_ = std::make_unique<ElasticityDomainOperator<ParMesh>>(
+         mesh_, order_, *kv_lam_coef_, *kv_mu_coef_, beta_mean * lam_fb_, beta_mean * mu_fb_,
+         /*Vp=*/0.0, /*Wf=*/0.0, /*lf=*/0.0, bc_velocity ? *bc_velocity : bc_, DGMethod::IP,
+         SolverType::CG_AMG, config_);
+      kv_vD_ = (bc_velocity != nullptr);
+      MFEM_VERIFY(!kv_vD_ || bc_velocity->dirichlet_attrs == bc_.dirichlet_attrs,
+                  "SetKelvinVoigt: bc_velocity must have the same Dirichlet attributes");
+      MFEM_VERIFY(kv_->GetFESpace().GetVSize() == height,
+                  "SetKelvinVoigt: damping operator size " << kv_->GetFESpace().GetVSize()
+                  << " != " << height);
+      if (has_fault_)
+      {
+         MFEM_VERIFY(kv_->GetNumFaultDOFs() == nd_ && kv_->GetNumOwnedFaultDOFs() == no_
+                     && kv_->GetNbfPerFace() == nbf_,
+                     "SetKelvinVoigt: the damping operator's fault layout differs");
+         // both elements of every fault face must lie inside the layer
+         GridFunctionCoefficient in_coef(kv_in_gf_.get());
+         int bad = 0;
+         for (int fi = 0; fi < nloc_faces_; fi++)
+         {
+            FaceElementTransformations *Tr = FaultFaceTr_(fi);
+            Tr->SetAllIntPoints(&Geometries.GetCenter(Tr->GetGeometryType()));
+            if (in_coef.Eval(*Tr->Elem1, Tr->GetElement1IntPoint()) < 0.5
+                || in_coef.Eval(*Tr->Elem2, Tr->GetElement2IntPoint()) < 0.5) { bad++; }
+         }
+         MPI_Allreduce(MPI_IN_PLACE, &bad, 1, MPI_INT, MPI_SUM, comm);
+         MFEM_VERIFY(bad == 0, "SetKelvinVoigt: " << bad << " fault-face sides are not "
+                     "inside the Kelvin-Voigt layer; increase the layer width ("
+                     << width << " m)");
+         Vector sp;
+         kv_->GetFaultFacePenalties(sigFkv_face_, sp);
+         Vector sloc(nd_);
+         for (int k = 0; k < nd_; k++) { sloc(k) = sigFkv_face_(k / nbf_); }
+         elast_->RestrictToOwnedFault(sloc, sigFkv_own_, 1);
+         v_gf_ = std::make_unique<ParGridFunction>(&elast_->GetFESpace());
+      }
+   }
+   bool HasKelvinVoigt() const { return static_cast<bool>(kv_); }
+   /// Slope of the total fault traction in V^{n+1} at owned DOF j, the
+   /// closure's gamma: 1/2 sigma_F dt (+ sigma_F^eta with Kelvin-Voigt).  The
+   /// end-of-step traction is X* + gamma V.
+   real_t ClosureGamma(int j) const
+   {
+      return kv_ ? 0.5 * sigF_own_(j) * dt_ + sigFkv_own_(j) : 0.5 * sigF_own_(j) * dt_;
+   }
+   /// Element length of KVScale::Node (tetrahedra and triangles).
+   real_t KVElementLength(int e, KVLength length) const
+   {
+      Array<int> ev;
+      mesh_.GetElementVertices(e, ev);
+      const int sd = mesh_.SpaceDimension();
+      auto dist = [&](int i, int j) {
+         const real_t *xi = mesh_.GetVertex(ev[i]), *xj = mesh_.GetVertex(ev[j]);
+         real_t d2 = 0.0;
+         for (int c = 0; c < sd; c++) { d2 += (xi[c] - xj[c]) * (xi[c] - xj[c]); }
+         return std::sqrt(d2);
+      };
+      if (length == KVLength::MeanEdge)
+      {
+         real_t hsum = 0.0;
+         int ne = 0;
+         for (int i = 0; i < ev.Size(); i++)
+            for (int j = i + 1; j < ev.Size(); j++) { hsum += dist(i, j); ne++; }
+         return hsum / ne;   // simplices: every vertex pair is an edge
+      }
+      const real_t vol = mesh_.GetElementVolume(e);
+      if (ev.Size() == 3)   // triangle: 4 A / P
+      {
+         return 4.0 * vol / (dist(0, 1) + dist(1, 2) + dist(2, 0));
+      }
+      // tet: 6 V / A_total (NitscheElementLength)
+      auto tri = [&](int a, int b, int c) {
+         const real_t *xa = mesh_.GetVertex(ev[a]), *xb = mesh_.GetVertex(ev[b]),
+                      *xc = mesh_.GetVertex(ev[c]);
+         const real_t e1[3] = {xb[0] - xa[0], xb[1] - xa[1], xb[2] - xa[2]};
+         const real_t e2[3] = {xc[0] - xa[0], xc[1] - xa[1], xc[2] - xa[2]};
+         const real_t cx = e1[1] * e2[2] - e1[2] * e2[1], cy = e1[2] * e2[0] - e1[0] * e2[2],
+                      cz = e1[0] * e2[1] - e1[1] * e2[0];
+         return 0.5 * std::sqrt(cx * cx + cy * cy + cz * cz);
+      };
+      const real_t A = tri(0, 1, 2) + tri(0, 2, 3) + tri(0, 3, 1) + tri(1, 2, 3);
+      return 6.0 * vol / A;
+   }
+   real_t KelvinVoigtEtaBar() const { return kv_eta_bar_; }
+   /// beta_e range over the layer elements (s).
+   real_t KelvinVoigtBetaMin() const { return kv_beta_min_; }
+   real_t KelvinVoigtBetaMax() const { return kv_beta_max_; }
+   long long KelvinVoigtLayerElements() const { return kv_layer_elems_; }
+   /// K_eta v (zero without the layer).
+   void ApplyKVStiffness(const Vector &v, Vector &Kv) const
+   {
+      Kv.SetSize(height);
+      if (!kv_) { Kv = 0.0; return; }
+      kv_->ApplyStiffness(v, Kv);
+   }
+   /// G_eta V for V on owned DOFs.
+   void KVSlipLoad(const Vector &V, Vector &GV) const
+   {
+      ToKernelLocal_(V, slip_k_);
+      kv_->AssembleSlipOnlyRHS(GV, slip_k_);
+   }
+   /// T_eta(v, V): the damping operator's fault traction (3 no, global).
+   void KVTrialTraction(const Vector &v, const Vector &V, Vector &T)
+   {
+      ToKernelLocal_(V, kv_slip_k_);
+      v_gf_->Vector::operator=(v);
+      kv_->ComputeTractionDiagnostics(*v_gf_, kv_slip_k_, kvTk_, kvTks_, kvTkc_, kvjr_,
+                                      &kvsn_);
+      kvTloc_.SetSize(3 * nd_);
+      for (int k = 0; k < nd_; k++)
+      {
+         real_t nk[3], t1k[3], t2k[3];
+         KernelTriad_(k, nk, t1k, t2k);
+         fault_frame::FromKernel(kvTk_(2 * k), kvTk_(2 * k + 1), kvsn_(k), eps_loc_[k],
+                                 nk, t1k, t2k, &kvTloc_(3 * k));
+      }
+      elast_->RestrictToOwnedFault(kvTloc_, T, 3);
+   }
+   /// sigma_F^eta per owned DOF and per local face (empty without the layer).
+   const Vector &FaultSigmaFKV() const { return sigFkv_own_; }
+   const Vector &FacePenaltyKV() const { return sigFkv_face_; }
 
 private:
    /// Shared by Mult and ImplicitSolve so both give identical bits:
@@ -499,11 +794,29 @@ private:
          ApplyDamping(*v, Cv_);
          F_ -= Cv_;
       }
+      if (kv_ && v)
+      {
+         // Kelvin-Voigt: -(K_eta v - G_eta V) with the stored slip rate V
+         // (V^{n+1} in ImplicitSolve, after the fault advance)
+         kv_->ApplyStiffness(*v, Kv_v_);
+         F_ -= Kv_v_;
+         if (kv_vD_)
+         {
+            kv_->AssembleDirichletOnlyRHS(FvD_, GetTime() - kv_tv_shift_);
+            F_ += FvD_;
+         }
+         if (has_fault_)
+         {
+            KVSlipLoad(V_, GvV_);
+            F_ += GvV_;
+         }
+      }
       Minv.Apply(F_, a);
    }
 
-   /// Boxes 3-11 at t = t_{n+1}, x = U^{n+1}.
-   void AdvanceFault_(const Vector &x, real_t t)
+   /// Boxes 3-11 at t = t_{n+1}, x = U^{n+1}; v = Udot* (used only by the
+   /// Kelvin-Voigt layer).
+   void AdvanceFault_(const Vector &x, real_t t, const Vector *v = nullptr)
    {
       MFEM_VERIFY(!pc_ || pc_seeded_, "NitscheWaveOperator: Prakash-Clifton is on "
                   "but sigma* was never seeded (SetPrakashCliftonState)");
@@ -523,6 +836,16 @@ private:
       }
       // 5-8
       TrialTraction(x, dstar_, Town_);
+      if (kv_)
+      {
+         // Kelvin-Voigt: X* gains T_eta(Udot*, 0); its slope sigma_F^eta in
+         // V^{n+1} goes into gamma (CloseDOF)
+         MFEM_VERIFY(v, "NitscheWaveOperator: the Kelvin-Voigt layer needs Udot*");
+         kv_zero_.SetSize(3 * no_);
+         kv_zero_ = 0.0;
+         KVTrialTraction(*v, kv_zero_, kvT_);
+         Town_ += kvT_;
+      }
       BackgroundTraction(t, S_);
       // 9-11
       real_t min_sig = std::numeric_limits<real_t>::infinity();
@@ -849,6 +1172,9 @@ private:
 
    ParMesh &mesh_;
    int order_;
+   BoundaryConfig bc_;
+   DomainConfig config_;
+   real_t lam_fb_ = 0.0, mu_fb_ = 0.0;
    std::unique_ptr<NitscheMaterialSample> sample_;
    std::unique_ptr<ElasticityDomainOperator<ParMesh>> elast_;
    std::unique_ptr<NitscheMass> mass_;
@@ -883,6 +1209,21 @@ private:
    Vector Tk_, Tks_, Tkc_, jr_k_, snk_, Tloc_;
    mutable Vector dloc_, slip_k_, Gd_;
    Vector last_accel_;
+
+   // Kelvin-Voigt damping
+   static constexpr real_t kKVFloorRel = 1e-12;   ///< beta outside the layer / beta_e
+   real_t kv_eta_bar_ = 0.0, kv_width_ = 0.0;
+   real_t kv_beta_min_ = 0.0, kv_beta_max_ = 0.0;
+   KVScale kv_scale_ = KVScale::Node;
+   bool kv_vD_ = false;               ///< damping term has Dirichlet velocity data
+   mutable real_t kv_tv_shift_ = 0.0; ///< t - (time of the damped velocity)
+   long long kv_layer_elems_ = 0;
+   std::unique_ptr<ParGridFunction> kv_lam_gf_, kv_mu_gf_, kv_in_gf_, v_gf_;
+   std::unique_ptr<GridFunctionCoefficient> kv_lam_coef_, kv_mu_coef_;
+   std::unique_ptr<ElasticityDomainOperator<ParMesh>> kv_;
+   Vector sigFkv_face_, sigFkv_own_, kvT_, kv_zero_;
+   Vector kv_slip_k_, kvTk_, kvTks_, kvTkc_, kvjr_, kvsn_, kvTloc_;
+   mutable Vector Kv_v_, GvV_, FvD_;
 };
 
 #endif // MFEM_USE_MPI
