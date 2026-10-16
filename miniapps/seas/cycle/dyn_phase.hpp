@@ -267,6 +267,8 @@ public:
                           + V(3 * j + 2) * V(3 * j + 2));
       }
    }
+   /// Slip as global three-vectors (3 N), Bridge::ToQD's input.
+   const Vector &Slip() const { return W_->Slip(); }
    void SlipKernel(Vector &sk) const { frames_.ToKernel(W_->Slip(), sk); }
    const Vector &Psi() const { return W_->State(); }
 

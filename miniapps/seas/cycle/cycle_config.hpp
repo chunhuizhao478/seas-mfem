@@ -23,10 +23,11 @@
 // [cycle] keys (defaults in brackets):
 //   ic                   "gold" | "scec_fd"                         [required]
 //   switching            false: the QD regime only; true: the regime
-//                        controller, which needs ic = "scec_fd" and, in
-//                        this build, [cycle.switch].max_dynamic_phases = 1
-//                        (P2: the run stops at the end of the first
-//                        dynamic phase; the switch back is P3)      [false]
+//                        controller, which needs ic = "scec_fd".  In this
+//                        build (P3) the run starts dynamic at t = 0, switches
+//                        back to QD at the end of the phase and continues to
+//                        t_final; a QD -> dynamic switch at t > 0 (P4) stops
+//                        the run instead                            [false]
 //   qd_radiation_damping true; false is refused with "gold"         [true]
 //   mesh_scale           vertex scale before the partition          [1.0]
 //   plate_rate           Vp of the far-field and creep loading     [required]
@@ -35,7 +36,18 @@
 //   [cycle.qd]      solver ("mumps" | "mumps_blr"), blr_tol,
 //                   petsc_options (PETSc TS options file), ts_atol, ts_rtol
 //   [cycle.switch]  V_on [1e-2], V_off [1e-3], T_dwell [10], T_min [0],
-//                   T_max [1200], max_dynamic_phases [0 = no limit]
+//                   T_max [1200], max_dynamic_phases [0 = no limit; N > 0:
+//                   the run stops at the end of the N-th dynamic phase,
+//                   before switching back]
+//   [cycle.probe]   V_off, T_dwell: arrays of positive numbers (both or
+//                   neither; default none; a V_off above V_on is allowed,
+//                   since the pairs are only measured).
+//                   The switch probe of plan P3: the first dynamic phase
+//                   runs on until every (V_off, T_dwell) pair would have
+//                   switched back (or T_max), and at each pair's switch the
+//                   driver solves the QD balance and writes the jump in tau
+//                   and V at every station to _switch_probe.txt.  The run
+//                   itself switches back with [cycle.switch]'s pair.
 //   [cycle.prestress] V_background (V_bg of psi0)                   [required]
 //   [cycle.fields]  V_init_dip, and the RectTaperFields a, Dc, V_init:
 //                   center, axis1, axis2 (3-vectors, global XYZ), half1,
@@ -144,6 +156,15 @@ struct SwitchConfig
    int max_dynamic_phases = 0;
 };
 
+/// [cycle.probe]: the switch probe of plan P3 (empty: off).  Every pair
+/// (V_off[i], T_dwell[j]) is measured.
+struct ProbeConfig
+{
+   std::vector<real_t> V_off;
+   std::vector<real_t> T_dwell;
+   bool Enabled() const { return !V_off.empty(); }
+};
+
 /// The dynamic regime's numerics (see the file comment for the keys).
 struct DynamicConfig
 {
@@ -175,6 +196,7 @@ struct CycleConfig
 
    QDConfig qd;
    SwitchConfig switch_cfg;
+   ProbeConfig probe;
    DynamicConfig dyn;
    PrestressConfig prestress;     ///< include_eta follows ic
    FaultFieldsConfig fields;
@@ -260,6 +282,26 @@ inline std::array<real_t, 3> Vec3(const toml::value &t, const std::string &sec,
                   "[" << sec << "]." << key << "[" << d << "] must be a number");
       out[d] = c.is_floating() ? static_cast<real_t>(c.as_floating())
                                : static_cast<real_t>(c.as_integer());
+   }
+   return out;
+}
+
+/// A non-empty array of positive numbers.
+inline std::vector<real_t> PositiveReals(const toml::value &t, const std::string &sec,
+                                         const std::string &key)
+{
+   MFEM_VERIFY(t.contains(key), "[" << sec << "]." << key << " is required");
+   const toml::value &v = t.at(key);
+   MFEM_VERIFY(v.is_array() && !v.as_array().empty(),
+               "[" << sec << "]." << key << " must be a non-empty array of numbers");
+   std::vector<real_t> out;
+   for (const toml::value &c : v.as_array())
+   {
+      MFEM_VERIFY(c.is_floating() || c.is_integer(),
+                  "[" << sec << "]." << key << " must hold numbers only");
+      out.push_back(c.is_floating() ? static_cast<real_t>(c.as_floating())
+                                    : static_cast<real_t>(c.as_integer()));
+      MFEM_VERIFY(out.back() > 0.0, "[" << sec << "]." << key << " values must be > 0");
    }
    return out;
 }
@@ -363,7 +405,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
    MFEM_VERIFY(root.contains("cycle"), "fd_cycle: the deck has no [cycle] section");
    const toml::value &cy = root.at("cycle");
    OnlyKeys(cy, "cycle", {"ic", "switching", "qd_radiation_damping", "mesh_scale",
-                          "plate_rate", "penalty_factor", "qd", "switch",
+                          "plate_rate", "penalty_factor", "qd", "switch", "probe",
                           "prestress", "fields", "output", "checkpoint"});
    c.ic = Str(cy, "cycle", "ic", "", true);
    MFEM_VERIFY(c.ic == "gold" || c.ic == "scec_fd",
@@ -423,10 +465,16 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
                   "[cycle.switch] needs T_dwell >= 0, T_min >= 0, T_max > T_min");
       MFEM_VERIFY(sw.max_dynamic_phases >= 0,
                   "[cycle.switch].max_dynamic_phases must be >= 0 (0 = no limit)");
-      MFEM_VERIFY(!c.switching || sw.max_dynamic_phases == 1,
-                  "[cycle].switching = true needs [cycle.switch].max_dynamic_phases = 1 "
-                  "in this build: the run stops at the end of the first dynamic phase, "
-                  "because the switch back to QD is plan phase P3");
+   }
+
+   if (cy.contains("probe"))
+   {
+      const std::string sec = "cycle.probe";
+      const toml::value &pr = cy.at("probe");
+      OnlyKeys(pr, sec, {"V_off", "T_dwell"});
+      c.probe.V_off = PositiveReals(pr, sec, "V_off");
+      c.probe.T_dwell = PositiveReals(pr, sec, "T_dwell");
+      MFEM_VERIFY(c.switching, "[cycle.probe] needs [cycle].switching = true");
    }
 
    MFEM_VERIFY(cy.contains("prestress"), "[cycle.prestress] is required");

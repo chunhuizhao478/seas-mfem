@@ -9,13 +9,16 @@
 //   GoDynamic(Vmax):  Vmax > V_on                     (after each QD step)
 //   AfterDynStep(Vmax, tau, dt):
 //     below = (Vmax < V_off) ? below + dt : 0
-//     below >= T_dwell and tau >= T_min  ->  END_OF_PHASE (back to QD)
+//     Vmax < V_off, below >= T_dwell and tau >= T_min  ->  END_OF_PHASE (back to QD)
 //     tau >= T_max                       ->  TOO_LONG (stop and report)
 //     else                               ->  STAY
 //
 // "below" counts the time max V has stayed below V_off, so the phase ends
 // T_dwell after the last step with max V >= V_off.  T_max stops the run
 // instead of forcing a switch (plan R9).  Defaults in SwitchConfig.
+//
+// The switch probe of plan P3 runs one controller per (V_off, T_dwell) pair
+// on the same max V history; a checkpoint keeps Phases() (Restore).
 //
 // No solver header (rule M4).
 
@@ -56,8 +59,11 @@ public:
    /// After each dynamic step of length dt, at phase time tau.
    DynVerdict AfterDynStep(real_t Vmax, real_t tau, real_t dt)
    {
-      below_ = (Vmax < cfg_.V_off) ? below_ + dt : 0.0;
-      if (below_ >= cfg_.T_dwell && tau >= cfg_.T_min) { return DynVerdict::EndOfPhase; }
+      const bool below = (Vmax < cfg_.V_off);
+      below_ = below ? below_ + dt : 0.0;
+      // `below` too: with T_dwell = 0 the counter alone (0 >= 0) would end
+      // the phase at a step above V_off.
+      if (below && below_ >= cfg_.T_dwell && tau >= cfg_.T_min) { return DynVerdict::EndOfPhase; }
       if (tau >= cfg_.T_max) { return DynVerdict::TooLong; }
       return DynVerdict::Stay;
    }
@@ -66,6 +72,13 @@ public:
    real_t BelowTime() const { return below_; }
    /// Dynamic phases entered so far.
    int Phases() const { return phases_; }
+   /// A restart from a QD checkpoint: the phases entered before it.
+   void Restore(int phases)
+   {
+      MFEM_VERIFY(phases >= 0, "RegimeController::Restore: " << phases << " phases");
+      phases_ = phases;
+      below_ = 0.0;
+   }
    /// True once the deck's max_dynamic_phases (> 0) have all been entered.
    bool LastPhase() const
    {

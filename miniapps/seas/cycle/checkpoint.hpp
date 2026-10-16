@@ -8,9 +8,11 @@
 //      step, event counters, state, displacement, traction, slip rate;
 //   2. io/petsc_ts_checkpoint.hpp WritePetscTSCheckpoint (PETSC_TS_V2):
 //      time, next dt, TS step number, rejections;
-//   3. the cycle block (FD_CYCLE_V1), appended here: the commit of the binary
-//      that wrote it (rule M10), the IC set, the regime, the step, and
-//      FdCycleOutput's state (cadence clock, event state, file sizes).
+//   3. the cycle block (FD_CYCLE_V2), appended here: the commit of the binary
+//      that wrote it (rule M10), the IC set, the regime, the step, the
+//      number of dynamic phases entered so far (the regime controller's
+//      state in the QD regime), and FdCycleOutput's state (cadence clock,
+//      event state, file sizes).  V1 (P1) had no phase count; it reads as 0.
 // Blocks 1 and 2 are written by the existing functions unchanged, so the
 // readers of seas_bp5_full can read the first two blocks.
 //
@@ -53,6 +55,7 @@ struct CheckpointInfo
    std::string commit;
    std::string ic;
    std::string regime = "QD";
+   int dyn_phases = 0;   ///< dynamic phases entered before this checkpoint
    FdCycleOutput::State out;
 };
 
@@ -80,11 +83,12 @@ inline void WriteCycleCheckpoint(const std::string &prefix, const CheckpointInfo
       MFEM_VERIFY(out.good(), "WriteCycleCheckpoint: cannot append to " << fn);
       const FdCycleOutput::State &o = info.out;
       out << std::setprecision(17) << std::scientific;
-      out << "FD_CYCLE_V1\n";
+      out << "FD_CYCLE_V2\n";
       out << "commit " << info.commit << "\n";
       out << "ic " << info.ic << "\n";
       out << "regime " << info.regime << "\n";
       out << "step " << info.step << "\n";
+      out << "dyn_phases " << info.dyn_phases << "\n";
       out << "out_last_write_time " << o.last_write_time << "\n";
       out << "out_num_events " << o.num_events << "\n";
       out << "out_in_event " << (o.in_event ? 1 : 0) << "\n";
@@ -134,10 +138,14 @@ inline void ReadCycleCheckpoint(const std::string &prefix, const std::string &co
    const std::string fn = CheckpointFilename(prefix, mpi.Rank());
    std::ifstream in(fn);
    std::string tok;
-   bool found = false;
-   while (in >> tok) { if (tok == "FD_CYCLE_V1") { found = true; break; } }
-   MFEM_VERIFY(found, "ReadCycleCheckpoint: " << fn << " has no FD_CYCLE_V1 block "
-               "(not written by seas_fd_cycle_driver)");
+   int version = 0;
+   while (in >> tok)
+   {
+      if (tok == "FD_CYCLE_V1") { version = 1; break; }
+      if (tok == "FD_CYCLE_V2") { version = 2; break; }
+   }
+   MFEM_VERIFY(version > 0, "ReadCycleCheckpoint: " << fn << " has no FD_CYCLE_V1/V2 "
+               "block (not written by seas_fd_cycle_driver)");
    auto tag = [&](const char *want)
    {
       std::string t;
@@ -152,6 +160,8 @@ inline void ReadCycleCheckpoint(const std::string &prefix, const std::string &co
    tag("ic"); in >> info.ic;
    tag("regime"); in >> info.regime;
    tag("step"); in >> step;
+   info.dyn_phases = 0;
+   if (version >= 2) { tag("dyn_phases"); in >> info.dyn_phases; }
    tag("out_last_write_time"); in >> o.last_write_time;
    tag("out_num_events"); in >> o.num_events;
    tag("out_in_event"); in >> in_event;

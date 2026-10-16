@@ -80,7 +80,14 @@ def compare(pa, pb, tol, exact, dedup, l2=False, columns=None):
             return False
         same += all(vx[c] == vy[c] for c in use)
         for k, c in enumerate(use):
-            a, b = float(vx[c]), float(vy[c])
+            try:
+                a, b = float(vx[c]), float(vy[c])
+            except ValueError:
+                # A text column (the switch log's regimes and reasons):
+                # equal or not.
+                if vx[c] != vy[c]:
+                    cmax[k] = math.inf
+                continue
             cmax[k] = max(cmax[k], rel(a, b))
             dsq[k] += (a - b) ** 2
             bsq[k] += b * b

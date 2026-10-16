@@ -8,6 +8,7 @@
 #   make -f cycle/cycle.mk test-cycle-api-pin     # rule M5, compile-time pins
 #   make -f cycle/cycle.mk test-cycle-params-parity  # P1, deck vs BP5Params
 #   make -f cycle/cycle.mk test-cycle-p2          # P2, regime hand-over tests
+#   make -f cycle/cycle.mk test-cycle-p3          # P3, the switch back to QD
 #   make -f cycle/cycle.mk cycle-owned-check      # rule M1, owned paths only
 #   make -f cycle/cycle.mk cycle-all              # all builds and checks (default)
 # Without the conda HDF5 (CONDA_PREFIX), point HDF5_INCFLAGS and HDF5_LIBS at
@@ -134,6 +135,32 @@ test-cycle-p2: seas_test_cycle_p2
 	done
 	$(MFEM_MPIEXEC) $(CYCLE_P2_MPIFLAGS) $(MFEM_MPIEXEC_NP) $(firstword $(filter-out 1,$(CYCLE_P2_NPS)) 1) ./seas_test_cycle_p2
 
+# P3 tests: the switch back to QD (bridge round trip; Reenter against a
+# fresh QD run and against a restart from the switch checkpoint).  Needs
+# PETSc; three QD factorizations one after the other.
+CYCLE_P3_SRC = tests/cycle/test_cycle_p3.cpp
+CYCLE_P3_OBJ = $(CYCLE_P3_SRC:.cpp=.o)
+$(CYCLE_P3_OBJ): %.o: $(SRC)%.cpp $(CYCLE_HEADERS) $(CYCLE_STAMP) \
+                 $(CYCLE_SHARED_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
+
+seas_test_cycle_p3: $(CYCLE_P3_OBJ) $(CYCLE_LINK_OBJS)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(CYCLE_P3_OBJ) $(CYCLE_LINK_OBJS) \
+	    $(CYCLE_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# 1 rank: bit for bit; 2 ranks: to MUMPS's parallel round-off (see the
+# test's file comment).
+CYCLE_P3_NPS ?= 1 2
+CYCLE_P3_DECK ?= config/fd_cycle/bp5_fd_first_event.toml
+CYCLE_P3_WORK ?= $(or $(TMPDIR),/tmp)/seas_test_cycle_p3
+test-cycle-p3: seas_test_cycle_p3
+	@for n in $(CYCLE_P3_NPS); do \
+	   $(MFEM_MPIEXEC) $(CYCLE_P2_MPIFLAGS) $(MFEM_MPIEXEC_NP) $$n ./seas_test_cycle_p3 \
+	      --deck $(CYCLE_P3_DECK) --work-dir $(CYCLE_P3_WORK)/np$$n || exit 1; \
+	done
+
 # Rule M1: the branch changes only its own paths, plus the shared files that
 # hold its hooks (document/fd_cycle_dev/HOOKS.md), and those by additions
 # only.  CYCLE_BASE is the shared branch this one merges from (M7); the check
@@ -169,12 +196,12 @@ cycle-owned-check:
 	echo "PASSED: every changed file is under an owned path, a hook file changed by additions only, or an import (rule M1)"
 
 cycle-all: seas_fd_cycle_driver seas_test_cycle_params_parity seas_test_cycle_p2 \
-           test-cycle-api-pin cycle-owned-check
+           seas_test_cycle_p3 test-cycle-api-pin cycle-owned-check
 
 cycle-clean:
 	rm -f $(FD_CYCLE_DRIVER_OBJ) $(CYCLE_API_PIN_OBJ) $(CYCLE_PARITY_OBJ) $(CYCLE_P2_OBJ) \
-	      seas_fd_cycle_driver seas_test_cycle_api_pin seas_test_cycle_params_parity \
-	      seas_test_cycle_p2 $(CYCLE_STAMP)
+	      $(CYCLE_P3_OBJ) seas_fd_cycle_driver seas_test_cycle_api_pin \
+	      seas_test_cycle_params_parity seas_test_cycle_p2 seas_test_cycle_p3 $(CYCLE_STAMP)
 
 .PHONY: cycle-all cycle-clean cycle-owned-check test-cycle-api-pin \
-        test-cycle-params-parity test-cycle-p2
+        test-cycle-params-parity test-cycle-p2 test-cycle-p3

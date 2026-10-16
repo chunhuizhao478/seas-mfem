@@ -1,7 +1,8 @@
 # bp5_fd_first_event_nokv.toml — seas_fd_cycle_driver, SCEC BP5-FD, the first
 # event (plan rev 3, phase P2): the scec_fd IC set, dynamic from t = 0 with
 # the damped numerics validated on TPV102 (plan 6.1), until max V stays
-# below V_off for T_dwell; then the run stops (the switch back is P3).
+# below V_off for T_dwell; then the run stops (max_dynamic_phases = 1;
+# bp5_fd_p3.toml switches back to QD).
 #
 # Run from miniapps/seas:
 #   mpirun -np N ./seas_fd_cycle_driver --deck config/fd_cycle/bp5_fd_first_event_nokv.toml
@@ -115,8 +116,8 @@ penalty_factor       = 1.0       # both regimes' K
 
 # Start dynamic when max V > V_on (0.015 m/s > 0.01 at t = 0, plan 11.5);
 # the phase ends once max V has stayed below V_off for T_dwell (the spec's
-# event end), and a phase longer than T_max stops the run.  P2 stops at the
-# end of the first dynamic phase.
+# event end), and a phase longer than T_max stops the run.  The run stops at
+# the end of the first dynamic phase (max_dynamic_phases = 1).
 [cycle.switch]
 V_on               = 1.0e-2
 V_off              = 1.0e-3

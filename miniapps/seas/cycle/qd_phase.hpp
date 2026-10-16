@@ -22,10 +22,24 @@
 //     op.SetInitialCondition(state)
 //   InitTS(dt0): PETSc TS (rk 5dp from the options file), adaptive, dt0
 //   Run(t, dt, t_final, max_steps, monitor): TSSolve; `monitor` runs at the
-//     start step and after each accepted step, as seas_bp5_full's monitor.
+//     start step and after each accepted step, as seas_bp5_full's monitor,
+//     and `false` stops the run at that step.  It runs from TS's post-step
+//     hook, not from a TSMonitor: TSSolve calls the monitors before TSStep,
+//     which resets the converged reason, so a stop set there was lost and
+//     the run went on (found by the P3 smoke test; it also affected P1's
+//     NaN stop).  Run calls it for the start step before TSSolve.
 //   Solve(t): one right-hand side at (t, state) for the switch to the
 //     dynamic regime (plan 6.2); Displacement, Slip, SlipRate, Psi, SigmaN
 //     then hand the static state to the bridge (cycle/state_bridge.hpp).
+//   Reenter(s, psi, t, step, dt0): the switch back (plan 6.3): the state
+//     from the bridge, one Solve(t) (static u and V from the balance with
+//     eta), then a new TS at t with first step dt0 whose step counter
+//     continues at `step`.  The new TS starts like a fresh QD run from that
+//     state (test_cycle_qd_restart_after_switch): the right-hand side is a
+//     function of (t, state) alone (no warm start), so the history of this
+//     object does not enter.  The monitor skips the re-entry step, as a
+//     restart skips its checkpoint step: the rows at that time are the
+//     dynamic regime's last, written before the switch.
 //
 // The kernel reads sigma_n, b, f0 and V0 as scalars outside SAFS mode
 // (fault/rate_state_fault.hpp: sigma_n_bp5_, AgingLawPsi, psi_init), so
@@ -179,6 +193,20 @@ public:
    }
 
    Vector &State() { return state_; }
+   /// Slip (kernel pairs, 2 N) and psi (N) into State(); nothing is solved.
+   void SetFaultState(const Vector &slip_k, const Vector &psi)
+   {
+      const int N = fault_->NumNodes();
+      MFEM_VERIFY(slip_k.Size() == 2 * N && psi.Size() == N,
+                  "QDPhase::SetFaultState: " << slip_k.Size() << " slip and " << psi.Size()
+                  << " psi values for " << N << " owned fault DOFs");
+      for (int i = 0; i < N; i++)
+      {
+         state_(FaultOp::StatePerNode * i + FaultOp::SlipIndex) = slip_k(2 * i);
+         state_(FaultOp::StatePerNode * i + FaultOp::SlipIndex + 1) = slip_k(2 * i + 1);
+         state_(FaultOp::StatePerNode * i + FaultOp::PsiIndex) = psi(i);
+      }
+   }
    FaultOp &Fault() { return *fault_; }
    PBP5SEASOp &Operator() { return *op_; }
    real_t MaxV() const { return op_->GetMaxSlipRate(); }
@@ -315,8 +343,24 @@ public:
                   "TSAdaptSetType(BASIC) failed");
       MFEM_VERIFY(TSSetFromOptions(ts) == PETSC_SUCCESS, "TSSetFromOptions failed");
       MFEM_VERIFY(TSSetTimeStep(ts, dt0) == PETSC_SUCCESS, "TSSetTimeStep failed");
-      MFEM_VERIFY(TSMonitorSet(ts, &QDPhase::MonitorCallback_, this, nullptr)
-                  == PETSC_SUCCESS, "TSMonitorSet failed");
+      MFEM_VERIFY(TSSetApplicationContext(ts, this) == PETSC_SUCCESS,
+                  "TSSetApplicationContext failed");
+      MFEM_VERIFY(TSSetPostStep(ts, &QDPhase::PostStepCallback_) == PETSC_SUCCESS,
+                  "TSSetPostStep failed");
+   }
+
+   /// Plan 6.3, the switch back: SetFaultState, Solve(t), and a new TS at t
+   /// (first step dt0, step counter `step`).  Returns the global max V of
+   /// the solve.  Collective.
+   real_t Reenter(const Vector &slip_k, const Vector &psi, real_t t, int step, real_t dt0)
+   {
+      SetFaultState(slip_k, psi);
+      const real_t Vmax = Solve(t);
+      InitTS(dt0);
+      TS ts = *ode_;
+      MFEM_VERIFY(TSSetStepNumber(ts, step) == PETSC_SUCCESS, "TSSetStepNumber failed");
+      skip_monitor_step_ = step;   // that time's rows are the dynamic regime's
+      return Vmax;
    }
 
    /// Continue from a checkpoint: the TS step counter and a fresh first stage.
@@ -341,8 +385,17 @@ public:
    {
       monitor_ = mon;
       stopped_ = false;
-      ode_->SetMaxIter(max_steps);
-      ode_->Run(state_, t, dt, t_final);
+      // The start step (TSSolve's first TSMonitor call in seas_bp5_full).
+      TS ts = *ode_;
+      PetscInt s0 = 0;
+      MFEM_VERIFY(TSGetStepNumber(ts, &s0) == PETSC_SUCCESS, "TSGetStepNumber failed");
+      MFEM_VERIFY(TSSetTime(ts, t) == PETSC_SUCCESS && TSSetTimeStep(ts, dt) == PETSC_SUCCESS,
+                  "TSSetTime/TSSetTimeStep failed");
+      if (CallMonitor_(static_cast<int>(s0), t))
+      {
+         ode_->SetMaxIter(max_steps);
+         ode_->Run(state_, t, dt, t_final);
+      }
       monitor_ = nullptr;
    }
 
@@ -447,20 +500,38 @@ private:
    }
 
 #ifdef MFEM_USE_PETSC
-   static PetscErrorCode MonitorCallback_(TS ts, PetscInt step, PetscReal t, Vec, void *ctx)
+   /// The monitor at one step; false: stop there.  The skipped step (a
+   /// restart's or a re-entry's) counts as `true`.
+   bool CallMonitor_(int step, real_t t)
+   {
+      if (step == skip_monitor_step_)
+      {
+         skip_monitor_step_ = -1;
+         return true;
+      }
+      if (monitor_ && !monitor_(step, t))
+      {
+         stopped_ = true;
+         return false;
+      }
+      return true;
+   }
+
+   /// After each accepted step (TSSolve, before its loop test, so the
+   /// reason set here ends the run at this step).
+   static PetscErrorCode PostStepCallback_(TS ts)
    {
       PetscFunctionBeginUser;
+      void *ctx = nullptr;
+      PetscCall(TSGetApplicationContext(ts, &ctx));
       QDPhase *self = static_cast<QDPhase *>(ctx);
-      const int istep = static_cast<int>(step);
-      if (istep == self->skip_monitor_step_)
+      PetscInt step;
+      PetscReal t;
+      PetscCall(TSGetStepNumber(ts, &step));
+      PetscCall(TSGetTime(ts, &t));
+      if (!self->CallMonitor_(static_cast<int>(step), static_cast<real_t>(t)))
       {
-         self->skip_monitor_step_ = -1;
-         PetscFunctionReturn(PETSC_SUCCESS);
-      }
-      if (self->monitor_ && !self->monitor_(istep, static_cast<real_t>(t)))
-      {
-         self->stopped_ = true;
-         TSSetConvergedReason(ts, TS_CONVERGED_USER);
+         PetscCall(TSSetConvergedReason(ts, TS_CONVERGED_USER));
       }
       PetscFunctionReturn(PETSC_SUCCESS);
    }

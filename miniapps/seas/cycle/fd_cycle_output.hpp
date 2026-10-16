@@ -12,7 +12,10 @@
 //   _fault.txt       WriteFaultTable: one row per fault DOF (P2: rupture
 //                    time, final slip, peak V and psi at the end of the
 //                    first dynamic phase)
-// The driver writes _switch.txt (regime changes) itself.
+//   _switch.txt      OpenSwitchLog / SwitchLog (root, switching on): one
+//                    line per regime change or stop
+// Sample returns the station rows Write would write, without writing (the
+// switch probe of plan P3).
 // The station and global files have the format of seas_bp5_full
 // (io/bp5_parallel_output.hpp, io/probe_output.hpp): two '#' header lines,
 // then rows of std::scientific, uppercase, 12 digits, space separated.  The
@@ -133,6 +136,9 @@ public:
       file_ << "\n";
    }
 
+   /// A line of text (the switch log's rows).
+   void Text(const std::string &line) { file_ << line << "\n"; }
+
    void Flush() { file_.flush(); }
    long long Size()
    {
@@ -151,6 +157,9 @@ class FdCycleOutput
 {
 public:
    static constexpr real_t kOutputTimeTolerance = 0.99;
+   /// Columns of a station row: t, slip_s, slip_d, log10 V_s, log10 V_d,
+   /// tau_s, tau_d (MPa), log10 theta.
+   static constexpr int kStationColumns = 8;
 
    /// What a checkpoint keeps to continue the files.
    struct State
@@ -193,6 +202,7 @@ public:
       MPI_Allreduce(cand.data(), owner.data(), ns, MPI_INT, MPI_MIN, comm_);
 
       if (restart) { state_ = *restart; }
+      restarted_ = (restart != nullptr);
       const std::vector<std::string> columns = {
          "time(s)", "slip_strike(m)", "slip_dip(m)",
          "log10(V_strike)(m/s)", "log10(V_dip)(m/s)",
@@ -259,30 +269,74 @@ public:
       {
          StationFields f;
          fill(f);
-         auto safe_log10 = [](real_t v) -> real_t
-         {
-            if (!std::isfinite(v)) { return -999.0; }
-            return v > 0.0 ? std::log10(v) : -300.0;
-         };
          for (size_t k = 0; k < owned_.size(); k++)
          {
-            const StationLocation &L = locs_[owned_[k]];
-            const real_t sd = Eval(f.slip_dip, L);
-            const real_t ss = Eval(f.slip_strike, L);
-            const real_t vd = std::abs(Eval(f.V_dip, L));
-            const real_t vs = std::abs(Eval(f.V_strike, L));
-            const real_t tau_d = -(Eval(f.tau_a_dip, L) + Eval(f.tau_b_dip, L)
-                                   + f.eta * Eval(f.V_dip, L)) / 1e6;
-            const real_t tau_s = -(Eval(f.tau_a_strike, L) + Eval(f.tau_b_strike, L)
-                                   + f.eta * Eval(f.V_strike, L)) / 1e6;
-            const real_t th = Eval(f.theta, L);
-            stations_[k]->Row({t, ss, sd, safe_log10(vs), safe_log10(vd),
-                               tau_s, tau_d, safe_log10(th)});
+            stations_[k]->Row(StationRow_(t, f, locs_[owned_[k]]));
          }
       }
       state_.last_write_time = t;
       Flush();
       return true;
+   }
+
+   /// The rows Write would write now, for every station in deck order
+   /// (kStationColumns values each), on the root; zeros on the other ranks.
+   /// Writes nothing and leaves the cadence alone.  Collective.
+   std::vector<real_t> Sample(real_t t, const FieldsFn &fill)
+   {
+      const int ns = static_cast<int>(cfg_.stations.size());
+      std::vector<real_t> mine(static_cast<size_t>(kStationColumns * ns), 0.0);
+      if (!owned_.empty())
+      {
+         StationFields f;
+         fill(f);
+         for (int s : owned_)
+         {
+            const std::vector<real_t> r = StationRow_(t, f, locs_[s]);
+            std::copy(r.begin(), r.end(), mine.begin() + kStationColumns * s);
+         }
+      }
+      std::vector<real_t> all(mine.size(), 0.0);
+      // Each station has one owner, so the sum is that owner's row.
+      MPI_Reduce(mine.data(), all.data(), static_cast<int>(mine.size()),
+                 MPITypeMap<real_t>::mpi_type, MPI_SUM, 0, comm_);
+      return all;
+   }
+
+   /// The switch log _switch.txt on the root: a fresh file, or with a
+   /// restart State the checkpointed one, continued.  Collective (only the
+   /// root opens a file).
+   void OpenSwitchLog(const std::string &commit)
+   {
+      if (rank_ != 0) { return; }
+      const std::string path = Path("_switch.txt");
+      const std::string name = std::filesystem::path(path).filename().string();
+      if (restarted_)
+      {
+         bool listed = false;
+         for (const std::string &f : state_.files) { listed = listed || (f == name); }
+         MFEM_VERIFY(listed, "FdCycleOutput restart: the checkpoint does not list " << name
+                     << "; it was written with [cycle].switching = false");
+         switch_ = Reopen(path, 5);
+      }
+      else
+      {
+         switch_ = std::make_unique<RowFile>(
+            path, "fd_cycle switch log, commit " + commit,
+            std::vector<std::string>{"time(s)", "Vmax(m/s)", "from", "to", "reason"});
+      }
+   }
+
+   /// One switch-log line (root; no-op elsewhere or without OpenSwitchLog).
+   void SwitchLog(real_t t, real_t Vmax, const std::string &from, const std::string &to,
+                  const std::string &reason)
+   {
+      if (!switch_) { return; }
+      std::ostringstream o;
+      o << std::scientific << std::uppercase << std::setprecision(12) << t << " " << Vmax
+        << " " << from << " " << to << " " << reason;
+      switch_->Text(o.str());
+      switch_->Flush();
    }
 
    /// A station row now, whatever the cadence; collective.
@@ -336,6 +390,7 @@ public:
       for (auto &f : stations_) { f->Flush(); }
       if (global_) { global_->Flush(); }
       if (catalog_) { catalog_->Flush(); }
+      if (switch_) { switch_->Flush(); }
    }
 
    /// The schedule, the event state and this rank's file sizes, flushed.
@@ -352,6 +407,7 @@ public:
       for (auto &f : stations_) { add(*f); }
       if (global_) { add(*global_); }
       if (catalog_) { add(*catalog_); }
+      if (switch_) { add(*switch_); }
       return s;
    }
 
@@ -374,6 +430,27 @@ public:
    }
 
 private:
+   /// One station row, term by term as ParallelBP5BenchmarkOutput::Write.
+   static std::vector<real_t> StationRow_(real_t t, const StationFields &f,
+                                          const StationLocation &L)
+   {
+      auto safe_log10 = [](real_t v) -> real_t
+      {
+         if (!std::isfinite(v)) { return -999.0; }
+         return v > 0.0 ? std::log10(v) : -300.0;
+      };
+      const real_t sd = Eval(f.slip_dip, L);
+      const real_t ss = Eval(f.slip_strike, L);
+      const real_t vd = std::abs(Eval(f.V_dip, L));
+      const real_t vs = std::abs(Eval(f.V_strike, L));
+      const real_t tau_d = -(Eval(f.tau_a_dip, L) + Eval(f.tau_b_dip, L)
+                             + f.eta * Eval(f.V_dip, L)) / 1e6;
+      const real_t tau_s = -(Eval(f.tau_a_strike, L) + Eval(f.tau_b_strike, L)
+                             + f.eta * Eval(f.V_strike, L)) / 1e6;
+      const real_t th = Eval(f.theta, L);
+      return {t, ss, sd, safe_log10(vs), safe_log10(vd), tau_s, tau_d, safe_log10(th)};
+   }
+
    std::string Path(const std::string &suffix) const
    {
       return cfg_.dir + "/" + cfg_.prefix + suffix;
@@ -410,6 +487,8 @@ private:
    std::vector<std::unique_ptr<RowFile>> stations_;
    std::unique_ptr<RowFile> global_;
    std::unique_ptr<RowFile> catalog_;
+   std::unique_ptr<RowFile> switch_;
+   bool restarted_ = false;
    State state_;
 };
 
