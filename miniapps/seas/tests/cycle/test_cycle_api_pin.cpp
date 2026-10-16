@@ -9,10 +9,12 @@
 // unevaluated call (decltype) with the argument types the adapter passes, or
 // a constructibility check; nothing runs.  The binary only reports the count.
 //
-// Hooks are pinned when they land (document/fd_cycle_dev/HOOKS.md).  On the
-// base 010b56e none has landed: H1a (FaultGeometry 4-argument constructor,
-// SetRateStatePerDOF), H1b (SetInitialFieldsPerDOF) and H2
-// (SetBackgroundTraction) are not pinned yet.
+// Hooks are pinned when the cycle starts to call them
+// (document/fd_cycle_dev/HOOKS.md).  P1 calls H1a (FaultGeometry 4-argument
+// constructor, SetRateStatePerDOF, GetVwValues) and H1b
+// (SetInitialFieldsPerDOF); they are not on the base 010b56e, so from P1 on
+// this test, like the driver, builds only on a tree that carries them.  H2
+// (SetBackgroundTraction) is pinned in P2.
 //
 // Build and run (from miniapps/seas):
 //   make -f cycle/cycle.mk test-cycle-api-pin
@@ -27,6 +29,7 @@
 #include "../../friction/dieterich_ruina.hpp"
 #include "../../friction/state_evolution.hpp"
 #include "../../config/bp5_params.hpp"
+#include "../../io/bp5_benchmark_output.hpp"
 #include "../../io/checkpoint.hpp"
 #include "../../io/petsc_ts_checkpoint.hpp"
 #include "../../common/mpi_context.hpp"
@@ -94,8 +97,14 @@ PIN_CTOR(QDDomain, ParMesh &, int, real_t, real_t, real_t, real_t, real_t,
          DGMethod, SolverType, BCMode, int);
 PIN(DGMethod::IP);
 PIN(SolverType::MUMPS);
+PIN(SolverType::MUMPS_BLR);
 PIN(BCMode::FarField);
+PIN(BasisType::GaussLobatto);
 PIN(LV<QDDomain>().SetPenaltyFactor(real_t()));
+PIN(LV<QDDomain>().SetBLRTol(real_t()));
+PIN_TYPE(const Array<int> &, CLV<QDDomain>().GetFaultInteriorFaces());
+PIN_TYPE(const Array<int> &, CLV<QDDomain>().GetFaultSharedFaces());
+PIN(CLV<QDDomain>().RestrictToOwnedFault(CLV<Vector>(), LV<Vector>()));
 PIN_TYPE(int, CLV<QDDomain>().GetNumFaultDOFs());
 PIN_TYPE(int, CLV<QDDomain>().GetNumOwnedFaultDOFs());
 PIN_TYPE(int, CLV<QDDomain>().GetNbfPerFace());
@@ -115,11 +124,30 @@ PIN(CLV<BP5Params>().L0);
 PIN(CLV<BP5Params>().cs);
 PIN(CLV<BP5Params>().rho);
 
-// Fault geometry (the BP5 constructor; H1a's 4-argument one is not pinned
-// until it lands).
+// Fault geometry: the BP5 constructor (the parity test's reference) and the
+// per-DOF arrays QDPhase and the station writer read.
 PIN_CTOR(QDGeom, DomainOperator<ParMesh> &, const BP5Params &, MPIContext *);
 PIN_TYPE(int, CLV<QDGeom>().NumFaultDOFs());
 PIN_TYPE(int, CLV<QDGeom>().NumGlobalFaultDOFs());
+PIN_TYPE(const Vector &, CLV<QDGeom>().fault_dof_coords_3d());
+PIN_TYPE(const Vector &, CLV<QDGeom>().GetCoordsX2());
+PIN_TYPE(const Vector &, CLV<QDGeom>().GetCoordsX3());
+PIN_TYPE(const Vector &, CLV<QDGeom>().GetAValues());
+PIN_TYPE(const Vector &, CLV<QDGeom>().GetDcValues());
+PIN_TYPE(const Vector &, CLV<QDGeom>().GetEtaValues());
+PIN_TYPE(const Vector &, CLV<QDGeom>().GetTauPre());
+PIN_TYPE(const Vector &, CLV<QDGeom>().GetVInit());
+PIN_TYPE(const Vector &, CLV<QDGeom>().sigma_n_per_dof());
+
+// Hook H1a: the constructor without the analytic BP5 fields, and the per-DOF
+// rate-and-state fill from the resolver.
+PIN_CTOR(QDGeom, DomainOperator<ParMesh> &, const BP5Params &, MPIContext *, bool);
+PIN_TYPE(void, LV<QDGeom>().SetRateStatePerDOF(CLV<spatial::RateStatePerDOFParams>(),
+                                               CLV<Vector>()));
+PIN_TYPE(const Vector &, CLV<QDGeom>().GetVwValues());
+// Hook H1b: per-DOF tau0, V_init and sigma_n.
+PIN_TYPE(void, LV<QDGeom>().SetInitialFieldsPerDOF(CLV<Vector>(), CLV<Vector>(),
+                                                   CLV<Vector>()));
 
 // Friction law and aging law.
 PIN_CTOR(DieterichRuinaFriction, const DieterichRuinaFriction::Constants &);
@@ -135,6 +163,26 @@ PIN_CTOR(QDFault, QDGeom *, DieterichRuinaFriction *, StateEvolution *,
          const BP5Params &, MPIContext *);
 PIN(LV<QDFault>().SetScecPsiInit(bool()));
 PIN_TYPE(int, CLV<QDFault>().StateSize());
+PIN_TYPE(int, CLV<QDFault>().TractionSize());
+PIN_TYPE(int, CLV<QDFault>().NumNodes());
+static_assert(QDFault::StatePerNode == 3 && QDFault::PsiIndex == 2,
+              "QD kernel state layout per node: slip dip, slip strike, psi");
+PIN(LV<QDFault>().PreInit(LV<Vector>()));
+PIN_TYPE(real_t, LV<QDFault>().Init(CLV<Vector>(), LV<Vector>()));
+PIN(CLV<QDFault>().GetSlip(CLV<Vector>(), LV<Vector>()));
+PIN(CLV<QDFault>().GetTheta(CLV<Vector>(), LV<Vector>()));
+PIN(CLV<QDFault>().RecomputeSlipRate(CLV<Vector>(), CLV<Vector>(), LV<Vector>()));
+PIN_TYPE(const Vector &, CLV<QDFault>().GetSlipRate());
+PIN(LV<QDFault>().SetSlipRate(CLV<Vector>()));
+
+// Station locator of seas_bp5_full's station writer.
+PIN_CTOR(Probe2DInterpolator, const Vector &, const Vector &,
+         const std::vector<Probe2DInterpolator::Station> &, int, int, bool);
+PIN_TYPE(bool, CLV<Probe2DInterpolator>().HasExactMatch(int()));
+PIN_TYPE(real_t, CLV<Probe2DInterpolator>().GetMatchDistance(int()));
+PIN_TYPE(int, CLV<Probe2DInterpolator>().GetNearestDOF(int()));
+PIN_TYPE(int, CLV<Probe2DInterpolator>().GetFaceStart(int()));
+PIN_TYPE(const Vector &, CLV<Probe2DInterpolator>().GetExactWeights(int()));
 
 // Quasi-dynamic operator.
 PIN_CTOR(QDOp, QDDomain *, QDFault *, MPIContext *);
@@ -162,6 +210,7 @@ PIN_CTOR(PetscODESolver, MPI_Comm, const std::string &);
 PIN(LV<PetscODESolver>().SetAbsTol(real_t()));
 PIN(LV<PetscODESolver>().SetRelTol(real_t()));
 PIN(LV<PetscODESolver>().SetMaxIter(int()));
+PIN(LV<PetscODESolver>().Run(LV<Vector>(), LV<real_t>(), LV<real_t>(), real_t()));
 PIN(LV<PetscODESolver>().Init(LV<TimeDependentOperator>(),
                               PetscODESolver::ODE_SOLVER_GENERAL));
 PIN_TYPE(petsc::TS, static_cast<petsc::TS>(CLV<PetscODESolver>()));
@@ -321,6 +370,6 @@ constexpr int kPinCount = __COUNTER__ - kPinBase - 1;
 int main()
 {
    std::cout << "PASSED: test_cycle_api_pin: " << kPinCount
-             << " API pins compiled (base 010b56e; hooks H1a, H1b, H2 not landed)\n";
+             << " API pins compiled (base 010b56e with hooks H1a, H1b; H2 not pinned)\n";
    return 0;
 }
