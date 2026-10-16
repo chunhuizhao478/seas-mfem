@@ -3371,7 +3371,10 @@ $(NITSCHE_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
                              domain/nitsche_wave_operator.hpp \
                              domain/nitsche_energy.hpp \
                              spatial/code/spatial_friction.hpp \
-                             dynamic/tpv102_stations.hpp \
+                             dynamic/fault_station_file.hpp \
+                             friction/rate_state_closure.hpp \
+                             friction/rate_state_srw_closure.hpp \
+                             friction/slip_weakening_closure.hpp \
                              $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) $(TOML_FLAGS) -DSEAS_USE_MPI \

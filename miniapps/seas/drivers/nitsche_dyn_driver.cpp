@@ -10,13 +10,16 @@
 // material, the boundary configuration and the fault setup, constructs the
 // NitscheWaveOperator (N-01) and advances it with MFEM's
 // CentralDifferenceSolver (N-02).  Nothing benchmark-specific lives here: the
-// law comes from a factory keyed on [meta] law, the friction parameters from
-// the SAFS resolver, the prestress and the nucleation from the deck as global
-// tensors (spec I1), the station list from the [problem] tag.
+// law comes from a factory keyed on [meta] law and [friction.rate_state]
+// state_evolution, the friction parameters from the SAFS resolver, the
+// prestress and the nucleation from the deck as global tensors (spec I1),
+// the stations from a station file the deck names.
 //
 // Outputs (in --output-dir):
-//   <prefix>_station_<name>.dat   TPV102StationWriter (column layout of the
+//   <prefix>_station_<name>.dat   FaultStationWriter (the column layout of the
 //                                 existing runs) through a DOFData adapter;
+//   <prefix>_station_snap.txt     per station: requested point, snapped fault
+//                                 node, distance;
 //   <prefix>_station_conventions.txt  frame, pin and sign map (I3);
 //   <prefix>_station_<name>_copies.dat  per station, the min/max over the DG
 //                                 copies at the station point (--station-copies
@@ -48,18 +51,44 @@
 // sigma* goes to the fault CSV dump and to fault.vtkhdf (normal_stress_pc).
 //
 // Scope (Chunhui Zhao, 2026-10-14): tetrahedral meshes; constant material
-// (the sidecar / depth-profile / halfspace selections are P8);
-// rate-and-state (slip weakening comes with TPV205).
+// (the sidecar / depth-profile / halfspace selections are P8).
+//
+// Laws (benchmark plan rev 1.3, Chunhui Zhao, 2026-10-16): rate and state
+// with the aging law (RateStateClosure); rate and state with the slip law and
+// strong rate weakening (RateStateSRWClosure; the deck must type
+// [friction.rate_state] f_w_default, because the parser fills 0.2 when the
+// key is absent); linear slip weakening (SlipWeakeningClosure,
+// [friction.slip_weakening], starting at rest: V = 0, slip path 0).
+//
+// Prestress regions (plan 4.5): optional top-level [[stress_region]] tables,
+// read by this driver.  Each is a box (x_min_m, x_max_m, y_min_m, y_max_m,
+// z_min_m, z_max_m; an absent bound is open, at least one is required) and a
+// full global tensor (sigma_xx_pa, sigma_yy_pa, sigma_zz_pa, sigma_xy_pa,
+// sigma_yz_pa, sigma_xz_pa, all six, tension positive as in [stress]) that
+// replaces the background inside the box; the last match wins.  The
+// operator projects the prestress face by face at quadrature points inside
+// each face, so a node on a box edge carries each adjacent face's value in
+// that face's DG copy.
+//
+// Stations (Chunhui Zhao, 2026-10-16): [output.stations] file = "..." (CSV
+// name,x,y,z in the global frame, written by scripts/make_fault_stations.py)
+// and snap_tolerance_m.  Each station snaps to the nearest fault node in
+// 3-D; the run aborts, naming the station, when that node is farther than
+// the tolerance.  No table, no station files.  The ninth column is
+// log10 theta (aging law, with V_0, f_0, b from [friction.rate_state]), psi
+// (strong rate weakening) or the slip path (slip weakening).
 
 #include "mfem.hpp"
 #include "../domain/nitsche_wave_operator.hpp"
 #include "../domain/nitsche_energy.hpp"
 #include "../solver/nitsche_cfl.hpp"
 #include "../friction/rate_state_closure.hpp"
+#include "../friction/rate_state_srw_closure.hpp"
+#include "../friction/slip_weakening_closure.hpp"
 #include "../fault/fault_frame.hpp"
 #include "../spatial/code/spatial_friction.hpp"
 #include "../dynamic/spatial_nucleation.hpp"
-#include "../dynamic/tpv102_stations.hpp"
+#include "../dynamic/fault_station_file.hpp"
 #ifdef MFEM_USE_HDF5
 #include "../io/fault_vtkhdf_writer.hpp"
 #include "../io/paraview_output.hpp"   // ParaViewOutput::ProbeH5ZZfpPluginOrAbort
@@ -76,6 +105,7 @@
 #include <iostream>
 #include <memory>
 #include <set>
+#include <sstream>
 #include <string>
 #include <sys/stat.h>
 #include <vector>
@@ -133,7 +163,7 @@ bool TomlBool(const toml::value *t, const char *key, bool def)
 }
 
 /// Station copy average (header, "Station copies").  Every owned DOF within
-/// kTie of the globally nearest station distance (the writer's own metric)
+/// kTie of the globally nearest station distance (3-D, the snapping metric)
 /// gets the face-area-weighted average over all DOFs at the station point P
 /// (P = the lexicographically smallest such position, copies within kTie of
 /// P); rank 0 sums in face-centroid order, so the sum does not depend on the
@@ -142,7 +172,7 @@ class StationCopyAverage
 {
 public:
    static constexpr real_t kTie = 1e-6;   // m
-   StationCopyAverage(NitscheWaveOperator &op, const std::vector<TPV102Station> &st,
+   StationCopyAverage(NitscheWaveOperator &op, const std::vector<FaultStation> &st,
                       const std::string &dir, const std::string &prefix)
       : ns_(static_cast<int>(st.size()))
    {
@@ -172,11 +202,7 @@ public:
       }
       E.RestrictToOwnedFault(cl, ca_, 4);
       const Vector &X = op.FaultPositions();
-      auto dist = [&](int s, int j) {
-         const real_t dx = X(3 * j) - st[s].along_strike;
-         const real_t dz = std::abs(X(3 * j + 2)) - st[s].down_dip;
-         return std::sqrt(dx * dx + dz * dz);
-      };
+      auto dist = [&](int s, int j) { return FaultStationDistance(st[s], &X(3 * j)); };
       std::vector<real_t> dmin(ns_, std::numeric_limits<real_t>::max());
       for (int s = 0; s < ns_; s++)
       {
@@ -312,15 +338,22 @@ private:
    std::vector<std::ofstream> env_;              // rank 0
 };
 
-/// Friction-law factory keyed on [meta] law (plan N-07, Generality).
+/// Friction-law factory keyed on [meta] law and [friction.rate_state]
+/// state_evolution (plan N-07, Generality; benchmark plan rev 1.3, 4.5).
+enum class LawKind { Aging, StrongRateWeakening, SlipWeakening };
+
 struct ClosureBundle
 {
    std::unique_ptr<DieterichRuinaFriction> fr;
    std::unique_ptr<IFaultClosure> closure;
    std::string name;
+   LawKind kind = LawKind::Aging;
 };
 
-ClosureBundle MakeClosure(const spatial::SpatialFrictionConfig &cfg)
+/// `t_rs` is the raw [friction.rate_state] table: the strong-rate-weakening
+/// branch requires f_w_default typed in the deck, because the parsed struct
+/// cannot tell an absent key from the 0.2 the parser fills in (plan 3.2).
+ClosureBundle MakeClosure(const spatial::SpatialFrictionConfig &cfg, const toml::value *t_rs)
 {
    ClosureBundle B;
    if (cfg.law == spatial::FrictionLawKind::RateState)
@@ -331,18 +364,28 @@ ClosureBundle MakeClosure(const spatial::SpatialFrictionConfig &cfg)
       B.fr = std::make_unique<DieterichRuinaFriction>(
          DieterichRuinaFriction::Constants{rs.V_0_default, rs.f_0_default,
                                         rs.b_default, rs.Dc_default});
-      RateStateClosure::StateLaw law = RateStateClosure::StateLaw::Aging;
       if (rs.state_evolution == spatial::StateEvolutionKind::SlipLawStrongRateWeakening)
       {
-         MFEM_ABORT("Nitsche driver: state_evolution = slip-law strong rate "
-                    "weakening (TPV104) has no IFaultClosure yet.");
+         MFEM_VERIFY(t_rs && t_rs->is_table() && t_rs->contains("f_w_default"),
+                     "Nitsche driver: state_evolution = slip-law strong rate weakening "
+                     "needs [friction.rate_state] f_w_default in the deck; when the key is "
+                     "absent the parser fills 0.2 without a word, so the driver refuses");
+         B.closure = std::make_unique<RateStateSRWClosure>(*B.fr, rs.f_w_default);
+         std::ostringstream nm;
+         nm << "rate_state (slip law, strong rate weakening, f_w = " << rs.f_w_default << ")";
+         B.name = nm.str();
+         B.kind = LawKind::StrongRateWeakening;
+         return B;
       }
-      B.closure = std::make_unique<RateStateClosure>(*B.fr, law);
+      B.closure = std::make_unique<RateStateClosure>(*B.fr, RateStateClosure::StateLaw::Aging);
       B.name = "rate_state (aging law)";
       return B;
    }
-   MFEM_ABORT("Nitsche driver: [meta] law = slip_weakening has no "
-              "IFaultClosure yet (it comes with TPV205).");
+   MFEM_VERIFY(cfg.slip_weakening.has_value(), "[meta] law = slip_weakening needs "
+               "[friction.slip_weakening]");
+   B.closure = std::make_unique<SlipWeakeningClosure>();
+   B.name = "slip_weakening (linear)";
+   B.kind = LawKind::SlipWeakening;
    return B;
 }
 
@@ -615,6 +658,11 @@ int main(int argc, char *argv[])
    const toml::value *t_fric = DeckTable(root, "friction");
    const toml::value *t_pc = (t_fric && t_fric->contains("prakash_clifton"))
                              ? &t_fric->at("prakash_clifton") : nullptr;
+   const toml::value *t_rs = (t_fric && t_fric->contains("rate_state"))
+                             ? &t_fric->at("rate_state") : nullptr;
+   const toml::value *t_out = DeckTable(root, "output");
+   const toml::value *t_st = (t_out && t_out->contains("stations"))
+                             ? &t_out->at("stations") : nullptr;
 
    const std::string mesh_path = ArgStr(argc, argv, "--mesh", cfg.mesh.path);
    const int p = ArgInt(argc, argv, "--order", cfg.mesh.order);
@@ -757,7 +805,7 @@ int main(int argc, char *argv[])
    }
 
    // ------------------------------------------------------------ closure
-   ClosureBundle law = MakeClosure(cfg);
+   ClosureBundle law = MakeClosure(cfg, t_rs);
    fs.closure = law.closure.get();
    fs.sigma_min = cfg.stress.pore_pressure.min_sigma_n_pa;
    MFEM_VERIFY(cfg.stress.pore_pressure.P_p_pa == 0.0
@@ -772,7 +820,76 @@ int main(int argc, char *argv[])
    const real_t s0[9] = {cfg.stress.sigma_xx_pa, cfg.stress.sigma_xy_pa, cfg.stress.sigma_xz_pa,
                          cfg.stress.sigma_xy_pa, cfg.stress.sigma_yy_pa, cfg.stress.sigma_yz_pa,
                          cfg.stress.sigma_xz_pa, cfg.stress.sigma_yz_pa, cfg.stress.sigma_zz_pa};
-   fs.prestress = [s0](const real_t[3], real_t s[9]) { for (int i = 0; i < 9; i++) { s[i] = s0[i]; } };
+   // [[stress_region]] (header, "Prestress regions"): a box and its own global
+   // tensor, replacing the background inside the box; the last match wins
+   struct StressRegion { real_t lo[3], hi[3], s[9]; };
+   std::vector<StressRegion> regions;
+   if (root.contains("stress_region"))
+   {
+      const toml::value &arr = root.at("stress_region");
+      MFEM_VERIFY(arr.is_array(), "[[stress_region]] must be an array of tables");
+      const char *bk[3][2] = {{"x_min_m", "x_max_m"}, {"y_min_m", "y_max_m"},
+                              {"z_min_m", "z_max_m"}};
+      const char *sk[6] = {"sigma_xx_pa", "sigma_yy_pa", "sigma_zz_pa",
+                           "sigma_xy_pa", "sigma_yz_pa", "sigma_xz_pa"};
+      for (size_t r = 0; r < arr.size(); r++)
+      {
+         const toml::value &e = arr.at(r);
+         MFEM_VERIFY(e.is_table(), "[[stress_region]] entry " << r + 1 << " must be a table");
+         for (const auto &kv : e.as_table())
+         {
+            bool known = false;
+            for (int c = 0; c < 3; c++) { known = known || kv.first == bk[c][0] || kv.first == bk[c][1]; }
+            for (int k = 0; k < 6; k++) { known = known || kv.first == sk[k]; }
+            MFEM_VERIFY(known, "[[stress_region]] entry " << r + 1 << ": unknown key '" << kv.first
+                        << "' (bounds x/y/z_min_m, x/y/z_max_m; tensor sigma_xx_pa ... sigma_xz_pa)");
+         }
+         StressRegion R;
+         int nb = 0;
+         for (int c = 0; c < 3; c++)
+         {
+            R.lo[c] = -std::numeric_limits<real_t>::infinity();
+            R.hi[c] = std::numeric_limits<real_t>::infinity();
+            if (e.contains(bk[c][0])) { R.lo[c] = TomlReal(&e, bk[c][0], 0.0); nb++; }
+            if (e.contains(bk[c][1])) { R.hi[c] = TomlReal(&e, bk[c][1], 0.0); nb++; }
+            MFEM_VERIFY(R.lo[c] < R.hi[c], "[[stress_region]] entry " << r + 1 << ": "
+                        << bk[c][0] << " must be < " << bk[c][1]);
+         }
+         MFEM_VERIFY(nb > 0, "[[stress_region]] entry " << r + 1 << " has no bound; the "
+                     "background tensor belongs in [stress]");
+         real_t v[6];
+         for (int k = 0; k < 6; k++)
+         {
+            MFEM_VERIFY(e.contains(sk[k]), "[[stress_region]] entry " << r + 1 << " needs "
+                        << sk[k] << " (all six components, tension positive; no defaults)");
+            v[k] = TomlReal(&e, sk[k], 0.0);
+         }
+         const real_t full[9] = {v[0], v[3], v[5], v[3], v[1], v[4], v[5], v[4], v[2]};
+         for (int i = 0; i < 9; i++) { R.s[i] = full[i]; }
+         regions.push_back(R);
+      }
+      if (g_rank == 0)
+      {
+         std::cout << "  prestress regions (last match wins over the background):\n";
+         for (size_t r = 0; r < regions.size(); r++)
+         {
+            const StressRegion &R = regions[r];
+            std::cout << "    " << r + 1 << ": x [" << R.lo[0] << ", " << R.hi[0] << "] y ["
+                      << R.lo[1] << ", " << R.hi[1] << "] z [" << R.lo[2] << ", " << R.hi[2]
+                      << "] m: sigma_xx yy zz xy yz xz = " << R.s[0] << " " << R.s[4] << " "
+                      << R.s[8] << " " << R.s[1] << " " << R.s[5] << " " << R.s[2] << " Pa\n";
+         }
+      }
+   }
+   fs.prestress = [s0, regions](const real_t x[3], real_t s[9]) {
+      const real_t *src = s0;
+      for (const StressRegion &R : regions)
+      {
+         if (x[0] >= R.lo[0] && x[0] <= R.hi[0] && x[1] >= R.lo[1] && x[1] <= R.hi[1]
+             && x[2] >= R.lo[2] && x[2] <= R.hi[2]) { src = R.s; }
+      }
+      for (int i = 0; i < 9; i++) { s[i] = src[i]; }
+   };
 
    // pin frame (F1 with the reference normal): nhat, shat, dhat
    real_t pn[3], pu[3], ps[3], pd[3];
@@ -813,27 +930,56 @@ int main(int argc, char *argv[])
    }
 
    // ------------------------------------------------------------ friction parameters
-   spatial::RateStateBlock rs = *cfg.rate_state;
-   rs.eta_auto = false;      // eta is quasi-dynamic radiation damping; the
-   rs.eta_default = 0.0;     // Nitsche closure uses gamma = 1/2 sigma_F dt
+   // split by law (plan 4.5): the slip-weakening branch never touches
+   // cfg.rate_state, which an LSW deck does not have
+   const bool is_rs = law.kind != LawKind::SlipWeakening;
+   spatial::RateStateBlock rs;
+   real_t b0 = 0.0, f00 = 0.0, V00 = 0.0;
+   if (is_rs)
+   {
+      rs = *cfg.rate_state;
+      rs.eta_auto = false;      // eta is quasi-dynamic radiation damping; the
+      rs.eta_default = 0.0;     // Nitsche closure uses gamma = 1/2 sigma_F dt
+      b0 = rs.b_default;
+      f00 = rs.f_0_default;
+      V00 = rs.V_0_default;
+   }
    spatial::SpatialFrictionResolver resolver;
-   const real_t b0 = rs.b_default, f00 = rs.f_0_default, V00 = rs.V_0_default;
-   fs.parameters = [&](const real_t x[3], FaultPointState &st) {
-      Vector xc(3);
-      for (int i = 0; i < 3; i++) { xc(i) = x[i]; }
-      Array<int> el(1), at(1);
-      el[0] = 0;
-      at[0] = bc.fault_attr;
-      Vector sn0;
-      spatial::RateStatePerDOFParams r = resolver.ResolveRateState(
-         rs, xc, el, at, material, pmesh, cfg.stress.pore_pressure, sn0);
-      MFEM_VERIFY(r.b(0) == b0 && r.f_0(0) == f00 && r.V_0(0) == V00,
-                  "Nitsche driver: per-DOF b / f_0 / V_0 differ from the defaults at ("
-                  << x[0] << ", " << x[1] << ", " << x[2] << "); the closure takes "
-                  "them as constants (spatially varying b is not wired)");
-      st.a = r.a(0);
-      st.Dc = r.Dc(0);
-   };
+   if (is_rs)
+   {
+      fs.parameters = [&](const real_t x[3], FaultPointState &st) {
+         Vector xc(3);
+         for (int i = 0; i < 3; i++) { xc(i) = x[i]; }
+         Array<int> el(1), at(1);
+         el[0] = 0;
+         at[0] = bc.fault_attr;
+         Vector sn0;
+         spatial::RateStatePerDOFParams r = resolver.ResolveRateState(
+            rs, xc, el, at, material, pmesh, cfg.stress.pore_pressure, sn0);
+         MFEM_VERIFY(r.b(0) == b0 && r.f_0(0) == f00 && r.V_0(0) == V00,
+                     "Nitsche driver: per-DOF b / f_0 / V_0 differ from the defaults at ("
+                     << x[0] << ", " << x[1] << ", " << x[2] << "); the closure takes "
+                     "them as constants (spatially varying b is not wired)");
+         st.a = r.a(0);
+         st.Dc = r.Dc(0);
+         if (law.kind == LawKind::StrongRateWeakening) { st.V_w = r.V_w(0); }
+      };
+   }
+   else
+   {
+      fs.parameters = [&](const real_t x[3], FaultPointState &st) {
+         Vector xc(3);
+         for (int i = 0; i < 3; i++) { xc(i) = x[i]; }
+         Array<int> at(1);
+         at[0] = bc.fault_attr;
+         spatial::SlipWeakeningPerDOFParams r =
+            resolver.ResolveSlipWeakening(*cfg.slip_weakening, xc, at);
+         st.mu_s = r.mu_s(0);
+         st.mu_d = r.mu_d(0);
+         st.Dc = r.d_c(0);
+         st.cohesion = r.cohesion(0);
+      };
+   }
 
    // ------------------------------------------------------------ operator
    DomainConfig dcfg;
@@ -901,17 +1047,19 @@ int main(int argc, char *argv[])
          ff::ToLocal(&S0(3 * j), 0.0, n, dd, ss, X[0], X[1], sig);
          const real_t xm = std::hypot(X[0], X[1]);
          for (int c = 0; c < 3; c++) { xc(c) = op.FaultPositions()(3 * j + c); }
-         Vector sn0;
-         spatial::RateStatePerDOFParams r = resolver.ResolveRateState(
-            rs, xc, el, at, material, pmesh, cfg.stress.pore_pressure, sn0);
-         const real_t Vi = r.V_init(0);
-         FaultPointState st;
-         st.a = op.FaultA()(j);
-         st.Dc = op.FaultDc()(j);
+         real_t Vi = 0.0;   // slip weakening starts at rest
+         if (is_rs)
+         {
+            Vector sn0;
+            spatial::RateStatePerDOFParams r = resolver.ResolveRateState(
+               rs, xc, el, at, material, pmesh, cfg.stress.pore_pressure, sn0);
+            Vi = r.V_init(0);
+         }
+         FaultPointState st = op.FaultParams(j);
          law.closure->SeedEquilibrium(xm, Vi, sig, st);
          psi(j) = st.psi;
          real_t Vl[2] = {0.0, 0.0};
-         if (xm > 0.0) { Vl[0] = -Vi * X[0] / xm; Vl[1] = -Vi * X[1] / xm; }
+         if (xm > 0.0 && Vi > 0.0) { Vl[0] = -Vi * X[0] / xm; Vl[1] = -Vi * X[1] / xm; }
          ff::Embed(Vl[0], Vl[1], dd, ss, &V(3 * j));
          sig0(j) = sig;
       }
@@ -925,7 +1073,14 @@ int main(int argc, char *argv[])
       // initial fault state per owned DOF (generic; e.g. to check psi^0
       // against a benchmark's closed form outside the driver)
       std::ofstream ini(out_dir + "/" + prefix + "_initial_r" + std::to_string(g_rank) + ".csv");
-      ini << std::setprecision(17) << "# x y z a Dc psi0 tau0_strike(-T.shat) sigma_n0 V0_strike\n";
+      ini << std::setprecision(17) << "# x y z a Dc psi0 tau0_strike(-T.shat) sigma_n0 V0_strike";
+      if (law.kind == LawKind::StrongRateWeakening) { ini << " V_w"; }
+      if (law.kind == LawKind::SlipWeakening) { ini << " mu_s mu_d cohesion"; }
+      ini << "\n";
+      if (law.kind == LawKind::SlipWeakening)
+      {
+         ini << "# slip weakening: a is unused (0) and psi0 is the slip path\n";
+      }
       for (int j = 0; j < no; j++)
       {
          const real_t *n = &op.FaultFrames()(9 * j), *dd = &op.FaultFrames()(9 * j + 3),
@@ -935,7 +1090,50 @@ int main(int argc, char *argv[])
          const real_t *x = &op.FaultPositions()(3 * j);
          ini << x[0] << " " << x[1] << " " << x[2] << " " << op.FaultA()(j) << " "
              << op.FaultDc()(j) << " " << psi(j) << " " << -X[1] << " " << sig << " "
-             << ff::Dot(&V(3 * j), ss) << "\n";
+             << ff::Dot(&V(3 * j), ss);
+         const FaultPointState &P = op.FaultParams(j);
+         if (law.kind == LawKind::StrongRateWeakening) { ini << " " << P.V_w; }
+         if (law.kind == LawKind::SlipWeakening)
+         {
+            ini << " " << P.mu_s << " " << P.mu_d << " " << P.cohesion;
+         }
+         ini << "\n";
+      }
+      // parameter ranges over the whole fault (D-02 / D-06 read the files)
+      if (law.kind != LawKind::Aging)
+      {
+         real_t mm[12];
+         for (int k = 0; k < 6; k++) { mm[2 * k] = 1e300; mm[2 * k + 1] = 1e300; }
+         long long nbar = 0;
+         for (int j = 0; j < no; j++)
+         {
+            const FaultPointState &P = op.FaultParams(j);
+            const real_t v[6] = {P.a, P.Dc, P.mu_s, P.mu_d, P.cohesion, P.V_w};
+            for (int k = 0; k < 6; k++)
+            {
+               mm[2 * k] = std::min(mm[2 * k], v[k]);
+               mm[2 * k + 1] = std::min(mm[2 * k + 1], -v[k]);
+            }
+            if (P.mu_s >= 1.0e6) { nbar++; }
+         }
+         MPI_Allreduce(MPI_IN_PLACE, mm, 12, MPITypeMap<real_t>::mpi_type, MPI_MIN, MPI_COMM_WORLD);
+         MPI_Allreduce(MPI_IN_PLACE, &nbar, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+         if (g_rank == 0)
+         {
+            const char *nm[6] = {"a", "Dc", "mu_s", "mu_d", "cohesion", "V_w"};
+            std::cout << std::setprecision(10) << "  friction parameters over the owned fault DOFs:";
+            for (int k = 0; k < 6; k++)
+            {
+               if (law.kind == LawKind::SlipWeakening && (k == 0 || k == 5)) { continue; }
+               if (law.kind == LawKind::StrongRateWeakening && k >= 2 && k <= 4) { continue; }
+               std::cout << " " << nm[k] << " [" << mm[2 * k] << ", " << -mm[2 * k + 1] << "]";
+            }
+            if (law.kind == LawKind::SlipWeakening)
+            {
+               std::cout << "; DOFs with a barrier mu_s (>= 1e6): " << nbar;
+            }
+            std::cout << "\n";
+         }
       }
    }
 
@@ -985,22 +1183,67 @@ int main(int argc, char *argv[])
    }
 
    // ------------------------------------------------------------ outputs
-   // station adapter: owned DOF positions -> TPV102StationWriter
-   std::vector<Vector> fcoords(no);
-   for (int j = 0; j < no; j++)
-   {
-      fcoords[j].SetSize(3);
-      for (int c = 0; c < 3; c++) { fcoords[j](c) = op.FaultPositions()(3 * j + c); }
-   }
-   std::unique_ptr<TPV102StationWriter> stations;
+   // stations from the station file the deck names (header, "Stations")
+   std::unique_ptr<FaultStationWriter> stations;
    std::unique_ptr<StationCopyAverage> station_avg;
-   if (cfg.problem.tag == "tpv102")
+   std::string state_label = "log10_theta";
+   if (t_st)
    {
-      stations = std::make_unique<TPV102StationWriter>();
-      stations->Open(out_dir, prefix, DefaultStations(), fcoords, no, MPI_COMM_WORLD);
+      MFEM_VERIFY(t_st->is_table() && t_st->contains("file") && t_st->contains("snap_tolerance_m"),
+                  "[output.stations] needs file (the station CSV) and snap_tolerance_m (m); "
+                  "there are no defaults");
+      const std::string st_path = TomlStr(t_st, "file", "");
+      const real_t snap_tol = TomlReal(t_st, "snap_tolerance_m", 0.0);
+      MFEM_VERIFY(snap_tol > 0.0, "[output.stations] snap_tolerance_m = " << snap_tol
+                  << "; it must be > 0");
+      const std::vector<FaultStation> st_list = ReadFaultStationFile(st_path);
+      const std::vector<FaultStationSnap> snap =
+         SnapFaultStations(st_list, op.FaultPositions(), MPI_COMM_WORLD);
+      if (g_rank == 0)
+      {
+         std::ofstream sl(out_dir + "/" + prefix + "_station_snap.txt");
+         sl << std::setprecision(12) << "# station file " << st_path << "; snap_tolerance_m "
+            << snap_tol << "\n# name x y z (requested, m)  X Y Z (nearest fault node, m)  distance (m)\n";
+         std::cout << "  stations from " << st_path << " (" << st_list.size()
+                   << "), nearest fault node in 3-D, snap_tolerance_m " << snap_tol << ":\n";
+         for (size_t s = 0; s < st_list.size(); s++)
+         {
+            const FaultStation &q = st_list[s];
+            sl << q.name << " " << q.x[0] << " " << q.x[1] << " " << q.x[2] << "  "
+               << snap[s].node[0] << " " << snap[s].node[1] << " " << snap[s].node[2] << "  "
+               << snap[s].distance << "\n";
+            std::cout << "    " << q.name << ": requested (" << q.x[0] << ", " << q.x[1] << ", "
+                      << q.x[2] << "), snapped (" << snap[s].node[0] << ", " << snap[s].node[1]
+                      << ", " << snap[s].node[2] << "), distance " << snap[s].distance << " m\n";
+         }
+         std::cout << std::flush;
+      }
+      for (size_t s = 0; s < st_list.size(); s++)
+      {
+         MFEM_VERIFY(snap[s].distance <= snap_tol, "station " << st_list[s].name << " ("
+                     << st_list[s].x[0] << ", " << st_list[s].x[1] << ", " << st_list[s].x[2]
+                     << "): the nearest fault node is " << snap[s].distance << " m away, more "
+                     "than [output.stations] snap_tolerance_m = " << snap_tol);
+      }
+      FaultStationWriter::StateFn state_fn;
+      if (law.kind == LawKind::Aging)
+      {
+         // theta = (Dc / V_0) exp((psi - f_0) / b), constants from the deck
+         state_fn = [V00, f00, b0](const DOFData &d) {
+            const real_t theta = (d.Dc / V00) * std::exp((d.psi - f00) / b0);
+            return std::log10(std::max(theta, real_t(1e-300)));
+         };
+      }
+      else
+      {
+         state_label = law.kind == LawKind::SlipWeakening ? "slip_path" : "psi";
+         state_fn = [](const DOFData &d) { return d.psi; };
+      }
+      stations = std::make_unique<FaultStationWriter>();
+      stations->Open(out_dir, prefix, st_list, snap, state_label, state_fn);
       if (station_copies == "average")
       {
-         station_avg = std::make_unique<StationCopyAverage>(op, DefaultStations(), out_dir, prefix);
+         station_avg = std::make_unique<StationCopyAverage>(op, st_list, out_dir, prefix);
       }
       if (g_rank == 0)
       {
@@ -1011,13 +1254,21 @@ int main(int argc, char *argv[])
            << "#        shat = up x nhat / |up x nhat| = (" << ps[0] << ", " << ps[1] << ", " << ps[2]
            << "), dhat = shat x nhat = (" << pd[0] << ", " << pd[1] << ", " << pd[2] << ")\n"
            << "# pin: orientation propagated, pinned by the reference normal; plus side = side nhat points into\n"
-           << "# columns (TPV102StationWriter layout): t slip1 slip2 V1 V2 tau1 tau2 sigma_n log10_theta\n"
+           << "# columns: t slip1 slip2 V1 V2 tau1 tau2 sigma_n " << state_label << "\n"
            << "#   slip1 = delta.dhat (SCEC v-slip)      slip2 = delta.shat (SCEC h-slip)\n"
            << "#   V1    = V.dhat     (SCEC v-slip-rate) V2    = V.shat     (SCEC h-slip-rate)\n"
            << "#   tau1  = -T.dhat    (SCEC v-shear-stress, Pa)  tau2 = -T.shat (SCEC h-shear-stress, Pa)\n"
            << "#   sigma_n = -T.nhat (compression positive, Pa); T = total traction on the face with normal nhat\n"
-           << "#   delta = u(+) - u(-), V = d delta/dt (SCEC slip definition); log10_theta from psi\n";
+           << "#   delta = u(+) - u(-), V = d delta/dt (SCEC slip definition)\n"
+           << "#   " << state_label << (law.kind == LawKind::Aging
+                                        ? ": log10 of theta = (Dc/V_0) exp((psi - f_0)/b), deck constants\n"
+                                        : law.kind == LawKind::SlipWeakening
+                                        ? ": accumulated slip path (m)\n" : ": state variable psi\n");
       }
+   }
+   else if (g_rank == 0)
+   {
+      std::cout << "  no [output.stations] table: no station files\n";
    }
    std::vector<DOFData> dofdata(no);
    auto fill_dofdata = [&]() {

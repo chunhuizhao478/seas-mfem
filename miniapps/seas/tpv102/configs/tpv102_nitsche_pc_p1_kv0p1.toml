@@ -39,7 +39,7 @@ law            = "rate_state"
 description    = "SCEC TPV102 (RS aging) via the Nitsche dynamic-rupture driver — global prestress tensor."
 
 [problem]
-tag = "tpv102"   # selects the SCEC TPV102 on-fault station writer
+tag = "tpv102"   # output file prefix; the stations come from [output.stations]
 
 # Material: homogeneous, native TPV102Params:
 #   mu = rho cs^2, lambda = rho (cp^2 - 2 cs^2), cs = 3464, cp = 6000, rho = 2670.
@@ -100,6 +100,15 @@ paraview_fault_dt      = "0.02s"
 paraview_fault_zfp_tol = 0.0
 paraview_fault_deflate_level = 1
 paraview_free_surface  = "off"   # the Nitsche driver writes no free-surface slice
+
+# On-fault stations (Chunhui Zhao, 2026-10-16): the committed station file
+# (scripts/make_fault_stations.py), each station snapped to the nearest fault
+# node in 3-D; the run aborts if that node is farther than snap_tolerance_m.
+# 600 m covers the 1000 m mesh at p = 1 (about 0.6 h/p); finer meshes snap
+# closer, and <prefix>_station_snap.txt lists every distance.
+[output.stations]
+file             = "tpv102/stations/tpv102_fault_stations.csv"
+snap_tolerance_m = 600.0
 
 # Rate-and-state, aging law (native TPV102Params).
 #   VW core a = 0.008, VS border a = 0.016 (boxcar_taper rule),
