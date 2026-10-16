@@ -58,6 +58,10 @@
 //   --check-accepted-state     After each accepted step, compare the cached
 //                              traction, sigma_n, V and V_max with a fresh
 //                              evaluation at the accepted state (GPU plan G0)
+//   --device STR               MFEM device: cpu (default), cuda, debug, or any
+//                              mfem::Device string (GPU plan G1)
+//   --device-id N              GPU for this rank (default: node-local rank
+//                              modulo the number of visible GPUs)
 
 #include "mfem.hpp"
 #ifdef MFEM_USE_PETSC
@@ -633,6 +637,10 @@ static void CheckAcceptedState(G0Measure &g0, PBP5SEASOp &seas_op,
       }
       else
       {
+         // u_c / u_f copy the displacement GridFunction, device-valid on a
+         // GPU device; read them on the host.
+         a.HostRead();
+         b.HostRead();
          for (int i = 0; i < a.Size(); i++)
          {
             num = std::max(num, std::abs(a(i) - b(i)));
@@ -935,6 +943,21 @@ static PetscErrorCode bp5_ts_monitor_callback(
    {
       seas::ScopedStageTimer timer(g0 ? g0->Timers() : nullptr,
                                    seas::StageTimers::MonitorTotal);
+      // The driver's state is the host array that Run() placed in PETSc's
+      // solution Vec u.  On a CUDA device PETSc's current copy may be on the
+      // GPU while state's own flags still say host-valid, so state.HostRead()
+      // would not fetch it.  Sync through u instead (GPU -> state's array);
+      // a no-op on the CPU.  Covers the body and CheckAcceptedState below.
+      const PetscScalar *u_host = nullptr;
+      ierr = VecGetArrayRead(u, &u_host);
+      MFEM_VERIFY(ierr == PETSC_SUCCESS, "VecGetArrayRead(u) failed");
+      const bool aliased = mon->state->Size() == 0 ||
+                           static_cast<const void *>(u_host) ==
+                           static_cast<const void *>(mon->state->GetData());
+      ierr = VecRestoreArrayRead(u, &u_host);
+      MFEM_VERIFY(ierr == PETSC_SUCCESS, "VecRestoreArrayRead(u) failed");
+      MFEM_VERIFY(aliased, "PETSc's solution Vec is not placed on the "
+                  "driver's state vector; the monitor would read stale data");
       ierr = bp5_ts_monitor_body(ts, step, time, u, ctx);
    }
    if (ierr != PETSC_SUCCESS || !g0) { return ierr; }
@@ -1075,6 +1098,9 @@ int main(int argc, char *argv[])
    bool exit_after_assembly = false;   // --exit-after-assembly
    long long perturb_seed = -1;        // --perturb-initial-state SEED
    bool check_accepted_state = false;  // --check-accepted-state
+   // GPU plan G1.
+   std::string device_str = "cpu";     // --device STR
+   int device_id_override = -1;        // --device-id N (-1 = automatic)
 
    for (int i = 1; i < argc; i++)
    {
@@ -1190,6 +1216,12 @@ int main(int argc, char *argv[])
          tandem_dt_init = std::atof(argv[++i]);
       }
       if (arg == "--petsc-ts") { use_petsc_ts = true; }
+      if (arg == "--device" && i + 1 < argc) { device_str = argv[++i]; }
+      if (arg == "--device-id" && i + 1 < argc)
+      {
+         device_id_override = std::atoi(argv[++i]);
+         MFEM_VERIFY(device_id_override >= 0, "--device-id N needs N >= 0");
+      }
       if (arg == "--paraview") { use_paraview = true; }
       if (arg == "--paraview-every" && i + 1 < argc)
       {
@@ -1401,6 +1433,36 @@ int main(int argc, char *argv[])
    MFEM_VERIFY(perturb_seed < 0 || restart_prefix.empty(),
                "--perturb-initial-state applies to a fresh start only, "
                "not to --restart");
+
+   // MFEM device (GPU plan G1).  Configured before PETSc is initialized,
+   // because MFEMInitializePetsc picks PETSc's GPU from it, and before any
+   // mesh, space or vector.  It lives to the end of main: its destructor
+   // finalizes hypre.
+   int device_id = device_id_override;
+   if (device_id < 0)
+   {
+      device_id = 0;
+#if defined(MFEM_USE_CUDA) || defined(MFEM_USE_HIP)
+      // One GPU per rank on a node: node-local rank modulo the visible GPUs.
+      // Counted only for a GPU backend: a GPU build may run --device cpu on
+      // a node without a GPU, where the count aborts.
+      const bool gpu_backend = device_str.find("cuda") != std::string::npos ||
+                               device_str.find("hip") != std::string::npos;
+      const int num_gpu = gpu_backend ? Device::GetDeviceCount() : 0;
+      if (num_gpu > 1)
+      {
+         MPI_Comm node_comm;
+         MPI_Comm_split_type(mpi.GetComm(), MPI_COMM_TYPE_SHARED, 0,
+                             MPI_INFO_NULL, &node_comm);
+         int node_rank = 0;
+         MPI_Comm_rank(node_comm, &node_rank);
+         MPI_Comm_free(&node_comm);
+         device_id = node_rank % num_gpu;
+      }
+#endif
+   }
+   Device device(device_str, device_id);
+   if (mpi.IsRoot()) { device.Print(); }
 
 #ifndef MFEM_USE_PETSC
    if (use_petsc_ts)

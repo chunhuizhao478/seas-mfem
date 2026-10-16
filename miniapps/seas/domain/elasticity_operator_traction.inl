@@ -407,6 +407,9 @@ void ElasticityDomainOperator<MeshType>::Solve(
    LinFormType b(fes_.get());
    b.Assemble();
    Vector &rhs = b;
+   // A linear form lives on the device; b.Assemble() zeroes it there. The
+   // slip and Dirichlet loops below add to it on the host.
+   rhs.HostReadWrite();
 
    const bool debug_first_step = (method_ == DGMethod::IP) &&
                                  DebugEnabledForTime(time);

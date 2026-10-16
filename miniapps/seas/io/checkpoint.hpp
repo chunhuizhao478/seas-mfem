@@ -89,7 +89,9 @@ inline void WriteCheckpoint(const std::string &prefix,
       out << state(i) << "\n";
    }
 
-   // Displacement
+   // Displacement (a copy of the displacement GridFunction, device-valid
+   // on a GPU device; read it on the host)
+   displacement.HostRead();
    out << "displacement_size " << displacement.Size() << "\n";
    for (int i = 0; i < displacement.Size(); i++)
    {

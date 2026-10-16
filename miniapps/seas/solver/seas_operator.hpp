@@ -348,6 +348,9 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
 
    // 1. Extract slip from state vector
    if (stage_timers_) { stage_timers_->Start(StageTimers::SlipExpand); }
+   // Under PETSc TS on a CUDA device, state is a PetscParVector whose valid
+   // copy may be on the GPU; the fault loops index it on the host.
+   state.HostRead();
    fault_->GetSlip(state, slip_);
 
    // Debug: check for NaN in slip before domain solve
@@ -503,6 +506,9 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
    // v51: pass elastic normal traction for sigma_n feedback (nullptr = use constant)
    {
       ScopedStageTimer timer(stage_timers_, StageTimers::Friction);
+      // ComputeRHS overwrites every entry of rate on the host; HostWrite()
+      // tells PETSc so (otherwise it keeps using a stale GPU copy).
+      rate.HostWrite();
       fault_->ComputeRHS(traction_, state, rate,
                           elastic_sigma_n_ ? &normal_traction_ : nullptr);
    }
