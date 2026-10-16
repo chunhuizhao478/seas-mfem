@@ -89,7 +89,11 @@ hid_t VTKHDF::EnsureDataset(hid_t f, const std::string &name, hid_t type,
 {
    const char *name_c = name.c_str();
 
-   const herr_t status = H5LTfind_dataset(f, name_c);
+   // Exact name test, as in EnsureGroup.  Before HDF5 1.14.5, H5LTfind_dataset
+   // compared only strlen(name) characters (HDFGroup/hdf5#4780), so a new
+   // "normal_stress" matched an existing "normal_stress_pc" and the open below
+   // failed (HDF5 1.14.3 on USC Discovery, 2026-10-16).
+   const htri_t status = H5Lexists(f, name_c, H5P_DEFAULT);
    Barrier();
 
    if (status == 0)
@@ -195,7 +199,7 @@ hid_t VTKHDF::EnsureDataset(hid_t f, const std::string &name, hid_t type,
    }
    else
    {
-      // Error occurred in H5LTfind_dataset.
+      // Error occurred in H5Lexists.
       MFEM_ABORT("Error finding HDF5 dataset " << name);
    }
 }
