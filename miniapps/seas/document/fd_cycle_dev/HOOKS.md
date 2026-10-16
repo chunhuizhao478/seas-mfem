@@ -32,6 +32,11 @@ The branch point is `nitsche-dynamic-rupture` at `010b56e`.
 
 ## Shared changes merged from other tracks
 
+A change taken whole from another branch is cherry-picked with `-x` and its
+commit is listed in `CYCLE_IMPORTS` in `cycle/cycle.mk`; `cycle-owned-check`
+then requires the branch to change that commit's files by exactly its patch.
+
 | Change | Home branch, commit | Merged here | Gates re-run |
 |--------|---------------------|-------------|--------------|
+| Station sigma_n fix: station V and tau re-solved with the normal traction the solver used (`SEASQuasiDynamicOperator::GetFrictionNormalTraction`, BP5 station writers, `seas_driver`, `seas_bp5_full`, unit test). Chunhui Zhao, 16 Oct 2026: use the same QD path as the Vista run (job 1074099) for fully dynamic development | `gpu-qd-bp5` `ef70517` | cherry-picked; `QDPhase::FillStationFields` passes the same normal traction | API pin, parity, 50 steps vs `gpu-qd-bp5` `seas_bp5_full`, restart; P0 job checks time, slip, state, global vs the older golden |
 | Track 2's H-B1 (`FaultPointState` 3 -> 8 scalars, `CloseDOF` trailing `slip_abs`) | `nitsche-benchmarks` `bb89a65`; reaches `nitsche-dynamic-rupture` only when track 2 finishes and Chunhui Zhao asks | | L-00, T12, P0/P1 BP5 gates, API pin |

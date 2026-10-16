@@ -171,6 +171,8 @@ PIN_TYPE(real_t, LV<QDFault>().Init(CLV<Vector>(), LV<Vector>()));
 PIN(CLV<QDFault>().GetSlip(CLV<Vector>(), LV<Vector>()));
 PIN(CLV<QDFault>().GetTheta(CLV<Vector>(), LV<Vector>()));
 PIN(CLV<QDFault>().RecomputeSlipRate(CLV<Vector>(), CLV<Vector>(), LV<Vector>()));
+PIN(CLV<QDFault>().RecomputeSlipRate(CLV<Vector>(), CLV<Vector>(), LV<Vector>(),
+                                     static_cast<const Vector *>(nullptr)));
 PIN_TYPE(const Vector &, CLV<QDFault>().GetSlipRate());
 PIN(LV<QDFault>().SetSlipRate(CLV<Vector>()));
 
@@ -193,6 +195,7 @@ PIN(LV<QDOp>().SetDisplacement(CLV<Vector>()));
 PIN_TYPE(const QDOp::GridFuncType &, CLV<QDOp>().GetDisplacement());
 PIN_TYPE(const Vector &, CLV<QDOp>().GetTraction());
 PIN_TYPE(const Vector &, CLV<QDOp>().GetNormalTraction());
+PIN_TYPE(const Vector *, CLV<QDOp>().GetFrictionNormalTraction());   // ef70517
 PIN_TYPE(real_t, CLV<QDOp>().GetMaxSlipRate());
 PIN_TYPE(const QDDomain *, CLV<QDOp>().GetDomain());
 PIN_TYPE(const QDFault *, CLV<QDOp>().GetFault());
@@ -369,6 +372,6 @@ constexpr int kPinCount = __COUNTER__ - kPinBase - 1;
 int main()
 {
    std::cout << "PASSED: test_cycle_api_pin: " << kPinCount
-             << " API pins compiled (base 010b56e with hooks H1a, H1b; H2 not pinned)\n";
+             << " API pins compiled (base 010b56e with hooks H1a, H1b and station fix ef70517; H2 not pinned)\n";
    return 0;
 }

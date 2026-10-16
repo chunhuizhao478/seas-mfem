@@ -182,15 +182,16 @@ public:
    real_t Eta() const { return eta_; }
 
    /// Station fields from the accepted state, as ParallelBP5BenchmarkOutput::
-   /// Write forms them: V re-solved from (traction, state), the traction of
-   /// the last right-hand-side evaluation.
+   /// Write forms them: V re-solved from (traction, state) and the normal
+   /// traction the solver used, both from the last right-hand-side
+   /// evaluation (station sigma_n fix ef70517 of gpu-qd-bp5).
    void FillStationFields(StationFields &f) const
    {
       const Vector &trac = op_->GetTraction();
       Vector slip, theta, V;
       fault_->GetSlip(state_, slip);
       fault_->GetTheta(state_, theta);
-      fault_->RecomputeSlipRate(trac, state_, V);
+      fault_->RecomputeSlipRate(trac, state_, V, op_->GetFrictionNormalTraction());
       const Vector &tau_pre = geom_->GetTauPre();
       const int N = fault_->NumNodes();
       for (Vector *v : {&f.slip_dip, &f.slip_strike, &f.V_dip, &f.V_strike,

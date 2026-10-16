@@ -110,15 +110,28 @@ CYCLE_BASE ?= origin/nitsche-dynamic-rupture
 CYCLE_OWNED_RE = ^miniapps/seas/(cycle/|drivers/fd_cycle_driver\.cpp$$|tests/cycle/|config/fd_cycle/|jobs/fd_cycle/|document/fd_cycle_dev/)
 CYCLE_HOOK_FILES = miniapps/seas/fault/fault_geometry.hpp
 CYCLE_HOOK_GREP = grep -xF $(foreach f,$(CYCLE_HOOK_FILES),-e $(f))
+# Fixes taken whole from other branches (HOOKS.md, "Shared changes merged from
+# other tracks"), cherry-picked with -x: the branch may change the files such
+# a commit touches only by exactly that commit's change (same patch id).
+CYCLE_IMPORTS = ef70517101ab3824e0955d7c7e3f9013e8eacf8c
 cycle-owned-check:
 	@base=$$(git merge-base HEAD $(CYCLE_BASE)) || { echo "ERROR: no merge base with $(CYCLE_BASE)"; exit 1; }; \
 	echo "Branch point: $$base ($(CYCLE_BASE))"; \
 	git diff --stat $$base HEAD; \
-	bad=$$(git diff --name-only $$base HEAD | grep -Ev '$(CYCLE_OWNED_RE)' | $(CYCLE_HOOK_GREP) -v); \
-	if [ -n "$$bad" ]; then echo "FAILED: files outside the owned paths and hook files:"; echo "$$bad"; exit 1; fi; \
+	imp=$$(for c in $(CYCLE_IMPORTS); do git diff-tree --no-commit-id --name-only -r $$c; done); \
+	bad=$$(git diff --name-only $$base HEAD | grep -Ev '$(CYCLE_OWNED_RE)' | $(CYCLE_HOOK_GREP) -v | \
+	       awk -v imp="$$imp" 'BEGIN { n = split(imp, f, "\n"); for (i = 1; i <= n; i++) skip[f[i]] = 1 } !($$0 in skip)'); \
+	if [ -n "$$bad" ]; then echo "FAILED: files outside the owned paths, hook files and imports:"; echo "$$bad"; exit 1; fi; \
 	del=$$(git diff --numstat $$base HEAD | awk '$$2 != 0 {print $$3}' | $(CYCLE_HOOK_GREP)); \
 	if [ -n "$$del" ]; then echo "FAILED: hook files must change by additions only:"; echo "$$del"; exit 1; fi; \
-	echo "PASSED: every changed file is under an owned path or is a hook file changed by additions only (rule M1)"
+	for c in $(CYCLE_IMPORTS); do \
+	   f=$$(git diff-tree --no-commit-id --name-only -r $$c | sed 's/^/:(top)/'); \
+	   a=$$(git show $$c -- $$f | git patch-id --stable | cut -d' ' -f1); \
+	   b=$$(git diff $$base HEAD -- $$f | git patch-id --stable | cut -d' ' -f1); \
+	   if [ -z "$$a" ] || [ "$$a" != "$$b" ]; then echo "FAILED: the branch changes the files of import $$c differently from $$c"; exit 1; fi; \
+	   echo "Import $$c: the same change to its $$(echo "$$f" | wc -l) files"; \
+	done; \
+	echo "PASSED: every changed file is under an owned path, a hook file changed by additions only, or an import (rule M1)"
 
 cycle-all: seas_fd_cycle_driver seas_test_cycle_params_parity test-cycle-api-pin \
            cycle-owned-check

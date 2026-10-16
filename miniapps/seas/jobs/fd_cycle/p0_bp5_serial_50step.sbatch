@@ -11,11 +11,18 @@
 # Fully dynamic BP5 cycle, phase P0 (plan rev 3): re-check the QD gold
 # configuration on the branch point.  A guarded copy of
 # jobs/bp5/bp5_verify_serial.sbatch (the 50-step golden, Frontera job 7643780):
-# same modules, same seas_bp5_full flags, 1 rank, 50 steps; then the shared
-# regression check against bp5/benchmark_data/golden_serial_1r_50step with
-# REG_TOL=1e-12 (relative L2, seven station columns and the global file).
-# Without REG_TOL the check is informational and always exits 0
-# (Makefile regression-check, scripts/regression_check.py --tolerance).
+# same modules, same seas_bp5_full flags, 1 rank, 50 steps; then a check
+# against bp5/benchmark_data/golden_serial_1r_50step.
+#
+# The branch carries the station sigma_n fix ef70517 (gpu-qd-bp5), which the
+# golden predates: station log10 V and tau now use the solver's elastic
+# sigma_n, so they differ from the golden by design (up to about 2.4e-2 in
+# log10 V at -16dp+10 in 50 steps); time, slip, state and the global file do
+# not change.  So the pass/fail check is tests/cycle/compare_runs.py with
+# relative L2 <= 1e-12 (the measure of scripts/regression_check.py) on
+# station columns time, slip strike, slip dip and state and on every column
+# of the global file.  The shared regression check then runs informational
+# (all columns, always exits 0) to print the V and tau differences.
 # Submit only on Chunhui Zhao's typed go for this job.
 #
 # Differences from the original, none of which touch the numerics: the
@@ -71,8 +78,11 @@ rc=$?
 echo "seas_bp5_full exit ${rc}"
 [ "${rc}" = 0 ] || exit "${rc}"
 
-make -f cycle/cycle.mk regression-check SIM_DIR="${RESULT_DIR}" SIM_PREFIX="${OUTPUT_PREFIX}" \
-     REF_DIR=bp5/benchmark_data/golden_serial_1r_50step REG_TOL=1e-12
+python3 tests/cycle/compare_runs.py "${RESULT_DIR}" "${OUTPUT_PREFIX}" \
+        bp5/benchmark_data/golden_serial_1r_50step bp5_verify_serial_job7643780 \
+        --tol 1e-12 --l2 --station-columns 0,1,2,7
 rc=$?
-echo "regression-check exit ${rc} (0 = all columns within 1e-12)"
+echo "compare_runs exit ${rc} (0 = time, slip, state and global within 1e-12)"
+make -f cycle/cycle.mk regression-check SIM_DIR="${RESULT_DIR}" SIM_PREFIX="${OUTPUT_PREFIX}" \
+     REF_DIR=bp5/benchmark_data/golden_serial_1r_50step
 exit "${rc}"
