@@ -7,15 +7,22 @@
 //
 //   Start(Vmax):      Vmax > V_on ? DYN : QD
 //   GoDynamic(Vmax):  Vmax > V_on                     (after each QD step)
-//   AfterDynStep(Vmax, tau, dt):
-//     below = (Vmax < V_off) ? below + dt : 0
+//   EnterDynamic(t):  the phase starts at time t
+//   AfterDynStep(Vmax, t, tau):
+//     below = (Vmax < V_off) ? t - t_above : 0,  t_above = time of the last
+//             step with Vmax >= V_off, or of the phase start
 //     Vmax < V_off, below >= T_dwell and tau >= T_min  ->  END_OF_PHASE (back to QD)
 //     tau >= T_max                       ->  TOO_LONG (stop and report)
 //     else                               ->  STAY
 //
-// "below" counts the time max V has stayed below V_off, so the phase ends
-// T_dwell after the last step with max V >= V_off.  T_max stops the run
-// instead of forcing a switch (plan R9).  Defaults in SwitchConfig.
+// "below" is the time max V has stayed below V_off, so the phase ends
+// T_dwell after the last step with max V >= V_off.  It is the plan's
+// `below = (Vmax < V_off) ? below + dt : 0` written as a difference of the
+// driver's t: FdCycleOutput::UpdateEvents measures the catalog's dwell the
+// same way from the same t, so with event_V = V_off and event_dwell =
+// T_dwell the catalog closes the event on the step the phase ends.  T_max
+// stops the run instead of forcing a switch (plan R9).  Defaults in
+// SwitchConfig.
 //
 // The switch probe of plan P3 runs one controller per (V_off, T_dwell) pair
 // on the same max V history; a checkpoint keeps Phases() (Restore).
@@ -49,18 +56,20 @@ public:
    Regime Start(real_t Vmax) const { return GoDynamic(Vmax) ? Regime::Dynamic : Regime::QD; }
    bool GoDynamic(real_t Vmax) const { return Vmax > cfg_.V_on; }
 
-   /// A dynamic phase starts: the dwell counter restarts.
-   void EnterDynamic()
+   /// A dynamic phase starts at time t: the dwell counter restarts.
+   void EnterDynamic(real_t t)
    {
+      t_above_ = t;
       below_ = 0.0;
       phases_++;
    }
 
-   /// After each dynamic step of length dt, at phase time tau.
-   DynVerdict AfterDynStep(real_t Vmax, real_t tau, real_t dt)
+   /// After each dynamic step, at time t and phase time tau.
+   DynVerdict AfterDynStep(real_t Vmax, real_t t, real_t tau)
    {
       const bool below = (Vmax < cfg_.V_off);
-      below_ = below ? below_ + dt : 0.0;
+      if (!below) { t_above_ = t; }
+      below_ = below ? t - t_above_ : 0.0;
       // `below` too: with T_dwell = 0 the counter alone (0 >= 0) would end
       // the phase at a step above V_off.
       if (below && below_ >= cfg_.T_dwell && tau >= cfg_.T_min) { return DynVerdict::EndOfPhase; }
@@ -88,6 +97,7 @@ public:
 
 private:
    SwitchConfig cfg_;
+   real_t t_above_ = 0.0;   ///< last step with max V >= V_off, or the phase start
    real_t below_ = 0.0;
    int phases_ = 0;
 };

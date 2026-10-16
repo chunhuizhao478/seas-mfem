@@ -12,7 +12,8 @@
 //      that wrote it (rule M10), the IC set, the regime, the step, the
 //      number of dynamic phases entered so far (the regime controller's
 //      state in the QD regime), and FdCycleOutput's state (cadence clock,
-//      event state, file sizes).  V1 (P1) had no phase count; it reads as 0.
+//      event state, file sizes).  V1 (P1) had no phase count, which reads
+//      as 0, and no catalog last-above time (see ReadCycleCheckpoint).
 // Blocks 1 and 2 are written by the existing functions unchanged, so the
 // readers of seas_bp5_full can read the first two blocks.
 //
@@ -95,6 +96,7 @@ inline void WriteCycleCheckpoint(const std::string &prefix, const CheckpointInfo
       out << "out_event_start " << o.event_start << "\n";
       out << "out_event_peak_V " << o.event_peak_V << "\n";
       out << "out_below_since " << o.below_since << "\n";
+      out << "out_last_above " << o.last_above << "\n";
       out << "out_files " << o.files.size() << "\n";
       for (size_t i = 0; i < o.files.size(); i++)
       {
@@ -168,6 +170,13 @@ inline void ReadCycleCheckpoint(const std::string &prefix, const std::string &co
    tag("out_event_start"); in >> o.event_start;
    tag("out_event_peak_V"); in >> o.event_peak_V;
    tag("out_below_since"); in >> o.below_since;
+   if (version >= 2) { tag("out_last_above"); in >> o.last_above; }
+   else
+   {
+      // V1 has no last time above: inside an event and below, its first time
+      // below (the old dwell, one step longer); above, the checkpoint's t.
+      o.last_above = (in_event != 0 && o.below_since >= 0.0) ? o.below_since : info.t;
+   }
    tag("out_files"); in >> nfiles;
    o.in_event = (in_event != 0);
    o.files.resize(nfiles);

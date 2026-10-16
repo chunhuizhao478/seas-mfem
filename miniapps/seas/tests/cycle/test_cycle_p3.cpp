@@ -26,12 +26,22 @@
 //                      the driver restarts (InitTS, state, RestoreTS).
 //                      B and C must repeat A bit for bit: state, time, next
 //                      dt, step number and rejections.
+//   catalog_matches_controller
+//                      Synthetic max V histories (no solver) through a
+//                      RegimeController and FdCycleOutput's event catalog
+//                      with the same threshold and dwell: the phase must end
+//                      on the step the catalog closes the event, and the
+//                      row's t_end must be the first time below.  Cases: the
+//                      Mac run's dt with a dip that comes back above and a
+//                      step exactly at the threshold, a dt that divides the
+//                      dwell (10,000 steps), T_dwell = 0, and t0 = 100 yr.
 //
 // Bit for bit holds on 1 rank.  On more ranks MUMPS's parallel solve is not
 // reproducible to the last bit from one call to the next (the same solve
 // twice differs by about 1e-16 in u, 1e-13 in the traction; bridge_roundtrip
 // prints this control), so there the re-entry solve is compared to 1e-12
-// and B and C to 1e-10 relative; slip, psi and the state copies stay exact.
+// and B and C to 1e-10 relative (the next dt to 1e-8, see DtTol); slip,
+// psi and the state copies stay exact.
 // `make test-cycle-p3` runs 1 rank (exact) and 2 ranks.
 //
 // Usage (from miniapps/seas; PETSc needed):
@@ -49,10 +59,14 @@
 #include "../../cycle/qd_phase.hpp"
 #include "../../cycle/dyn_phase.hpp"
 #include "../../cycle/state_bridge.hpp"
+#include "../../cycle/regime_controller.hpp"
+#include "../../cycle/fd_cycle_output.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -71,6 +85,10 @@ struct Checker
    /// Tolerances of what goes through a parallel MUMPS solve (file comment).
    real_t SolveTol() const { return mpi.Size() == 1 ? 0.0 : 1e-12; }
    real_t RunTol() const { return mpi.Size() == 1 ? 0.0 : 1e-10; }
+   /// The RK45 controller's next dt: its error estimate is a difference of
+   /// nearly equal stages, so the solve's round-off grows in it (2 Mac
+   /// ranks: 2e-10 and 4e-10 with the state at 1e-13).
+   real_t DtTol() const { return mpi.Size() == 1 ? 0.0 : 1e-8; }
 
    /// Pass when m <= tol (m and tol global); prints both.
    void Report(const std::string &name, real_t m, real_t tol, const std::string &what)
@@ -233,7 +251,8 @@ void Compare(Checker &c, const std::string &who, const RunResult &x, const RunRe
    const real_t tol = c.RunTol();
    c.Report(who + ": state vs A", c.RelInf(x.state, a.state), tol, "max rel diff");
    c.Report(who + ": t vs A", std::abs(x.t - a.t) / std::abs(a.t), tol, "rel diff");
-   c.Report(who + ": next dt vs A", std::abs(x.dt - a.dt) / std::abs(a.dt), tol, "rel diff");
+   c.Report(who + ": next dt vs A", std::abs(x.dt - a.dt) / std::abs(a.dt), c.DtTol(),
+            "rel diff");
    c.True(who + ": step and rejections vs A", x.step == a.step && x.rejections == a.rejections,
           "step " + std::to_string(x.step) + ", rejections " + std::to_string(x.rejections));
 }
@@ -329,6 +348,111 @@ void TestQDRestartAfterSwitch(Checker &c, const Setup &S, const cycle::CycleConf
 
 } // namespace
 
+// ------------------------------------------------- catalog_matches_controller
+
+/// One piece of a synthetic history: `steps` steps at max V = `V`.
+struct Piece
+{
+   int steps;
+   real_t V;
+};
+
+/// The last data row of a root-written row file (empty when none).
+std::vector<real_t> LastRow(const std::string &path, int &rows)
+{
+   std::ifstream in(path);
+   std::string line;
+   std::vector<real_t> last;
+   rows = 0;
+   while (std::getline(in, line))
+   {
+      if (line.empty() || line[0] == '#') { continue; }
+      std::istringstream ls(line);
+      last.clear();
+      real_t v;
+      while (ls >> v) { last.push_back(v); }
+      rows++;
+   }
+   return last;
+}
+
+void CatalogCase(Checker &c, const std::string &work, const std::string &name, real_t t0,
+                 real_t dt, real_t dwell, const std::vector<Piece> &history)
+{
+   const real_t V_off = 1.0e-3;
+   cycle::OutputConfig oc;
+   oc.dir = work;
+   oc.prefix = "catalog_" + name;
+   oc.event_V = V_off;
+   oc.event_dwell = dwell;
+   cycle::SwitchConfig sw;
+   sw.V_off = V_off;
+   sw.T_dwell = dwell;
+   sw.T_max = 1e30;
+   cycle::RegimeController ctl(sw);
+   int end_step = -1, close_step = -1, n = 0;
+   real_t t = t0, tau = 0.0, dip_start = -1.0, prev_V = 1.0, t_end_phase = -1.0;
+   {
+      cycle::FdCycleOutput out(oc, c.mpi.GetComm(), {}, "test");
+      // As the driver: the QD balance at t0 opens the event, then the phase.
+      out.UpdateEvents(t, 1.5e-2);
+      ctl.EnterDynamic(t);
+      for (const Piece &p : history)
+      {
+         for (int k = 0; k < p.steps && (end_step < 0 || close_step < 0); k++)
+         {
+            n++;
+            tau += dt;
+            t = t0 + tau;
+            if (p.V < V_off && prev_V >= V_off) { dip_start = t; }
+            prev_V = p.V;
+            out.UpdateEvents(t, p.V);
+            const cycle::DynVerdict v = ctl.AfterDynStep(p.V, t, tau);
+            if (end_step < 0 && v == cycle::DynVerdict::EndOfPhase) { end_step = n; t_end_phase = t; }
+            if (close_step < 0 && !out.InEvent()) { close_step = n; }
+         }
+      }
+      out.Flush();
+   }
+   std::ostringstream d;
+   d << "phase ends at step " << end_step << " (t = " << std::setprecision(12) << t_end_phase
+     << " s), catalog closes at step " << close_step;
+   c.True("catalog_matches_controller " + name, end_step > 0 && close_step == end_step, d.str());
+   int rows = 0;
+   std::vector<real_t> row;
+   bool ok = true;
+   real_t rel = 0.0;
+   if (c.mpi.IsRoot())
+   {
+      row = LastRow(work + "/" + oc.prefix + "_catalog.txt", rows);
+      ok = (rows == 1 && row.size() == 4);
+      if (ok) { rel = std::abs(row[2] - dip_start) / std::abs(dip_start); }
+      ok = ok && rel <= 1e-11 && row[0] == 1.0 && row[1] == t0;
+   }
+   std::ostringstream e;
+   e << "rows " << rows << ", t_end vs first time below: relative " << std::scientific
+     << std::setprecision(2) << rel;
+   c.True("catalog_matches_controller " + name + " row", ok, e.str());
+}
+
+void TestCatalogMatchesController(Checker &c, const std::string &work)
+{
+   if (c.mpi.IsRoot()) { std::cout << "\ncatalog_matches_controller\n"; }
+   const real_t dt_mac = 1.719631e-3;
+   // 3.4 s of rupture, 5.2 s below, back above for 0.9 s (one step exactly at
+   // the threshold), then 14 s below: only the last dip ends the phase.
+   CatalogCase(c, work, "mac_dt", 0.0, dt_mac, 10.0,
+               {{2000, 3.0}, {3000, 5e-4}, {250, 2e-3}, {1, 1e-3}, {250, 2e-3},
+                {8000, 8.6e-4}});
+   // 10 s is exactly 10,000 steps of 1 ms (the tie the old code missed by
+   // one step either way).
+   CatalogCase(c, work, "round_dt", 0.0, 1e-3, 10.0, {{100, 1.0}, {12000, 9e-4}});
+   CatalogCase(c, work, "dwell_0", 0.0, 1e-3, 0.0, {{50, 1.0}, {10, 9e-4}});
+   // A later event: t0 = 100 yr, where t carries fewer digits of tau.
+   CatalogCase(c, work, "t0_100yr", 100.0 * 365.25 * 86400.0, dt_mac, 10.0,
+               {{2000, 3.0}, {8000, 8.6e-4}});
+}
+
 int main(int argc, char *argv[])
 {
    MPIContext mpi(&argc, &argv);
@@ -388,6 +512,7 @@ int main(int argc, char *argv[])
       const cycle::Prestress pre = cycle::BuildPrestress(par, cfg.prestress);
       Setup S{cfg, pmesh, mpi, par, pre};
       Checker c{mpi};
+      TestCatalogMatchesController(c, work);
       {
          qd->Setup(par, pre);
          cycle::DynPhase dyn(pmesh, cfg0, qd->Table(), par, pre);

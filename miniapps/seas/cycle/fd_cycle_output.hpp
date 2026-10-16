@@ -170,6 +170,7 @@ public:
       real_t event_start = 0.0;
       real_t event_peak_V = 0.0;
       real_t below_since = -1.0;            ///< < 0: not below event_V in an event
+      real_t last_above = -1.0;             ///< in an event: last max V >= event_V
       std::vector<std::string> files;       ///< this rank's files, by name
       std::vector<long long> sizes;         ///< their sizes in bytes
    };
@@ -353,7 +354,11 @@ public:
       global_->Row({t, Vmax > 0.0 ? std::log10(Vmax) : -300.0});
    }
 
-   /// Event catalog on the global max V; the same on every rank.
+   /// Event catalog on the global max V; the same on every rank.  The row's
+   /// t_end is the first time below event_V.  The dwell counts from the last
+   /// time at or above it, as RegimeController's does from the same t, so a
+   /// dynamic phase that ends on the same threshold and dwell closes the
+   /// event on the same step.
    void UpdateEvents(real_t t, real_t Vmax)
    {
       State &s = state_;
@@ -366,13 +371,19 @@ public:
             s.event_start = t;
             s.event_peak_V = Vmax;
             s.below_since = -1.0;
+            s.last_above = t;
          }
          return;
       }
       s.event_peak_V = std::max(s.event_peak_V, Vmax);
-      if (Vmax > cfg_.event_V) { s.below_since = -1.0; return; }
+      if (Vmax >= cfg_.event_V)
+      {
+         s.below_since = -1.0;
+         s.last_above = t;
+         return;
+      }
       if (s.below_since < 0.0) { s.below_since = t; }
-      if (t - s.below_since >= cfg_.event_dwell)
+      if (t - s.last_above >= cfg_.event_dwell)
       {
          if (catalog_)
          {

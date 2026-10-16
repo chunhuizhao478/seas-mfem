@@ -262,7 +262,7 @@ PhaseEnd RunFirstDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg,
       cycle::bridge::ToNitsche(dyn.Frames(), sk, qd.SlipRate(), psi_qd, d, V, psi);
       dyn.Enter(qd.Displacement(), d, V, psi, sn, t);
    }
-   ctl.EnterDynamic();
+   ctl.EnterDynamic(t);
    out.SwitchLog(t, Vstart, "QD", "dynamic", "start");
 
    // ---- the switch probe (plan P3): one controller per pair ----
@@ -280,7 +280,7 @@ PhaseEnd RunFirstDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg,
             s.T_dwell = tdw;
             s.max_dynamic_phases = 0;
             probes.emplace_back(s);
-            probes.back().EnterDynamic();
+            probes.back().EnterDynamic(t);
          }
       }
       probe_done.assign(probes.size(), 0);
@@ -435,12 +435,12 @@ PhaseEnd RunFirstDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg,
          track(t);
          out.UpdateEvents(t, Vmax);
          if (out.Write(t, Vmax, fill_dyn)) { out.WriteGlobal(t, Vmax); }
-         verdict = ctl.AfterDynStep(Vmax, dyn.Tau(), dyn.Dt());
+         verdict = ctl.AfterDynStep(Vmax, t, dyn.Tau());
       }
       for (size_t k = 0; k < probes.size(); k++)
       {
          if (probe_done[k]) { continue; }
-         const cycle::DynVerdict v = probes[k].AfterDynStep(Vmax, dyn.Tau(), dyn.Dt());
+         const cycle::DynVerdict v = probes[k].AfterDynStep(Vmax, t, dyn.Tau());
          if (v == cycle::DynVerdict::EndOfPhase)
          {
             ProbeSwitch(mpi, cfg, qd, dyn, out, probes[k].Config().V_off,
