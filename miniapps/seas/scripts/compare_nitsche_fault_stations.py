@@ -17,7 +17,8 @@ Sources (each LABEL=DIR, repeatable; the order given is kept):
                             [n-stress] [state].  The first --ref is the one
                             the pass test uses.
   --gold LABEL=DIR[:FMT]    golds; FMT = scec_si (SAFS writer, Pa; default)
-                            or nitsche (TPV102 writer layout).
+                            or nitsche (TPV102 writer layout).  A gold's
+                            station files are in its results/ subfolder.
 A station's file in DIR is the one whose stem ends in "_station_<name>" or
 in "_<key>", key = x2_<strike km>_x3_<depth km> from the station file.
 
@@ -25,9 +26,15 @@ Measures per station (t <= t_end):
   arrival   first time |V| > 1 mm/s (SCEC definition), |V| = |(V_h, V_v)|
   peak      max |V|
   slip      |(slip_h, slip_v)| at t_end
+            (t_end = --t-end, lowered to the earliest end of any source,
+            with a warning, so every source is measured on one window)
   state     state column at t_end (when both sides have it)
-  noise     RMS of sigma_n, tau_h, tau_v after removing a least-squares
-            line from each consecutive --noise-window (default 0.1 s)
+  noise     RMS of sigma_n, tau_h, tau_v as in the TPV102 and damping-test
+            reports (plan section 8): from the station's arrival (first
+            |V_h| > 1 mm/s) + --noise-after s (0.5) to t_end, the residual
+            after a centred moving average of --noise-window s (0.1) in
+            samples of the source's own median dt, w samples dropped at each
+            end; |sigma_n| for the normal stress
 
 Pass test (plan rev 1.3, section 8; accepted by Chunhui Zhao 2026-10-16),
 against the first --ref, for the LAST --run:
@@ -134,25 +141,27 @@ def load(path, fmt):
 
 
 # ------------------------------------------------------------------ measures
-def window_noise(t, x, w, t_end):
-    m = t <= t_end + 1e-12
-    t, x = t[m], x[m]
-    if t.size < 4:
+def noise_rms(d, k, window, after):
+    """Noise of column k of d (already cut at t_end): the measure of the
+    TPV102 and damping-test reports (rms() in their build scripts).  The
+    arrival uses |V_h| where those scripts used V_h > 1 mm/s; the two agree
+    for every benchmark here, whose ruptures slip in +h."""
+    t = d["t"]
+    i = np.nonzero(np.abs(d["h-slip-rate"]) > 1e-3)[0]
+    if i.size == 0:
         return float("nan")
-    edges = np.arange(t[0], t[-1] + w, w)
-    ss, n = 0.0, 0
-    for a, b in zip(edges[:-1], edges[1:]):
-        s = (t >= a) & (t < b)
-        if s.sum() < 3:
-            continue
-        c = np.polyfit(t[s] - a, x[s], 1)
-        r = x[s] - np.polyval(c, t[s] - a)
-        ss += float(np.sum(r * r))
-        n += int(s.sum())
-    return float(np.sqrt(ss / n)) if n else float("nan")
+    m = t >= t[i[0]] + after
+    if m.sum() < 3:
+        return float("nan")
+    w = max(1, int(round(window / np.median(np.diff(t[m])))))
+    x = np.abs(d[k][m]) if k == "n-stress" else d[k][m]
+    if x.size <= 2 * w:
+        return float("nan")
+    r = (x - np.convolve(x, np.ones(w) / w, mode="same"))[w:-w]
+    return float(np.sqrt(np.mean(r * r)))
 
 
-def measures(d, t_end, w):
+def measures(d, t_end, window, after):
     t = d["t"]
     V = np.hypot(d["h-slip-rate"], d["v-slip-rate"])
     m = t <= t_end + 1e-12
@@ -165,9 +174,10 @@ def measures(d, t_end, w):
     }
     if "state" in d:
         out["state"] = float(np.interp(t_end, t, d["state"]))
+    dc = {k: v[m] for k, v in d.items() if isinstance(v, np.ndarray)}
     for k, lab in (("n-stress", "noise_sn"), ("h-shear-stress", "noise_th"), ("v-shear-stress", "noise_tv")):
         if k in d:
-            out[lab] = window_noise(t, d[k], w, t_end)
+            out[lab] = noise_rms(dc, k, window, after)
     return out
 
 
@@ -204,7 +214,8 @@ def main():
     ap.add_argument("--ref", action="append", default=[])
     ap.add_argument("--gold", action="append", default=[])
     ap.add_argument("--t-end", type=float, default=12.0)
-    ap.add_argument("--noise-window", type=float, default=0.1)
+    ap.add_argument("--noise-window", type=float, default=0.1, help="moving-average width (s)")
+    ap.add_argument("--noise-after", type=float, default=0.5, help="noise starts this long after arrival (s)")
     ap.add_argument("--arrival-tol", type=float, default=0.1)
     ap.add_argument("--slip-tol", type=float, default=0.02)
     ap.add_argument("--slip-min", type=float, default=0.1)
@@ -239,17 +250,21 @@ def main():
     runs = [lab for kind, lab, d, fmt in srcs if kind == "run"]
     refs = [lab for kind, lab, d, fmt in srcs if kind == "ref"]
     labels = [lab for kind, lab, d, fmt in srcs]
+    # One common end time for every source, so a run that stops early is
+    # never compared with a reference measured further on.
     t_end = a.t_end
-    for lab in runs:
+    for lab in labels:
         ends = [data[(lab, s["name"])]["t"][-1] for s in stations if (lab, s["name"]) in data]
         if ends and min(ends) < t_end - 1e-9:
-            print(f"# WARNING: run {lab} ends at {min(ends):.4f} s < t_end = {t_end} s; "
-                  f"measures use t_end = {min(ends):.4f} for it")
+            print(f"# WARNING: {lab} ends at {min(ends):.4f} s < t_end = {t_end} s; "
+                  f"every source is measured to t = {min(ends):.4f} s")
+            t_end = min(ends)
     M = {}
     for (lab, name), d in data.items():
-        M[(lab, name)] = measures(d, min(t_end, d["t"][-1]), a.noise_window)
+        M[(lab, name)] = measures(d, t_end, a.noise_window, a.noise_after)
 
-    print(f"# stations {a.stations}; t_end {t_end} s; noise window {a.noise_window} s")
+    print(f"# stations {a.stations}; t_end {t_end} s; noise: {a.noise_window} s centred moving average,"
+          f" from arrival + {a.noise_after} s")
     print(f"{'station':16s} {'source':14s} {'arrival':>8s} {'peak V':>8s} {'slip':>8s} {'state':>9s}"
           f" {'sn rms':>7s} {'th rms':>7s} {'tv rms':>7s}   misfit vs {refs[0] if refs else '-'}")
     for st in stations:
@@ -268,6 +283,7 @@ def main():
                          f"  peak {100 * f['r_peak']:+6.1f}%")
             print(line)
     summary = {"stations": a.stations, "t_end": t_end, "noise_window": a.noise_window,
+               "noise_after": a.noise_after,
                "measures": {f"{lab}|{n}": m for (lab, n), m in M.items()}}
 
     # noise medians
