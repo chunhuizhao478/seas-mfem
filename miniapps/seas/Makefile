@@ -3303,6 +3303,41 @@ seas_test_nitsche_lsw: $(TEST_NITSCHE_LSW_OBJ)
 test-nitsche-lsw: seas_test_nitsche_lsw
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_lsw
 
+# Nitsche linear slip weakening on the inline box (benchmark plan rev 1.3,
+# phase B3): L-05 mirror symmetry, L-08 rank invariance against one rank,
+# L-09 Prakash-Clifton and Kelvin-Voigt (default mode, np 1, 2, 4); the
+# long checks L-06 energy balance and L-07 coupled dt refinement.
+TEST_NITSCHE_LSW_INLINE_SRC = tests/verification/test_nitsche_lsw_inline.cpp
+TEST_NITSCHE_LSW_INLINE_OBJ = $(TEST_NITSCHE_LSW_INLINE_SRC:.cpp=.o)
+$(TEST_NITSCHE_LSW_INLINE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             domain/nitsche_wave_operator.hpp \
+                             domain/nitsche_energy.hpp \
+                             domain/elasticity_operator_penalty.inl \
+                             fault/fault_orientation.hpp \
+                             fault/fault_frame.hpp \
+                             friction/fault_closure.hpp \
+                             friction/slip_weakening_closure.hpp \
+                             solver/nitsche_cfl.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_lsw_inline: $(TEST_NITSCHE_LSW_INLINE_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_LSW_INLINE_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-lsw-inline: seas_test_nitsche_lsw_inline
+	for np in 1 2 4; do $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_nitsche_lsw_inline || exit 1; done
+
+test-nitsche-lsw-inline-long: seas_test_nitsche_lsw_inline
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_nitsche_lsw_inline --l06 8 8 4 2 2.0
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 8 ./seas_test_nitsche_lsw_inline --l07 8 8 4 2 1.5 2 0.1
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 8 ./seas_test_nitsche_lsw_inline --l07 8 8 4 1 1.5 2 0.1
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 8 ./seas_test_nitsche_lsw_inline --l07 8 8 4 2 1.5 2 0
+
 # Nitsche rate and state, slip law with strong rate weakening (benchmark
 # plan rev 1.3, phase B5): S-01 adapter, S-02 initial state, S-03 Heun
 # against the frozen-V exponential, S-04 low speed.  Pointwise, one rank.
