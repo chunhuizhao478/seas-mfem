@@ -136,7 +136,8 @@ struct NitscheFaultSetup
    /// (TPV102: dtau F(r) (e_X e_Y + e_Y e_X) times G(t)).  Empty = none.
    std::function<void(const real_t x[3], real_t sigma[9])> nucleation_spatial;
    std::function<real_t(real_t t)> nucleation_temporal;
-   /// Per-point friction parameters (a, Dc) at a fault DOF position.
+   /// Per-point friction parameters at a fault DOF position (the fields the
+   /// closure's law reads, e.g. a, Dc; checked by closure->CheckParameters).
    std::function<void(const real_t x[3], FaultPointState &s)> parameters;
    /// Permitted range sigma_n_eff >= sigma_min ([pore_pressure]
    /// min_sigma_n_pa, default 0; spatial/code/spatial_friction.cpp:957-960).
@@ -370,6 +371,9 @@ public:
    const Vector &FaultSigmaF() const { return sigF_own_; }   ///< no
    const Vector &FaultA() const { return a_own_; }
    const Vector &FaultDc() const { return Dc_own_; }
+   /// Per-point parameters of owned DOF j as NitscheFaultSetup::parameters
+   /// gave them (psi and slip_abs zero; the step sets them per call).
+   const FaultPointState &FaultParams(int j) const { return par_own_[j]; }
    const FaultOrientation &Orientation() const { return *orient_; }
    const NitscheStepRecord &LastStep() const { return record_; }
    /// Box 8/9 values of the last advance on owned DOFs: X_tan in the frame
@@ -462,9 +466,10 @@ public:
    /// global slip rate in V[3], sigma_eff and X_tan in the frame.  With
    /// sigma_pc (Prakash-Clifton) *sigma_pc = E *sigma_pc + omE sigma_eff on
    /// return and the closure sees that value instead of sigma_eff.
+   /// slip_abs = |d^n| of DOF j, passed to the closure as st.slip_abs.
    void CloseDOF(int j, const real_t TS[3], real_t psi, real_t V[3],
                  real_t &sigma_eff, real_t X[2], real_t *sigma_pc = nullptr,
-                 real_t E = 0.0, real_t omE = 1.0) const
+                 real_t E = 0.0, real_t omE = 1.0, real_t slip_abs = 0.0) const
    {
       const real_t *n = &frame_own_(9 * j), *dv = &frame_own_(9 * j + 3),
                     *sv = &frame_own_(9 * j + 6);
@@ -478,10 +483,9 @@ public:
                     << ", t = " << GetTime() << ": sigma_n_eff = " << sigma_eff
                     << " < sigma_min = " << sigma_min_);
       }
-      FaultPointState st;
+      FaultPointState st = par_own_[j];
       st.psi = psi;
-      st.a = a_own_(j);
-      st.Dc = Dc_own_(j);
+      st.slip_abs = slip_abs;
       real_t sig_law = sigma_eff;
       if (sigma_pc)
       {
@@ -497,10 +501,8 @@ public:
    /// r(|V|, psi) at owned DOF j (box 4, 10).
    real_t StateRate(int j, real_t Vabs, real_t psi) const
    {
-      FaultPointState st;
+      FaultPointState st = par_own_[j];
       st.psi = psi;
-      st.a = a_own_(j);
-      st.Dc = Dc_own_(j);
       return closure_->StateRate(Vabs, st);
    }
 
@@ -859,6 +861,9 @@ private:
       {
          real_t TS[3], Vn[3], X[2], sig;
          for (int c = 0; c < 3; c++) { TS[c] = Town_(3 * j + c) + S_(3 * j + c); }
+         // |d^n|: d_ still holds d^n here (box 11 writes d^{n+1} below)
+         const real_t *dn = &d_(3 * j);
+         const real_t dn_abs = std::sqrt(dn[0] * dn[0] + dn[1] * dn[1] + dn[2] * dn[2]);
          if (pc_)
          {
             // previous step's slip rate (SeisSol: slipRateMagnitude before the solve)
@@ -866,11 +871,11 @@ private:
             const real_t Vo_abs = std::sqrt(Vo[0] * Vo[0] + Vo[1] * Vo[1] + Vo[2] * Vo[2]);
             const real_t xpc = -(Vo_abs + pc_vstar_) * dt / pc_len_;
             CloseDOF(j, TS, psistar_(j), Vn, sig, X, &sigpc_(j), std::exp(xpc),
-                     -std::expm1(xpc));
+                     -std::expm1(xpc), dn_abs);
             min_pc = std::min(min_pc, sigpc_(j));
             max_pc = std::max(max_pc, sigpc_(j));
          }
-         else { CloseDOF(j, TS, psistar_(j), Vn, sig, X); }
+         else { CloseDOF(j, TS, psistar_(j), Vn, sig, X, nullptr, 0.0, 1.0, dn_abs); }
          const real_t Vabs = std::sqrt(Vn[0] * Vn[0] + Vn[1] * Vn[1] + Vn[2] * Vn[2]);
          // C-07 anti-parallel: V . X_tan < 0 wherever |V| > 0.
          const real_t *dv = &frame_own_(9 * j + 3), *sv = &frame_own_(9 * j + 6);
@@ -1115,13 +1120,20 @@ private:
       elast_->RestrictToOwnedFault(x_loc, x_own_, 3);
       a_own_.SetSize(no_);
       Dc_own_.SetSize(no_);
+      par_own_.assign(no_, FaultPointState());
       for (int j = 0; j < no_; j++)
       {
          FaultPointState st;
          fs.parameters(&x_own_(3 * j), st);
-         MFEM_VERIFY(st.a > 0.0 && st.Dc > 0.0, "NitscheFaultSetup: parameters "
-                     "give a = " << st.a << ", Dc = " << st.Dc << " at owned "
-                     "fault DOF " << j);
+         st.psi = 0.0;
+         st.slip_abs = 0.0;
+         MFEM_VERIFY(closure_->CheckParameters(st), "NitscheFaultSetup: the "
+                     "closure rejects the parameters at owned fault DOF " << j
+                     << " (" << x_own_(3 * j) << ", " << x_own_(3 * j + 1) << ", "
+                     << x_own_(3 * j + 2) << "): a = " << st.a << ", Dc = "
+                     << st.Dc << ", mu_s = " << st.mu_s << ", mu_d = " << st.mu_d
+                     << ", cohesion = " << st.cohesion << ", V_w = " << st.V_w);
+         par_own_[j] = st;
          a_own_(j) = st.a;
          Dc_own_(j) = st.Dc;
       }
@@ -1196,6 +1208,7 @@ private:
    DenseMatrix Bk_;                    // kernel triad per local DOF (9 x nd)
    std::vector<real_t> eps_loc_;       // eps_f per local DOF
    Vector frame_own_, x_own_, sigF_own_, a_own_, Dc_own_;
+   std::vector<FaultPointState> par_own_;   // per owned DOF (H-B1)
    Vector sigF_face_, spread_face_;
    Vector S0_own_, Snuc_own_;
    Vector d_, V_, psi_;

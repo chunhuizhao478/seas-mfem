@@ -29,12 +29,20 @@ namespace mfem
 namespace seas
 {
 
-/// State and local parameters of one fault point.
+/// State and local parameters of one fault point.  Scalars only (test T12):
+/// each closure reads the fields its law needs and ignores the rest.
 struct FaultPointState
 {
-   real_t psi = 0.0;   ///< logarithmic state variable [-]
+   real_t psi = 0.0;   ///< state variable (rate-and-state psi; slip path for slip weakening) [-]
    real_t a = 0.0;     ///< direct-effect parameter at this point [-]
    real_t Dc = 0.0;    ///< critical slip distance at this point [m]
+   real_t mu_s = 0.0;      ///< static friction coefficient (slip weakening) [-]
+   real_t mu_d = 0.0;      ///< dynamic friction coefficient (slip weakening) [-]
+   real_t cohesion = 0.0;  ///< frictional cohesion (slip weakening) [Pa]
+   real_t V_w = 0.0;       ///< weakening slip rate (strong rate weakening) [m/s]
+   /// Slip magnitude |d^n| at the start of the step.  Not a parameter: the
+   /// operator sets it on every box-9 call (CloseDOF); zero elsewhere.
+   real_t slip_abs = 0.0;
 };
 
 class IFaultClosure
@@ -56,6 +64,14 @@ public:
    /// no gamma, no radiation damping).
    virtual void SeedEquilibrium(real_t tau0, real_t V_ini, real_t sigma_n,
                                 FaultPointState &s) const = 0;
+
+   /// True when the per-point parameters are admissible for this law; the
+   /// operator aborts at setup otherwise.  Default: a > 0 and Dc > 0 (the
+   /// rate-and-state check).
+   virtual bool CheckParameters(const FaultPointState &s) const
+   {
+      return s.a > 0.0 && s.Dc > 0.0;
+   }
 };
 
 } // namespace seas
