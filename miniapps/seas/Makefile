@@ -3280,6 +3280,29 @@ test-nitsche-hook-spy: seas_test_nitsche_hook_spy
 	if grep -q "closure rejects the parameters" hook_spy_abort.log; then echo "PASSED: --abort-reject aborted: closure rejects the parameters"; \
 	else echo "FAILED: --abort-reject aborted without 'closure rejects the parameters'"; exit 1; fi; rm -f hook_spy_abort.log
 
+# Nitsche linear slip weakening (benchmark plan rev 1.3, phase B2): the
+# closure's stick and slip branches, its derivative and its agreement with
+# the ADER TPV205 solve (L-01 to L-04).  Pointwise, one rank.
+TEST_NITSCHE_LSW_SRC = tests/verification/test_nitsche_lsw.cpp
+TEST_NITSCHE_LSW_OBJ = $(TEST_NITSCHE_LSW_SRC:.cpp=.o)
+$(TEST_NITSCHE_LSW_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             friction/fault_closure.hpp \
+                             friction/slip_weakening_closure.hpp \
+                             dynamic/tpv205_friction.hpp \
+                             config/tpv205_params.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_lsw: $(TEST_NITSCHE_LSW_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_NITSCHE_LSW_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-lsw: seas_test_nitsche_lsw
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_lsw
+
 # Nitsche dynamic rupture P7: the driver (plan N-07).  Reads the SAFS deck
 # through spatial::LoadSpatialFrictionConfig (toml11) and the constant
 # material; links the friction parser, the material and the nucleation
