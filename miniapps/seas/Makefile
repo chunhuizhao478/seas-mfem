@@ -3249,6 +3249,37 @@ test-nitsche-pc: seas_test_nitsche_pc
 	if grep -q "never seeded" pc_abort.log; then echo "PASSED: --abort-unseeded aborted: never seeded"; \
 	else echo "FAILED: --abort-unseeded aborted without 'never seeded'"; exit 1; fi; rm -f pc_abort.log
 
+# Nitsche hook H-B1 (benchmark plan rev 1.3, gate L-10): a spy closure sees
+# |d^n| and the stored per-point parameters; a rejecting CheckParameters
+# must stop the setup (exit non-zero with its message).
+TEST_NITSCHE_HOOK_SPY_SRC = tests/verification/test_nitsche_hook_spy.cpp
+TEST_NITSCHE_HOOK_SPY_OBJ = $(TEST_NITSCHE_HOOK_SPY_SRC:.cpp=.o)
+$(TEST_NITSCHE_HOOK_SPY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             domain/nitsche_wave_operator.hpp \
+                             domain/elasticity_operator_penalty.inl \
+                             fault/fault_orientation.hpp \
+                             fault/fault_frame.hpp \
+                             friction/fault_closure.hpp \
+                             friction/rate_state_closure.hpp \
+                             solver/nitsche_cfl.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_hook_spy: $(TEST_NITSCHE_HOOK_SPY_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_HOOK_SPY_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-hook-spy: seas_test_nitsche_hook_spy
+	for np in 1 2 4; do $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_nitsche_hook_spy || exit 1; done
+	if $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_hook_spy --abort-reject > hook_spy_abort.log 2>&1; \
+	then echo "FAILED: --abort-reject did not abort"; exit 1; fi; \
+	if grep -q "closure rejects the parameters" hook_spy_abort.log; then echo "PASSED: --abort-reject aborted: closure rejects the parameters"; \
+	else echo "FAILED: --abort-reject aborted without 'closure rejects the parameters'"; exit 1; fi; rm -f hook_spy_abort.log
+
 # Nitsche dynamic rupture P7: the driver (plan N-07).  Reads the SAFS deck
 # through spatial::LoadSpatialFrictionConfig (toml11) and the constant
 # material; links the friction parser, the material and the nucleation
