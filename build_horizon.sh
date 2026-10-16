@@ -4,11 +4,15 @@
 #
 #   MODE=cpu (default)  CPU-only build for Vista's Grace-Grace (gg) nodes:
 #                       G0's CPU baseline and goldens.  No CUDA, no cuDSS.
-#   MODE=cuda           CUDA build for Horizon (G1).  Not written yet; the
-#                       script stops.  It will use the same versions as
-#                       MODE=cpu, so a Vista golden and a Horizon run differ
-#                       only by the GPU work, the MPI build and nvcc's host
-#                       compilation.
+#   MODE=cuda           CUDA build (G1): PETSc with CUDA (hypre on the GPU;
+#                       MUMPS stays on the CPU), cuDSS, and MFEM with
+#                       MFEM_USE_CUDA and MFEM_USE_CUDSS.  Same versions as
+#                       MODE=cpu, so a CPU golden and a GPU run differ only
+#                       by the GPU work, the CUDA libraries and nvcc's host
+#                       compilation.  GPU_ARCH picks the GPU (90: Vista gh,
+#                       GH200; 100: Horizon gb, GB200).  MFEM is configured
+#                       in place, so a MODE=cuda build needs its own clone
+#                       (one checkout holds one mode; the script checks).
 #
 # Every library is built from source at a pinned version (Vista's PETSc and
 # MUMPS modules cannot be used: petsc/3.24 does not load with gcc/13.2.0 +
@@ -19,9 +23,11 @@
 # Stages (STAGE=..., several separated by spaces; default "deps mfem seas"):
 #   fetch  On a LOGIN node, which has internet (compute nodes may not):
 #          download the PETSc release and every package tarball its configure
-#          asks for into ${DEPS_ROOT}/downloads.
+#          asks for into ${DEPS_ROOT}/downloads (MODE=cuda: also the cuDSS
+#          wheel from PyPI).
 #   deps   PETSc with MUMPS, ScaLAPACK, METIS, ParMETIS, PT-Scotch and hypre,
-#          built from those tarballs, installed in ${PETSC_PREFIX}.
+#          built from those tarballs, installed in ${PETSC_PREFIX}
+#          (MODE=cuda: also unpacks cuDSS into ${CUDSS_DIR}).
 #   mfem   Configure and build MFEM (this checkout, in place) against it.
 #   seas   Build seas_bp5_full and the unit tests G0 runs
 #          (seas_test_elasticity_operator, seas_test_g0_matrix_only).
@@ -42,6 +48,13 @@
 #                               (-L/-l flags only; rpaths are added for MFEM)
 #   CPU_FLAGS="-mcpu=neoverse-v2"   (Grace on both Vista and Horizon)
 #   JOBS=<n>                    parallel make (default: nproc)
+#   MODE=cuda only:
+#   CUDA_MODULE=cuda/13.0       CUDA toolkit module added to MODULES
+#   GPU_ARCH=90                 CUDA compute capability (90 GH200, 100 GB200)
+#   CUDSS_VERSION=0.7.1.6       cuDSS release, from the PyPI wheel
+#                               nvidia-cudss-cu<CUDA major> (aarch64)
+#   CUDSS_DIR=<dir>             cuDSS install to use (default: the wheel
+#                               unpacked in ${DEPS_ROOT}/cudss-${CUDSS_VERSION})
 
 set -euo pipefail
 
@@ -49,7 +62,18 @@ MODE="${MODE:-cpu}"
 STAGE="${STAGE:-deps mfem seas}"
 PETSC_VERSION="${PETSC_VERSION:-3.24.6}"
 DEPS_ROOT="${DEPS_ROOT:-${WORK:-$HOME}/seas-gpu-deps}"
-MODULES="${MODULES:-gcc/13.2.0 openmpi/5.0.11 nvpl/26.9 cmake/3.31.5}"
+CPU_MODULES="gcc/13.2.0 openmpi/5.0.11 nvpl/26.9 cmake/3.31.5"
+# cuda/13.x is the CUDA line whose openmpi/5.0.11 build on Vista is
+# CUDA-aware (with cuda/12.x Lmod loads the CPU-only OpenMPI).
+CUDA_MODULE="${CUDA_MODULE:-cuda/13.0}"
+GPU_ARCH="${GPU_ARCH:-90}"
+CUDSS_VERSION="${CUDSS_VERSION:-0.7.1.6}"
+if [ "${MODE}" = "cuda" ]; then
+   # Load the CUDA module before openmpi so Lmod picks its CUDA-aware build.
+   MODULES="${MODULES:-gcc/13.2.0 ${CUDA_MODULE} openmpi/5.0.11 nvpl/26.9 cmake/3.31.5}"
+else
+   MODULES="${MODULES:-${CPU_MODULES}}"
+fi
 CPU_FLAGS="${CPU_FLAGS:--mcpu=neoverse-v2}"
 JOBS="${JOBS:-$(nproc)}"
 
@@ -57,6 +81,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOWNLOADS="${DEPS_ROOT}/downloads"
 PETSC_SRC="${DEPS_ROOT}/src/petsc-${PETSC_VERSION}"
 PETSC_PREFIX="${DEPS_ROOT}/petsc-${PETSC_VERSION}-${MODE}"
+# Build directory inside the shared PETSc source tree, one per mode (cpu keeps
+# the name PETSc's configure picks by default).
+if [ "${MODE}" = "cuda" ]; then
+   PETSC_BUILD_ARCH=arch-linux-cuda-opt
+else
+   PETSC_BUILD_ARCH=arch-linux-c-opt
+fi
 PROVENANCE="${DEPS_ROOT}/build_provenance_${MODE}.txt"
 PETSC_TARBALL="petsc-${PETSC_VERSION}.tar.gz"
 PETSC_URLS=(
@@ -64,13 +95,22 @@ PETSC_URLS=(
    "https://gitlab.com/petsc/petsc/-/archive/v${PETSC_VERSION}/petsc-v${PETSC_VERSION}.tar.gz"
 )
 
-if [ "${MODE}" = "cuda" ]; then
-   echo "ERROR: MODE=cuda is G1 work and is not written yet." >&2
-   exit 1
-fi
-if [ "${MODE}" != "cpu" ]; then
+if [ "${MODE}" != "cpu" ] && [ "${MODE}" != "cuda" ]; then
    echo "ERROR: MODE must be cpu or cuda (got '${MODE}')." >&2
    exit 1
+fi
+CUDSS_DIR="${CUDSS_DIR:-${DEPS_ROOT}/cudss-${CUDSS_VERSION}}"
+CUDSS_CUDA=""   # CUDA major version of the cuDSS wheel, from nvcc (below)
+# One checkout holds one MFEM configuration (MFEM is configured in place).
+if [ -f "${SCRIPT_DIR}/config/config.mk" ]; then
+   _cfg_cuda="$(grep -m1 '^MFEM_USE_CUDA ' "${SCRIPT_DIR}/config/config.mk" | awk '{print $3}')"
+   if { [ "${MODE}" = "cuda" ] && [ "${_cfg_cuda}" = "NO" ]; } ||
+      { [ "${MODE}" = "cpu" ] && [ "${_cfg_cuda}" = "YES" ]; }; then
+      echo "ERROR: this checkout is configured with MFEM_USE_CUDA=${_cfg_cuda};" \
+           "use a separate clone for MODE=${MODE}." >&2
+      exit 1
+   fi
+   unset _cfg_cuda
 fi
 
 log() { echo "[build_horizon ${MODE}] $*"; }
@@ -87,6 +127,20 @@ if [ "${MODULES}" != "none" ]; then
    # shellcheck disable=SC2086
    module load ${MODULES}
 fi
+
+if [ "${MODE}" = "cuda" ]; then
+   command -v nvcc >/dev/null || { echo "ERROR: MODE=cuda needs nvcc (CUDA_MODULE)." >&2; exit 1; }
+   CUDSS_CUDA="$(nvcc --version | sed -n 's/.*release \([0-9]*\)\..*/\1/p')"
+   [ -n "${CUDSS_CUDA}" ] || { echo "ERROR: cannot read the CUDA version from nvcc." >&2; exit 1; }
+   # hypre, cuDSS and the device-buffer test pass GPU buffers to MPI.
+   # (No grep -q: it stops reading at the first match, and under pipefail a
+   # SIGPIPE'd ompi_info would fail the test.)
+   ompi_info --parsable --all 2>/dev/null | grep 'built_with_cuda_support:value:true' >/dev/null || {
+      echo "ERROR: the loaded MPI is not CUDA-aware (ompi_info); check MODULES." >&2
+      exit 1
+   }
+fi
+CUDSS_WHEEL="nvidia_cudss_cu${CUDSS_CUDA}-${CUDSS_VERSION}-py3-none-manylinux_2_17_aarch64.whl"
 
 BLASLAPACK_LIB="${BLASLAPACK_LIB:-}"
 if [ -z "${BLASLAPACK_LIB}" ]; then
@@ -119,6 +173,11 @@ record_toolchain() {
       echo "mpi: $(ompi_info 2>/dev/null | grep -m1 'Open MPI:' | xargs || mpichversion 2>/dev/null | head -1)"
       echo "blas/lapack: ${BLASLAPACK_LIB}"
       echo "cpu flags: ${CPU_FLAGS}"
+      if [ "${MODE}" = "cuda" ]; then
+         echo "nvcc: $(nvcc --version 2>&1 | grep -m1 release)"
+         echo "gpu arch: sm_${GPU_ARCH}"
+         echo "cudss: ${CUDSS_DIR} (CUDSS_VERSION ${CUDSS_VERSION})"
+      fi
       echo "petsc: ${PETSC_VERSION} at ${PETSC_PREFIX}"
    } >> "${PROVENANCE}"
 }
@@ -138,7 +197,6 @@ PETSC_CONFIGURE_ARGS=(
    --with-shared-libraries=1
    --with-64-bit-indices=0
    --with-x=0
-   --with-cuda=0
    "--with-blaslapack-lib=${BLASLAPACK_LIB}"
    --download-scalapack
    --download-mumps
@@ -148,6 +206,13 @@ PETSC_CONFIGURE_ARGS=(
    --download-hypre
    --with-packages-download-dir="${DOWNLOADS}"
 )
+if [ "${MODE}" = "cuda" ]; then
+   # hypre (downloaded by PETSc) is then built with CUDA too; MUMPS and the
+   # rest stay on the CPU.
+   PETSC_CONFIGURE_ARGS+=(--with-cuda=1 --with-cuda-arch="${GPU_ARCH}")
+else
+   PETSC_CONFIGURE_ARGS+=(--with-cuda=0)
+fi
 
 unpack_petsc() {
    if [ -f "${PETSC_SRC}/configure" ]; then return; fi
@@ -213,9 +278,54 @@ for name, urls in pkgs:
 if failed:
     sys.exit("ERROR: could not download: " + ", ".join(failed))
 PY
+   if [ "${MODE}" = "cuda" ] && [ ! -f "${DOWNLOADS}/${CUDSS_WHEEL}" ]; then
+      log "downloading cuDSS ${CUDSS_VERSION} (PyPI wheel nvidia-cudss-cu${CUDSS_CUDA}, aarch64)"
+      python3 -m pip download --no-deps --only-binary=:all: \
+         --platform manylinux_2_17_aarch64 --python-version 3 \
+         -d "${DOWNLOADS}" "nvidia-cudss-cu${CUDSS_CUDA}==${CUDSS_VERSION}"
+      [ -f "${DOWNLOADS}/${CUDSS_WHEEL}" ] || {
+         echo "ERROR: ${CUDSS_WHEEL} not in ${DOWNLOADS} after pip download" >&2
+         exit 1
+      }
+   fi
    log "downloads in ${DOWNLOADS}:"
    ls -la "${DOWNLOADS}"
    record_toolchain fetch
+}
+
+# cuDSS from its wheel: nvidia/cuNN/{include,lib} -> ${CUDSS_DIR}/{include,lib},
+# plus the unversioned .so names the link line and MFEM's cuDSS settings use.
+unpack_cudss() {
+   if [ -f "${CUDSS_DIR}/include/cudss.h" ]; then return; fi
+   [ -f "${DOWNLOADS}/${CUDSS_WHEEL}" ] || {
+      echo "ERROR: ${DOWNLOADS}/${CUDSS_WHEEL} missing; run STAGE=fetch on a login node," \
+           "or set CUDSS_DIR to an existing cuDSS install." >&2
+      exit 1
+   }
+   log "unpacking ${CUDSS_WHEEL} into ${CUDSS_DIR}"
+   python3 - "${DOWNLOADS}/${CUDSS_WHEEL}" "${CUDSS_DIR}" "${CUDSS_CUDA}" <<'PY'
+import os, sys, zipfile
+whl, dest, cuda = sys.argv[1], sys.argv[2], sys.argv[3]
+with zipfile.ZipFile(whl) as z:
+    for name in z.namelist():
+        for sub in ("include", "lib"):
+            pre = f"nvidia/cu{cuda}/{sub}/"
+            if name.startswith(pre) and not name.endswith("/"):
+                out = os.path.join(dest, sub, name[len(pre):])
+                os.makedirs(os.path.dirname(out), exist_ok=True)
+                with open(out, "wb") as f:
+                    f.write(z.read(name))
+libdir = os.path.join(dest, "lib")
+for so in os.listdir(libdir):
+    if so.endswith(".so.0"):
+        link = os.path.join(libdir, so[:-2])
+        if not os.path.exists(link):
+            os.symlink(so, link)
+PY
+   [ -f "${CUDSS_DIR}/include/cudss.h" ] && [ -e "${CUDSS_DIR}/lib/libcudss.so" ] || {
+      echo "ERROR: cuDSS unpack into ${CUDSS_DIR} incomplete" >&2
+      exit 1
+   }
 }
 
 # --------------------------------------------------------------------------
@@ -223,13 +333,14 @@ PY
 # --------------------------------------------------------------------------
 stage_deps() {
    unpack_petsc
+   if [ "${MODE}" = "cuda" ]; then unpack_cudss; fi
    if [ -f "${PETSC_PREFIX}/lib/petsc/conf/petscvariables" ]; then
       log "PETSc already installed in ${PETSC_PREFIX}; skipping (remove it to rebuild)"
    else
       log "configuring PETSc ${PETSC_VERSION}"
-      ( cd "${PETSC_SRC}" && ./configure "${PETSC_CONFIGURE_ARGS[@]}" )
-      ( cd "${PETSC_SRC}" && make PETSC_DIR="${PETSC_SRC}" PETSC_ARCH=arch-linux-c-opt MAKE_NP="${JOBS}" all )
-      ( cd "${PETSC_SRC}" && make PETSC_DIR="${PETSC_SRC}" PETSC_ARCH=arch-linux-c-opt install )
+      ( cd "${PETSC_SRC}" && ./configure PETSC_ARCH="${PETSC_BUILD_ARCH}" "${PETSC_CONFIGURE_ARGS[@]}" )
+      ( cd "${PETSC_SRC}" && make PETSC_DIR="${PETSC_SRC}" PETSC_ARCH="${PETSC_BUILD_ARCH}" MAKE_NP="${JOBS}" all )
+      ( cd "${PETSC_SRC}" && make PETSC_DIR="${PETSC_SRC}" PETSC_ARCH="${PETSC_BUILD_ARCH}" install )
    fi
    record_toolchain deps
    {
@@ -240,7 +351,20 @@ stage_deps() {
       done
       grep -h -m1 'define PETSC_PKG_MUMPS_VERSION_\(MAJOR\|MINOR\|SUBMINOR\)' "${PETSC_PREFIX}/include/petscconf.h" 2>/dev/null || true
       grep -h -m1 'HYPRE_RELEASE_VERSION' "${PETSC_PREFIX}/include/HYPRE_config.h" 2>/dev/null || true
+      grep -h -E 'define HYPRE_USING_(CUDA|GPU|UNIFIED_MEMORY|GPU_AWARE_MPI|DEVICE_MALLOC_ASYNC)' \
+         "${PETSC_PREFIX}/include/HYPRE_config.h" 2>/dev/null || true
    } >> "${PROVENANCE}"
+   if [ "${MODE}" = "cuda" ]; then
+      # The plan builds hypre for the GPU without unified memory.
+      grep -q 'define HYPRE_USING_CUDA' "${PETSC_PREFIX}/include/HYPRE_config.h" || {
+         echo "ERROR: PETSc's hypre was not built with CUDA (HYPRE_config.h)." >&2
+         exit 1
+      }
+      if grep -q 'define HYPRE_USING_UNIFIED_MEMORY' "${PETSC_PREFIX}/include/HYPRE_config.h"; then
+         echo "ERROR: PETSc's hypre was built with unified memory; the plan needs it off." >&2
+         exit 1
+      fi
+   fi
 }
 
 petsc_var() {
@@ -258,12 +382,29 @@ stage_mfem() {
    local P="${PETSC_PREFIX}"
    local ext_libs
    ext_libs="$(petsc_var PETSC_EXTERNAL_LIB_BASIC)"
+   local mfem_cuda_args=()
+   local mfem_cxx_args=(MFEM_CXX=mpicxx OPTIM_FLAGS="-O3 -std=c++17 ${CPU_FLAGS}")
+   if [ "${MODE}" = "cuda" ]; then
+      # nvcc compiles MFEM (and seas, which builds with MFEM's compiler) with
+      # mpicxx as its host compiler; host-only flags go through -Xcompiler.
+      mfem_cxx_args=(MFEM_CXX=nvcc MFEM_HOST_CXX=mpicxx
+                     OPTIM_FLAGS="-O3 -std=c++17 -Xcompiler=${CPU_FLAGS}")
+      [ -f "${CUDSS_DIR}/include/cudss.h" ] || {
+         echo "ERROR: no cuDSS in ${CUDSS_DIR}; run STAGE=deps first." >&2
+         exit 1
+      }
+      local cuda_dir
+      cuda_dir="$(dirname "$(dirname "$(command -v nvcc)")")"
+      mfem_cuda_args=(
+         MFEM_USE_CUDA=YES CUDA_DIR="${cuda_dir}" CUDA_ARCH="sm_${GPU_ARCH}"
+         MFEM_USE_CUDSS=YES CUDSS_DIR="${CUDSS_DIR}"
+      )
+   fi
    log "configuring MFEM in ${SCRIPT_DIR}"
    cd "${SCRIPT_DIR}"
    make config \
       MFEM_USE_MPI=YES \
-      MFEM_CXX=mpicxx \
-      OPTIM_FLAGS="-O3 -std=c++17 ${CPU_FLAGS}" \
+      "${mfem_cxx_args[@]}" \
       MFEM_USE_METIS=YES MFEM_USE_METIS_5=YES \
       METIS_DIR="${P}" METIS_OPT="-I${P}/include" \
       METIS_LIB="-Wl,-rpath,${P}/lib -L${P}/lib -lmetis" \
@@ -273,9 +414,11 @@ stage_mfem() {
       MFEM_USE_MUMPS=YES MUMPS_DIR="${P}" MUMPS_OPT="-I${P}/include" \
       MUMPS_LIB="-Wl,-rpath,${P}/lib -L${P}/lib -ldmumps -lmumps_common -lpord ${ext_libs}" \
       MFEM_USE_PETSC=YES PETSC_DIR="${P}" PETSC_ARCH= \
-      MFEM_USE_HDF5=NO
+      MFEM_USE_HDF5=NO \
+      "${mfem_cuda_args[@]}"
    make -j"${JOBS}" lib
    record_toolchain mfem
+   grep -E '^MFEM_USE_CUDSS ' config/config.mk >> "${PROVENANCE}" || true
    grep -E '^MFEM_USE_(MPI|PETSC|MUMPS|METIS|LAPACK|CUDA|HDF5) ' config/config.mk >> "${PROVENANCE}"
 }
 
