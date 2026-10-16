@@ -1,0 +1,227 @@
+# bp5_fd_first_event.toml — seas_fd_cycle_driver, SCEC BP5-FD, the first
+# event (plan rev 3, phase P2): the scec_fd IC set, dynamic from t = 0 with
+# the damped numerics validated on TPV102 (plan 6.1), until max V stays
+# below V_off for T_dwell; then the run stops (the switch back is P3).
+#
+# Run from miniapps/seas:
+#   mpirun -np N ./seas_fd_cycle_driver --deck config/fd_cycle/bp5_fd_first_event.toml
+# bp5_fd_first_event_nokv.toml is the same deck with Kelvin-Voigt off
+# (Prakash-Clifton kept), the plan's comparison run.
+#
+# Same problem, mesh and IC set as bp5_scec_fd.toml (the QD-only deck):
+#   - V_i = 0.03 m/s in the nucleation patch (BP5 section 3);
+#   - tau0 = sigma_n a asinh(V/(2 V0) exp(psi0/a)), no eta |V| (SCEC eq. 22,
+#     and eq. 23 with dtau = 0 for BP5-FD);
+#   - psi0 = f0 + b ln(V0 / V_init) everywhere (eq. 18), not from stress
+#     equilibrium.  Without eta the patch slips at V_i at t = 0; the QD
+#     regime subtracts eta V, so there it starts slightly below V_i.
+# The fault is the plane y = 0, strike along +x, depth = -z.
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "SCEC BP5-FD, scec_fd IC set, first event, dynamic from t = 0 (seas_fd_cycle_driver P2)."
+
+# BP5: rho = 2670 kg/m^3, cs = 3.464 km/s, nu = 0.25 (lambda = mu).
+[material_constant_fallback]
+lambda = 32038120320.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+# Tandem's exact BP5 mesh, in km; mesh_scale below converts to m.
+[mesh]
+path  = "bp5/mesh/reference/bp5_tandem_exact.msh"
+order = 1
+
+[velocity]
+use_sidecar = false
+
+# The shear prestress is BuildPrestress's steady state; only sigma_n is read.
+[stress]
+kind          = "fault_local_prestress"
+tau_strike_pa = 0.0
+tau_dip_pa    = 0.0
+sigma_n_pa    = 25.0e6
+
+# The dynamic regime's numerics: the kv0p1 values of
+# tpv102/configs/tpv102_nitsche_pc_p1_kv0p1.toml (plan 6.1).  cfl is the
+# fraction of the measured C(p): dt = cfl C(p) h_min / (p^2 c_p), 1.72 ms at
+# p = 1 on this mesh.  Kelvin-Voigt (Day et al. 2005 A8) in every element:
+# beta_e = kv_eta (1/3) (h_e / p) / c_s with h_e = 6 V / A.  The penalty is
+# [cycle].penalty_factor, shared with the QD regime.
+[numerics]
+cfl       = 0.5
+kv_eta    = 0.1
+kv_scale  = "node"
+kv_length = "inscribed"
+
+# 1800 yr (BP5); dt_initial as seas_bp5_full --tandem-time-stepping.
+[time]
+tfinal     = 5.680368e10
+dt_initial = 0.01
+
+[output]
+output_dir = "."
+
+# Fault 3; free surface 1 (natural).  The legacy QD constructor holds the
+# far-field and creep boundaries (attribute 5) as Dirichlet (plan 3.4).
+[boundary]
+fault_attr    = 3
+natural_attrs = [1]
+
+# The dynamic regime's fault frame: the oriented normal is -y (the
+# reference), strike = up x n = +x, dip = strike x n = -z.  Only these
+# orientation, pin, tangent and junction values are implemented.
+[fault_geometry]
+ref_normal      = [0.0, -1.0, 0.0]
+up              = [0.0,  0.0, 1.0]
+kind            = "vertical_strike_slip"
+orientation     = "propagated"
+pin_by          = "reference"
+tangent         = "pointwise"
+junction_policy = "refuse"
+pin_min_margin  = 0.1
+
+# BP5 eqs. 14-17: scalar values; a, Dc and V_init come from [cycle.fields].
+[friction.rate_state]
+a_default       = 0.004
+b_default       = 0.03
+Dc_default      = 0.14
+V_0_default     = 1.0e-6
+f_0_default     = 0.6
+V_init_default  = 1.0e-9
+sigma_n_default = 25.0e6
+state_evolution = "aging_law"
+eta             = "auto"         # 0.5 sqrt(mu rho) = mu / (2 cs); QD regime only
+
+# Prakash-Clifton regularization of the normal stress the dynamic law sees
+# (SeisSol TPV6/7 values, as the TPV102 decks).
+[friction.prakash_clifton]
+v_star = 1.0      # m/s
+length = 0.01     # m
+
+[cycle]
+ic                   = "scec_fd"
+switching            = true
+qd_radiation_damping = true
+mesh_scale           = 1000.0
+plate_rate           = 1.0e-9
+penalty_factor       = 1.0       # both regimes' K
+
+# Start dynamic when max V > V_on (0.015 m/s > 0.01 at t = 0, plan 11.5);
+# the phase ends once max V has stayed below V_off for T_dwell (the spec's
+# event end), and a phase longer than T_max stops the run.  P2 stops at the
+# end of the first dynamic phase.
+[cycle.switch]
+V_on               = 1.0e-2
+V_off              = 1.0e-3
+T_dwell            = 10.0
+T_min              = 0.0
+T_max              = 1200.0
+max_dynamic_phases = 1
+
+[cycle.qd]
+solver        = "mumps"
+petsc_options = "tests/verification/petsc_ts_rk45_tandem.cfg"
+ts_atol       = 1.0e-7
+ts_rtol       = 1.0e-50
+
+[cycle.prestress]
+V_background = 1.0e-9            # psi0 = f0 + b ln(V0 / V_bg), eq. 18
+
+[cycle.fields]
+V_init_dip = 1.0e-20             # kernel dip component (V_zero)
+
+# a: a0 = 0.004 in the 60 km x 12 km velocity-weakening core (depth 4-16 km),
+# amax = 0.04 beyond a 2 km linear transition (eq. 14).
+[cycle.fields.a]
+center  = [0.0, 0.0, -10.0e3]
+axis1   = [1.0, 0.0, 0.0]
+axis2   = [0.0, 0.0, 1.0]
+half1   = 30.0e3
+half2   = 6.0e3
+taper   = 2.0e3
+inside  = 0.004
+outside = 0.04
+
+# Dc: 0.13 m in the 12 km x 12 km nucleation patch (x = -30..-18 km,
+# depth 4-16 km), 0.14 m elsewhere; edges included within 1 mm (Tandem's
+# bp5_outside scenario).
+[cycle.fields.Dc]
+center  = [-24.0e3, 0.0, -10.0e3]
+axis1   = [1.0, 0.0, 0.0]
+axis2   = [0.0, 0.0, 1.0]
+half1   = 6.0e3
+half2   = 6.0e3
+taper   = 0.0
+eps     = 1.0e-3
+inside  = 0.13
+outside = 0.14
+
+# Initial slip rate (kernel strike component): V_i = 0.03 m/s in the
+# nucleation patch (SCEC), V_init = 1e-9 m/s elsewhere.
+[cycle.fields.V_init]
+center  = [-24.0e3, 0.0, -10.0e3]
+axis1   = [1.0, 0.0, 0.0]
+axis2   = [0.0, 0.0, 1.0]
+half1   = 6.0e3
+half2   = 6.0e3
+taper   = 0.0
+eps     = 1.0e-3
+inside  = 0.03
+outside = 1.0e-9
+
+# Station files on the spec's cadence (BP5 section 4.1): 0.1 s rows while
+# max V > 1e-3 m/s, else 0.1 yr; in the dynamic regime the global file gets
+# a row with each station row.  Stations in global XYZ (x2 = x, x3 = -z),
+# file names as the SCEC upload.
+[cycle.output]
+prefix       = "bp5_fd_first_event"
+fast_V       = 1.0e-3
+dt_fast      = 0.1
+dt_slow      = 3155760.0
+event_V      = 1.0e-3
+event_dwell  = 10.0
+plane_origin = [0.0, 0.0, 0.0]
+plane_axis1  = [1.0, 0.0, 0.0]
+plane_axis2  = [0.0, 0.0, -1.0]
+
+[[cycle.output.station]]
+name = "fltst_strk-36dp+00"
+x    = [-36.0e3, 0.0, 0.0]
+[[cycle.output.station]]
+name = "fltst_strk-16dp+00"
+x    = [-16.0e3, 0.0, 0.0]
+[[cycle.output.station]]
+name = "fltst_strk+00dp+00"
+x    = [0.0, 0.0, 0.0]
+[[cycle.output.station]]
+name = "fltst_strk+16dp+00"
+x    = [16.0e3, 0.0, 0.0]
+[[cycle.output.station]]
+name = "fltst_strk+36dp+00"
+x    = [36.0e3, 0.0, 0.0]
+[[cycle.output.station]]
+name = "fltst_strk-24dp+10"
+x    = [-24.0e3, 0.0, -10.0e3]
+[[cycle.output.station]]
+name = "fltst_strk-16dp+10"
+x    = [-16.0e3, 0.0, -10.0e3]
+[[cycle.output.station]]
+name = "fltst_strk+00dp+10"
+x    = [0.0, 0.0, -10.0e3]
+[[cycle.output.station]]
+name = "fltst_strk+16dp+10"
+x    = [16.0e3, 0.0, -10.0e3]
+[[cycle.output.station]]
+name = "fltst_strk+00dp+22"
+x    = [0.0, 0.0, -22.0e3]
+
+# QD checkpoints only; P2 takes no QD step.
+[cycle.checkpoint]
+every_qd_steps = 0

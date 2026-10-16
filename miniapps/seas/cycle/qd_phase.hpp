@@ -23,6 +23,9 @@
 //   InitTS(dt0): PETSc TS (rk 5dp from the options file), adaptive, dt0
 //   Run(t, dt, t_final, max_steps, monitor): TSSolve; `monitor` runs at the
 //     start step and after each accepted step, as seas_bp5_full's monitor.
+//   Solve(t): one right-hand side at (t, state) for the switch to the
+//     dynamic regime (plan 6.2); Displacement, Slip, SlipRate, Psi, SigmaN
+//     then hand the static state to the bridge (cycle/state_bridge.hpp).
 //
 // The kernel reads sigma_n, b, f0 and V0 as scalars outside SAFS mode
 // (fault/rate_state_fault.hpp: sigma_n_bp5_, AgingLawPsi, psi_init), so
@@ -117,7 +120,7 @@ public:
                                         seed_.Wf, seed_.lf, DGMethod::IP, st,
                                         BCMode::FarField, BasisType::GaussLobatto);
       if (st == SolverType::MUMPS_BLR) { dom_->SetBLRTol(cfg.qd.blr_tol); }
-      if (cfg.qd.penalty_factor != 1.0) { dom_->SetPenaltyFactor(cfg.qd.penalty_factor); }
+      if (cfg.penalty_factor != 1.0) { dom_->SetPenaltyFactor(cfg.penalty_factor); }
 
       geom_ = std::make_unique<FaultGeometry<ParMesh>>(*dom_, seed_, &mpi_,
                                                        /*compute_bp5_params=*/false);
@@ -180,6 +183,44 @@ public:
    PBP5SEASOp &Operator() { return *op_; }
    real_t MaxV() const { return op_->GetMaxSlipRate(); }
    real_t Eta() const { return eta_; }
+
+   /// Plan 6.2, step 1: one right-hand-side evaluation at (t, State()) (one
+   /// solve), which leaves the static displacement, the traction, the
+   /// normal traction and the slip rate consistent with the state, with the
+   /// walls and the creep plane at Vp t.  Returns the global max V.
+   real_t Solve(real_t t)
+   {
+      op_->SetTime(t);
+      Vector rate(state_.Size());
+      op_->Mult(state_, rate);
+      return op_->GetMaxSlipRate();
+   }
+   /// What the last evaluation left, for the bridge (owned fault DOFs; slip
+   /// and slip rate as kernel (dip, strike) pairs, 2 N values).
+   const Vector &Displacement() const { return op_->GetDisplacement(); }
+   void Slip(Vector &s) const { fault_->GetSlip(state_, s); }
+   const Vector &SlipRate() const { return fault_->GetSlipRate(); }
+   void Psi(Vector &psi) const
+   {
+      const int N = fault_->NumNodes();
+      psi.SetSize(N);
+      for (int i = 0; i < N; i++) { psi(i) = state_(FaultOp::StatePerNode * i + FaultOp::PsiIndex); }
+   }
+   /// sigma_n_eff of the last friction solve (N values): sigma0 plus the
+   /// elastic normal traction when that solve used it, as the kernel forms
+   /// it (fault/rate_state_fault.hpp, ComputeRHS).
+   void SigmaN(Vector &sn) const
+   {
+      const int N = fault_->NumNodes();
+      const Vector *nt = op_->GetFrictionNormalTraction();
+      sn.SetSize(N);
+      for (int i = 0; i < N; i++) { sn(i) = nt ? seed_.sigma_n + (*nt)(i) : seed_.sigma_n; }
+   }
+   /// The kernel's traction of the last evaluation (2 N, kernel frame) and
+   /// the elastic normal traction (N, compression positive; empty unless
+   /// elastic sigma_n was on in that evaluation).
+   const Vector &Traction() const { return op_->GetTraction(); }
+   const Vector &NormalTraction() const { return op_->GetNormalTraction(); }
 
    /// Station fields from the accepted state, as ParallelBP5BenchmarkOutput::
    /// Write forms them: V re-solved from (traction, state) and the normal

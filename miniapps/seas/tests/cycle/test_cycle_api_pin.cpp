@@ -13,7 +13,9 @@
 // (document/fd_cycle_dev/HOOKS.md).  P1 calls H1a (FaultGeometry 4-argument
 // constructor, SetRateStatePerDOF, GetVwValues) and H1b
 // (SetInitialFieldsPerDOF), committed on this branch (they are not on the
-// base 010b56e).  H2 (SetBackgroundTraction) is pinned in P2.
+// base 010b56e).  P2 calls H2 (NitscheWaveOperator::SetBackgroundTraction),
+// also on this branch, and the operator, energy and QD calls of DynPhase,
+// the driver's first-event path and test_cycle_p2.
 //
 // Build and run (from miniapps/seas):
 //   make -f cycle/cycle.mk test-cycle-api-pin
@@ -35,6 +37,7 @@
 
 // Adapter 2 (DynPhase) and the state bridge: the Nitsche dynamic stack.
 #include "../../domain/nitsche_wave_operator.hpp"
+#include "../../domain/nitsche_energy.hpp"
 #include "../../domain/boundary_config.hpp"
 #include "../../domain/domain_config.hpp"
 #include "../../solver/nitsche_cfl.hpp"
@@ -275,6 +278,56 @@ PIN_TYPE(const Vector &, CLV<W>().PrakashCliftonSigma());
 PIN(LV<W>().SetKelvinVoigt(real_t(), W::KVScale::Node, real_t(), W::KVLength::Inscribed,
                            static_cast<const BoundaryConfig *>(nullptr)));
 
+// P2: hook H2, then what DynPhase, the first-event path and test_cycle_p2
+// read from the operator.
+PIN(LV<W>().SetBackgroundTraction(CLV<Vector>()));                     // H2
+PIN_TYPE(real_t, CLV<W>().GetTime());
+PIN_TYPE(real_t, CLV<W>().ClosureGamma(int()));
+PIN_TYPE(const Vector &, CLV<W>().LastShear());
+PIN_TYPE(const Vector &, CLV<W>().LastAcceleration());
+PIN(LV<W>().TrialTraction(CLV<Vector>(), CLV<Vector>(), LV<Vector>()));
+PIN(CLV<W>().SlipLoad(CLV<Vector>(), LV<Vector>()));
+PIN_TYPE(const IFaultClosure &, CLV<W>().Closure());
+PIN_TYPE(const NitscheMass &, CLV<W>().Mass());
+PIN(CLV<NitscheMass>().Apply(CLV<Vector>(), LV<Vector>()));
+PIN_TYPE(const real_t *, CLV<W>().Orientation().Normal(int()));
+PIN_TYPE(bool, CLV<W>().HasKelvinVoigt());
+PIN_TYPE(real_t, CLV<W>().KelvinVoigtBetaMin());
+PIN_TYPE(real_t, CLV<W>().KelvinVoigtBetaMax());
+PIN_TYPE(long long, CLV<W>().KelvinVoigtLayerElements());
+PIN_TYPE(bool, CLV<W>().HasPrakashClifton());
+PIN_TYPE(real_t, CLV<W>().LastStep().max_V_dt_over_Dc);
+PIN_TYPE(real_t, CLV<W>().LastStep().min_sigma_eff);
+PIN_TYPE(real_t, CLV<W>().LastStep().max_sigma_eff);
+PIN_TYPE(real_t, CLV<W>().LastStep().min_sigma_pc);
+PIN_TYPE(real_t, CLV<W>().LastStep().max_sigma_pc);
+PIN_TYPE(real_t, CLV<IFaultClosure>().SolveSlipRate(static_cast<const real_t *>(nullptr),
+                                                    real_t(), real_t(),
+                                                    CLV<FaultPointState>(),
+                                                    static_cast<real_t *>(nullptr)));
+PIN_TYPE(real_t, CLV<DieterichRuinaFriction>().PsiToTheta(real_t(), real_t()));
+// The elasticity operator both regimes share (same_K, frames, R8).
+PIN(CLV<QDDomain>().ApplyStiffness(CLV<Vector>(), LV<Vector>()));
+PIN(CLV<QDDomain>().AssembleDirichletOnlyRHS(LV<Vector>(), real_t()));
+PIN(CLV<QDDomain>().AssembleSlipOnlyRHS(LV<Vector>(), CLV<Vector>()));
+PIN(CLV<QDDomain>().RestrictToOwnedFault(CLV<Vector>(), LV<Vector>(), int()));
+PIN(CLV<QDDomain>().ExpandOwnedToLocalFault(CLV<Vector>(), LV<Vector>(), int()));
+PIN_TYPE(ParFiniteElementSpace &, LV<QDDomain>().GetFESpace());
+// The energy balance (test_cycle_p2 --energy).
+PIN_CTOR(NitscheEnergyMonitor, W &);
+PIN_TYPE(NitscheEnergyRecord, LV<NitscheEnergyMonitor>().Evaluate(CLV<Vector>(), CLV<Vector>(),
+                                                                   CLV<Vector>(), real_t()));
+PIN(LV<NitscheEnergyMonitor>().Start(CLV<NitscheEnergyRecord>()));
+PIN_TYPE(real_t, LV<NitscheEnergyMonitor>().Step(CLV<NitscheEnergyRecord>()));
+PIN_TYPE(real_t, CLV<NitscheEnergyMonitor>().SumRho());
+PIN_TYPE(real_t, CLV<NitscheEnergyMonitor>().SumAbsRho());
+PIN_TYPE(real_t, CLV<NitscheEnergyRecord>().P_ext);
+PIN_TYPE(real_t, CLV<NitscheEnergyRecord>().P_pre);
+PIN_TYPE(real_t, CLV<NitscheEnergyRecord>().P_fric);
+PIN_TYPE(real_t, CLV<NitscheEnergyRecord>().E_h);
+// The QD side of the hand-over: one right-hand side at t.
+PIN(LV<QDOp>().SetTime(real_t()));
+
 // Fault setup and the pointwise closure state.
 PIN_TYPE(const IFaultClosure *, CLV<NitscheFaultSetup>().closure);
 PIN_TYPE(FaultOrientationConfig, CLV<NitscheFaultSetup>().orientation);
@@ -372,6 +425,6 @@ constexpr int kPinCount = __COUNTER__ - kPinBase - 1;
 int main()
 {
    std::cout << "PASSED: test_cycle_api_pin: " << kPinCount
-             << " API pins compiled (base 010b56e with hooks H1a, H1b and station fix ef70517; H2 not pinned)\n";
+             << " API pins compiled (base 010b56e with hooks H1a, H1b, H2 and station fix ef70517)\n";
    return 0;
 }

@@ -412,6 +412,18 @@ public:
    const Vector &PrestressTraction() const { return S0_own_; }
    const Vector &NucleationTraction() const { return Snuc_own_; }
    real_t NucleationFactor(real_t t) const { return nuc_temporal_ ? nuc_temporal_(t) : 0.0; }
+   /// Hook H2 (fully-dynamic-cycle, document/fd_cycle_dev/HOOKS.md): replace
+   /// the projected prestress after setup by per-DOF values, a global
+   /// three-vector per owned fault DOF (3 no), tension positive: the
+   /// traction on the face with the oriented normal of FaultFrames(), as
+   /// PrestressTraction() holds it.
+   void SetBackgroundTraction(const Vector &S0)
+   {
+      MFEM_VERIFY(has_fault_, "SetBackgroundTraction: the operator has no fault");
+      MFEM_VERIFY(S0.Size() == 3 * no_, "SetBackgroundTraction: size " << S0.Size()
+                  << " != 3 x " << no_ << " owned fault DOFs");
+      S0_own_ = S0;
+   }
    const IFaultClosure &Closure() const { return *closure_; }
    real_t SigmaMin() const { return sigma_min_; }
    /// Global number of shared (cross-rank) fault faces, each counted once.

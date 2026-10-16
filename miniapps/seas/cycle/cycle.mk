@@ -7,6 +7,7 @@
 #   make -f cycle/cycle.mk seas_fd_cycle_driver   # the driver
 #   make -f cycle/cycle.mk test-cycle-api-pin     # rule M5, compile-time pins
 #   make -f cycle/cycle.mk test-cycle-params-parity  # P1, deck vs BP5Params
+#   make -f cycle/cycle.mk test-cycle-p2          # P2, regime hand-over tests
 #   make -f cycle/cycle.mk cycle-owned-check      # rule M1, owned paths only
 #   make -f cycle/cycle.mk cycle-all              # all builds and checks (default)
 # Without the conda HDF5 (CONDA_PREFIX), point HDF5_INCFLAGS and HDF5_LIBS at
@@ -42,9 +43,14 @@ CYCLE_COMMIT_FLAG = -DSEAS_CYCLE_COMMIT='"$(CYCLE_COMMIT)"'
 CYCLE_HEADERS = $(wildcard cycle/*.hpp)
 CYCLE_CXXFLAGS = $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) $(TOML_FLAGS) \
                  -DSEAS_USE_MPI $(CYCLE_COMMIT_FLAG)
-# Shared headers the cycle includes (QD stack, deck loader, material field).
+# Shared headers the cycle includes (QD stack, deck loader, material field,
+# and the Nitsche dynamic stack that dyn_phase.hpp includes).
+CYCLE_DYN_HEADERS = domain/nitsche_wave_operator.hpp domain/nitsche_material_sample.hpp \
+                    domain/nitsche_mass.hpp domain/nitsche_energy.hpp solver/nitsche_cfl.hpp \
+                    friction/rate_state_closure.hpp friction/fault_closure.hpp
 CYCLE_SHARED_HEADERS = $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(PARALLEL_IO_HEADERS) \
-                       spatial/code/spatial_friction.hpp dynamic/heterogeneous_material.hpp
+                       spatial/code/spatial_friction.hpp dynamic/heterogeneous_material.hpp \
+                       $(CYCLE_DYN_HEADERS)
 # Shared objects: the deck loader and resolver (spatial_friction) and what it
 # links (material field, coefficients, HDF5 data fields).
 CYCLE_LINK_OBJS = $(SPATIAL_FRICTION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
@@ -86,10 +92,7 @@ test-cycle-params-parity: seas_test_cycle_params_parity
 # stacks in one translation unit, as the driver will.
 CYCLE_API_PIN_SRC = tests/cycle/test_cycle_api_pin.cpp
 CYCLE_API_PIN_OBJ = $(CYCLE_API_PIN_SRC:.cpp=.o)
-$(CYCLE_API_PIN_OBJ): %.o: $(SRC)%.cpp $(CYCLE_HEADERS) $(SEAS_HEADERS) \
-                      $(PARALLEL_HEADERS) $(PARALLEL_IO_HEADERS) \
-                      domain/nitsche_wave_operator.hpp solver/nitsche_cfl.hpp \
-                      friction/rate_state_closure.hpp spatial/code/spatial_friction.hpp \
+$(CYCLE_API_PIN_OBJ): %.o: $(SRC)%.cpp $(CYCLE_HEADERS) $(CYCLE_SHARED_HEADERS) \
                       $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
@@ -101,6 +104,36 @@ seas_test_cycle_api_pin: $(CYCLE_API_PIN_OBJ)
 test-cycle-api-pin: seas_test_cycle_api_pin
 	./seas_test_cycle_api_pin
 
+# P2 tests: the frame map and its ghost copies on 1, 2, 4 and 8 ranks, on
+# the METIS partition and on one that puts the two sides of the fault on
+# different ranks (every fault face shared; even rank counts); then, on the
+# first rank count above 1, same K, prestress sign, load clock and the static
+# hand-over.  BP5 mesh at 1000 m; the energy balance is a separate, longer
+# run (seas_test_cycle_p2 --energy 2).  Hosts with fewer cores need
+# CYCLE_P2_MPIFLAGS=--oversubscribe for 8 ranks.
+CYCLE_P2_SRC = tests/cycle/test_cycle_p2.cpp
+CYCLE_P2_OBJ = $(CYCLE_P2_SRC:.cpp=.o)
+$(CYCLE_P2_OBJ): %.o: $(SRC)%.cpp $(CYCLE_HEADERS) $(CYCLE_STAMP) \
+                 $(CYCLE_SHARED_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
+
+seas_test_cycle_p2: $(CYCLE_P2_OBJ) $(CYCLE_LINK_OBJS)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(CYCLE_P2_OBJ) $(CYCLE_LINK_OBJS) \
+	    $(CYCLE_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+CYCLE_P2_NPS ?= 1 2 4 8
+CYCLE_P2_MPIFLAGS ?=
+test-cycle-p2: seas_test_cycle_p2
+	@for n in $(CYCLE_P2_NPS); do \
+	   $(MFEM_MPIEXEC) $(CYCLE_P2_MPIFLAGS) $(MFEM_MPIEXEC_NP) $$n ./seas_test_cycle_p2 --frames-only || exit 1; \
+	   if [ $$((n % 2)) -eq 0 ]; then \
+	      $(MFEM_MPIEXEC) $(CYCLE_P2_MPIFLAGS) $(MFEM_MPIEXEC_NP) $$n ./seas_test_cycle_p2 --frames-only --split-y || exit 1; \
+	   fi; \
+	done
+	$(MFEM_MPIEXEC) $(CYCLE_P2_MPIFLAGS) $(MFEM_MPIEXEC_NP) $(firstword $(filter-out 1,$(CYCLE_P2_NPS)) 1) ./seas_test_cycle_p2
+
 # Rule M1: the branch changes only its own paths, plus the shared files that
 # hold its hooks (document/fd_cycle_dev/HOOKS.md), and those by additions
 # only.  CYCLE_BASE is the shared branch this one merges from (M7); the check
@@ -108,7 +141,8 @@ test-cycle-api-pin: seas_test_cycle_api_pin
 # to the list.
 CYCLE_BASE ?= origin/nitsche-dynamic-rupture
 CYCLE_OWNED_RE = ^miniapps/seas/(cycle/|drivers/fd_cycle_driver\.cpp$$|tests/cycle/|config/fd_cycle/|jobs/fd_cycle/|document/fd_cycle_dev/)
-CYCLE_HOOK_FILES = miniapps/seas/fault/fault_geometry.hpp
+CYCLE_HOOK_FILES = miniapps/seas/fault/fault_geometry.hpp \
+                   miniapps/seas/domain/nitsche_wave_operator.hpp
 CYCLE_HOOK_GREP = grep -xF $(foreach f,$(CYCLE_HOOK_FILES),-e $(f))
 # Fixes taken whole from other branches (HOOKS.md, "Shared changes merged from
 # other tracks"), cherry-picked with -x: the branch may change the files such
@@ -134,13 +168,13 @@ cycle-owned-check:
 	done; \
 	echo "PASSED: every changed file is under an owned path, a hook file changed by additions only, or an import (rule M1)"
 
-cycle-all: seas_fd_cycle_driver seas_test_cycle_params_parity test-cycle-api-pin \
-           cycle-owned-check
+cycle-all: seas_fd_cycle_driver seas_test_cycle_params_parity seas_test_cycle_p2 \
+           test-cycle-api-pin cycle-owned-check
 
 cycle-clean:
-	rm -f $(FD_CYCLE_DRIVER_OBJ) $(CYCLE_API_PIN_OBJ) $(CYCLE_PARITY_OBJ) \
+	rm -f $(FD_CYCLE_DRIVER_OBJ) $(CYCLE_API_PIN_OBJ) $(CYCLE_PARITY_OBJ) $(CYCLE_P2_OBJ) \
 	      seas_fd_cycle_driver seas_test_cycle_api_pin seas_test_cycle_params_parity \
-	      $(CYCLE_STAMP)
+	      seas_test_cycle_p2 $(CYCLE_STAMP)
 
 .PHONY: cycle-all cycle-clean cycle-owned-check test-cycle-api-pin \
-        test-cycle-params-parity
+        test-cycle-params-parity test-cycle-p2

@@ -5,8 +5,14 @@
 //
 // Files, all under <dir>/<prefix>:
 //   _<station>.txt   one per station, SCEC on-fault columns
-//   _global.txt      time and log10 of the global max slip rate, every step
+//   _global.txt      time and log10 of the global max slip rate: every QD
+//                    step; in the dynamic regime with each station row
+//                    (the driver calls WriteGlobal when Write wrote)
 //   _catalog.txt     one row per event (root)
+//   _fault.txt       WriteFaultTable: one row per fault DOF (P2: rupture
+//                    time, final slip, peak V and psi at the end of the
+//                    first dynamic phase)
+// The driver writes _switch.txt (regime changes) itself.
 // The station and global files have the format of seas_bp5_full
 // (io/bp5_parallel_output.hpp, io/probe_output.hpp): two '#' header lines,
 // then rows of std::scientific, uppercase, 12 digits, space separated.  The
@@ -406,6 +412,41 @@ private:
    std::unique_ptr<RowFile> catalog_;
    State state_;
 };
+
+/// One file for the whole fault: `ncol` values per owned fault DOF on each
+/// rank (`data`, DOF-major), gathered to the root and written in rank order
+/// in the RowFile format.  Collective.
+inline void WriteFaultTable(const std::string &path, MPI_Comm comm,
+                            const std::string &description,
+                            const std::vector<std::string> &columns, const Vector &data)
+{
+   const int ncol = static_cast<int>(columns.size());
+   MFEM_VERIFY(ncol > 0 && data.Size() % ncol == 0, "WriteFaultTable: " << data.Size()
+               << " values is not a multiple of " << ncol << " columns");
+   int rank = 0, nr = 1;
+   MPI_Comm_rank(comm, &rank);
+   MPI_Comm_size(comm, &nr);
+   int nloc = data.Size();
+   std::vector<int> cnt(nr), dsp(nr, 0);
+   MPI_Gather(&nloc, 1, MPI_INT, cnt.data(), 1, MPI_INT, 0, comm);
+   std::vector<real_t> all;
+   if (rank == 0)
+   {
+      for (int r = 1; r < nr; r++) { dsp[r] = dsp[r - 1] + cnt[r - 1]; }
+      all.resize(static_cast<size_t>(dsp[nr - 1] + cnt[nr - 1]));
+   }
+   MPI_Gatherv(data.GetData(), nloc, MPITypeMap<real_t>::mpi_type, all.data(), cnt.data(),
+               dsp.data(), MPITypeMap<real_t>::mpi_type, 0, comm);
+   if (rank != 0) { return; }
+   RowFile f(path, description, columns);
+   std::vector<real_t> row(static_cast<size_t>(ncol));
+   for (size_t i = 0; i + ncol <= all.size(); i += ncol)
+   {
+      for (int c = 0; c < ncol; c++) { row[c] = all[i + c]; }
+      f.Row(row);
+   }
+   f.Flush();
+}
 
 } // namespace cycle
 } // namespace seas

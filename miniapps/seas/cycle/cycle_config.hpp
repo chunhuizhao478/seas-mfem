@@ -22,12 +22,20 @@
 //
 // [cycle] keys (defaults in brackets):
 //   ic                   "gold" | "scec_fd"                         [required]
-//   switching            false (P1 runs the QD regime only)         [false]
+//   switching            false: the QD regime only; true: the regime
+//                        controller, which needs ic = "scec_fd" and, in
+//                        this build, [cycle.switch].max_dynamic_phases = 1
+//                        (P2: the run stops at the end of the first
+//                        dynamic phase; the switch back is P3)      [false]
 //   qd_radiation_damping true; false is refused with "gold"         [true]
 //   mesh_scale           vertex scale before the partition          [1.0]
 //   plate_rate           Vp of the far-field and creep loading     [required]
-//   [cycle.qd]      solver ("mumps" | "mumps_blr"), blr_tol, penalty_factor,
+//   penalty_factor       IP penalty scale of BOTH regimes' K (one value,
+//                        so the two stiffness matrices agree, plan 6.1) [1.0]
+//   [cycle.qd]      solver ("mumps" | "mumps_blr"), blr_tol,
 //                   petsc_options (PETSc TS options file), ts_atol, ts_rtol
+//   [cycle.switch]  V_on [1e-2], V_off [1e-3], T_dwell [10], T_min [0],
+//                   T_max [1200], max_dynamic_phases [0 = no limit]
 //   [cycle.prestress] V_background (V_bg of psi0)                   [required]
 //   [cycle.fields]  V_init_dip, and the RectTaperFields a, Dc, V_init:
 //                   center, axis1, axis2 (3-vectors, global XYZ), half1,
@@ -37,6 +45,21 @@
 //                   and [[cycle.output.station]] name, x (global XYZ)
 //   [cycle.checkpoint] every_qd_steps (0 = no checkpoint; else also one at
 //                   the end of a run, as seas_bp5_full) [0]
+//
+// The dynamic regime reads the keys the Nitsche driver reads, from the same
+// shared sections (drivers/nitsche_dyn_driver.cpp:616-648, 708-736,
+// 849-884), with its defaults:
+//   [numerics]  cfl [0.5] (fraction of C(p); the shared loader reads it),
+//               kv_eta [0 = Kelvin-Voigt off], kv_scale ["node" | "dt"],
+//               kv_length ["inscribed" | "edge"], kv_layer_width [m; absent
+//               = the whole domain].  No other key: penalty_factor lives in
+//               [cycle], the velocity-stress keys mean nothing here.
+//   [friction.prakash_clifton]  v_star, length (both required if present)
+//   [fault_geometry]  ref_normal, up (the shared loader), orientation
+//               ["propagated"], pin_by ["reference"], tangent ["pointwise"],
+//               junction_policy ["refuse"] (the only implemented values),
+//               pin_min_margin [the orientation's default]
+//   [pore_pressure] min_sigma_n_pa: the lower bound of sigma_n_eff [0]
 //
 // No solver header (rule M4).
 
@@ -102,10 +125,40 @@ struct QDConfig
    /// seas_bp5_full's BLR runs use: its --blr-tol default of 1e-10 is passed
    /// to SetBLRTol only when it differs from 1e-10.
    real_t blr_tol = 1e-12;
-   real_t penalty_factor = 1.0;
    std::string petsc_options = "tests/verification/petsc_ts_rk45_tandem.cfg";
    real_t ts_atol = 1e-7;
    real_t ts_rtol = 1e-50;
+};
+
+/// [cycle.switch]: the regime controller (plan 3.3 g).  Defaults: Thrase's
+/// BP1-FD thresholds, the spec's 10 s event end, T_max about six times the
+/// longest Tandem p=1 phase (plan 6.5).
+struct SwitchConfig
+{
+   real_t V_on = 1.0e-2;    ///< dynamic when the global max V exceeds it [m/s]
+   real_t V_off = 1.0e-3;   ///< back to QD once max V stays below it ...
+   real_t T_dwell = 10.0;   ///< ... for this long [s]
+   real_t T_min = 0.0;      ///< no switch back before this phase time [s]
+   real_t T_max = 1200.0;   ///< a longer dynamic phase stops the run [s]
+   /// Stop at the end of this many dynamic phases; 0 = no limit.
+   int max_dynamic_phases = 0;
+};
+
+/// The dynamic regime's numerics (see the file comment for the keys).
+struct DynamicConfig
+{
+   real_t cfl = 0.5;
+   real_t kv_eta = 0.0;
+   std::string kv_scale = "node";
+   std::string kv_length = "inscribed";
+   real_t kv_layer_width = -1.0;   ///< < 0: the whole domain
+   bool pc = false;                ///< Prakash-Clifton on
+   real_t pc_v_star = 0.0;         ///< [m/s]
+   real_t pc_length = 0.0;         ///< [m]
+   std::array<real_t, 3> ref_normal = {{0.0, -1.0, 0.0}};
+   std::array<real_t, 3> up = {{0.0, 0.0, 1.0}};
+   real_t pin_min_margin = -1.0;   ///< < 0: the orientation's default
+   real_t sigma_min = 0.0;         ///< [Pa]
 };
 
 struct CycleConfig
@@ -118,8 +171,11 @@ struct CycleConfig
    bool qd_radiation_damping = true;
    real_t mesh_scale = 1.0;
    real_t plate_rate = 0.0;   ///< Vp [m/s] of the Dirichlet loading
+   real_t penalty_factor = 1.0;   ///< IP penalty scale of both regimes
 
    QDConfig qd;
+   SwitchConfig switch_cfg;
+   DynamicConfig dyn;
    PrestressConfig prestress;     ///< include_eta follows ic
    FaultFieldsConfig fields;
    OutputConfig output;
@@ -307,14 +363,16 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
    MFEM_VERIFY(root.contains("cycle"), "fd_cycle: the deck has no [cycle] section");
    const toml::value &cy = root.at("cycle");
    OnlyKeys(cy, "cycle", {"ic", "switching", "qd_radiation_damping", "mesh_scale",
-                          "plate_rate", "qd",
+                          "plate_rate", "penalty_factor", "qd", "switch",
                           "prestress", "fields", "output", "checkpoint"});
    c.ic = Str(cy, "cycle", "ic", "", true);
    MFEM_VERIFY(c.ic == "gold" || c.ic == "scec_fd",
                "[cycle].ic must be \"gold\" or \"scec_fd\"; got \"" << c.ic << "\"");
    c.switching = Bool(cy, "cycle", "switching", false);
-   MFEM_VERIFY(!c.switching, "[cycle].switching = true needs the dynamic regime "
-               "(plan phases P3/P4); this build runs the QD regime only");
+   MFEM_VERIFY(!c.switching || !c.IsGold(),
+               "[cycle].switching = true is refused with ic = \"gold\": that set starts "
+               "at V = V_i = 0.01 m/s = V_on, so the start regime would depend on "
+               "round-off (plan 4.2); use ic = \"scec_fd\"");
    c.qd_radiation_damping = Bool(cy, "cycle", "qd_radiation_damping", true);
    MFEM_VERIFY(c.qd_radiation_damping || !c.IsGold(),
                "[cycle].qd_radiation_damping = false is refused with ic = \"gold\": "
@@ -325,22 +383,51 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
    MFEM_VERIFY(c.mesh_scale > 0.0, "[cycle].mesh_scale must be > 0");
    c.plate_rate = Real(cy, "cycle", "plate_rate", 0.0, true);
    MFEM_VERIFY(c.plate_rate > 0.0, "[cycle].plate_rate must be > 0");
+   c.penalty_factor = Real(cy, "cycle", "penalty_factor", c.penalty_factor);
+   MFEM_VERIFY(c.penalty_factor > 0.0, "[cycle].penalty_factor must be > 0");
 
    if (cy.contains("qd"))
    {
       const toml::value &q = cy.at("qd");
-      OnlyKeys(q, "cycle.qd", {"solver", "blr_tol", "penalty_factor", "petsc_options",
-                               "ts_atol", "ts_rtol"});
+      MFEM_VERIFY(!q.contains("penalty_factor"), "[cycle.qd].penalty_factor is now "
+                  "[cycle].penalty_factor: one value for both regimes' stiffness");
+      OnlyKeys(q, "cycle.qd", {"solver", "blr_tol", "petsc_options", "ts_atol", "ts_rtol"});
       c.qd.solver = Str(q, "cycle.qd", "solver", c.qd.solver);
       c.qd.blr_tol = Real(q, "cycle.qd", "blr_tol", c.qd.blr_tol);
-      c.qd.penalty_factor = Real(q, "cycle.qd", "penalty_factor", c.qd.penalty_factor);
       c.qd.petsc_options = Str(q, "cycle.qd", "petsc_options", c.qd.petsc_options);
       c.qd.ts_atol = Real(q, "cycle.qd", "ts_atol", c.qd.ts_atol);
       c.qd.ts_rtol = Real(q, "cycle.qd", "ts_rtol", c.qd.ts_rtol);
    }
    MFEM_VERIFY(c.qd.solver == "mumps" || c.qd.solver == "mumps_blr",
                "[cycle.qd].solver must be \"mumps\" or \"mumps_blr\"");
-   MFEM_VERIFY(c.qd.penalty_factor > 0.0, "[cycle.qd].penalty_factor must be > 0");
+
+   if (cy.contains("switch"))
+   {
+      const std::string sec = "cycle.switch";
+      const toml::value &w = cy.at("switch");
+      OnlyKeys(w, sec, {"V_on", "V_off", "T_dwell", "T_min", "T_max", "max_dynamic_phases"});
+      SwitchConfig &sw = c.switch_cfg;
+      sw.V_on = Real(w, sec, "V_on", sw.V_on);
+      sw.V_off = Real(w, sec, "V_off", sw.V_off);
+      sw.T_dwell = Real(w, sec, "T_dwell", sw.T_dwell);
+      sw.T_min = Real(w, sec, "T_min", sw.T_min);
+      sw.T_max = Real(w, sec, "T_max", sw.T_max);
+      sw.max_dynamic_phases = Int(w, sec, "max_dynamic_phases", sw.max_dynamic_phases);
+   }
+   {
+      const SwitchConfig &sw = c.switch_cfg;
+      MFEM_VERIFY(sw.V_off > 0.0 && sw.V_on > sw.V_off,
+                  "[cycle.switch] needs 0 < V_off < V_on; got V_off = " << sw.V_off
+                  << ", V_on = " << sw.V_on);
+      MFEM_VERIFY(sw.T_dwell >= 0.0 && sw.T_min >= 0.0 && sw.T_max > sw.T_min,
+                  "[cycle.switch] needs T_dwell >= 0, T_min >= 0, T_max > T_min");
+      MFEM_VERIFY(sw.max_dynamic_phases >= 0,
+                  "[cycle.switch].max_dynamic_phases must be >= 0 (0 = no limit)");
+      MFEM_VERIFY(!c.switching || sw.max_dynamic_phases == 1,
+                  "[cycle].switching = true needs [cycle.switch].max_dynamic_phases = 1 "
+                  "in this build: the run stops at the end of the first dynamic phase, "
+                  "because the switch back to QD is plan phase P3");
+   }
 
    MFEM_VERIFY(cy.contains("prestress"), "[cycle.prestress] is required");
    {
@@ -411,6 +498,74 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       OnlyKeys(k, "cycle.checkpoint", {"every_qd_steps"});
       c.checkpoint_every = Int(k, "cycle.checkpoint", "every_qd_steps", 0);
       MFEM_VERIFY(c.checkpoint_every >= 0, "[cycle.checkpoint].every_qd_steps must be >= 0");
+   }
+
+   // ---- the dynamic regime's numerics (shared sections, Nitsche keys) ----
+   {
+      DynamicConfig &d = c.dyn;
+      d.cfl = s.numerics.cfl;
+      MFEM_VERIFY(d.cfl > 0.0 && d.cfl <= 1.0,
+                  "[numerics].cfl (fraction of C(p)) must be in (0, 1]; got " << d.cfl);
+      MFEM_VERIFY(s.mesh.order >= 1 && s.mesh.order <= 4,
+                  "[mesh].order must be in 1..4 (the measured C(p) of the explicit step)");
+      if (root.contains("numerics"))
+      {
+         const std::string sec = "numerics";
+         const toml::value &n = root.at("numerics");
+         MFEM_VERIFY(!n.contains("penalty_factor"), "[numerics].penalty_factor: the cycle "
+                     "takes the penalty from [cycle].penalty_factor, one value for both regimes");
+         OnlyKeys(n, sec, {"cfl", "kv_eta", "kv_scale", "kv_length", "kv_layer_width"});
+         d.kv_eta = Real(n, sec, "kv_eta", d.kv_eta);
+         d.kv_scale = Str(n, sec, "kv_scale", d.kv_scale);
+         d.kv_length = Str(n, sec, "kv_length", d.kv_length);
+         if (n.contains("kv_layer_width"))
+         {
+            d.kv_layer_width = Real(n, sec, "kv_layer_width", 0.0);
+            MFEM_VERIFY(d.kv_layer_width > 0.0, "[numerics].kv_layer_width must be > 0 m");
+         }
+      }
+      MFEM_VERIFY(d.kv_eta >= 0.0, "[numerics].kv_eta must be >= 0");
+      MFEM_VERIFY(d.kv_scale == "node" || d.kv_scale == "dt",
+                  "[numerics].kv_scale = \"" << d.kv_scale << "\"; use \"node\" or \"dt\"");
+      MFEM_VERIFY(d.kv_length == "inscribed" || d.kv_length == "edge",
+                  "[numerics].kv_length = \"" << d.kv_length
+                  << "\"; use \"inscribed\" or \"edge\"");
+
+      if (root.contains("friction") && root.at("friction").contains("prakash_clifton"))
+      {
+         const std::string sec = "friction.prakash_clifton";
+         const toml::value &p = root.at("friction").at("prakash_clifton");
+         OnlyKeys(p, sec, {"v_star", "length"});
+         d.pc = true;
+         d.pc_v_star = Real(p, sec, "v_star", 0.0, true);
+         d.pc_length = Real(p, sec, "length", 0.0, true);
+         MFEM_VERIFY(d.pc_v_star > 0.0 && d.pc_length > 0.0, "[" << sec << "] v_star = "
+                     << d.pc_v_star << ", length = " << d.pc_length << "; both must be > 0");
+      }
+
+      d.ref_normal = s.fault_geometry.ref_normal;   // normalized by the shared loader
+      d.up = s.fault_geometry.up;
+      if (root.contains("fault_geometry"))
+      {
+         const std::string sec = "fault_geometry";
+         const toml::value &g = root.at("fault_geometry");
+         OnlyKeys(g, sec, {"ref_normal", "up", "kind", "orientation", "pin_by", "tangent",
+                           "junction_policy", "pin_min_margin"});
+         const std::string orient = Str(g, sec, "orientation", "propagated");
+         const std::string pin_by = Str(g, sec, "pin_by", "reference");
+         const std::string tangent = Str(g, sec, "tangent", "pointwise");
+         const std::string junction = Str(g, sec, "junction_policy", "refuse");
+         MFEM_VERIFY(orient == "propagated" && pin_by == "reference" &&
+                     tangent == "pointwise" && junction == "refuse",
+                     "[fault_geometry] orientation, pin_by, tangent, junction_policy: only "
+                     "\"propagated\", \"reference\", \"pointwise\", \"refuse\" are implemented");
+         if (g.contains("pin_min_margin"))
+         {
+            d.pin_min_margin = Real(g, sec, "pin_min_margin", 0.0);
+            MFEM_VERIFY(d.pin_min_margin > 0.0, "[fault_geometry].pin_min_margin must be > 0");
+         }
+      }
+      d.sigma_min = s.stress.pore_pressure.min_sigma_n_pa;
    }
    return c;
 #endif

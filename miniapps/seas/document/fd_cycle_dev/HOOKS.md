@@ -21,12 +21,12 @@ The branch point is `nitsche-dynamic-rupture` at `010b56e`.
 |------|-----------------|--------|--------|
 | H1a | `fault/fault_geometry.hpp`: `FaultGeometry` 4-argument constructor, `SetRateStatePerDOF` and `GetVwValues`, copied byte for byte from spatial-seas-driver `f6cf3f5` (`fault/fault_geometry.hpp:183`, `:678`; 154 lines, additions only) | "Fully dynamic BP5 cycle P1: hooks H1a and H1b on this branch" | yes |
 | H1b | `fault/fault_geometry.hpp`: `FaultGeometry::SetInitialFieldsPerDOF(tau0, V_init, sigma_n)`, appended after H1a (44 lines, additions only) | same commit | yes |
+| H2 | `domain/nitsche_wave_operator.hpp`: `NitscheWaveOperator::SetBackgroundTraction(S0)`, after `NucleationFactor` (12 lines, additions only): replaces the projected prestress by per-DOF global tractions. M9: a trial merge with `nitsche-benchmarks` (H-B1, `81759da`) is clean, and H2 sits outside the lines H-B1 changes | "Fully dynamic BP5 cycle P2: first dynamic event" | yes |
 
 ## Planned
 
 | Hook | What it adds | Lands with |
 |------|--------------|------------|
-| H2 | `NitscheWaveOperator::SetBackgroundTraction(S0)`, after track 2's H-B1 (M9) | P2 |
 | H3 | `NitscheWaveOperator::SetConstantLoad` (stage B absorbing side walls only) | P5, if stage B |
 | H4 | optional | |
 
