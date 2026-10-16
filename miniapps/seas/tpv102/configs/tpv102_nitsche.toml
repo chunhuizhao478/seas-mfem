@@ -99,11 +99,13 @@ paraview_free_surface  = "off"   # the Nitsche driver writes no free-surface sli
 # On-fault stations (Chunhui Zhao, 2026-10-16): the committed station file
 # (scripts/make_fault_stations.py), each station snapped to the nearest fault
 # node in 3-D; the run aborts if that node is farther than snap_tolerance_m.
-# 600 m covers the 1000 m mesh at p = 1 (about 0.6 h/p); finer meshes snap
-# closer, and <prefix>_station_snap.txt lists every distance.
+# 700 m covers the 1000 m mesh at p = 1, as in the TPV205 and TPV104 decks:
+# its farthest station, flt_12_3, is 601.7 m from its node on the Mac mesh
+# (the one the TPV102 Nitsche runs used); finer meshes snap closer, and
+# <prefix>_station_snap.txt lists every distance.
 [output.stations]
 file             = "tpv102/stations/tpv102_fault_stations.csv"
-snap_tolerance_m = 600.0
+snap_tolerance_m = 700.0
 
 # Rate-and-state, aging law (native TPV102Params).
 #   VW core a = 0.008, VS border a = 0.016 (boxcar_taper rule),
