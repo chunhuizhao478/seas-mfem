@@ -8,11 +8,13 @@
 #   gcc/14.2.0  cuda/12.6 (hierarchy only)  openmpi/5.0.5  hypre/2.31.0 (32-bit ints, no GPU)  metis/5.1.0.3  phdf5/1.14.6
 # MFEM features: MPI + METIS 5 + HDF5 (fault.vtkhdf).  No MUMPS, PETSc, LAPACK,
 # Caliper or H5Z-ZFP: the Nitsche driver uses none of them (explicit time
-# stepping; the decks set paraview_fault_zfp_tol = 0).
+# stepping; the decks set paraview_fault_zfp_tol = 0).  seas_test_nitsche_p5 is
+# not built: its T-11 sign test asks for a MUMPS solve, which this build would
+# silently replace with CG + AMG.
 #
 # Usage (from the repository root):  JOBS=64 bash build_vista.sh
-# Exit status 0 only when libmfem.a AND seas_nitsche_dyn_driver exist after a
-# successful make; every module and path is printed.
+# Exit status 0 only when libmfem.a AND every target exist after a successful
+# make; every module and path is printed.
 set -o pipefail
 JOBS="${JOBS:-32}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,7 +59,8 @@ grep -qE "^#define HYPRE_USING_(CUDA|GPU|HIP)" "$TACC_HYPRE_INC/HYPRE_config.h" 
 command -v mpicxx >/dev/null || fail "mpicxx not on PATH"
 echo "  mpicxx: $(command -v mpicxx); $(mpicxx --version | head -1)"
 
-# --- toml11 (the driver reads the decks through it)
+# --- toml11 (the driver reads the decks through it).  The login-node clone uses
+# --recurse-submodules; this is then a no-op that needs no network.
 git submodule update --init miniapps/seas/extern/toml11 || fail "toml11 submodule update failed"
 [ -f miniapps/seas/extern/toml11/toml.hpp ] || fail "miniapps/seas/extern/toml11/toml.hpp missing"
 
@@ -81,8 +84,8 @@ make -j"$JOBS" lib || fail "MFEM library build failed"
 # --- the driver and the gate tests (fresh objects: the Makefile has no header deps)
 cd miniapps/seas || fail "no miniapps/seas"
 find . -name '*.o' -not -path './extern/*' -delete
-TARGETS="seas_nitsche_dyn_driver seas_test_nitsche_gates seas_test_nitsche_p5 seas_test_nitsche_pf \
-         seas_test_nitsche_hook_spy seas_test_nitsche_lsw seas_test_nitsche_srw"
+TARGETS="seas_nitsche_dyn_driver seas_test_nitsche_gates seas_test_nitsche_pf seas_test_nitsche_hook_spy \
+         seas_test_nitsche_lsw seas_test_nitsche_srw seas_test_nitsche_lsw_inline"
 echo "=== building $TARGETS ==="
 make -j"$JOBS" MFEM_DIR=../.. HDF5_DIR="$HDF5_DIR_V" SEAS_FS_LIB= $TARGETS || fail "SEAS build failed"
 for t in $TARGETS; do [ -x "$t" ] || fail "$t missing after make"; done

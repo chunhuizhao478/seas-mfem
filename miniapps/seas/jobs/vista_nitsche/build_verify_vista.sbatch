@@ -8,29 +8,37 @@
 #SBATCH -t 02:00:00
 #SBATCH -A EAR26024
 # Vista build + verification for the Nitsche TPV205 / TPV104 benchmarks (Chunhui Zhao,
-# 2026-10-16).  Submit from the checkout's miniapps/seas/jobs/vista_nitsche/ after
-#   cd $WORK && git clone https://github.com/chunhuizhao478/seas-mfem.git seas-mfem-benchmarks
-#   cd seas-mfem-benchmarks && git checkout <pushed nitsche-benchmarks commit>
-# (network work on the login node; compiling here).  Steps:
+# 2026-10-16).  Network work on the login node, compiling here:
+#   cd $WORK && git clone --recurse-submodules -b nitsche-benchmarks \
+#       https://github.com/chunhuizhao478/seas-mfem.git seas-mfem-benchmarks
+#   cd seas-mfem-benchmarks/miniapps/seas/jobs/vista_nitsche && sbatch build_verify_vista.sbatch
+# Steps:
+#   0. the repo CLAUDE.md guard (GitHub first), plus no untracked sources
 #   1. build_vista.sh: MFEM + seas_nitsche_dyn_driver + six gate tests (modules only)
 #   2. meshes from the committed .geo with TACC gmsh, msh 2.2, sha256 recorded:
 #      tpv205/mesh/tpv2053d_1000m.msh, tpv2053d_200m.msh, tpv104/mesh/tpv104_200m.msh
-#   3. gate tests (as on the Mac at c906a8a): gates 74/0, p5 14/0, pf 22/0, hook-spy 16/16 x3 + abort,
-#      lsw 13/13, srw 9/9
+#      (tpv104_200m.geo equals tpv102_200m.geo apart from comments)
+#   3. gate tests, as on the Mac at c906a8a: gates 74/0, pf 22/0, hook-spy 16/16 at np 1, 2, 4 + abort,
+#      lsw 13/13, srw 9/9, lsw-inline 14/14 at np 1, 2, 4
 #   4. driver smoke: TPV205 1000 m p=1 to 1.2 s on 8 ranks.  Mac reference (same deck, its own
 #      1000 m mesh): "816 steps, t = 1.20137 s; max|V| 1.52293 m/s; max|V|dt/Dc 0.0056054".  The
 #      Vista mesh can differ from the Mac one (gmsh output depends on platform), so compare the
 #      numbers, not bytes.
-#   5. 200 m load check: TPV104 and TPV205 200 m, p = 2, all 144 ranks, tfinal 0.003 s; node memory peak,
-#      tets, implied min 6V/A and dt, steps to 12 s.  Decides 144 vs 128 ranks per node for the runs.
+#   5. 200 m load check: TPV205 then TPV104 200 m, p = 2, all 144 ranks, tfinal 0.003 s; node memory
+#      peak, tets, implied min 6V/A and dt, steps to 12 s.  Confirms the ranks per node of the runs.
 # Cost: 1 node x <= 2 h x 0.33 SU = <= 0.66 SU.
 export LC_ALL=C LANG=C
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
-cd "$SLURM_SUBMIT_DIR/../../../.." || exit 2          # repository root
-ROOT=$(pwd)
-echo "repo $ROOT  commit $(git rev-parse HEAD)"
-DIRTY=$(git status --porcelain --untracked-files=no | wc -l)
-[ "$DIRTY" -eq 0 ] || { echo "ERROR: $DIRTY tracked files modified; run only from a clean pushed commit"; git status --short; exit 2; }
+ROOT=$(cd "$SLURM_SUBMIT_DIR/../../../.." && pwd)          # repository root
+cd $ROOT
+git fetch -q origin || { echo "ERROR: git fetch failed"; exit 2; }
+[ -z "$(git status --porcelain --untracked-files=no)" ] \
+   || { echo "ERROR: uncommitted changes in $ROOT"; git status --short; exit 2; }
+[ -n "$(git branch -r --contains HEAD)" ] \
+   || { echo "ERROR: HEAD $(git rev-parse --short HEAD) is not on GitHub"; exit 2; }
+echo "commit $(git rev-parse HEAD)"
+UNTRACKED=$(git ls-files --others --exclude-standard -- '*.cpp' '*.hpp' '*.inl' Makefile '*.toml' '*.sbatch')
+[ -z "$UNTRACKED" ] || { echo "ERROR: untracked sources in $ROOT:"; echo "$UNTRACKED"; exit 2; }
 T0=$(date +%s)
 JOBS=64 bash build_vista.sh > build_vista_$SLURM_JOB_ID.log 2>&1
 rc=$?; echo "build_vista.sh exit $rc after $(( $(date +%s) - T0 )) s"; tail -20 build_vista_$SLURM_JOB_ID.log
@@ -47,7 +55,7 @@ for g in tpv205/mesh/tpv2053d_1000m tpv205/mesh/tpv2053d_200m tpv104/mesh/tpv104
 done
 sha256sum tpv205/mesh/tpv2053d_1000m.msh tpv205/mesh/tpv2053d_200m.msh tpv104/mesh/tpv104_200m.msh | tee MESH_SHA256_VISTA
 echo "=== gate tests ==="
-for t in test-nitsche-gates test-nitsche-p5 test-nitsche-pf test-nitsche-hook-spy test-nitsche-lsw test-nitsche-srw; do
+for t in test-nitsche-gates test-nitsche-pf test-nitsche-hook-spy test-nitsche-lsw test-nitsche-srw test-nitsche-lsw-inline; do
    s=$(date +%s); make MFEM_DIR=../.. HDF5_DIR="$TACC_PHDF5_DIR" SEAS_FS_LIB= $t > ${t}_$SLURM_JOB_ID.log 2>&1; rc=$?
    echo "$t exit $rc in $(( $(date +%s) - s )) s: PASSED $(grep -v echo ${t}_$SLURM_JOB_ID.log | grep -c PASSED), FAILED $(grep -v echo ${t}_$SLURM_JOB_ID.log | grep -c FAILED)"
 done
@@ -65,8 +73,9 @@ echo "Mac reference: 816 steps, t = 1.20137 s; max|V| 1.52293 m/s; max|V|dt/Dc 0
 # (MemTotal - MemAvailable, /proc/meminfo) is sampled every 2 s.  The driver prints no
 # h_min, so it is derived from its dt line: h_min = dt p^2 c_p / (cfl C(p)), cfl 0.5,
 # c_p = 6000 m/s in both decks (the same relation gives 26.81 m for the TPV102 200 m mesh).
-for case in "tpv104 tpv104/configs/tpv104_nitsche.toml tpv104/mesh/tpv104_200m.msh" \
-            "tpv205 tpv205/configs/tpv205_nitsche.toml tpv205/mesh/tpv2053d_200m.msh"; do
+# TPV205 (smaller mesh) first, so its numbers survive if TPV104 runs out of memory.
+for case in "tpv205 tpv205/configs/tpv205_nitsche.toml tpv205/mesh/tpv2053d_200m.msh" \
+            "tpv104 tpv104/configs/tpv104_nitsche.toml tpv104/mesh/tpv104_200m.msh"; do
    set -- $case; PROB=$1; DECK=$2; MESH=$3
    echo "=== 200 m load check: $PROB p=2, 144 ranks, tfinal 0.003 s ==="
    OUT=$SCRATCH/nitsche_benchmarks/loadcheck_${PROB}_200m_p2_$SLURM_JOB_ID; mkdir -p $OUT
@@ -84,5 +93,5 @@ for case in "tpv104 tpv104/configs/tpv104_nitsche.toml tpv104/mesh/tpv104_200m.m
    awk '{u=($2-$3)/1048576; if(u>m)m=u; t=$2/1048576} END{printf "node memory: peak in use %.1f GB of %.1f GB (MemTotal - MemAvailable, 2 s samples)\n", m, t}' $OUT/meminfo_kB.log
 done
 sacct -j $SLURM_JOB_ID --format=JobID,JobName%20,Elapsed,MaxRSS,MaxVMSize,NTasks 2>&1 | head -20
-echo "(MaxRSS is per task and appears only for srun steps; ibrun with Open MPI may leave it empty, so the /proc/meminfo peak above is the number that decides 144 vs 128 ranks per node)"
+echo "(MaxRSS is per task and appears only for srun steps; ibrun with Open MPI may leave it empty, so the /proc/meminfo peak above is the number that decides the ranks per node)"
 echo "total $(( $(date +%s) - T0 )) s"
