@@ -3303,6 +3303,29 @@ seas_test_nitsche_lsw: $(TEST_NITSCHE_LSW_OBJ)
 test-nitsche-lsw: seas_test_nitsche_lsw
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_lsw
 
+# Nitsche rate and state, slip law with strong rate weakening (benchmark
+# plan rev 1.3, phase B5): S-01 adapter, S-02 initial state, S-03 Heun
+# against the frozen-V exponential, S-04 low speed.  Pointwise, one rank.
+TEST_NITSCHE_SRW_SRC = tests/verification/test_nitsche_srw.cpp
+TEST_NITSCHE_SRW_OBJ = $(TEST_NITSCHE_SRW_SRC:.cpp=.o)
+$(TEST_NITSCHE_SRW_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             friction/fault_closure.hpp \
+                             friction/rate_state_srw_closure.hpp \
+                             friction/slip_law_srw_psi.hpp \
+                             config/tpv104_params.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_srw: $(TEST_NITSCHE_SRW_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_NITSCHE_SRW_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-srw: seas_test_nitsche_srw
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_srw
+
 # Nitsche dynamic rupture P7: the driver (plan N-07).  Reads the SAFS deck
 # through spatial::LoadSpatialFrictionConfig (toml11) and the constant
 # material; links the friction parser, the material and the nucleation
