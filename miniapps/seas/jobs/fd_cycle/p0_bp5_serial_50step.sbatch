@@ -12,9 +12,11 @@
 # configuration on the branch point.  A guarded copy of
 # jobs/bp5/bp5_verify_serial.sbatch (the 50-step golden, Frontera job 7643780):
 # same modules, same seas_bp5_full flags, 1 rank, 50 steps; then the shared
-# regression check against bp5/benchmark_data/golden_serial_1r_50step at its
-# default tolerance (relative L2 1e-12, seven station columns and the global
-# file).  Submit only on Chunhui Zhao's typed go for this job.
+# regression check against bp5/benchmark_data/golden_serial_1r_50step with
+# REG_TOL=1e-12 (relative L2, seven station columns and the global file).
+# Without REG_TOL the check is informational and always exits 0
+# (Makefile regression-check, scripts/regression_check.py --tolerance).
+# Submit only on Chunhui Zhao's typed go for this job.
 #
 # Differences from the original, none of which touch the numerics: the
 # GitHub-first guard (CLAUDE.md), the build through
@@ -70,7 +72,7 @@ echo "seas_bp5_full exit ${rc}"
 [ "${rc}" = 0 ] || exit "${rc}"
 
 make -f cycle/cycle.mk regression-check SIM_DIR="${RESULT_DIR}" SIM_PREFIX="${OUTPUT_PREFIX}" \
-     REF_DIR=bp5/benchmark_data/golden_serial_1r_50step
+     REF_DIR=bp5/benchmark_data/golden_serial_1r_50step REG_TOL=1e-12
 rc=$?
 echo "regression-check exit ${rc} (0 = all columns within 1e-12)"
 exit "${rc}"
