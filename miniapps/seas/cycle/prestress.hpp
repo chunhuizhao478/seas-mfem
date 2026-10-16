@@ -13,7 +13,9 @@
 //   sigma0 = sigma_n
 // The kernel frame and its anti-parallel sign are those of the QD kernel
 // (fault/rate_state_fault.hpp, config/bp5_params.hpp tau0_vec).  The
-// arithmetic follows BP5Params::tau0_vec term by term.  QD receives tau0,
+// arithmetic follows BP5Params::tau0_vec term by term, down to tau being one
+// expression, so that a compiler that fuses a*b + c (clang on arm64 does by
+// default) rounds it the same way in both.  QD receives tau0,
 // V_init and sigma0 through hook H1b; the dynamic operator receives the same
 // values as global vectors through hook H2 (P2).
 //
@@ -73,8 +75,14 @@ inline Prestress BuildPrestress(const FaultParams &par, const PrestressConfig &i
 
       const real_t psi0 = rs.f_0(i) + rs.b(i) * std::log(V0 / ic.V_background);
       const real_t e = std::exp(psi0 / a);
-      real_t tau = sigma_n * a * std::asinh((Vi_abs / (2.0 * V0)) * e);
-      if (ic.include_eta) { tau += rs.eta(i) * Vi_abs; }
+      // One expression, as in BP5Params::tau0_vec.  Adding eta |V| in a
+      // second statement left tau 1 ulp off under FMA contraction (Mac,
+      // clang 22), which changed the first adaptive step against
+      // seas_bp5_full.
+      const real_t tau =
+         ic.include_eta
+         ? sigma_n * a * std::asinh((Vi_abs / (2.0 * V0)) * e) + rs.eta(i) * Vi_abs
+         : sigma_n * a * std::asinh((Vi_abs / (2.0 * V0)) * e);
 
       p.tau0(2 * i) = -tau * Vi[0] / Vi_abs;
       p.tau0(2 * i + 1) = -tau * Vi[1] / Vi_abs;

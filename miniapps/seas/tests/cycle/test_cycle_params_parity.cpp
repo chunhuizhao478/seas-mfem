@@ -11,14 +11,19 @@
 //
 //   gold deck (ic "gold"):
 //     ref = FaultGeometry(dom, BP5Params(), mpi)        # BP5Params at each DOF
-//     a, Dc, V_init (2 components), tau0 (2 components) vs ref: rel. 1e-12
-//     b, f0, V0, sigma_n, eta vs BP5Params' scalars:     rel. 1e-12
-//     the QD geometry after H1a + H1b holds the same arrays as ref
-//     psi0: kernel (PreInit + Init at zero traction) vs BuildPrestress
+//     a, Dc, V_init (2 components), tau0 (2 components) vs ref: exact
+//     b, f0, V0, sigma_n, eta vs BP5Params' scalars:     exact
+//     the QD geometry after H1a + H1b holds the same arrays as ref: exact
+//     psi0: kernel (PreInit + Init at zero traction) vs BuildPrestress:
+//     rel. 1e-12 (the kernel inverts the steady state, so round-off)
 //   scec_fd deck (ic "scec_fd"):
 //     ref with BP5Params V_nuc = 0.03 (SCEC V_i)
-//     a, Dc, V_init vs ref; tau0 vs ref's tau0 without eta |V| (eq. 22)
-//     psi0: kernel (SCEC psi, eq. 18) vs BuildPrestress
+//     a, Dc, V_init vs ref: exact; tau0 vs ref's tau0 without eta |V|
+//     (eq. 22, formed here): rel. 1e-12
+//     psi0: kernel (SCEC psi, eq. 18) vs BuildPrestress: rel. 1e-12
+// "Exact" is what lets the driver's QD phase repeat seas_bp5_full row for
+// row: a 1-ulp difference in tau0 changed the first adaptive step on the
+// Mac (FMA contraction), so a tolerance here would hide it.
 // The nucleation-patch DOFs and those on its edge are counted; both must be
 // present (the edge is where the 1 mm inclusion tolerance decides).
 //
@@ -53,7 +58,7 @@ using namespace mfem::seas;
 namespace
 {
 
-constexpr real_t kTol = 1e-12;
+constexpr real_t kTol = 1e-12;   // where round-off is expected (see header)
 
 /// Relative difference with a floor, so exact zeros compare exactly.
 real_t RelDiff(real_t x, real_t y)
@@ -69,7 +74,8 @@ struct Checker
    int failures = 0;
 
    /// Max relative difference of two equal-sized vectors, over all ranks.
-   void Vec(const std::string &name, const Vector &x, const Vector &y)
+   void Vec(const std::string &name, const Vector &x, const Vector &y,
+            real_t tol = 0.0)
    {
       int bad_size = (x.Size() != y.Size()) ? 1 : 0;
       bad_size = mpi.GlobalMaxInt(bad_size);
@@ -81,26 +87,28 @@ struct Checker
       }
       real_t m = 0.0;
       for (int i = 0; i < x.Size(); i++) { m = std::max(m, RelDiff(x(i), y(i))); }
-      Report(name, mpi.GlobalMax(m));
+      Report(name, mpi.GlobalMax(m), tol);
    }
 
    /// Every entry of x against the scalar y.
-   void Scalar(const std::string &name, const Vector &x, real_t y)
+   void Scalar(const std::string &name, const Vector &x, real_t y,
+               real_t tol = 0.0)
    {
       real_t m = 0.0;
       for (int i = 0; i < x.Size(); i++) { m = std::max(m, RelDiff(x(i), y)); }
-      Report(name, mpi.GlobalMax(m));
+      Report(name, mpi.GlobalMax(m), tol);
    }
 
-   void Report(const std::string &name, real_t m)
+   void Report(const std::string &name, real_t m, real_t tol)
    {
-      const bool ok = (m <= kTol);
+      const bool ok = (m <= tol);
       if (!ok) { failures++; }
       if (mpi.IsRoot())
       {
          std::cout << "  " << (ok ? "ok  " : "FAIL") << " " << std::left
                    << std::setw(34) << name << std::right << " max rel diff "
-                   << std::scientific << std::setprecision(3) << m << "\n";
+                   << std::scientific << std::setprecision(3) << m
+                   << (tol == 0.0 ? "  (exact)" : "  (tolerance 1e-12)") << "\n";
       }
    }
 };
@@ -218,7 +226,8 @@ int CheckSet(const std::string &deck, ParMesh &pmesh, MPIContext &mpi,
    c.Scalar("V0", par.rs.V_0, bp5.V0);
    c.Scalar("sigma_n", par.rs.sigma_n_eff, bp5.sigma_n);
    c.Scalar("sigma0", pre.sigma0, bp5.sigma_n);
-   c.Scalar("psi0 (BuildPrestress)", pre.psi0, bp5.f0 + bp5.b * std::log(bp5.V0 / bp5.Vp));
+   c.Scalar("psi0 (BuildPrestress)", pre.psi0, bp5.f0 + bp5.b * std::log(bp5.V0 / bp5.Vp),
+            kTol);
    if (gold)
    {
       c.Vec("tau0 (dip, strike)", pre.tau0, ref.GetTauPre());
@@ -237,7 +246,7 @@ int CheckSet(const std::string &deck, ParMesh &pmesh, MPIContext &mpi,
          want(2 * i) = tp(2 * i) + ev * v0 / vabs;
          want(2 * i + 1) = tp(2 * i + 1) + ev * v1 / vabs;
       }
-      c.Vec("tau0 (dip, strike), no eta|V|", pre.tau0, want);
+      c.Vec("tau0 (dip, strike), no eta|V|", pre.tau0, want, kTol);
    }
 
    // Hooks H1a + H1b: what the kernel caches, then the kernel's psi0.
@@ -249,7 +258,7 @@ int CheckSet(const std::string &deck, ParMesh &pmesh, MPIContext &mpi,
    c.Vec("H1b geometry V_init", g.GetVInit(), par.V_init);
    c.Vec("H1b geometry tau_pre", g.GetTauPre(), pre.tau0);
    c.Scalar("H1b geometry sigma_n", g.sigma_n_per_dof(), bp5.sigma_n);
-   c.Vec("psi0 kernel vs BuildPrestress", psi, pre.psi0);
+   c.Vec("psi0 kernel vs BuildPrestress", psi, pre.psi0, kTol);
 
    if (mpi.IsRoot())
    {
@@ -291,7 +300,7 @@ int main(int argc, char *argv[])
    {
       std::cout << "test_cycle_params_parity: " << gold_cfg.shared.mesh.path << " x "
                 << gold_cfg.mesh_scale << ", p = " << gold_cfg.shared.mesh.order
-                << ", ranks " << mpi.Size() << ", tolerance " << kTol << "\n";
+                << ", ranks " << mpi.Size() << "\n";
    }
 
    // seas_bp5_full's gold parameters are BP5Params' defaults (Tandem:

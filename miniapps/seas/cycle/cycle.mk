@@ -120,7 +120,8 @@ cycle-owned-check:
 	git diff --stat $$base HEAD; \
 	imp=$$(for c in $(CYCLE_IMPORTS); do git diff-tree --no-commit-id --name-only -r $$c; done); \
 	bad=$$(git diff --name-only $$base HEAD | grep -Ev '$(CYCLE_OWNED_RE)' | $(CYCLE_HOOK_GREP) -v | \
-	       awk -v imp="$$imp" 'BEGIN { n = split(imp, f, "\n"); for (i = 1; i <= n; i++) skip[f[i]] = 1 } !($$0 in skip)'); \
+	       IMP="$$imp" awk 'BEGIN { n = split(ENVIRON["IMP"], f, "\n"); for (i = 1; i <= n; i++) skip[f[i]] = 1 } !($$0 in skip)') \
+	   || { echo "ERROR: cycle-owned-check could not list the changed files"; exit 1; }; \
 	if [ -n "$$bad" ]; then echo "FAILED: files outside the owned paths, hook files and imports:"; echo "$$bad"; exit 1; fi; \
 	del=$$(git diff --numstat $$base HEAD | awk '$$2 != 0 {print $$3}' | $(CYCLE_HOOK_GREP)); \
 	if [ -n "$$del" ]; then echo "FAILED: hook files must change by additions only:"; echo "$$del"; exit 1; fi; \
