@@ -12,9 +12,8 @@
 // Hooks are pinned when the cycle starts to call them
 // (document/fd_cycle_dev/HOOKS.md).  P1 calls H1a (FaultGeometry 4-argument
 // constructor, SetRateStatePerDOF, GetVwValues) and H1b
-// (SetInitialFieldsPerDOF); they are not on the base 010b56e, so from P1 on
-// this test, like the driver, builds only on a tree that carries them.  H2
-// (SetBackgroundTraction) is pinned in P2.
+// (SetInitialFieldsPerDOF), committed on this branch (they are not on the
+// base 010b56e).  H2 (SetBackgroundTraction) is pinned in P2.
 //
 // Build and run (from miniapps/seas):
 //   make -f cycle/cycle.mk test-cycle-api-pin

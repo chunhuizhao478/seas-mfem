@@ -101,18 +101,24 @@ seas_test_cycle_api_pin: $(CYCLE_API_PIN_OBJ)
 test-cycle-api-pin: seas_test_cycle_api_pin
 	./seas_test_cycle_api_pin
 
-# Rule M1: the branch changes only its own paths.  CYCLE_BASE is the shared
-# branch this one merges from (M7); the check diffs HEAD against their merge
-# base, so a merge of that branch adds nothing to the list.
+# Rule M1: the branch changes only its own paths, plus the shared files that
+# hold its hooks (document/fd_cycle_dev/HOOKS.md), and those by additions
+# only.  CYCLE_BASE is the shared branch this one merges from (M7); the check
+# diffs HEAD against their merge base, so a merge of that branch adds nothing
+# to the list.
 CYCLE_BASE ?= origin/nitsche-dynamic-rupture
 CYCLE_OWNED_RE = ^miniapps/seas/(cycle/|drivers/fd_cycle_driver\.cpp$$|tests/cycle/|config/fd_cycle/|jobs/fd_cycle/|document/fd_cycle_dev/)
+CYCLE_HOOK_FILES = miniapps/seas/fault/fault_geometry.hpp
+CYCLE_HOOK_GREP = grep -xF $(foreach f,$(CYCLE_HOOK_FILES),-e $(f))
 cycle-owned-check:
 	@base=$$(git merge-base HEAD $(CYCLE_BASE)) || { echo "ERROR: no merge base with $(CYCLE_BASE)"; exit 1; }; \
 	echo "Branch point: $$base ($(CYCLE_BASE))"; \
 	git diff --stat $$base HEAD; \
-	bad=$$(git diff --name-only $$base HEAD | grep -Ev '$(CYCLE_OWNED_RE)'); \
-	if [ -n "$$bad" ]; then echo "FAILED: files outside the owned paths:"; echo "$$bad"; exit 1; fi; \
-	echo "PASSED: every changed file is under an owned path (rule M1)"
+	bad=$$(git diff --name-only $$base HEAD | grep -Ev '$(CYCLE_OWNED_RE)' | $(CYCLE_HOOK_GREP) -v); \
+	if [ -n "$$bad" ]; then echo "FAILED: files outside the owned paths and hook files:"; echo "$$bad"; exit 1; fi; \
+	del=$$(git diff --numstat $$base HEAD | awk '$$2 != 0 {print $$3}' | $(CYCLE_HOOK_GREP)); \
+	if [ -n "$$del" ]; then echo "FAILED: hook files must change by additions only:"; echo "$$del"; exit 1; fi; \
+	echo "PASSED: every changed file is under an owned path or is a hook file changed by additions only (rule M1)"
 
 cycle-all: seas_fd_cycle_driver seas_test_cycle_params_parity test-cycle-api-pin \
            cycle-owned-check
