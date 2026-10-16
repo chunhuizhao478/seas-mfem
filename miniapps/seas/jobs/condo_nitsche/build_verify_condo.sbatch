@@ -24,6 +24,8 @@
 #      tpv102/mesh/tpv102_100m.msh     Mac gmsh 4.15.0 output of tpv102_100m.geo, the mesh of condo
 #                                      job 6459052; TPV104 runs on it (tpv104_200m.geo is
 #                                      tpv102_200m.geo apart from comments; there is no tpv104_100m.geo)
+#      tpv104/mesh/tpv104_200m.msh     Vista gmsh 4.15.0 mesh of Vista job 1075919, for the condo debug
+#                                      run tpv104_200m_p1.sbatch
 #   3. gate tests, as on the Mac at c906a8a and on Vista (job 1075901): gates 74/0, pf 22/0,
 #      hook-spy at np 1, 2, 4 + abort, lsw 13/13, srw 9/9, lsw-inline at np 1, 2, 4
 #   4. driver smoke: TPV205 1000 m p=1 to 1.2 s on 8 ranks, on the same mesh file as the Mac
@@ -53,7 +55,8 @@ module purge
 module load gcc/13.3.0 openmpi/5.0.5 hypre/2.31.0 metis/5.1.0 hdf5/1.14.3
 cd miniapps/seas
 echo "=== meshes from $MESH_STAGE ==="
-for m in tpv205/mesh/tpv2053d_1000m.msh tpv205/mesh/tpv2053d_100m.msh tpv102/mesh/tpv102_100m.msh; do
+for m in tpv205/mesh/tpv2053d_1000m.msh tpv205/mesh/tpv2053d_100m.msh tpv102/mesh/tpv102_100m.msh \
+         tpv104/mesh/tpv104_200m.msh; do
    [ -f $m ] || cp -v $MESH_STAGE/$(basename $m) $m || { echo "ERROR: cannot copy $(basename $m) from $MESH_STAGE"; exit 2; }
 done
 sha256sum -c jobs/condo_nitsche/meshes.sha256 || { echo "ERROR: mesh checksum mismatch"; exit 2; }
