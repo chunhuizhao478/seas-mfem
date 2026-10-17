@@ -1168,10 +1168,66 @@
                canonical_to_local_perm_[fi * nbf_per_face_ + k] =
                   gid_idx[k].second;
             }
-            // For higher-order DOFs beyond vertices (p>=2): identity
-            for (int k = nv; k < nbf_per_face_; k++)
+            // Higher-order face nodes (p >= 2).  This tail used to be the
+            // identity, which assumed that both ranks of a shared fault face
+            // see its vertices in the same local order; they generally do
+            // not, so ExpandOwnedToLocalFault put another node's value on the
+            // edge/interior nodes of the ghost copy (found in Nitsche P6 by
+            // the fault-DOF scatter test).  Debug v61 sections 7/8.1 and v62
+            // section 2 checked this exchange at p = 1 and rightly rejected a
+            // send-path change as a double permutation; this keeps that
+            // design and only fills in the p >= 2 tail with the general rule
+            // the vertex part above is the p = 1 case of:
+            //   sigma(i) = local vertex of canonical vertex i (gid_idx),
+            //   canonical node k = the local node j with
+            //   lambda^j[sigma(i)] == lambda^k[i] for i = 0, 1, 2,
+            // lambda = barycentric coordinates of the face nodal points.
+            // (Decision, Chunhui Zhao, 2026-10-14: fix it in P6.)
+            if (nbf_per_face_ > nv)
             {
-               canonical_to_local_perm_[fi * nbf_per_face_ + k] = k;
+               MFEM_VERIFY(nv == 3, "canonical face-DOF permutation: "
+                           "triangular fault faces only (face " << fi
+                           << " has " << nv << " vertices)");
+               const IntegrationRule &nir = face_quad_->GetNodalRule();
+               MFEM_VERIFY(nir.GetNPoints() == nbf_per_face_,
+                           "canonical face-DOF permutation: nodal rule has "
+                           << nir.GetNPoints() << " points, nbf = "
+                           << nbf_per_face_);
+               auto bary = [&nir](int j, real_t l[3])
+               {
+                  const IntegrationPoint &ip = nir.IntPoint(j);
+                  l[0] = 1.0 - ip.x - ip.y;
+                  l[1] = ip.x;
+                  l[2] = ip.y;
+               };
+               const real_t tol = 1e-10;
+               for (int k = nv; k < nbf_per_face_; k++)
+               {
+                  real_t lk[3];
+                  bary(k, lk);
+                  int match = -1, nmatch = 0;
+                  for (int j = 0; j < nbf_per_face_; j++)
+                  {
+                     real_t lj[3];
+                     bary(j, lj);
+                     bool same = true;
+                     for (int i = 0; i < 3; i++)
+                     {
+                        if (std::abs(lj[gid_idx[i].second] - lk[i]) > tol)
+                        {
+                           same = false;
+                        }
+                     }
+                     if (same) { match = j; nmatch++; }
+                  }
+                  MFEM_VERIFY(nmatch == 1,
+                              "canonical face-DOF permutation: fault face "
+                              << fi << ", canonical node " << k
+                              << " (barycentric " << lk[0] << ", " << lk[1]
+                              << ", " << lk[2] << ") has " << nmatch
+                              << " matching local nodes (expected 1)");
+                  canonical_to_local_perm_[fi * nbf_per_face_ + k] = match;
+               }
             }
          }
       }
