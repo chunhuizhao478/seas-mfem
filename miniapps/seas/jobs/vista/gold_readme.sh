@@ -178,21 +178,23 @@ gold_readme_backfill() {
       return 0
    fi
    root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-   # provenance.txt lines (g0_provenance):
+   # provenance.txt lines (g0_provenance), first in the file:
    #   job: ID NAME on HOST, DATE
    #   nodes: N, tasks: T, partition: P
    #   source: HASH (BRANCH), dirty files: D
    #   binary: DATE SIZE sha256 PREFIX
-   line="$(sed -n 's/^job: //p' "${prov}")"
+   # The build record appended after them has source: lines of its own (one
+   # per build stage), so each field is taken from its first line only.
+   line="$(sed -n 's/^job: //p' "${prov}" | head -n 1)"
    GR_JOB="$(echo "${line}" | awk '{print $1}')"
    GR_JOBNAME="$(echo "${line}" | awk '{print $2}')"
    GR_HOST="$(echo "${line}" | sed -n 's/.* on \([^,]*\),.*/\1/p')"
    GR_START="$(echo "${line}" | sed -n 's/.*, //p')"
-   line="$(sed -n 's/^nodes: //p' "${prov}")"
+   line="$(sed -n 's/^nodes: //p' "${prov}" | head -n 1)"
    GR_NODES="$(echo "${line}" | sed -n 's/^\([^,]*\),.*/\1/p')"
    GR_TASKS="$(echo "${line}" | sed -n 's/.*tasks: \([^,]*\),.*/\1/p')"
    GR_PARTITION="$(echo "${line}" | sed -n 's/.*partition: //p')"
-   line="$(sed -n 's/^source: //p' "${prov}")"
+   line="$(sed -n 's/^source: //p' "${prov}" | head -n 1)"
    GR_HASH="$(echo "${line}" | awk '{print $1}')"
    GR_BRANCH="$(echo "${line}" | sed -n 's/^[^ ]* (\([^)]*\)).*/\1/p')"
    GR_DIRTY="$(echo "${line}" | sed -n 's/.*dirty files: *//p')"
@@ -210,7 +212,7 @@ gold_readme_backfill() {
    GR_KNOBS="(not recorded by this job; see the submit line)"
    GR_MODE="cpu"
    grep -q 'MFEM_USE_CUDA *= YES' "${prov}" && GR_MODE="cuda"
-   GR_BINARY="\`miniapps/seas/seas_bp5_full\`, $(sed -n 's/^binary: [^ ]* [^ ]* //p' "${prov}") (first 16 hex digits, from provenance.txt)"
+   GR_BINARY="\`miniapps/seas/seas_bp5_full\`, $(sed -n 's/^binary: [^ ]* [^ ]* //p' "${prov}" | head -n 1) (first 16 hex digits, from provenance.txt)"
    GR_FLAGS="$(git -C "${root}" show "${GR_HASH}:miniapps/seas/jobs/vista/g0_env.sh" 2>/dev/null | _gold_readme_flags | paste -sd' ')"
    GR_MESHES="$(_gold_readme_meshes "${root}" "${GR_HASH}")"
    GR_BUILD="$(sed -n '/^--- build provenance ---$/,$p' "${prov}" | sed '1d')"
