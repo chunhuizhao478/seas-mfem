@@ -70,7 +70,13 @@ g0_check_binary() {
       || { echo "ERROR: MFEM was not built with MUMPS." >&2; exit 1; }
 }
 
-# g0_provenance DIR: what produced the files in DIR.
+# gold_readme_job DIR writes DIR/README.md: the commit, job, script, flags,
+# meshes (sha256), binary, build and the commands that reproduce DIR.
+# shellcheck source=gold_readme.sh
+source "${SEAS_DIR}/jobs/vista/gold_readme.sh"
+
+# g0_provenance DIR: what produced the files in DIR (provenance.txt and
+# README.md).
 g0_provenance() {
    local dir="$1"
    mkdir -p "${dir}"
@@ -86,4 +92,5 @@ g0_provenance() {
          cat "${G0_DEPS_PROVENANCE:-${WORK:-$HOME}/seas-gpu-deps/build_provenance_cpu.txt}"
       fi
    } > "${dir}/provenance.txt"
+   gold_readme_job "${dir}"
 }
