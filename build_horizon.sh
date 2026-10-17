@@ -246,10 +246,27 @@ stage_fetch() {
    unpack_petsc
 
    # With --with-packages-download-dir, PETSc's configure lists the package
-   # tarballs it needs and stops.  Each line reads: name ['url1', 'url2', ...]
+   # tarballs missing from that directory and stops.  Each line reads:
+   # name ['url1', 'url2', ...].  When none is missing it goes on to build
+   # the packages instead, so it is asked with an empty directory (it then
+   # lists them all), a prefix inside it and a PETSC_ARCH of its own, which
+   # leaves the build directories, the install prefix and DOWNLOADS alone.
    log "asking PETSc's configure which package tarballs it needs"
    local listing="${DEPS_ROOT}/petsc_download_list.txt"
-   ( cd "${PETSC_SRC}" && ./configure "${PETSC_CONFIGURE_ARGS[@]}" ) > "${listing}" 2>&1 || true
+   local probe probe_arch=arch-fetch-probe
+   probe="$(mktemp -d "${DEPS_ROOT}/fetch-probe.XXXXXX")"
+   local probe_args=() a
+   for a in "${PETSC_CONFIGURE_ARGS[@]}"; do
+      case "${a}" in
+         --prefix=*) probe_args+=(--prefix="${probe}/prefix") ;;
+         --with-packages-download-dir=*)
+            probe_args+=(--with-packages-download-dir="${probe}") ;;
+         *) probe_args+=("${a}") ;;
+      esac
+   done
+   ( cd "${PETSC_SRC}" && ./configure PETSC_ARCH="${probe_arch}" "${probe_args[@]}" ) \
+      > "${listing}" 2>&1 || true
+   rm -rf "${probe}" "${PETSC_SRC:?}/${probe_arch}"
    python3 - "${listing}" "${DOWNLOADS}" <<'PY'
 import ast, os, re, subprocess, sys
 listing, dest = sys.argv[1], sys.argv[2]
