@@ -871,6 +871,8 @@ DOMAIN_HEADERS = common/seas_types.hpp \
                  domain/elasticity_operator_setup.inl \
                  domain/elasticity_operator_assembly.inl \
                  domain/elasticity_operator_traction.inl \
+                 domain/elasticity_operator_qd.inl \
+                 domain/qd_stage_operators.hpp \
                  domain/matrix_stats.hpp \
                  domain/boundary_config.hpp \
                  domain/domain_config.hpp \
@@ -1054,6 +1056,10 @@ TEST_BR2_CONSISTENCY_OBJ = $(TEST_BR2_CONSISTENCY_SRC:.cpp=.o)
 TEST_PARALLEL_ELAST_SRC = tests/parallel/test_parallel_elasticity.cpp
 TEST_PARALLEL_ELAST_OBJ = $(TEST_PARALLEL_ELAST_SRC:.cpp=.o)
 
+# GPU plan G2: per-stage operators vs the face loops
+TEST_QD_STAGE_OPS_SRC = tests/parallel/test_qd_stage_operators.cpp
+TEST_QD_STAGE_OPS_OBJ = $(TEST_QD_STAGE_OPS_SRC:.cpp=.o)
+
 # Parallel wave operator tests (dynamic rupture)
 TEST_PARALLEL_WAVE_SRC = tests/parallel/test_parallel_wave_operator.cpp
 TEST_PARALLEL_WAVE_OBJ = $(TEST_PARALLEL_WAVE_SRC:.cpp=.o)
@@ -1098,6 +1104,7 @@ PAR_MINIAPPS = seas_test_mpi_context seas_test_parallel_utils \
                seas_test_scaling \
                seas_test_br2_consistency \
                seas_test_parallel_elasticity \
+               seas_test_qd_stage_operators \
                seas_test_bp5_parallel_smoke \
                seas_test_parallel_wave_operator
 # Long-running parallel simulations (built by `make all`, not run by `make test`)
@@ -5371,6 +5378,22 @@ $(TEST_PARALLEL_ELAST_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS)
 test-parallel-elasticity: seas_test_parallel_elasticity
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_parallel_elasticity
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_parallel_elasticity
+
+# GPU plan G2: per-stage operators vs the face loops (acceptance tests 1-4)
+seas_test_qd_stage_operators: $(TEST_QD_STAGE_OPS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_QD_STAGE_OPS_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+$(TEST_QD_STAGE_OPS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+test-qd-stage-operators: seas_test_qd_stage_operators
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_qd_stage_operators
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_qd_stage_operators
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_qd_stage_operators --partition fault
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_qd_stage_operators
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_qd_stage_operators --partition fault
 
 # Parallel wave operator tests (dynamic rupture)
 # Match the serial rule (line 847): the test instantiates

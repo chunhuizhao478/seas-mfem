@@ -62,6 +62,10 @@
 //                              mfem::Device string (GPU plan G1)
 //   --device-id N              GPU for this rank (default: node-local rank
 //                              modulo the number of visible GPUs)
+//   --qd-operators MODE        loops (default): per-stage face loops;
+//                              matrix: B, D, C, N operators built once,
+//                              b = B*slip + D*g(t), T = C_u*u + C_d*slip
+//                              (GPU plan G2; IP only, no face tracer)
 
 #include "mfem.hpp"
 #ifdef MFEM_USE_PETSC
@@ -1101,6 +1105,8 @@ int main(int argc, char *argv[])
    // GPU plan G1.
    std::string device_str = "cpu";     // --device STR
    int device_id_override = -1;        // --device-id N (-1 = automatic)
+   // GPU plan G2.
+   std::string qd_operators = "loops"; // --qd-operators loops|matrix
 
    for (int i = 1; i < argc; i++)
    {
@@ -1217,6 +1223,13 @@ int main(int argc, char *argv[])
       }
       if (arg == "--petsc-ts") { use_petsc_ts = true; }
       if (arg == "--device" && i + 1 < argc) { device_str = argv[++i]; }
+      if (arg == "--qd-operators" && i + 1 < argc)
+      {
+         qd_operators = argv[++i];
+         MFEM_VERIFY(qd_operators == "loops" || qd_operators == "matrix",
+                     "--qd-operators: loops or matrix, got '"
+                     << qd_operators << "'");
+      }
       if (arg == "--device-id" && i + 1 < argc)
       {
          device_id_override = std::atoi(argv[++i]);
@@ -2027,6 +2040,16 @@ int main(int argc, char *argv[])
       std::cout << "  [v54] elastic-sigma-n: "
                 << (elastic_sigma_n ? "ON (default, Tandem)" : "OFF (--no-elastic-sigma-n)")
                 << "\n";
+   }
+   // GPU plan G2: per-stage operators instead of the face loops
+   if (qd_operators == "matrix")
+   {
+      seas_op.SetQDOperators(true);
+      domain.GetQDStageOperators()->PrintSummary(mpi.GetComm(), std::cout);
+   }
+   if (mpi.IsRoot())
+   {
+      std::cout << "  [G2] qd-operators: " << qd_operators << "\n";
    }
 
    // Face tracer for per-face diagnostics (rank-local, no MPI)
@@ -3556,6 +3579,14 @@ int main(int argc, char *argv[])
    {
       global_out->Flush();
       global_out->Close();
+   }
+
+   if (qd_operators == "matrix")
+   {
+      const long long rejected = use_petsc_ts
+                                 ? step_rejections
+                                 : ode_solver.GetTotalRejections();
+      domain.PrintQDStageEvalSummary(step, rejected, std::cout);
    }
 
    if (mpi.IsRoot())

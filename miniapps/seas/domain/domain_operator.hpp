@@ -279,6 +279,30 @@ public:
    /// Get MPI communicator (parallel only)
    virtual MPI_Comm GetComm() const { return MPI_COMM_WORLD; }
 #endif
+
+   /// @brief GPU plan G2: build the per-stage operators B, D, C_u, C_δ
+   /// (and N_u, N_δ with @a with_normal) once, for SolveStage().
+   ///
+   /// Default: not supported.  ElasticityDomainOperator overrides it for a
+   /// parallel mesh with the IP method.
+   virtual void BuildQDStageOperators(bool with_normal)
+   {
+      MFEM_ABORT("This domain operator has no QD stage operators "
+                 "(--qd-operators matrix); with_normal = " << with_normal);
+   }
+
+   /// @brief GPU plan G2: one quasi-dynamic stage through the operators of
+   /// BuildQDStageOperators(): b = B·δ + D·g(t), K u = b,
+   /// T = C_u·u + C_δ·δ and, when @a normal_owned is given,
+   /// T_n = N_u·u + N_δ·δ.  Slip and tractions are on owned fault DOFs.
+   virtual void SolveStage(real_t /*time*/, const Vector & /*slip_owned*/,
+                           GridFuncType & /*displacement*/,
+                           Vector & /*traction_owned*/,
+                           Vector * /*normal_owned*/)
+   {
+      MFEM_ABORT("This domain operator has no QD stage operators "
+                 "(--qd-operators matrix)");
+   }
 };
 
 // Convenience type aliases

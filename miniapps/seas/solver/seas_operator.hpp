@@ -169,6 +169,18 @@ public:
       face_tracer_ = tracer;
    }
 
+   /// GPU plan G2 (--qd-operators): run each stage through the domain's
+   /// prebuilt operators (true) or the face loops (false, the default).
+   /// true builds the operators now, with N_u, N_δ when elastic sigma_n is
+   /// on, so call it after SetElasticSigmaN().  SetInitialCondition() and
+   /// the face tracer's decomposed traction stay on the loops.
+   void SetQDOperators(bool matrix)
+   {
+      if (matrix) { domain_->BuildQDStageOperators(elastic_sigma_n_); }
+      qd_matrix_ = matrix;
+      qd_matrix_normal_ = elastic_sigma_n_;
+   }
+
 private:
    DomainOpType *domain_;
    FaultOpType *fault_;
@@ -197,6 +209,10 @@ private:
 
    // v57 MPI diagnostic: fire once on first non-zero slip
    mutable bool mpi_diag_done_ = true;  // v58: disabled by default
+
+   // GPU plan G2: stages through the domain's stage operators
+   bool qd_matrix_ = false;
+   bool qd_matrix_normal_ = false;  // elastic sigma_n when they were built
 
    // v51 flags
    bool zero_dip_traction_ = false;
@@ -362,60 +378,79 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
    }
 #endif
 
-   // 2. Solve domain problem with slip BC
-   domain_->ExpandOwnedToLocalFault(slip_, local_slip_, domain_->NumSlipComponents());
-   if (stage_timers_) { stage_timers_->Stop(StageTimers::SlipExpand); }
-   domain_->Solve(t, local_slip_, *u_gf_);
-
-   // 3. Compute traction at fault from displacement
-   // v51: optionally compute elastic normal traction for sigma_n feedback
-   if (stage_timers_) { stage_timers_->Start(StageTimers::Traction); }
-   if (face_tracer_ && face_tracer_->IsActive())
+   if (qd_matrix_)
    {
-      // Decomposed traction for face tracer (including normal decomposition)
-      domain_->ComputeTractionDiagnostics(
-         *u_gf_, local_slip_, local_traction_,
-         local_traction_stress_, local_traction_correction_,
-         local_jump_residual_,
-         elastic_sigma_n_ ? &local_normal_traction_ : nullptr,
-         elastic_sigma_n_ ? &local_normal_stress_ : nullptr,
-         elastic_sigma_n_ ? &local_normal_corr_ : nullptr);
-      domain_->RestrictToOwnedFault(local_traction_, traction_,
-                                    domain_->NumSlipComponents());
-      domain_->RestrictToOwnedFault(local_traction_stress_, traction_stress_,
-                                    domain_->NumSlipComponents());
-      domain_->RestrictToOwnedFault(local_traction_correction_,
-                                    traction_correction_,
-                                    domain_->NumSlipComponents());
-      domain_->RestrictToOwnedFault(local_jump_residual_, jump_residual_,
-                                    domain_->NumSlipComponents());
-      if (elastic_sigma_n_)
-      {
-         domain_->RestrictToOwnedFault(local_normal_traction_,
-                                       normal_traction_);
-         domain_->RestrictToOwnedFault(local_normal_stress_,
-                                       normal_stress_);
-         domain_->RestrictToOwnedFault(local_normal_corr_,
-                                       normal_corr_);
-      }
+      // GPU plan G2: b = B·δ + D·g(t), solve, T = C_u·u + C_δ·δ and
+      // T_n = N_u·u + N_δ·δ on owned fault DOFs (no local fault vectors).
+      MFEM_VERIFY(!(face_tracer_ && face_tracer_->IsActive()),
+                  "--qd-operators matrix: the face tracer needs the "
+                  "decomposed traction of the face loops; use "
+                  "--qd-operators loops");
+      MFEM_VERIFY(qd_matrix_normal_ == elastic_sigma_n_,
+                  "--qd-operators matrix: elastic sigma_n changed after "
+                  "the stage operators were built");
+      if (stage_timers_) { stage_timers_->Stop(StageTimers::SlipExpand); }
+      domain_->SolveStage(t, slip_, *u_gf_, traction_,
+                          elastic_sigma_n_ ? &normal_traction_ : nullptr);
    }
    else
    {
-      domain_->ComputeTraction(*u_gf_, local_slip_, local_traction_,
-                               elastic_sigma_n_ ? &local_normal_traction_
-                                                : nullptr);
-      domain_->RestrictToOwnedFault(local_traction_, traction_,
-                                    domain_->NumSlipComponents());
-      if (elastic_sigma_n_)
+      // 2. Solve domain problem with slip BC
+      domain_->ExpandOwnedToLocalFault(slip_, local_slip_, domain_->NumSlipComponents());
+      if (stage_timers_) { stage_timers_->Stop(StageTimers::SlipExpand); }
+      domain_->Solve(t, local_slip_, *u_gf_);
+
+      // 3. Compute traction at fault from displacement
+      // v51: optionally compute elastic normal traction for sigma_n feedback
+      if (stage_timers_) { stage_timers_->Start(StageTimers::Traction); }
+      if (face_tracer_ && face_tracer_->IsActive())
       {
-         domain_->RestrictToOwnedFault(local_normal_traction_,
-                                       normal_traction_);
+         // Decomposed traction for face tracer (including normal decomposition)
+         domain_->ComputeTractionDiagnostics(
+            *u_gf_, local_slip_, local_traction_,
+            local_traction_stress_, local_traction_correction_,
+            local_jump_residual_,
+            elastic_sigma_n_ ? &local_normal_traction_ : nullptr,
+            elastic_sigma_n_ ? &local_normal_stress_ : nullptr,
+            elastic_sigma_n_ ? &local_normal_corr_ : nullptr);
+         domain_->RestrictToOwnedFault(local_traction_, traction_,
+                                       domain_->NumSlipComponents());
+         domain_->RestrictToOwnedFault(local_traction_stress_, traction_stress_,
+                                       domain_->NumSlipComponents());
+         domain_->RestrictToOwnedFault(local_traction_correction_,
+                                       traction_correction_,
+                                       domain_->NumSlipComponents());
+         domain_->RestrictToOwnedFault(local_jump_residual_, jump_residual_,
+                                       domain_->NumSlipComponents());
+         if (elastic_sigma_n_)
+         {
+            domain_->RestrictToOwnedFault(local_normal_traction_,
+                                          normal_traction_);
+            domain_->RestrictToOwnedFault(local_normal_stress_,
+                                          normal_stress_);
+            domain_->RestrictToOwnedFault(local_normal_corr_,
+                                          normal_corr_);
+         }
       }
+      else
+      {
+         domain_->ComputeTraction(*u_gf_, local_slip_, local_traction_,
+                                  elastic_sigma_n_ ? &local_normal_traction_
+                                                   : nullptr);
+         domain_->RestrictToOwnedFault(local_traction_, traction_,
+                                       domain_->NumSlipComponents());
+         if (elastic_sigma_n_)
+         {
+            domain_->RestrictToOwnedFault(local_normal_traction_,
+                                          normal_traction_);
+         }
+      }
+      if (stage_timers_) { stage_timers_->Stop(StageTimers::Traction); }
    }
-   if (stage_timers_) { stage_timers_->Stop(StageTimers::Traction); }
 
    // v57 MPI diagnostic: print norms on first non-zero-slip evaluation
-   if (!mpi_diag_done_)
+   // (face loops only: it reads the local fault vectors)
+   if (!mpi_diag_done_ && !qd_matrix_)
    {
       real_t slip_norm = local_slip_.Normlinf();
       if (mpi_ctx_) { slip_norm = mpi_ctx_->GlobalMax(slip_norm); }
