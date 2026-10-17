@@ -315,27 +315,34 @@
          // --exit-after-assembly: K and its statistics only, no solver.
          if (assemble_matrix_only_) { return; }
 
+         // Direct solvers (MUMPS, MUMPS BLR, cuDSS) behind one interface,
+         // solver/qd_linear_solver.hpp (GPU plan G3).  cuDSS reads and
+         // writes device vectors: B_ and X_ live on the device.
+         if (solver_type_ == SolverType::CUDSS
 #ifdef MFEM_USE_MUMPS
-         const int mumps_print_level = matrix_stats_enabled_ ? 2 : 1;
-         if (solver_type_ == SolverType::MUMPS)
+             || solver_type_ == SolverType::MUMPS
+             || solver_type_ == SolverType::MUMPS_BLR
+#endif
+            )
          {
-            auto *mumps = new MUMPSSolver(mesh_.GetComm());
-            mumps->SetMatrixSymType(MUMPSSolver::MatType::SYMMETRIC_POSITIVE_DEFINITE);
-            mumps->SetPrintLevel(mumps_print_level);
-            mumps->SetOperator(*cached_Ah_.As<HypreParMatrix>());
-            solver_.reset(mumps);
-         }
-         else if (solver_type_ == SolverType::MUMPS_BLR)
-         {
-            auto *mumps = new MUMPSSolver(mesh_.GetComm());
-            mumps->SetMatrixSymType(MUMPSSolver::MatType::SYMMETRIC_POSITIVE_DEFINITE);
-            mumps->SetPrintLevel(mumps_print_level);
-            mumps->SetBLRTol(blr_tol_);
-            mumps->SetOperator(*cached_Ah_.As<HypreParMatrix>());
-            solver_.reset(mumps);
+            const QDLinearSolverKind kind =
+               (solver_type_ == SolverType::CUDSS) ? QDLinearSolverKind::CUDSS
+               : (solver_type_ == SolverType::MUMPS) ? QDLinearSolverKind::MUMPS
+               : QDLinearSolverKind::MUMPS_BLR;
+            QDLinearSolverSetup setup;
+            solver_ = MakeQDLinearSolver(kind, *cached_Ah_.As<HypreParMatrix>(),
+                                         matrix_stats_enabled_ ? 2 : 1,
+                                         blr_tol_, &setup);
+            if (kind == QDLinearSolverKind::CUDSS)
+            {
+               B_.UseDevice(true);
+               X_.UseDevice(true);
+            }
+            int rank = 0;
+            MPI_Comm_rank(mesh_.GetComm(), &rank);
+            if (rank == 0) { mfem::out << QDLinearSolverSummary(setup) << "\n"; }
          }
          else
-#endif
 #ifdef MFEM_USE_SUPERLU
          if (solver_type_ == SolverType::SUPERLU)
          {

@@ -367,6 +367,10 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
    // Under PETSc TS on a CUDA device, state is a PetscParVector whose valid
    // copy may be on the GPU; the fault loops index it on the host.
    state.HostRead();
+   // GetSlip writes every entry on the host; with the stage operators on a
+   // GPU the previous stage left slip_ on the device (B·δ, C_δ·δ read it
+   // there), so mark the host copy as the one being written.
+   slip_.HostWrite();
    fault_->GetSlip(state, slip_);
 
    // Debug: check for NaN in slip before domain solve

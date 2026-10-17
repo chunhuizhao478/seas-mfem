@@ -35,6 +35,9 @@
 //   --V-nuc VAL                Nucleation slip rate [m/s] (default: 0.03)
 //   --delta-tau-factor VAL     Delta-tau multiplier (default: 1.0, Tandem: 0.0)
 //   --solver mumps|cg           Linear solver (default: cg)
+//   --solver cudss             cuDSS direct solver on the GPU (GPU plan G3;
+//                              needs MFEM_USE_CUDSS, --device cuda and
+//                              --qd-operators matrix)
 //   --check-residual           Warn if post-solve ||K*x-b||/||b|| > 1e-8
 //   --monitor-traction N       Log tau_pre/traction/total every N RHS evals
 //   --dump-bdr-vtk             Output boundary attributes to VTK
@@ -1549,6 +1552,10 @@ int main(int argc, char *argv[])
    {
       solver_type = SolverType::CG_AMG;
    }
+   else if (solver_str == "cudss" || solver_str == "CUDSS")
+   {
+      solver_type = SolverType::CUDSS;
+   }
 
    // Verify requested solver is actually available at compile time.
    // Without this check, MUMPS/SuperLU/STRUMPACK requests silently
@@ -1594,6 +1601,33 @@ int main(int argc, char *argv[])
       return 2;
    }
 #endif
+   // GPU plan G3: cuDSS solves on device vectors, so it needs a GPU device,
+   // and the stage operators keep b, u and T there (the face loops build
+   // b on the host).
+   if (solver_type == SolverType::CUDSS)
+   {
+      std::string why;
+#ifndef MFEM_USE_CUDSS
+      why = "requires MFEM built with MFEM_USE_CUDSS=YES (build_horizon.sh "
+            "MODE=cuda)";
+#endif
+      if (why.empty() && !Device::Allows(Backend::CUDA_MASK))
+      {
+         why = "requires --device cuda";
+      }
+      if (why.empty() && qd_operators != "matrix")
+      {
+         why = "requires --qd-operators matrix";
+      }
+      if (!why.empty())
+      {
+         if (mpi.IsRoot())
+         {
+            std::cerr << "ERROR: --solver cudss " << why << ".\n";
+         }
+         return 2;
+      }
+   }
 
    // Process --bc-mode flag
    BCMode bc_mode = BCMode::FarField;
@@ -1830,6 +1864,7 @@ int main(int argc, char *argv[])
       else if (solver_type == SolverType::SUPERLU) solver_desc = "SuperLU_DIST (direct)";
       else if (solver_type == SolverType::STRUMPACK) solver_desc = "STRUMPACK BLR (approximate direct)";
       else if (solver_type == SolverType::GMRES_BlockILU) solver_desc = "GMRES+BlockILU (iterative)";
+      else if (solver_type == SolverType::CUDSS) solver_desc = "cuDSS (direct, GPU)";
       std::cout << "  Solver: " << solver_desc << "\n";
       std::string bc_desc = "FarField";
       if (bc_mode == BCMode::XOnly) bc_desc = "XOnly (attrs 1-2 Dirichlet, 3-6 Natural)";
@@ -2025,6 +2060,12 @@ int main(int argc, char *argv[])
    {
       domain.SetStageTimers(g0.Timers());
       seas_op.SetStageTimers(g0.Timers());
+      // GPU plan G3: on a GPU, kernels run asynchronously; wait for them at
+      // each timer start and stop so each part is charged its own GPU time.
+      if (Device::Allows(Backend::CUDA_MASK | Backend::HIP_MASK))
+      {
+         g0.timers.SetDeviceSync([]() { MFEM_DEVICE_SYNC; });
+      }
    }
 
    // v51: dip traction diagnostics

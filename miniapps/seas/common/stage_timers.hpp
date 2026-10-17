@@ -14,9 +14,11 @@
 // calls) and of the accepted-step monitor.  Enabled by seas_bp5_full
 // --stage-timers N (GPU plan G0: where a stage spends its time on the CPU).
 //
-// Timers are rank-local and never synchronize; the driver reduces them
-// across ranks when it prints.  An operator holding a null StageTimers
-// pointer does no timing at all.
+// Timers are rank-local and never synchronize across ranks; the driver
+// reduces them when it prints.  On a GPU the driver sets a device sync
+// (SetDeviceSync), called at every start and stop, so asynchronous kernels
+// are charged to the part that launched them.  An operator holding a null
+// StageTimers pointer does no timing at all.
 
 #ifndef MFEM_SEAS_STAGE_TIMERS_HPP
 #define MFEM_SEAS_STAGE_TIMERS_HPP
@@ -60,10 +62,18 @@ public:
       return names[p];
    }
 
-   void Start(Part p) { start_[p] = Now(); }
+   /// Wait for the device at every Start and Stop (nullptr: never).
+   void SetDeviceSync(void (*sync)()) { sync_ = sync; }
+
+   void Start(Part p)
+   {
+      if (sync_) { sync_(); }
+      start_[p] = Now();
+   }
 
    void Stop(Part p)
    {
+      if (sync_) { sync_(); }
       seconds_[p] += Now() - start_[p];
       calls_[p]++;
    }
@@ -90,6 +100,7 @@ private:
                 clock::now().time_since_epoch()).count();
    }
 
+   void (*sync_)() = nullptr;
    std::array<double, NumParts> start_{};
    std::array<double, NumParts> seconds_{};
    std::array<long long, NumParts> calls_{};

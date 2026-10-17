@@ -180,6 +180,7 @@ struct QDStageOperators
    double build_seconds = 0.0;     ///< probing + matrix construction
    long long g_evals = 0;          ///< g(t) evaluations (one per stage)
    double g_eval_seconds = 0.0;    ///< time in the loading callback
+   double g_copy_seconds = 0.0;    ///< g(t) host-to-device copies (GPU)
 
    /// Sizes, nonzeros and memory of every matrix, summed over ranks.
    /// Collective; prints on rank 0.

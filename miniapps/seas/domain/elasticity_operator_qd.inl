@@ -434,6 +434,7 @@ void ElasticityDomainOperator<MeshType>::BuildQDStageOperators(
       ops->g_xyz.SetSize(static_cast<int>(pt_xyz.size()));
       for (int i = 0; i < ops->g_xyz.Size(); i++) { ops->g_xyz(i) = pt_xyz[i]; }
       ops->g.SetSize(ng);
+      ops->g.UseDevice(true);   // D·g reads it on the device (GPU plan G3)
       ops->g = 0.0;
       ops->build_seconds = MPI_Wtime() - t_start;
       qd_ops_ = std::move(ops);
@@ -450,15 +451,29 @@ void ElasticityDomainOperator<MeshType>::EvaluateQDDirichletValues(
 {
    QDStageOperators &ops = *qd_ops_;
    const double t0 = MPI_Wtime();
+   // The callback runs on the host; on a device, the previous stage left g
+   // there, so mark the host copy as the one being written.
+   real_t *g = ops.g.HostWrite();
    Vector u_D_val(3);
    for (int p = 0; p < ops.NumPoints(); p++)
    {
       const Vector x(ops.g_xyz.GetData() + 3 * p, 3);
       EvalDirichletFunc(ops.g_attr[p], x, time, u_D_val);
-      for (int c = 0; c < 3; c++) { ops.g(3 * p + c) = u_D_val(c); }
+      for (int c = 0; c < 3; c++) { g[3 * p + c] = u_D_val(c); }
    }
    ops.g_eval_seconds += MPI_Wtime() - t0;
    ops.g_evals++;
+   if (Device::Allows(Backend::DEVICE_MASK))
+   {
+      // Copy g to the device here, so the copy is timed on its own rather
+      // than inside D·g (on a GPU, after the kernels queued before it).
+      const bool gpu = Device::Allows(Backend::CUDA_MASK | Backend::HIP_MASK);
+      if (gpu) { MFEM_DEVICE_SYNC; }
+      const double t1 = MPI_Wtime();
+      ops.g.Read();
+      if (gpu) { MFEM_DEVICE_SYNC; }
+      ops.g_copy_seconds += MPI_Wtime() - t1;
+   }
 }
 
 template <typename MeshType>
@@ -518,6 +533,9 @@ void ElasticityDomainOperator<MeshType>::SolveStage(
    SolveLoadedRHS(displacement);
    ScopedStageTimer timer(stage_timers_, StageTimers::Traction);
    QDStageTraction(X_, slip_owned, traction_owned, normal_owned);
+   // Friction reads T and T_n on the host; on a device, copy them back.
+   traction_owned.HostRead();
+   if (normal_owned) { normal_owned->HostRead(); }
 }
 
 template <typename MeshType>
@@ -528,12 +546,23 @@ void ElasticityDomainOperator<MeshType>::PrintQDStageEvalSummary(
                "not called");
    MPI_Comm comm = mesh_.GetComm();
    const QDStageOperators &ops = *qd_ops_;
-   double sec_max = 0.0, pts = ops.NumPoints(), pts_max = 0.0;
+   double sec_max = 0.0, pts = ops.NumPoints(), pts_max = 0.0, copy_max = 0.0;
    MPI_Reduce(&ops.g_eval_seconds, &sec_max, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
    MPI_Reduce(&pts, &pts_max, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
+   MPI_Reduce(&ops.g_copy_seconds, &copy_max, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
+   // Host loading (callback + copy) as a share of the stage time, per rank
+   // (GPU plan G3a threshold: 5%); needs --stage-timers.
+   const double stage_sec =
+      stage_timers_ ? stage_timers_->Seconds(StageTimers::StageTotal) : 0.0;
+   const double share = stage_sec > 0.0
+                        ? (ops.g_eval_seconds + ops.g_copy_seconds) / stage_sec
+                        : -1.0;
+   double share_max = -1.0;
+   MPI_Reduce(&share, &share_max, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
    int rank;
    MPI_Comm_rank(comm, &rank);
    if (rank != 0) { return; }
+   const bool on_device = Device::Allows(Backend::DEVICE_MASK);
    const long long attempted = accepted_steps + rejected_steps;
    std::ostringstream o;
    o << "[QD-OPERATORS] g(t): " << ops.g_evals << " evaluations over "
@@ -545,8 +574,24 @@ void ElasticityDomainOperator<MeshType>::PrintQDStageEvalSummary(
      << (ops.g_evals > 0 ? 1e3 * sec_max / ops.g_evals : 0.0)
      << " ms per evaluation (slowest rank, at most "
      << static_cast<long long>(pts_max) << " points = "
-     << static_cast<long long>(3 * pts_max)
-     << " values per rank); no host-to-device copy on the CPU\n";
+     << static_cast<long long>(3 * pts_max) << " values per rank); ";
+   if (on_device)
+   {
+      o << "host-to-device copy " << copy_max << " s total, "
+        << (ops.g_evals > 0 ? 1e3 * copy_max / ops.g_evals : 0.0)
+        << " ms per copy (slowest rank)\n";
+   }
+   else
+   {
+      o << "no host-to-device copy on the CPU\n";
+   }
+   if (share_max >= 0.0)
+   {
+      o << "[QD-OPERATORS] host loading (g(t) callback + copy): "
+        << std::fixed << std::setprecision(3) << 100.0 * share_max
+        << "% of the stage time (largest share over ranks; G3a threshold "
+        << "5%)\n";
+   }
    os << o.str();
    os.flush();
 }

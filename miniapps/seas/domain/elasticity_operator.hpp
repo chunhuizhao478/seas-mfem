@@ -29,6 +29,7 @@
 #include "matrix_stats.hpp"
 #include "../common/stage_timers.hpp"
 #include "qd_stage_operators.hpp"
+#include "../solver/qd_linear_solver.hpp"
 
 #include <memory>
 #include <cmath>
@@ -44,8 +45,9 @@ namespace mfem
 namespace seas
 {
 
-/// Linear solver type for the elasticity domain operator
-enum class SolverType { CG_AMG, MUMPS, MUMPS_BLR, GMRES_BlockILU, GMRES_AMG, SUPERLU, STRUMPACK };
+/// Linear solver type for the elasticity domain operator.  CUDSS: cuDSS on
+/// the GPU (MFEM_USE_CUDSS), for the stage operators of GPU plan G3.
+enum class SolverType { CG_AMG, MUMPS, MUMPS_BLR, GMRES_BlockILU, GMRES_AMG, SUPERLU, STRUMPACK, CUDSS };
 
 /// Boundary condition mode for the elasticity domain operator
 ///
@@ -249,6 +251,12 @@ public:
                    Vector *normal_owned) override;
    /// The operators, or nullptr before BuildQDStageOperators().
    const QDStageOperators *GetQDStageOperators() const { return qd_ops_.get(); }
+   /// The assembled stiffness matrix K, or nullptr before assembly (first
+   /// Solve(), SolveStage() or AssembleMatrixOnly()).
+   const HypreParMatrix *GetStiffnessMatrix() const
+   {
+      return cached_Ah_.Ptr() ? cached_Ah_.As<HypreParMatrix>() : nullptr;
+   }
    /// The stage pieces on their own, for tests: b = B·δ + D·g(t) and the
    /// traction products for a given displacement (true DOFs).
    void QDStageRHS(real_t time, const Vector &slip_owned, Vector &b) const;

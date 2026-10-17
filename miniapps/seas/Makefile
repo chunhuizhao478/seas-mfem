@@ -890,7 +890,8 @@ FAULT_HEADERS = fault/fault_geometry.hpp \
 # Phase 4: SEAS operator
 SOLVER_HEADERS = solver/seas_operator.hpp \
                  solver/seas_bdrload_operator.hpp \
-                 solver/time_stepper.hpp
+                 solver/time_stepper.hpp \
+                 solver/qd_linear_solver.hpp
 
 # Phase 5: I/O
 IO_HEADERS = io/probe_output.hpp \
@@ -1059,6 +1060,10 @@ TEST_PARALLEL_ELAST_OBJ = $(TEST_PARALLEL_ELAST_SRC:.cpp=.o)
 # GPU plan G2: per-stage operators vs the face loops
 TEST_QD_STAGE_OPS_SRC = tests/parallel/test_qd_stage_operators.cpp
 TEST_QD_STAGE_OPS_OBJ = $(TEST_QD_STAGE_OPS_SRC:.cpp=.o)
+
+# GPU plan G3a: cuDSS against MUMPS on the BP5 stiffness
+TEST_CUDSS_VS_MUMPS_SRC = tests/parallel/test_cudss_vs_mumps.cpp
+TEST_CUDSS_VS_MUMPS_OBJ = $(TEST_CUDSS_VS_MUMPS_SRC:.cpp=.o)
 
 # Parallel wave operator tests (dynamic rupture)
 TEST_PARALLEL_WAVE_SRC = tests/parallel/test_parallel_wave_operator.cpp
@@ -5394,6 +5399,19 @@ test-qd-stage-operators: seas_test_qd_stage_operators
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_qd_stage_operators --partition fault
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_qd_stage_operators
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_qd_stage_operators --partition fault
+
+# GPU plan G3a: cuDSS against MUMPS (a GPU build; on 1 and 2 GPUs)
+seas_test_cudss_vs_mumps: $(TEST_CUDSS_VS_MUMPS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_CUDSS_VS_MUMPS_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+$(TEST_CUDSS_VS_MUMPS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+test-cudss-vs-mumps: seas_test_cudss_vs_mumps
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_cudss_vs_mumps
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_cudss_vs_mumps
 
 # Parallel wave operator tests (dynamic rupture)
 # Match the serial rule (line 847): the test instantiates
