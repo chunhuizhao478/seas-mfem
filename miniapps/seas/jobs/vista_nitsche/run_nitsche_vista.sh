@@ -1,10 +1,11 @@
 #!/bin/bash
 # Shared body of the Vista benchmark jobs (Chunhui Zhao, 2026-10-16).  Sourced by
-# tpv{205,104}_200m_p{1,2}.sbatch and tpv{205,104}_100m_p1.sbatch, which set PROB, DECK, MESH, ORDER,
-# TFINAL and RES (default 200m).
+# tpv{205,104}_200m_p{1,2}.sbatch, tpv{205,104}_100m_p1.sbatch and tpv{205,104}_mirror_*.sbatch, which set
+# PROB, DECK, MESH, ORDER, TFINAL and RES (default 200m).
 # Runs only from a clean pushed checkout (repo CLAUDE.md guard) whose driver was built at
 # the same commit (build_verify_vista.sbatch writes miniapps/seas/BUILD_COMMIT_VISTA) and
-# whose mesh checksum is in MESH_SHA256_VISTA (meshes made on Vista) or jobs/vista_nitsche/meshes.sha256
+# whose mesh checksum is in MESH_SHA256_VISTA or MESH_SHA256_MIRROR_VISTA (meshes made on Vista by
+# build_verify_vista.sbatch and make_mirror_meshes_vista.sbatch) or jobs/vista_nitsche/meshes.sha256
 # (meshes copied in).  Every log records the commit and the mesh sha256.
 export LC_ALL=C LANG=C
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1      # one thread per MPI rank
@@ -30,10 +31,10 @@ echo "host $(hostname)  nodes $SLURM_JOB_NUM_NODES  ranks $SLURM_NTASKS"
 [ -x ./seas_nitsche_dyn_driver ] || { echo "ERROR: seas_nitsche_dyn_driver not built"; exit 2; }
 [ "$(cat BUILD_COMMIT_VISTA 2>/dev/null)" = "$HEAD" ] \
    || { echo "ERROR: driver built at '$(cat BUILD_COMMIT_VISTA 2>/dev/null)', checkout is $HEAD; rerun build_verify_vista.sbatch"; exit 2; }
-[ -f "$MESH" ] || { echo "ERROR: $MESH missing; build_verify_vista.sbatch generates the 200 m meshes, the 100 m ones are copied in"; exit 2; }
+[ -f "$MESH" ] || { echo "ERROR: $MESH missing; build_verify_vista.sbatch generates the 200 m meshes, make_mirror_meshes_vista.sbatch the mirror ones, the 100 m ones are copied in"; exit 2; }
 SHA=$(sha256sum "$MESH" | cut -d' ' -f1)
-grep -q "^$SHA  $MESH\$" MESH_SHA256_VISTA jobs/vista_nitsche/meshes.sha256 2>/dev/null \
-   || { echo "ERROR: $MESH sha256 $SHA not in MESH_SHA256_VISTA or jobs/vista_nitsche/meshes.sha256"; exit 2; }
+grep -q "^$SHA  $MESH\$" MESH_SHA256_VISTA MESH_SHA256_MIRROR_VISTA jobs/vista_nitsche/meshes.sha256 2>/dev/null \
+   || { echo "ERROR: $MESH sha256 $SHA not in MESH_SHA256_VISTA, MESH_SHA256_MIRROR_VISTA or jobs/vista_nitsche/meshes.sha256"; exit 2; }
 echo "deck $DECK  mesh $MESH sha256 $SHA  order $ORDER  tfinal $TFINAL"
 module purge; module load TACC
 module swap nvidia gcc/14.2.0 2>/dev/null || module load gcc/14.2.0
