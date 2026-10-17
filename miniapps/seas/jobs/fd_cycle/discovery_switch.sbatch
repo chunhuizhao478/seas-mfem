@@ -13,9 +13,9 @@
 # (damped: Kelvin-Voigt 0.1 + Prakash-Clifton), the switch back to QD once max
 # V has stayed below V_off = 1 mm/s for 10 s, then QD for 50 yr
 # (config/fd_cycle/bp5_fd_p3.toml as committed).  The switch probe measures
-# the tau and V jump at the stations for V_off {0.3, 1, 3} mm/s x T_dwell
-# {0.1, 1, 10} s; the dynamic phase runs on until every pair has switched or
-# T_max = 1200 s, and the output files stop at the deck's switch.
+# the tau and V jump at the stations for V_off {1, 3} mm/s x T_dwell
+# {0.1, 1, 10} s; the deck's own pair (1 mm/s, 10 s) switches last, so the
+# dynamic phase ends at the deck's switch.
 # Expected: the switch near t = 288.6 s (the Mac P2 run of the same event);
 # exit 0 at t_final, 7 if the QD balance right after the switch is at or above
 # V_on (the guard), 6 at a later QD -> dynamic switch (P4, not before ~225 yr).

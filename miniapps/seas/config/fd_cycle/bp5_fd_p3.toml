@@ -2,7 +2,7 @@
 # the first event dynamic from t = 0 (as bp5_fd_first_event.toml), then the
 # switch back to QD at the end of the phase (plan 6.3) and 50 yr of QD.
 # The switch probe measures the jump in tau and V at every station for
-# V_off in {3e-4, 1e-3, 3e-3} m/s and T_dwell in {0.1, 1, 10} s; the run
+# V_off in {1e-3, 3e-3} m/s and T_dwell in {0.1, 1, 10} s; the run
 # itself switches back with [cycle.switch]'s V_off = 1e-3, T_dwell = 10.
 #
 # Run from miniapps/seas:
@@ -128,10 +128,11 @@ T_min              = 0.0
 T_max              = 1200.0
 max_dynamic_phases = 0
 
-# The switch probe (plan P3): the dynamic phase runs on until all nine pairs
-# have switched (or T_max); the files stop at the deck pair's switch.
+# The switch probe (plan P3): the dynamic phase runs on until all six pairs
+# have switched (or T_max); the deck's own pair (1e-3, 10) switches last, so
+# the phase ends at the deck's switch.
 [cycle.probe]
-V_off   = [3.0e-4, 1.0e-3, 3.0e-3]
+V_off   = [1.0e-3, 3.0e-3]
 T_dwell = [0.1, 1.0, 10.0]
 
 [cycle.qd]
