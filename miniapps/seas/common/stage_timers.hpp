@@ -19,12 +19,26 @@
 // (SetDeviceSync), called at every start and stop, so asynchronous kernels
 // are charged to the part that launched them.  An operator holding a null
 // StageTimers pointer does no timing at all.
+//
+// GPU plan G4: in a CUDA build each timed part is also an NVTX range named
+// "seas:<part>", so an Nsight Systems trace shows which part made each
+// host-device copy (jobs/vista/g4_trace_check.py).  NVTX v3 is header-only
+// and costs next to nothing when no profiler is attached.
 
 #ifndef MFEM_SEAS_STAGE_TIMERS_HPP
 #define MFEM_SEAS_STAGE_TIMERS_HPP
 
+#include "mfem.hpp"
+
 #include <array>
 #include <chrono>
+
+#if defined(MFEM_USE_CUDA) && defined(__has_include)
+#if __has_include(<nvtx3/nvToolsExt.h>)
+#include <nvtx3/nvToolsExt.h>
+#define SEAS_HAVE_NVTX 1
+#endif
+#endif
 
 namespace mfem
 {
@@ -62,12 +76,28 @@ public:
       return names[p];
    }
 
+   /// NVTX range name of part @a p: "seas:" + Name(p).
+   static const char *NvtxName(int p)
+   {
+      static const char *names[NumParts] =
+      {
+         "seas:matrix_setup", "seas:slip_expand", "seas:slip_rhs",
+         "seas:dirichlet_rhs", "seas:solve", "seas:solve_post",
+         "seas:traction", "seas:friction", "seas:stage_total",
+         "seas:monitor_total", "seas:monitor_output", "seas:monitor_checkpoint"
+      };
+      return names[p];
+   }
+
    /// Wait for the device at every Start and Stop (nullptr: never).
    void SetDeviceSync(void (*sync)()) { sync_ = sync; }
 
    void Start(Part p)
    {
       if (sync_) { sync_(); }
+#ifdef SEAS_HAVE_NVTX
+      nvtx_[p] = nvtxRangeStartA(NvtxName(p));
+#endif
       start_[p] = Now();
    }
 
@@ -76,6 +106,9 @@ public:
       if (sync_) { sync_(); }
       seconds_[p] += Now() - start_[p];
       calls_[p]++;
+#ifdef SEAS_HAVE_NVTX
+      nvtxRangeEnd(nvtx_[p]);
+#endif
    }
 
    double Seconds(int p) const { return seconds_[p]; }
@@ -104,6 +137,9 @@ private:
    std::array<double, NumParts> start_{};
    std::array<double, NumParts> seconds_{};
    std::array<long long, NumParts> calls_{};
+#ifdef SEAS_HAVE_NVTX
+   std::array<nvtxRangeId_t, NumParts> nvtx_{};
+#endif
 };
 
 /// RAII helper: times one part when @a timers is non-null.
@@ -123,6 +159,35 @@ public:
 private:
    StageTimers *timers_;
    StageTimers::Part part_;
+};
+
+/// RAII helper: an NVTX range around a span that is not a timed part (GPU
+/// plan G4); nothing outside a CUDA build.
+class NvtxRange
+{
+public:
+   explicit NvtxRange(const char *name)
+   {
+#ifdef SEAS_HAVE_NVTX
+      id_ = nvtxRangeStartA(name);
+#else
+      (void) name;
+#endif
+   }
+   ~NvtxRange()
+   {
+#ifdef SEAS_HAVE_NVTX
+      nvtxRangeEnd(id_);
+#endif
+   }
+
+   NvtxRange(const NvtxRange &) = delete;
+   NvtxRange &operator=(const NvtxRange &) = delete;
+
+#ifdef SEAS_HAVE_NVTX
+private:
+   nvtxRangeId_t id_;
+#endif
 };
 
 } // namespace seas

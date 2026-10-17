@@ -248,6 +248,8 @@ SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::SEASQuasiDynamicO
 
    // Allocate work vectors (sized for slip/traction components)
    slip_.SetSize(fault_->SlipSize());
+   // GPU plan G4: GetSlip fills slip_ on the device when there is one.
+   slip_.UseDevice(true);
    local_slip_.SetSize(domain_->NumSlipComponents() * domain_->GetNumFaultDOFs());
    traction_.SetSize(fault_->TractionSize());
    local_traction_.SetSize(domain_->NumSlipComponents() * domain_->GetNumFaultDOFs());
@@ -364,17 +366,14 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
 
    // 1. Extract slip from state vector
    if (stage_timers_) { stage_timers_->Start(StageTimers::SlipExpand); }
-   // Under PETSc TS on a CUDA device, state is a PetscParVector whose valid
-   // copy may be on the GPU; the fault loops index it on the host.
-   state.HostRead();
-   // GetSlip writes every entry on the host; with the stage operators on a
-   // GPU the previous stage left slip_ on the device (B·δ, C_δ·δ read it
-   // there), so mark the host copy as the one being written.
-   slip_.HostWrite();
+   // GPU plan G4: GetSlip and the fault RHS read state where it is (under
+   // PETSc TS on a GPU, a PetscParVector on the device), so nothing
+   // state-sized crosses to the host here.
    fault_->GetSlip(state, slip_);
 
    // Debug: check for NaN in slip before domain solve
 #ifndef NDEBUG
+   slip_.HostRead();
    for (int i = 0; i < slip_.Size(); i++)
    {
       MFEM_VERIFY(std::isfinite(slip_(i)),
@@ -409,6 +408,11 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
       if (stage_timers_) { stage_timers_->Start(StageTimers::Traction); }
       if (face_tracer_ && face_tracer_->IsActive())
       {
+         // GPU plan G4: the tracer reads the fault vectors on the host every
+         // stage, which a GPU run must not do.
+         MFEM_VERIFY(!Device::Allows(Backend::CUDA_MASK | Backend::HIP_MASK),
+                     "the face tracer reads the fault vectors on the host "
+                     "every stage; run it without a GPU device");
          // Decomposed traction for face tracer (including normal decomposition)
          domain_->ComputeTractionDiagnostics(
             *u_gf_, local_slip_, local_traction_,
@@ -482,10 +486,14 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
    // v51: Zero dip traction component (index 0 of each DOF's [dip, strike] pair)
    if (zero_dip_traction_)
    {
-      for (int i = 0; i < traction_.Size() / 2; i++)
+      // GPU plan G4: a kernel, on the device when there is one.
+      const bool use_dev = Device::Allows(Backend::DEVICE_MASK);
+      real_t *T = traction_.ReadWrite(use_dev);
+      forall_switch(use_dev, traction_.Size() / 2,
+                    [=] MFEM_HOST_DEVICE (int i)
       {
-         traction_(2 * i) = 0.0;  // tau_dip = 0
-      }
+         T[2 * i] = 0.0;  // tau_dip = 0
+      });
    }
 
    // v51: Dump dip/strike traction ratio during coseismic phase
@@ -496,6 +504,7 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
       if (mpi_ctx_) { v_max = fault_->GetGlobalMaxSlipRate(); }
       if (v_max > coseismic_v_threshold_)
       {
+         traction_.HostRead();
          int n_dofs = traction_.Size() / 2;
          real_t sum_ratio = 0.0;
          real_t max_ratio = 0.0;
@@ -545,9 +554,6 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
    // v51: pass elastic normal traction for sigma_n feedback (nullptr = use constant)
    {
       ScopedStageTimer timer(stage_timers_, StageTimers::Friction);
-      // ComputeRHS overwrites every entry of rate on the host; HostWrite()
-      // tells PETSc so (otherwise it keeps using a stale GPU copy).
-      rate.HostWrite();
       fault_->ComputeRHS(traction_, state, rate,
                           elastic_sigma_n_ ? &normal_traction_ : nullptr);
    }
@@ -559,6 +565,7 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
       if (stage_count < 10 && domain_->IsFirstStepDebugEnabled())
       {
          stage_count++;
+         traction_.HostRead();
          real_t trac_l1 = 0.0, trac_linf = 0.0;
          for (int i = 0; i < traction_.Size(); i++)
          {
@@ -568,6 +575,7 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
          }
          real_t V_l1 = 0.0, V_linf = 0.0;
          const Vector &V = fault_->GetSlipRate();
+         V.HostRead();
          for (int i = 0; i < V.Size(); i++)
          {
             real_t a = std::abs(V(i));
@@ -616,6 +624,9 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
    // Face tracer: stage decomposition data for committed step
    if (face_tracer_ && face_tracer_->IsActive())
    {
+      traction_.HostRead();
+      normal_traction_.HostRead();
+      fault_->GetSlipRate().HostRead();
       face_tracer_->RecordMult(
          traction_, traction_stress_, traction_correction_,
          jump_residual_, normal_traction_,

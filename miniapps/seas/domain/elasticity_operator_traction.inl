@@ -316,6 +316,9 @@ void ElasticityDomainOperator<MeshType>::RestrictToOwnedFault(
                << ", expected " << comps_per_dof * num_fault_dofs_);
 
    owned_data.SetSize(comps_per_dof * num_owned_fault_dofs_);
+   // Host loop (GPU plan G4: host loops say so).
+   local_data.HostRead();
+   owned_data.HostWrite();
    for (int owned_dof = 0; owned_dof < num_owned_fault_dofs_; owned_dof++)
    {
       const int local_dof = owned_fault_dof_to_local_dof_[owned_dof];
@@ -338,6 +341,10 @@ void ElasticityDomainOperator<MeshType>::ExpandOwnedToLocalFault(
 
    local_data.SetSize(comps_per_dof * num_fault_dofs_);
    local_data = 0.0;
+   // Host loop (GPU plan G4: host loops say so; GetSlip may have filled
+   // owned_data on the device).
+   owned_data.HostRead();
+   local_data.HostReadWrite();
 
    for (int owned_dof = 0; owned_dof < num_owned_fault_dofs_; owned_dof++)
    {

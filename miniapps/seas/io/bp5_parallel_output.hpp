@@ -222,6 +222,21 @@ public:
       }
    }
 
+   /// @brief Whether Write() at @a time writes: the adaptive schedule,
+   /// agreed over the ranks.  Collective.  (GPU plan G4: the TS monitor
+   /// asks first, and copies the state to the host only when it does.)
+   bool WriteDue(real_t time, real_t global_V_max) const
+   {
+      real_t dt_out = BP5BenchmarkOutput<Mesh>::OutputInterval(global_V_max);
+      int should_write =
+         (time - last_write_time_ >= dt_out * kOutputTimeTolerance) ? 1 : 0;
+#ifdef SEAS_USE_MPI
+      MPI_Allreduce(MPI_IN_PLACE, &should_write, 1, MPI_INT, MPI_MAX,
+                    mpi_ctx_.GetComm());
+#endif
+      return should_write != 0;
+   }
+
    /// @brief Write output if adaptive schedule requires it.
    ///
    /// Each rank evaluates owned stations from local data — no gather.
@@ -236,14 +251,7 @@ public:
               const Vector &traction, const Vector *normal_traction,
               real_t global_V_max)
    {
-      real_t dt_out = BP5BenchmarkOutput<Mesh>::OutputInterval(global_V_max);
-      int should_write =
-         (time - last_write_time_ >= dt_out * kOutputTimeTolerance) ? 1 : 0;
-#ifdef SEAS_USE_MPI
-      MPI_Allreduce(MPI_IN_PLACE, &should_write, 1, MPI_INT, MPI_MAX,
-                    mpi_ctx_.GetComm());
-#endif
-      if (!should_write) { return false; }
+      if (!WriteDue(time, global_V_max)) { return false; }
 
       if (!owned_stations_.empty())
       {
@@ -274,6 +282,10 @@ public:
          fault.GetTheta(state, local_theta);
          Vector local_V;
          fault.RecomputeSlipRate(traction, state, local_V, normal_traction);
+         // GPU plan G4: the re-solve runs where the data is; the station
+         // loop below reads V and the traction on the host.
+         local_V.HostRead();
+         traction.HostRead();
          int N = fault.NumNodes();
 
          Vector slip_dip(N), slip_strike(N), V_dip(N), V_strike(N);

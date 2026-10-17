@@ -72,6 +72,13 @@ inline void WriteCheckpoint(const std::string &prefix,
 
    out << std::setprecision(17) << std::scientific;
 
+   // GPU plan G4: the vectors may be valid on the device only; this writer
+   // reads them on the host.
+   state.HostRead();
+   traction.HostRead();
+   slip_rate.HostRead();
+   k0.HostRead();
+
    // Header
    out << "SEAS_CHECKPOINT_V1\n";
    out << "num_ranks " << size << "\n";
@@ -182,6 +189,8 @@ inline bool ReadCheckpoint(const std::string &prefix,
       int n;
       in >> n;
       vec.SetSize(n);
+      // GPU plan G4: written on the host; a device copy is now stale.
+      vec.HostWrite();
       for (int i = 0; i < n; i++)
       {
          in >> vec(i);

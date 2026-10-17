@@ -470,8 +470,13 @@ void ElasticityDomainOperator<MeshType>::EvaluateQDDirichletValues(
       const bool gpu = Device::Allows(Backend::CUDA_MASK | Backend::HIP_MASK);
       if (gpu) { MFEM_DEVICE_SYNC; }
       const double t1 = MPI_Wtime();
-      ops.g.Read();
-      if (gpu) { MFEM_DEVICE_SYNC; }
+      {
+         // The one planned host-to-device copy in a stage (GPU plan G3a);
+         // its own NVTX range, so the G4 trace check can tell it apart.
+         NvtxRange range("seas:g_copy");
+         ops.g.Read();
+         if (gpu) { MFEM_DEVICE_SYNC; }
+      }
       ops.g_copy_seconds += MPI_Wtime() - t1;
    }
 }
@@ -533,9 +538,6 @@ void ElasticityDomainOperator<MeshType>::SolveStage(
    SolveLoadedRHS(displacement);
    ScopedStageTimer timer(stage_timers_, StageTimers::Traction);
    QDStageTraction(X_, slip_owned, traction_owned, normal_owned);
-   // Friction reads T and T_n on the host; on a device, copy them back.
-   traction_owned.HostRead();
-   if (normal_owned) { normal_owned->HostRead(); }
 }
 
 template <typename MeshType>

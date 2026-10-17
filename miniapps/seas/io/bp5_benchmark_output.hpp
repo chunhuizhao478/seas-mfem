@@ -602,6 +602,9 @@ public:
       // the same evaluation enters sigma_n_eff as in ComputeRHS().
       Vector slip_rate;
       fault.RecomputeSlipRate(traction, state, slip_rate, normal_traction);
+      // GPU plan G4: WriteRow reads V and the traction on the host.
+      slip_rate.HostRead();
+      traction.HostRead();
 
       const Vector &tau_pre = fault.GetGeometry()->GetTauPre(); // [2*N]
 

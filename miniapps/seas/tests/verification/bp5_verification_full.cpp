@@ -703,7 +703,8 @@ struct BP5MonitorCtx
 {
    // Core objects (non-owning)
    MPIContext *mpi;
-   Vector *state;                                       // shares memory with PETSc Vec
+   Vector *state;   // shares its host array with PETSc's solution Vec; read
+                    // it through MonitorHostState() (GPU plan G4)
    ParallelBP5BenchmarkOutput *bench_out;
    seas::FaceTraceLogger<ParMesh> *face_tracer;
    RateStateFaultOperator<ParMesh, 2> *fault_op;
@@ -740,10 +741,53 @@ struct BP5MonitorCtx
    int restart_rejections_carryover = 0;                 // R-303 / R-005
 
    G0Measure *g0 = nullptr;  // --stage-timers / --check-accepted-state
+
+   Array<int> nan_workspace;    // the NaN check's reduction (GPU plan G4)
+   bool state_on_host = false;  // MonitorHostState() ran in this call
 };
+
+/// GPU plan G4: the accepted state on the host, for the parts of the monitor
+/// that need it there (output, checkpoint, tracer, the G0 check).  Run()
+/// placed the driver's state host array in PETSc's solution Vec u; on a GPU,
+/// PETSc's current copy may be on the device while state's flags still say
+/// host-valid.  Reading u on the host brings it into state's array (a copy
+/// only when PETSc's copy is on the GPU), and HostReadWrite() then drops any
+/// device copy of state, so a kernel that reads state copies the current
+/// values.  Once per monitor call; ReleaseMonitorState() ends it.
+static const Vector &MonitorHostState(Vec u, BP5MonitorCtx &mon)
+{
+   Vector &state = *mon.state;
+   if (mon.state_on_host) { return state; }
+   const PetscScalar *u_host = nullptr;
+   PetscErrorCode ierr = VecGetArrayRead(u, &u_host);
+   MFEM_VERIFY(ierr == PETSC_SUCCESS, "VecGetArrayRead(u) failed");
+   const bool aliased = state.Size() == 0 ||
+                        static_cast<const void *>(u_host) ==
+                        static_cast<const void *>(state.GetData());
+   ierr = VecRestoreArrayRead(u, &u_host);
+   MFEM_VERIFY(ierr == PETSC_SUCCESS, "VecRestoreArrayRead(u) failed");
+   MFEM_VERIFY(aliased, "PETSc's solution Vec is not placed on the "
+               "driver's state vector; the monitor would read stale data");
+   state.HostReadWrite();
+   mon.state_on_host = true;
+   return state;
+}
+
+/// GPU plan G4: at the end of a monitor call that read the state, hand the
+/// host array back to PETSc: kernels that read state since left a device
+/// copy (which the debug device guards by protecting the host pages that
+/// PETSc writes next).
+static void ReleaseMonitorState(BP5MonitorCtx &mon)
+{
+   if (!mon.state_on_host) { return; }
+   mon.state->HostReadWrite();
+   mon.state_on_host = false;
+}
 
 /// Body of the PETSc TSMonitor callback below.
 /// Matches Tandem's MonitorQD::monitor pattern: read state, do I/O.
+/// GPU plan G4: each accepted step reads only V_max and a non-finite flag;
+/// the state comes to the host (MonitorHostState) only for output.
 static PetscErrorCode bp5_ts_monitor_body(
    TS ts, PetscInt step, PetscReal time, Vec u, void *ctx)
 {
@@ -751,8 +795,6 @@ static PetscErrorCode bp5_ts_monitor_body(
    auto *mon = static_cast<BP5MonitorCtx*>(ctx);
    seas::StageTimers *timers = mon->g0 ? mon->g0->Timers() : nullptr;
 
-   // state already reflects the accepted step (PlaceMemory shares memory).
-   Vector &state  = *mon->state;
    auto   &mpi    = *mon->mpi;
 
    // Get dt for console output
@@ -763,19 +805,40 @@ static PetscErrorCode bp5_ts_monitor_body(
    // Face tracer
    if (mon->face_tracer->IsActive())
    {
-      mon->face_tracer->CommitStep(static_cast<int>(step), time, state, false);
+      mon->face_tracer->CommitStep(static_cast<int>(step), time,
+                                   MonitorHostState(u, *mon), false);
    }
 
-   // V_max & NaN check
+   // V_max & NaN check.  GPU plan G4: the check covers the whole state, in
+   // a reduction over PETSc's current copy of it, wherever that is (it was
+   // the first 100 entries, on the host).
    real_t V_max = mon->seas_op->GetMaxSlipRate();
    {
       bool has_nan = !std::isfinite(V_max);
       if (!has_nan)
       {
-         for (int i = 0; i < std::min(state.Size(), 100); i++)
+         const PetscScalar *X = nullptr;
+         PetscMemType mtype;
+         PetscInt n = 0;
+         PetscErrorCode ierr = VecGetLocalSize(u, &n);
+         MFEM_VERIFY(ierr == PETSC_SUCCESS, "VecGetLocalSize(u) failed");
+         ierr = VecGetArrayReadAndMemType(u, &X, &mtype);
+         MFEM_VERIFY(ierr == PETSC_SUCCESS,
+                     "VecGetArrayReadAndMemType(u) failed");
+         const bool use_dev = PetscMemTypeDevice(mtype);
+         MFEM_VERIFY(!use_dev ||
+                     Device::Allows(Backend::CUDA_MASK | Backend::HIP_MASK),
+                     "PETSc keeps the state on a device MFEM does not use");
+         int non_finite = 0;
+         reduce(static_cast<int>(n), non_finite,
+                [=] MFEM_HOST_DEVICE (int i, int &r)
          {
-            if (!std::isfinite(state(i))) { has_nan = true; break; }
-         }
+            r |= std::isfinite(X[i]) ? 0 : 1;
+         }, BOrReducer<int>{}, use_dev, mon->nan_workspace);
+         ierr = VecRestoreArrayReadAndMemType(u, &X);
+         MFEM_VERIFY(ierr == PETSC_SUCCESS,
+                     "VecRestoreArrayReadAndMemType(u) failed");
+         has_nan = (non_finite != 0);
       }
       int local_nan = has_nan ? 1 : 0;
       int global_nan = mpi.GlobalSumInt(local_nan);
@@ -823,13 +886,16 @@ static PetscErrorCode bp5_ts_monitor_body(
    if (timers) { timers->Start(seas::StageTimers::MonitorOutput); }
    if (mon->write_every_step)
    {
-      mon->bench_out->ForceWrite(time, state, *mon->fault_op,
+      mon->bench_out->ForceWrite(time, MonitorHostState(u, *mon),
+                                 *mon->fault_op,
                                  mon->seas_op->GetTraction(),
                                  mon->seas_op->GetFrictionNormalTraction(),
                                  V_max);
       mon->bench_out->Flush();
    }
-   else if (mon->bench_out->Write(time, state, *mon->fault_op,
+   else if (mon->bench_out->WriteDue(time, V_max) &&
+            mon->bench_out->Write(time, MonitorHostState(u, *mon),
+                                  *mon->fault_op,
                                   mon->seas_op->GetTraction(),
                                   mon->seas_op->GetFrictionNormalTraction(),
                                   V_max))
@@ -837,9 +903,12 @@ static PetscErrorCode bp5_ts_monitor_body(
       mon->bench_out->Flush();
    }
 
-   // ParaView output (adaptive schedule, MPI-collective)
+   // ParaView output (adaptive schedule, MPI-collective).  It writes
+   // mon->state; its volume path reads the state before it asks the
+   // schedule, so with ParaView on, the state comes to the host every step.
    if (mon->paraview_write_fn)
    {
+      MonitorHostState(u, *mon);
       mon->paraview_write_fn(static_cast<int>(step), time, V_max);
    }
 
@@ -862,7 +931,7 @@ static PetscErrorCode bp5_ts_monitor_body(
       Vector empty_k0;
       WriteCheckpoint(mon->full_prefix, time, mon->current_dt,
                       istep, mon->num_seismic_events, mon->in_seismic_event,
-                      state, u_vec,
+                      MonitorHostState(u, *mon), u_vec,
                       mon->seas_op->GetTraction(), mon->fault_op->GetSlipRate(),
                       false, empty_k0, mon->mpi);
 
@@ -950,32 +1019,27 @@ static PetscErrorCode bp5_ts_monitor_callback(
    {
       seas::ScopedStageTimer timer(g0 ? g0->Timers() : nullptr,
                                    seas::StageTimers::MonitorTotal);
-      // The driver's state is the host array that Run() placed in PETSc's
-      // solution Vec u.  On a CUDA device PETSc's current copy may be on the
-      // GPU while state's own flags still say host-valid, so state.HostRead()
-      // would not fetch it.  Sync through u instead (GPU -> state's array);
-      // a no-op on the CPU.  Covers the body and CheckAcceptedState below.
-      const PetscScalar *u_host = nullptr;
-      ierr = VecGetArrayRead(u, &u_host);
-      MFEM_VERIFY(ierr == PETSC_SUCCESS, "VecGetArrayRead(u) failed");
-      const bool aliased = mon->state->Size() == 0 ||
-                           static_cast<const void *>(u_host) ==
-                           static_cast<const void *>(mon->state->GetData());
-      ierr = VecRestoreArrayRead(u, &u_host);
-      MFEM_VERIFY(ierr == PETSC_SUCCESS, "VecRestoreArrayRead(u) failed");
-      MFEM_VERIFY(aliased, "PETSc's solution Vec is not placed on the "
-                  "driver's state vector; the monitor would read stale data");
       ierr = bp5_ts_monitor_body(ts, step, time, u, ctx);
    }
-   if (ierr != PETSC_SUCCESS || !g0) { return ierr; }
+   if (ierr != PETSC_SUCCESS || !g0)
+   {
+      ReleaseMonitorState(*mon);
+      return ierr;
+   }
    TSConvergedReason reason;
    TSGetConvergedReason(ts, &reason);
-   if (reason < 0) { return ierr; }  // NaN abort in the body
+   if (reason < 0)  // NaN abort in the body
+   {
+      ReleaseMonitorState(*mon);
+      return ierr;
+   }
    if (g0->check_accepted_state)
    {
-      CheckAcceptedState(*g0, *mon->seas_op, *mon->fault_op, *mon->state,
-                         time, static_cast<int>(step), *mon->mpi);
+      CheckAcceptedState(*g0, *mon->seas_op, *mon->fault_op,
+                         MonitorHostState(u, *mon), time,
+                         static_cast<int>(step), *mon->mpi);
    }
+   ReleaseMonitorState(*mon);
    if (g0->TimersOn() && step > 0 && step % g0->timer_interval == 0)
    {
       PrintStageTimers(*g0, static_cast<int>(step), "every N steps",
@@ -1479,6 +1543,18 @@ int main(int argc, char *argv[])
    }
    Device device(device_str, device_id);
    if (mpi.IsRoot()) { device.Print(); }
+   // GPU plan G4: on a device the fault RHS writes its rate there, and only
+   // PETSc TS keeps the time-stepping vectors there too; the in-house RK45
+   // reads them on the host.
+   if (Device::Allows(Backend::DEVICE_MASK) && !use_petsc_ts)
+   {
+      if (mpi.IsRoot())
+      {
+         std::cerr << "ERROR: --device " << device_str << " needs --petsc-ts "
+                   << "(the in-house RK45 steps on the host).\n";
+      }
+      return 2;
+   }
 
 #ifndef MFEM_USE_PETSC
    if (use_petsc_ts)
@@ -2246,6 +2322,7 @@ int main(int argc, char *argv[])
       std::mt19937_64 gen(static_cast<std::uint64_t>(perturb_seed)
                           + 1000003ULL * static_cast<std::uint64_t>(mpi.Rank()));
       std::uniform_real_distribution<double> dist(-1.0, 1.0);
+      state.HostReadWrite();  // GPU plan G4: host loop
       for (int i = 0; i < state.Size(); i++)
       {
          state(i) *= 1.0 + 1e-15 * dist(gen);
@@ -2689,6 +2766,7 @@ int main(int argc, char *argv[])
       std::ofstream vtp(vtp_file);
       vtp << "owned_dof,x2,x3,param_a,param_Dc,psi_init\n";
       vtp << std::setprecision(10);
+      state.HostRead();  // GPU plan G4: host loop
       for (int i = 0; i < n_owned; i++)
       {
          real_t psi_i = state(i * 3 + 2);  // BP5: [slip_dip, slip_strike, psi]
@@ -2742,6 +2820,7 @@ int main(int argc, char *argv[])
             const int spn = 3;  // BP5: [slip_dip, slip_strike, psi]
             const int n_owned = fault_op.NumNodes();
             Vector owned_psi(n_owned);
+            state.HostRead();  // GPU plan G4: host loop
             for (int i = 0; i < n_owned; i++)
             {
                owned_psi(i) = state(i * spn + 2);
@@ -2792,6 +2871,7 @@ int main(int argc, char *argv[])
          const int spn = 3;  // BP5: [slip_dip, slip_strike, psi]
          const int n_owned = fault_op.NumNodes();
          Vector owned_psi(n_owned);
+         state.HostRead();  // GPU plan G4: host loop
          for (int i = 0; i < n_owned; i++)
          {
             owned_psi(i) = state(i * spn + 2);
@@ -3293,7 +3373,17 @@ int main(int argc, char *argv[])
                      "restart_prefix.empty().");
       }
 
-      petsc_ode->Run(state, t, current_dt, t_final);
+      // GPU plan G4: SetInitialCondition may have left a device copy of
+      // state; mark the host copy current so Run() places the host array in
+      // PETSc's solution Vec on every backend (PETSc moves it to the GPU
+      // itself), as before G4.
+      state.HostReadWrite();
+      {
+         // The whole TSSolve as one NVTX range: the G4 trace check counts
+         // the copies inside it (jobs/vista/g4_trace_check.py).
+         seas::NvtxRange ts_range("seas:ts_solve");
+         petsc_ode->Run(state, t, current_dt, t_final);
+      }
 
       // Retrieve final step count and rejection count from PETSc
       {
