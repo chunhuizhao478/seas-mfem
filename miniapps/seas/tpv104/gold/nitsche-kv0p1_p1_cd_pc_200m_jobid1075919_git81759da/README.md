@@ -1,6 +1,7 @@
 # TPV104 gold: Nitsche dynamic rupture, Kelvin-Voigt damping, p1, 200 m (Vista job 1075919)
 
-- Code: seas-mfem branch nitsche-benchmarks, commit 81759da, built on TACC Vista by
+- Code: seas-mfem branch nitsche-benchmarks, commit 81759da2fb36f180fbf3bdd087318b6d680b732f (81759da, on GitHub),
+  built on TACC Vista by
   jobs/vista_nitsche/build_verify_vista.sbatch (clean checkout, BUILD_COMMIT_VISTA = 81759da).
   Driver seas_nitsche_dyn_driver.
 - Deck and job script: jobs/ (= tpv104/configs/tpv104_nitsche.toml and jobs/vista_nitsche/{tpv104_200m_p1.sbatch,
@@ -24,4 +25,27 @@
   peak h-slip-rate 20.1 % (low at 8 of 9; within 10 % only at the hypocentre); noise RMS
   sigma_n / tau_h / tau_v 0.071 / 0.024 / 0.043 MPa (DRDG3D 0.019 / 0.030 / 0.025). Fails the pass test
   (arrival > 0.1 s at 3 stations, slip > 2 % at the 4 stations at +-12 km), as expected of the coarsest run.
+
+## Reproduce
+
+On Vista (login node for the network steps):
+
+    cd $WORK && git clone --recurse-submodules -b nitsche-benchmarks \
+        https://github.com/chunhuizhao478/seas-mfem.git seas-mfem-benchmarks
+    cd seas-mfem-benchmarks && git checkout 81759da2fb36f180fbf3bdd087318b6d680b732f
+    cd miniapps/seas/jobs/vista_nitsche && sbatch build_verify_vista.sbatch   # build, tpv104_200m.msh, gate tests
+    sbatch tpv104_200m_p1.sbatch
+
+build_verify_vista.sbatch generates tpv104/mesh/tpv104_200m.msh from the committed tpv104/mesh/tpv104_200m.geo with Vista's gmsh 4.15.0;
+gmsh output depends on the platform, so compare its sha256 with the one above. The job refuses to start unless
+the checkout is clean, HEAD is on GitHub and the driver was built at HEAD. Compare (from miniapps/seas, with
+D = this folder; rerunning it on these results/ reproduces compare.txt):
+
+    python3 -I scripts/compare_nitsche_fault_stations.py --stations tpv104/stations/tpv104_fault_stations.csv \
+        --prefix tpv104 --run vista_p1_200m=$D/results \
+        --ref drdg3d=tpv104/benchmark_data/DRDG3D --ref seissol=tpv104/benchmark_data/seisol \
+        --gold mixedflux_p1=tpv104/gold/mixedflux_p1_rk45_jobid7765845_git04674fc/results \
+        --gold mixedflux_p2=tpv104/gold/mixedflux_p2_rk45_jobid7765380_git04674fc/results \
+        --json compare_summary.json > compare.txt
+
 - Requested by Chunhui Zhao (TPV205/TPV104 benchmarks, 2026-10-16).

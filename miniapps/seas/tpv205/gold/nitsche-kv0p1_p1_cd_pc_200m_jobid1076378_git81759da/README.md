@@ -1,6 +1,7 @@
 # TPV205 gold: Nitsche dynamic rupture, Kelvin-Voigt damping, p1, 200 m (Vista job 1076378)
 
-- Code: seas-mfem branch nitsche-benchmarks, commit 81759da, built on TACC Vista by
+- Code: seas-mfem branch nitsche-benchmarks, commit 81759da2fb36f180fbf3bdd087318b6d680b732f (81759da, on GitHub),
+  built on TACC Vista by
   jobs/vista_nitsche/build_verify_vista.sbatch (clean checkout, BUILD_COMMIT_VISTA = 81759da).
   Driver seas_nitsche_dyn_driver.
 - Deck and job script: jobs/ (= tpv205/configs/tpv205_nitsche.toml and jobs/vista_nitsche/{tpv205_200m_p1.sbatch,
@@ -27,4 +28,27 @@
   (DRDG3D 100 m tau_h / tau_v 0.017 / 0.021). Fails the pass test (arrival > 0.1 s at 2 stations; slip > 2 %
   at 5 stations: the four at +-12 km, 2.8 to 5.4 % low, and x2 = -7.5 km at the surface, 2.5 %; peak within
   10 % at 2 of 16), as expected of the coarsest run.
+
+## Reproduce
+
+On Vista (login node for the network steps):
+
+    cd $WORK && git clone --recurse-submodules -b nitsche-benchmarks \
+        https://github.com/chunhuizhao478/seas-mfem.git seas-mfem-benchmarks
+    cd seas-mfem-benchmarks && git checkout 81759da2fb36f180fbf3bdd087318b6d680b732f
+    cd miniapps/seas/jobs/vista_nitsche && sbatch build_verify_vista.sbatch   # build, tpv2053d_200m.msh, gate tests
+    sbatch tpv205_200m_p1.sbatch
+
+build_verify_vista.sbatch generates tpv205/mesh/tpv2053d_200m.msh from the committed tpv205/mesh/tpv2053d_200m.geo with Vista's gmsh 4.15.0;
+gmsh output depends on the platform, so compare its sha256 with the one above. The job refuses to start unless
+the checkout is clean, HEAD is on GitHub and the driver was built at HEAD. Compare (from miniapps/seas, with
+D = this folder; rerunning it on these results/ reproduces compare.txt):
+
+    python3 -I scripts/compare_nitsche_fault_stations.py --stations tpv205/stations/tpv205_fault_stations.csv \
+        --prefix tpv205 --run vista_p1_200m=$D/results \
+        --ref drdg3d_100m=tpv205/benchmark_data/DRDG3D_100m_O4 --ref drdg3d_200m=tpv205/benchmark_data/DRDG3D_200m_O4 \
+        --gold mixedflux_p1=tpv205/gold/mixedflux_p1_rk45_jobidcombined_7762879_7763019_git04674fc/results \
+        --gold mixedflux_p2=tpv205/gold/mixedflux_p2_rk45_jobid7762880_git04674fc/results \
+        --peak-min-stations 14 --json compare_summary.json > compare.txt
+
 - Requested by Chunhui Zhao (TPV205/TPV104 benchmarks, 2026-10-16).
