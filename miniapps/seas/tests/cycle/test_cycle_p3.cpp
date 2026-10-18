@@ -301,7 +301,7 @@ void TestQDRestartAfterSwitch(Checker &c, const Setup &S, const cycle::CycleConf
       info.step = K;
       info.rejections = qd->Rejections();
       info.commit = SEAS_CYCLE_COMMIT;
-      info.ic = S.cfg.ic;
+      info.ic = S.cfg.IcLabel();
       info.dyn_phases = 1;
       cycle::CheckpointData cd;
       cd.state = qd->State();

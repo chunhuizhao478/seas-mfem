@@ -49,6 +49,17 @@
 //                   and V at every station to _switch_probe.txt.  The run
 //                   itself switches back with [cycle.switch]'s pair.
 //   [cycle.prestress] V_background (V_bg of psi0)                   [required]
+//                   eta_V_init: tau0 += eta |V_init| (BuildPrestress
+//                   include_eta: eq. 20, and eq. 23 with dtau = eta V_i, the
+//                   QD convention).  "gold" always adds it (false is
+//                   refused); with "scec_fd" it is false by default (eq. 22,
+//                   eq. 23 with dtau = 0) and true makes the dynamic regime
+//                   start the BP5 patch at V_i = 0.03 m/s from u = u' = 0 (the
+//                   balance tau0 - eta V = friction at t = 0 then holds at
+//                   V_init, as in SBEM and BICyclE) instead of the 0.015 m/s
+//                   of tau_i - eta V.  One tau0 for both regimes, the whole
+//                   run; checkpoints record the IC set as
+//                   "scec_fd+eta_V_init" (IcLabel)          [ic == "gold"]
 //   [cycle.fields]  V_init_dip, and the RectTaperFields a, Dc, V_init:
 //                   center, axis1, axis2 (3-vectors, global XYZ), half1,
 //                   half2, taper, eps, inside, outside               [required]
@@ -198,7 +209,7 @@ struct CycleConfig
    SwitchConfig switch_cfg;
    ProbeConfig probe;
    DynamicConfig dyn;
-   PrestressConfig prestress;     ///< include_eta follows ic
+   PrestressConfig prestress;     ///< include_eta: [cycle.prestress].eta_V_init
    FaultFieldsConfig fields;
    OutputConfig output;
    int checkpoint_every = 0;
@@ -210,6 +221,13 @@ struct CycleConfig
    int fault_attr = 3;
 
    bool IsGold() const { return ic == "gold"; }
+   /// The IC set as checkpoints record it: "scec_fd+eta_V_init" when
+   /// [cycle.prestress].eta_V_init adds eta |V_init| to the scec_fd tau0, so
+   /// a restart refuses a deck with the other prestress.
+   std::string IcLabel() const
+   {
+      return (prestress.include_eta && !IsGold()) ? ic + "+eta_V_init" : ic;
+   }
 
    static CycleConfig Load(const std::string &deck);
 };
@@ -480,10 +498,13 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
    MFEM_VERIFY(cy.contains("prestress"), "[cycle.prestress] is required");
    {
       const toml::value &p = cy.at("prestress");
-      OnlyKeys(p, "cycle.prestress", {"V_background"});
+      OnlyKeys(p, "cycle.prestress", {"V_background", "eta_V_init"});
       c.prestress.V_background = Real(p, "cycle.prestress", "V_background", 0.0, true);
       MFEM_VERIFY(c.prestress.V_background > 0.0, "[cycle.prestress].V_background must be > 0");
-      c.prestress.include_eta = c.IsGold();
+      c.prestress.include_eta = Bool(p, "cycle.prestress", "eta_V_init", c.IsGold());
+      MFEM_VERIFY(c.prestress.include_eta || !c.IsGold(),
+                  "[cycle.prestress].eta_V_init = false with ic = \"gold\": the gold IC set "
+                  "(Tandem convention) adds eta |V_init| to tau0");
    }
 
    MFEM_VERIFY(cy.contains("fields"), "[cycle.fields] is required");

@@ -12,12 +12,15 @@
 // (plan 6.3) and runs to t_final, with a checkpoint at the switch.  A QD
 // max V above V_on after that is the QD -> dynamic switch of P4, which
 // stops the run (exit 6).  [cycle.probe] adds the switch probe.
+// The first dynamic phase starts from u = u' = 0 and the QD balance at t = 0:
+// 0.015 m/s in the BP5 patch with the scec_fd prestress (eq. 23, dtau = 0),
+// V_i = 0.03 m/s with [cycle.prestress].eta_V_init = true (tau0 += eta V_i).
 //
 //   cfg   = CycleConfig::Load(deck)                  # [cycle] + shared sections
 //   mesh  = LoadScaledMesh([mesh].path, [cycle].mesh_scale);  ParMesh
 //   qd    = QDPhase(mesh, cfg)                       # domain + geometry (H1a ctor)
 //   par   = BuildFaultParams(qd.Table(), [friction.rate_state], [cycle.fields])
-//   pre   = BuildPrestress(par, ic set)
+//   pre   = BuildPrestress(par, ic set, [cycle.prestress].eta_V_init)
 //   qd.Setup(par, pre)                               # H1a, H1b, kernel, IC
 //   out   = FdCycleOutput(cfg.output, qd.LocateStations())
 //   restart: Checkpoint read, files truncated to the checkpoint, TS step set
@@ -620,7 +623,9 @@ int main(int argc, char *argv[])
                 << (cycle::BuildIsClean() ? "" : "   [not a clean build of a commit]") << "\n"
                 << "  ranks: " << mpi.Size() << "\n"
                 << "  deck: " << deck << "\n"
-                << "  IC set: " << cfg.ic << "\n"
+                << "  IC set: " << cfg.IcLabel()
+                << (cfg.prestress.include_eta && !cfg.IsGold()
+                    ? " (eta |V_init| in tau0, [cycle.prestress].eta_V_init)" : "") << "\n"
                 << "  mesh: " << cfg.shared.mesh.path << " x " << cfg.mesh_scale
                 << ", p = " << cfg.shared.mesh.order << "\n"
                 << "  QD solver: " << cfg.qd.solver << ", PETSc options: "
@@ -704,8 +709,8 @@ int main(int argc, char *argv[])
          cycle::CheckpointInfo info;
          cycle::CheckpointData data;
          cycle::ReadCycleCheckpoint(restart_prefix, commit, allow_other_commit, info, data, mpi);
-         MFEM_VERIFY(info.ic == cfg.ic, "restart: the checkpoint has IC set " << info.ic
-                     << ", the deck " << cfg.ic);
+         MFEM_VERIFY(info.ic == cfg.IcLabel(), "restart: the checkpoint has IC set "
+                     << info.ic << ", the deck " << cfg.IcLabel());
          MFEM_VERIFY(data.state.Size() == qd.State().Size(),
                      "restart: state size " << data.state.Size() << " vs "
                      << qd.State().Size() << " (same mesh, order and rank count needed)");
@@ -740,7 +745,7 @@ int main(int argc, char *argv[])
          info.step = step;
          info.rejections = rejections_before + qd.Rejections();
          info.commit = commit;
-         info.ic = cfg.ic;
+         info.ic = cfg.IcLabel();
          info.dyn_phases = ctl.Phases();
          info.out = out->GetState();
          cycle::CheckpointData d;

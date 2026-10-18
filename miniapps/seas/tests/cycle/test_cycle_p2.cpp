@@ -29,6 +29,16 @@
 //                   residual r = F_D - K u_s + G delta_s is at the QD solve
 //                   tolerance, and W's traction T_h(u_s, delta_s) in the
 //                   kernel frame equals the QD traction and normal traction.
+//   eta_prestress   [cycle.prestress].eta_V_init: tau0 gains eta |V_init| at
+//                   every DOF along tau0, sigma0 and psi0 unchanged; W's
+//                   closure X - gamma V = F(V) with gamma = eta on that
+//                   prestress traction returns V_init (the fault balance at
+//                   t = 0+ from u = u' = 0), while on the scec_fd prestress
+//                   (eq. 23, dtau = 0; the control) it stays below 3/4 V_i.
+//   eta_start       printed only: from u = u' = 0, slip 0, psi0 and V =
+//                   V_init, |V| / V_i in bands of distance from the patch
+//                   edge after 1, 20 and 100 steps, with and without
+//                   eta_V_init, damping off and with the deck's.
 //   energy          (--energy T > 0) Kelvin-Voigt and Prakash-Clifton off,
 //                   from the first event's start (at t = 0 the walls and
 //                   the slip are zero, so the QD balance is u = 0, delta = 0
@@ -66,6 +76,7 @@
 #include <cmath>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -457,6 +468,227 @@ void TestStaticHandoff(Checker &c, cycle::QDPhase &qd, cycle::DynPhase &dyn)
    }
 }
 
+// --------------------------------------------------------- eta_prestress
+
+/// The patch DOFs (|V_init| > 1 mm/s) in bands of their distance from the
+/// patch edge, inset = min(half1 - |xi1|, half2 - |xi2|) in the
+/// [cycle.fields.V_init] rectangle: per band the number of DOFs and the
+/// min and max of |V| / |V_init|; over the whole patch max | |tau| - |tau_i| |
+/// / |tau_i|, tau the end-of-step shear traction and tau_i = |pre.tau0| of the
+/// prestress passed in.  Global.
+struct PatchState
+{
+   static constexpr int kBands = 4;
+   static constexpr real_t kEdges[kBands + 1] = {-1.0e9, 0.5e3, 1.5e3, 3.0e3, 1.0e9};
+   real_t vmin[kBands], vmax[kBands], dtau = 0.0;
+   long long count[kBands];
+   real_t Min(int b0) const
+   { real_t v = vmin[b0]; for (int b = b0; b < kBands; b++) { v = std::min(v, vmin[b]); } return v; }
+   real_t Max(int b0) const
+   { real_t v = vmax[b0]; for (int b = b0; b < kBands; b++) { v = std::max(v, vmax[b]); } return v; }
+   long long Count(int b0) const
+   { long long n = 0; for (int b = b0; b < kBands; b++) { n += count[b]; } return n; }
+};
+
+PatchState Patch(const MPIContext &mpi, cycle::DynPhase &dyn, const cycle::FaultParams &par,
+                 const cycle::Prestress &pre, const cycle::RectTaperSpec &rect)
+{
+   Vector vabs;
+   dyn.SlipRateMagnitude(vabs);
+   cycle::StationFields f;
+   dyn.FillStationFields(f);
+   const Vector &X = dyn.FaultPositions();
+   PatchState p;
+   for (int b = 0; b < PatchState::kBands; b++)
+   {
+      p.vmin[b] = std::numeric_limits<real_t>::infinity();
+      p.vmax[b] = 0.0;
+      p.count[b] = 0;
+   }
+   real_t dtau = 0.0;
+   for (int j = 0; j < vabs.Size(); j++)
+   {
+      const real_t Vi = std::hypot(par.V_init(2 * j), par.V_init(2 * j + 1));
+      if (Vi <= 1.0e-3) { continue; }
+      real_t xi1 = 0.0, xi2 = 0.0;
+      for (int c = 0; c < 3; c++)
+      {
+         xi1 += (X(3 * j + c) - rect.center[c]) * rect.axis1[c];
+         xi2 += (X(3 * j + c) - rect.center[c]) * rect.axis2[c];
+      }
+      const real_t inset = std::min(rect.half1 - std::abs(xi1), rect.half2 - std::abs(xi2));
+      int b = 0;
+      while (b < PatchState::kBands - 1 && inset >= PatchState::kEdges[b + 1]) { b++; }
+      p.count[b]++;
+      p.vmin[b] = std::min(p.vmin[b], vabs(j) / Vi);
+      p.vmax[b] = std::max(p.vmax[b], vabs(j) / Vi);
+      const real_t t0 = std::hypot(pre.tau0(2 * j), pre.tau0(2 * j + 1));
+      const real_t t1 = std::hypot(f.tau_a_dip(j), f.tau_a_strike(j));
+      dtau = std::max(dtau, std::abs(t1 - t0) / t0);
+   }
+   for (int b = 0; b < PatchState::kBands; b++)
+   {
+      p.vmin[b] = mpi.GlobalMin(p.vmin[b]);
+      p.vmax[b] = mpi.GlobalMax(p.vmax[b]);
+   }
+   MPI_Allreduce(MPI_IN_PLACE, p.count, PatchState::kBands, MPI_LONG_LONG, MPI_SUM,
+                 mpi.GetComm());
+   p.dtau = mpi.GlobalMax(dtau);
+   return p;
+}
+
+/// One line per band: "inset [a, b) km: n DOFs, [min, max]" for each state.
+void PrintBands(const MPIContext &mpi, const std::vector<std::string> &names,
+                const std::vector<PatchState> &st)
+{
+   if (!mpi.IsRoot()) { return; }
+   const char *band[PatchState::kBands] = {"edge, inset < 0.5 km  ", "inset 0.5 - 1.5 km    ",
+                                           "inset 1.5 - 3 km      ", "inset >= 3 km         "};
+   std::cout << "  |V| / V_i in the patch by distance from its edge:\n";
+   for (int b = 0; b < PatchState::kBands; b++)
+   {
+      std::cout << "    " << band[b] << std::setw(5) << st[0].count[b] << " DOFs";
+      for (size_t k = 0; k < st.size(); k++)
+      {
+         std::cout << std::fixed << std::setprecision(4) << "   " << names[k] << " ["
+                   << st[k].vmin[b] << ", " << st[k].vmax[b] << "]";
+      }
+      std::cout << "\n";
+   }
+}
+
+/// [cycle.prestress].eta_V_init: tau0 gains eta |V_init| at every DOF, in the
+/// direction of tau0, and nothing else changes.  Then the fault balance at
+/// t = 0+ from u = u' = 0 (the bulk at rest, V jumping to its start value):
+/// W's closure with gamma = eta on the prestress traction alone returns
+/// V_init with eta_V_init, and about V_init / 2 without (the control).
+void TestEtaPrestress(Checker &c, cycle::DynPhase &dyn, const cycle::FaultParams &par,
+                      const cycle::Prestress &pre, const cycle::Prestress &pre_eta)
+{
+   const MPIContext &mpi = c.mpi;
+   NitscheWaveOperator &W = dyn.Op();
+   const int N = dyn.NumOwnedFaultDOFs();
+   real_t err = 0.0, dir = 0.0, dmax = 0.0;
+   for (int j = 0; j < N; j++)
+   {
+      const real_t Vi = std::hypot(par.V_init(2 * j), par.V_init(2 * j + 1));
+      const real_t t0 = std::hypot(pre.tau0(2 * j), pre.tau0(2 * j + 1));
+      const real_t t1 = std::hypot(pre_eta.tau0(2 * j), pre_eta.tau0(2 * j + 1));
+      const real_t etaV = par.rs.eta(j) * Vi;
+      err = std::max(err, std::abs(t1 - t0 - etaV) / t1);
+      dir = std::max(dir, std::abs(pre.tau0(2 * j) * pre_eta.tau0(2 * j + 1) -
+                                   pre.tau0(2 * j + 1) * pre_eta.tau0(2 * j)) / (t0 * t1));
+      dmax = std::max(dmax, etaV);
+   }
+   err = mpi.GlobalMax(err);
+   dir = mpi.GlobalMax(dir);
+   dmax = mpi.GlobalMax(dmax);
+   if (mpi.IsRoot())
+   {
+      std::cout << "\neta_prestress: max eta |V_init| = " << std::scientific
+                << std::setprecision(4) << dmax << " Pa\n";
+   }
+   c.Report("|tau0(eta)| - |tau0| - eta |V_init|, max rel", err, 1e-14, "");
+   c.Report("direction: max |tau0 x tau0(eta)| / |..||..|", dir, 1e-14, "");
+   c.Report("sigma0 unchanged", c.RelInf(pre_eta.sigma0, pre.sigma0), 0.0, "max rel diff");
+   c.Report("psi0 unchanged", c.RelInf(pre_eta.psi0, pre.psi0), 0.0, "max rel diff");
+
+   // The closure X - gamma V = F(V), gamma = eta, X the prestress traction.
+   Vector S0, S0e, Vexp;
+   dyn.Frames().TractionToGlobal(pre.tau0, pre.sigma0, S0);
+   dyn.Frames().TractionToGlobal(pre_eta.tau0, pre_eta.sigma0, S0e);
+   dyn.Frames().ToGlobal(par.V_init, Vexp);
+   real_t vrel = 0.0, cosmin = 1.0, zmax = 0.0, zmin = std::numeric_limits<real_t>::infinity();
+   for (int j = 0; j < N; j++)
+   {
+      const real_t *n = &W.FaultFrames()(9 * j), *dv = &W.FaultFrames()(9 * j + 3),
+                    *sv = &W.FaultFrames()(9 * j + 6);
+      FaultPointState st;
+      st.psi = pre.psi0(j);
+      st.a = W.FaultA()(j);
+      st.Dc = W.FaultDc()(j);
+      const real_t *ve = &Vexp(3 * j);
+      const real_t ne = std::sqrt(fault_frame::Dot(ve, ve));
+      for (int k = 0; k < 2; k++)
+      {
+         real_t X[2], s, Vt[2], vg[3];
+         fault_frame::ToLocal(&(k == 0 ? S0e : S0)(3 * j), 0.0, n, dv, sv, X[0], X[1], s);
+         W.Closure().SolveSlipRate(X, par.rs.eta(j), s, st, Vt);
+         fault_frame::Embed(Vt[0], Vt[1], dv, sv, vg);
+         const real_t ng = std::sqrt(fault_frame::Dot(vg, vg));
+         if (k == 0)
+         {
+            real_t dd = 0.0;
+            for (int i = 0; i < 3; i++) { dd = std::max(dd, std::abs(vg[i] - ve[i])); }
+            vrel = std::max(vrel, dd / ne);
+            cosmin = std::min(cosmin, fault_frame::Dot(ve, vg) / (ne * ng));
+         }
+         else if (ne > 1.0e-3)
+         {
+            zmax = std::max(zmax, ng / ne);
+            zmin = std::min(zmin, ng / ne);
+         }
+      }
+   }
+   zmin = mpi.GlobalMin(zmin);
+   zmax = mpi.GlobalMax(zmax);
+   if (mpi.IsRoot())
+   {
+      std::cout << std::fixed << std::setprecision(4) << "  closure without eta_V_init: |V| / "
+                << "V_i in the patch [" << zmin << ", " << zmax << "]\n";
+   }
+   c.Report("closure(S0(eta), psi0, gamma eta): V vs V_init", mpi.GlobalMax(vrel), 1e-9,
+            "max |dV| / |V_init|");
+   c.Report("  direction: 1 - min cos(V, V_init)", 1.0 - mpi.GlobalMin(cosmin), 1e-12, "");
+   c.Report("control, closure(S0, psi0, gamma eta): max |V| / V_i", zmax, 0.75, "patch");
+}
+
+/// The first steps of W from u = u' = 0, slip 0, psi0 and V = V_init, with
+/// and without eta_V_init: |V| / V_i by distance from the patch edge after
+/// 1, 20 and 100 steps, and | |tau| - tau_i | / tau_i (tau_i = |tau0| of the
+/// scec_fd prestress).  Printed only: the jump of the bulk velocity at the
+/// fault from 0 to the slip rate is a step the mesh resolves with ringing.
+void PrintEtaStart(const MPIContext &mpi, ParMesh &pmesh, const cycle::CycleConfig &cfg,
+                   cycle::QDPhase &qd, const cycle::FaultParams &par,
+                   const cycle::Prestress &pre, const cycle::Prestress &pre_eta,
+                   const cycle::RectTaperSpec &rect, const std::string &label)
+{
+   const int marks[3] = {1, 20, 100};
+   std::vector<std::string> names;
+   std::vector<PatchState> st;
+   real_t dt = 0.0;
+   for (int k = 0; k < 2; k++)
+   {
+      const cycle::Prestress &p = k == 0 ? pre_eta : pre;
+      cycle::DynPhase dyn(pmesh, cfg, qd.Table(), par, p);
+      EnterBackground(dyn, par, p);
+      int done = 0;
+      for (int m : marks)
+      {
+         for (; done < m; done++) { dyn.Step(); }
+         st.push_back(Patch(mpi, dyn, par, pre, rect));
+         names.push_back(std::string(k == 0 ? "eta V_i" : "dtau = 0") + ", " +
+                         std::to_string(m));
+      }
+      dt = dyn.Dt();
+   }
+   if (mpi.IsRoot())
+   {
+      std::cout << "\neta_start (" << label << "; steps of " << std::fixed
+                << std::setprecision(3) << 1e3 * dt << " ms; printed only)\n";
+   }
+   PrintBands(mpi, names, st);
+   if (mpi.IsRoot())
+   {
+      std::cout << "  max | |tau| - tau_i | / tau_i in the patch:";
+      for (size_t i = 0; i < st.size(); i++)
+      {
+         std::cout << " " << names[i] << ": " << std::scientific << std::setprecision(2)
+                   << st[i].dtau << (i + 1 < st.size() ? ";" : "\n");
+      }
+   }
+}
+
 // ---------------------------------------------------------------- energy
 
 struct EnergyRun
@@ -585,6 +817,8 @@ int main(int argc, char *argv[])
    const cycle::CycleConfig cfg = cycle::CycleConfig::Load(deck);
    MFEM_VERIFY(cfg.switching, deck << ": [cycle] switching is false; the P2 tests need "
                "the dynamic regime's sections");
+   MFEM_VERIFY(!cfg.prestress.include_eta, deck << ": [cycle.prestress].eta_V_init is true; "
+               "the P2 tests start from the scec_fd prestress (eta_prestress builds the other)");
    // The tests' W: damping and the normal-stress regularization off.
    cycle::CycleConfig cfg0 = cycle::CycleConfig::Load(deck);
    cfg0.dyn.kv_eta = 0.0;
@@ -638,6 +872,17 @@ int main(int argc, char *argv[])
       }
       if (!frames_only)
       {
+         cycle::PrestressConfig ic_eta = cfg.prestress;
+         ic_eta.include_eta = true;
+         const cycle::Prestress pre_eta = cycle::BuildPrestress(par, ic_eta);
+         {
+            cycle::DynPhase dyn(pmesh, cfg0, qd.Table(), par, pre);
+            TestEtaPrestress(c, dyn, par, pre, pre_eta);
+         }
+         PrintEtaStart(mpi, pmesh, cfg0, qd, par, pre, pre_eta, cfg.fields.V_init,
+                       "damping off");
+         PrintEtaStart(mpi, pmesh, cfg, qd, par, pre, pre_eta, cfg.fields.V_init,
+                       "the deck's damping");
          qd.Setup(par, pre);   // the initial QD solve (factorization)
          cycle::DynPhase dyn(pmesh, cfg0, qd.Table(), par, pre);
          TestStaticHandoff(c, qd, dyn);

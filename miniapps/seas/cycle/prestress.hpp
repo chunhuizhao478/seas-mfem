@@ -19,9 +19,11 @@
 // V_init and sigma0 through hook H1b; the dynamic operator receives the same
 // values as global vectors through hook H2 (P2).
 //
-// The IC set fixes include_eta: "gold" (Tandem convention, acceptance A) adds
-// eta |V| (eq. 20, and eq. 23 with dtau = eta V_i); "scec_fd" does not
-// (eq. 22, eq. 23 with dtau = 0).
+// include_eta is [cycle.prestress].eta_V_init.  "gold" (Tandem convention,
+// acceptance A) always adds eta |V| (eq. 20, and eq. 23 with dtau = eta V_i);
+// "scec_fd" does not by default (eq. 22, eq. 23 with dtau = 0), and with
+// eta_V_init = true it does, so that the dynamic regime starts at V_init
+// from u = u' = 0.
 
 #ifndef MFEM_SEAS_CYCLE_PRESTRESS_HPP
 #define MFEM_SEAS_CYCLE_PRESTRESS_HPP
@@ -40,7 +42,7 @@ namespace cycle
 
 struct PrestressConfig
 {
-   bool include_eta = true;    ///< "gold": true; "scec_fd": false
+   bool include_eta = true;    ///< [cycle.prestress].eta_V_init ("gold": true)
    real_t V_background = 0.0;  ///< V_bg of psi0 (BP5: V_init = 1e-9 m/s)
 };
 
