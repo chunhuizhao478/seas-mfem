@@ -7,8 +7,8 @@
 #
 # Run from miniapps/seas:
 #   mpirun -np N ./seas_fd_cycle_driver --deck config/fd_cycle/bp5_fd_p3.toml
-# A QD max V above V_on after the switch is the QD -> dynamic switch of P4,
-# which stops the run (exit 6).
+# A QD max V above V_on after the switch starts the next dynamic phase (P4);
+# builds before P4 stopped the run there (exit 6).
 #
 # Same problem, mesh and IC set as bp5_scec_fd.toml (the QD-only deck):
 #   - V_i = 0.03 m/s in the nucleation patch (BP5 section 3);

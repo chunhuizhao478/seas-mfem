@@ -18,7 +18,8 @@
 # dynamic phase ends at the deck's switch.
 # Expected: the switch near t = 288.6 s (the Mac P2 run of the same event);
 # exit 0 at t_final, 7 if the QD balance right after the switch is at or above
-# V_on (the guard), 6 at a later QD -> dynamic switch (P4, not before ~225 yr).
+# V_on (the guard); 6 at a later QD -> dynamic switch in builds before P4
+# (not before ~225 yr; from P4 on that event runs dynamic).
 # A QD checkpoint is written at the switch and every 500 QD steps; if the job
 # runs out of time in QD, continue with --restart <out>/bp5_fd_p3.
 # Submit after discovery_build.sbatch, e.g.

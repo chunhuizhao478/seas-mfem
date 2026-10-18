@@ -21,9 +21,10 @@
 # 0.1 m/s at 1.7 s as BICyclE, then about 0.09 m/s to 6.3 s (BICyclE: 1 m/s
 # at 8.3 s), so an earlier event than 6494469's but later than BICyclE's.
 # Exit 0 at t_final, 7 if the QD balance right after the switch is at or
-# above V_on (the guard), 6 at a later QD -> dynamic switch (P4).  A QD
-# checkpoint is written at the switch and every 500 QD steps; if the job
-# runs out of time in QD, continue with --restart <out>/bp5_fd_eta.
+# above V_on (the guard); 6 at a later QD -> dynamic switch in builds before
+# P4 (from P4 on that event runs dynamic).  A QD checkpoint is written at
+# the switch and every 500 QD steps; if the job runs out of time in QD,
+# continue with --restart <out>/bp5_fd_eta.
 # Submit after discovery_build.sbatch, e.g.
 #   sbatch --dependency=afterok:<build job id> discovery_eta.sbatch
 # Cost: 2 nodes x <= 24 h on the SCEC condo (scec_608).

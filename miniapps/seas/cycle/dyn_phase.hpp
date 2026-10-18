@@ -297,7 +297,9 @@ public:
       frames_.ToKernel(W_->Slip(), sk);
       frames_.ToKernel(W_->SlipRate(), vk);
       const Vector &Xs = W_->LastShear();
-      if (Xs.Size() == 2 * N)
+      // steps_ > 0: after a re-Enter (P4) the operator still holds the last
+      // phase's shear until this phase's first step.
+      if (steps_ > 0 && Xs.Size() == 2 * N)
       {
          T.SetSize(3 * N);
          const Vector &V = W_->SlipRate();

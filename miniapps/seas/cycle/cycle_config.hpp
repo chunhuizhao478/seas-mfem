@@ -23,11 +23,12 @@
 // [cycle] keys (defaults in brackets):
 //   ic                   "gold" | "scec_fd"                         [required]
 //   switching            false: the QD regime only; true: the regime
-//                        controller, which needs ic = "scec_fd".  In this
-//                        build (P3) the run starts dynamic at t = 0, switches
-//                        back to QD at the end of the phase and continues to
-//                        t_final; a QD -> dynamic switch at t > 0 (P4) stops
-//                        the run instead                            [false]
+//                        controller, which needs ic = "scec_fd".  The run
+//                        starts dynamic at t = 0 if the QD balance's max V
+//                        is above V_on (else in QD), switches back to QD at
+//                        the end of each dynamic phase and to dynamic when
+//                        the QD max V passes V_on again (P4), to t_final or
+//                        [cycle.switch].max_dynamic_phases          [false]
 //   qd_radiation_damping true; false is refused with "gold"         [true]
 //   mesh_scale           vertex scale before the partition          [1.0]
 //   plate_rate           Vp of the far-field and creep loading     [required]

@@ -6,12 +6,16 @@
 //
 // Phase P1: the QD regime only ([cycle].switching = false).
 // Phase P2: the first BP5-FD event ([cycle].switching = true, ic "scec_fd",
-// [cycle.switch].max_dynamic_phases = 1), see RunFirstDynamicPhase.
-// Phase P3: the switch back ([cycle.switch].max_dynamic_phases = 0): at the
-// end of the first dynamic phase the QD regime takes the slip and psi over
-// (plan 6.3) and runs to t_final, with a checkpoint at the switch.  A QD
-// max V above V_on after that is the QD -> dynamic switch of P4, which
-// stops the run (exit 6).  [cycle.probe] adds the switch probe.
+// [cycle.switch].max_dynamic_phases = 1), see RunDynamicPhase.
+// Phase P3: the switch back: at the end of a dynamic phase the QD regime
+// takes the slip and psi over (plan 6.3) and continues, with a checkpoint
+// at the switch.  [cycle.probe] adds the switch probe to the first phase.
+// Phase P4: the QD -> dynamic switch at t > 0: when the QD regime's max V
+// passes V_on, the dynamic regime takes over from the QD balance at that
+// step (U = u_s, U' = 0), so the regimes alternate to t_final
+// ([cycle.switch].max_dynamic_phases = 0) or to the end of the N-th
+// dynamic phase (N > 0).  A run whose QD balance at t = 0 is not above V_on
+// starts in QD.
 // The first dynamic phase starts from u = u' = 0 and the QD balance at t = 0:
 // 0.015 m/s in the BP5 patch with the scec_fd prestress (eq. 23, dtau = 0),
 // V_i = 0.03 m/s with [cycle.prestress].eta_V_init = true (tau0 += eta V_i).
@@ -24,10 +28,17 @@
 //   qd.Setup(par, pre)                               # H1a, H1b, kernel, IC
 //   out   = FdCycleOutput(cfg.output, qd.LocateStations())
 //   restart: Checkpoint read, files truncated to the checkpoint, TS step set
-//   qd.Run(monitor):  at the start step and after every accepted step
-//       Vmax = global max V;  NaN check
-//       out.UpdateEvents;  out.Write (cadence);  out.WriteGlobal
-//       every N steps: Checkpoint, and the next step restarts its RK stage
+//   switching: dyn = DynPhase(mesh, cfg, table, par, pre)   # one W for the run
+//       fresh run: Vmax = qd.Solve(0); Vmax > V_on: rows at t = 0 and
+//       RunDynamicPhase(0) (the first event), back to QD at its end
+//   loop:
+//     qd.Run(monitor):  at the start step and after every accepted step
+//         Vmax = global max V;  NaN check
+//         out.UpdateEvents;  out.Write (cadence);  out.WriteGlobal
+//         every N steps: Checkpoint, and the next step restarts its RK stage
+//         switching and Vmax > V_on: stop the QD run at this step
+//     stopped for a switch: Vqd = qd.Solve(t); RunDynamicPhase(t)
+//         (back to QD at its end, unless it stops the run); next loop
 //   end: Checkpoint (if N > 0), out.ForceWrite (seas_bp5_full's final row)
 //
 // The per-step work and its order follow seas_bp5_full's TS monitor
@@ -42,17 +53,19 @@
 // uninterrupted run bit for bit (test_cycle_restart); one from the final
 // checkpoint of a run stopped elsewhere (max steps) matches it to round-off.
 //
-// Switching on (P2 deck: stop after the first event; P3 deck: back to QD):
+// Switching on (P2 deck: stop after the first event; P3 deck: back to QD and
+// the next events dynamic):
 //   mpirun -np N ./seas_fd_cycle_driver --deck config/fd_cycle/bp5_fd_first_event.toml
 //          [--output-dir DIR] [--max-dyn-steps N] [--log-every N]
 //          [--max-steps N] [--checkpoint-every N] [--restart <prefix>]
-// --max-dyn-steps stops the dynamic phase early (timing and smoke runs);
-// --end-phase-after N ends it after N steps and switches back (smoke runs).
-// Checkpoints exist only in the QD regime, so --restart continues the QD
-// part of a switched run (from the switch, or every N QD steps after it).
-// Exit codes: 0 done, 2 no PETSc, 3 non-finite, 4 a dynamic phase reached
-// T_max, 5 max V <= V_on at t = 0, 6 QD -> dynamic at t > 0 (P4), 7 the
-// guard: the QD balance after the switch back is above V_on.
+// --max-dyn-steps stops the run in a dynamic phase after N steps (timing and
+// smoke runs); --end-phase-after N ends every dynamic phase after N steps
+// and switches back (smoke runs).  Checkpoints exist only in the QD regime,
+// so --restart continues the QD part of a switched run (from a switch back,
+// or every N QD steps after it), with the dynamic phases so far counted.
+// Exit codes: 0 done (or --max-dyn-steps), 2 no PETSc, 3 non-finite, 4 a
+// dynamic phase reached T_max, 7 the guard: the QD balance after a switch
+// back is above V_on.
 
 #include "mfem.hpp"
 #include "../cycle/build_info.hpp"
@@ -84,7 +97,7 @@ using namespace mfem::seas;
 namespace
 {
 
-/// Where the first dynamic phase leaves the run.
+/// Where a dynamic phase leaves the run.
 struct PhaseEnd
 {
    int rc = 0;               ///< non-zero: stop with this exit code
@@ -165,96 +178,75 @@ void ProbeSwitch(const MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::QD
             << xmax[1] << " " << xmax[2] << "\n" << std::flush;
 }
 
-/// Plan P2 and P3: the first BP5-FD event and the switch back to QD.
+/// The dynamic regime's settings, once per run (main builds one DynPhase and
+/// every dynamic phase re-enters it).
+void PrintDynamicSetup(const MPIContext &mpi, const cycle::CycleConfig &cfg,
+                       cycle::DynPhase &dyn, double setup_s)
+{
+   const cycle::SwitchConfig &sw = cfg.switch_cfg;
+   const cycle::DynamicConfig &dc = cfg.dyn;
+   const int p = cfg.shared.mesh.order;
+   if (!mpi.IsRoot()) { return; }
+   std::cout << std::setprecision(6)
+             << "\n  dynamic regime (Nitsche, explicit central difference):\n"
+             << "    dt = " << dyn.Dt() << " s (cfl " << dc.cfl << " x C(" << p << ") "
+             << cycle::DynPhase::kCeig[p] << "), set up in " << setup_s << " s\n"
+             << "    Kelvin-Voigt: ";
+   if (dyn.HasKelvinVoigt())
+   {
+      std::cout << "eta_bar " << dc.kv_eta << ", scale " << dc.kv_scale << " (h_e "
+                << dc.kv_length << "), beta " << dyn.KelvinVoigtBetaMin() << " .. "
+                << dyn.KelvinVoigtBetaMax() << " s, " << dyn.KelvinVoigtElements()
+                << " elements\n";
+   }
+   else { std::cout << "off\n"; }
+   std::cout << "    Prakash-Clifton: ";
+   if (dyn.HasPrakashClifton())
+   {
+      std::cout << "v_star " << dc.pc_v_star << " m/s, length " << dc.pc_length << " m\n";
+   }
+   else { std::cout << "off\n"; }
+   std::cout << "    shared fault faces: " << dyn.NumSharedFaultFaces()
+             << "; frame checks: ghost copies " << dyn.GhostFrameMismatch()
+             << ", eps_f n_k vs oriented normal " << dyn.NormalMismatch() << "\n"
+             << "    switch: V_on " << sw.V_on << ", V_off " << sw.V_off << " m/s, T_dwell "
+             << sw.T_dwell << " s, T_min " << sw.T_min << " s, T_max " << sw.T_max
+             << " s, max_dynamic_phases " << sw.max_dynamic_phases << "\n";
+}
+
+/// One dynamic phase (plan 6.2, 6.3): from the QD balance at t_s (max V =
+/// Vstart > V_on, just solved) to the switch back.  Phase 1 at t = 0 is the
+/// first BP5-FD event (P2, P3); a later phase starts where the QD regime's
+/// max V passed V_on (P4).
 ///
-///   dyn    = DynPhase(mesh, cfg, table, par, pre)      # W, H2, dt, damping
-///   Vmax   = qd.Solve(0)                 # static u and V from the QD balance
-///   rows at t = 0 from the QD fields (as the P1 monitor's start step)
-///   regime = ctl.Start(Vmax)             # dynamic if Vmax > V_on
-///   dyn.Enter(Bridge::ToNitsche(qd), t = 0)   # U = u_s, U' = 0, (d, V, psi)
+///   dyn.Enter(Bridge::ToNitsche(qd), t_s)   # U = u_s, U' = 0, (d, V, psi)
 ///   until the controller ends the phase or T_max:
 ///      dyn.Step();  rupture time, peak V per DOF
 ///      out.UpdateEvents;  out.Write (cadence) and a global row with it
 ///   end of the phase: a station row, the fault table, the switch log, the
-///      summary; then (plan 6.3, unless max_dynamic_phases = 1)
+///      summary; then (plan 6.3, unless it is the deck's last phase)
 ///      (s, psi) = Bridge::ToQD(dyn);  Vqd = qd.Reenter(s, psi, t)
 ///      checkpoint;  Vqd >= V_on: stop (the guard of plan 6.3)
 ///
-/// With [cycle.probe] the phase runs on after the deck's switch until every
+/// With [cycle.probe] phase 1 runs on after the deck's switch until every
 /// probe pair has switched (or T_max) for the measurement alone: the files
 /// stop at the deck's switch, and the switch back uses the state saved
-/// there.  At each pair's switch ProbeSwitch writes the jumps.
-///
-/// A QD start (Vmax <= V_on at t = 0) needs the QD -> dynamic switch at
-/// t > 0, which is P4, so it stops here.  Exit codes: 0 at the end of the
-/// phase or at --max-dyn-steps, 3 a non-finite QD balance after the switch,
-/// 4 the phase reached T_max, 5 a QD start, 7 the guard.
-PhaseEnd RunFirstDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg,
-                              ParMesh &pmesh, cycle::QDPhase &qd,
-                              const cycle::FaultParams &par, const cycle::Prestress &pre,
-                              cycle::FdCycleOutput &out, cycle::RegimeController &ctl,
-                              const std::string &commit, long max_dyn_steps,
-                              long end_phase_after, int log_every, int &rejections_before,
-                              const std::function<void(int, real_t)> &checkpoint)
+/// there.  At each pair's switch ProbeSwitch writes the jumps.  Later phases
+/// have no probe.  Exit codes: 0 at the end of the phase or at
+/// --max-dyn-steps, 3 a non-finite QD balance after the switch, 4 the phase
+/// reached T_max, 7 the guard.
+PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::QDPhase &qd,
+                         cycle::DynPhase &dyn, cycle::FdCycleOutput &out,
+                         cycle::RegimeController &ctl, const std::string &commit, real_t t_s,
+                         real_t Vstart, long max_dyn_steps, long end_phase_after,
+                         int log_every, int &rejections_before,
+                         const std::function<void(int, real_t)> &checkpoint)
 {
    PhaseEnd end;
    const bool root = mpi.IsRoot();
    const cycle::SwitchConfig &sw = cfg.switch_cfg;
-   const cycle::DynamicConfig &dc = cfg.dyn;
    const std::string prefix = cfg.output.dir + "/" + cfg.output.prefix;
-
-   const double wall_setup = MPI_Wtime();
-   cycle::DynPhase dyn(pmesh, cfg, qd.Table(), par, pre);
-   const double setup_s = MPI_Wtime() - wall_setup;
-   const int p = cfg.shared.mesh.order;
-   if (root)
-   {
-      std::cout << std::setprecision(6)
-                << "\n  dynamic regime (Nitsche, explicit central difference):\n"
-                << "    dt = " << dyn.Dt() << " s (cfl " << dc.cfl << " x C(" << p << ") "
-                << cycle::DynPhase::kCeig[p] << "), set up in " << setup_s << " s\n"
-                << "    Kelvin-Voigt: ";
-      if (dyn.HasKelvinVoigt())
-      {
-         std::cout << "eta_bar " << dc.kv_eta << ", scale " << dc.kv_scale << " (h_e "
-                   << dc.kv_length << "), beta " << dyn.KelvinVoigtBetaMin() << " .. "
-                   << dyn.KelvinVoigtBetaMax() << " s, " << dyn.KelvinVoigtElements()
-                   << " elements\n";
-      }
-      else { std::cout << "off\n"; }
-      std::cout << "    Prakash-Clifton: ";
-      if (dyn.HasPrakashClifton())
-      {
-         std::cout << "v_star " << dc.pc_v_star << " m/s, length " << dc.pc_length << " m\n";
-      }
-      else { std::cout << "off\n"; }
-      std::cout << "    shared fault faces: " << dyn.NumSharedFaultFaces()
-                << "; frame checks: ghost copies " << dyn.GhostFrameMismatch()
-                << ", eps_f n_k vs oriented normal " << dyn.NormalMismatch() << "\n"
-                << "    switch: V_on " << sw.V_on << ", V_off " << sw.V_off << " m/s, T_dwell "
-                << sw.T_dwell << " s, T_min " << sw.T_min << " s, T_max " << sw.T_max
-                << " s, max_dynamic_phases " << sw.max_dynamic_phases << "\n";
-   }
-
-   // ---- start: the QD balance at t = 0 ----
-   real_t t = 0.0;
-   const real_t Vstart = qd.Solve(t);
-   auto fill_qd = [&qd](cycle::StationFields &f) { qd.FillStationFields(f); };
-   out.UpdateEvents(t, Vstart);
-   out.Write(t, Vstart, fill_qd);
-   out.WriteGlobal(t, Vstart);
-
-   if (ctl.Start(Vstart) != cycle::Regime::Dynamic)
-   {
-      if (root)
-      {
-         std::cerr << "ERROR: max V = " << Vstart << " m/s at t = 0 is not above V_on = "
-                   << sw.V_on << " m/s, so the run would start in the QD regime; the "
-                   "QD -> dynamic switch at t > 0 is plan phase P4, not in this build.\n";
-      }
-      end.rc = 5;
-      return end;
-   }
+   real_t t = t_s;
 
    // ---- hand-over (plan 6.2): U = u_s, U' = 0, (d, V, psi), sigma* ----
    {
@@ -266,13 +258,14 @@ PhaseEnd RunFirstDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg,
       dyn.Enter(qd.Displacement(), d, V, psi, sn, t);
    }
    ctl.EnterDynamic(t);
-   out.SwitchLog(t, Vstart, "QD", "dynamic", "start");
+   const int phase = ctl.Phases();
+   out.SwitchLog(t, Vstart, "QD", "dynamic", t == 0.0 ? "start" : "V_on");
 
    // ---- the switch probe (plan P3): one controller per pair ----
    std::vector<cycle::RegimeController> probes;
    std::vector<char> probe_done;
    std::unique_ptr<std::ofstream> probe_rows, probe_sum;
-   if (cfg.probe.Enabled())
+   if (cfg.probe.Enabled() && phase == 1)
    {
       for (real_t voff : cfg.probe.V_off)
       {
@@ -332,8 +325,18 @@ PhaseEnd RunFirstDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg,
    auto fill_dyn = [&dyn](cycle::StationFields &f) { dyn.FillStationFields(f); };
    if (root)
    {
-      std::cout << "\n  initial max V (QD balance) = " << Vstart << " m/s; dynamic phase from t = "
-                << t << " s\n\n" << std::setw(10) << "step" << std::setw(14) << "tau [s]"
+      if (t == 0.0)
+      {
+         std::cout << "\n  initial max V (QD balance) = " << Vstart << " m/s; dynamic phase "
+                   << phase << " from t = " << t << " s\n\n";
+      }
+      else
+      {
+         std::cout << "\n  QD -> dynamic at t = " << t << " s (" << t / BP5Params::seconds_per_year
+                   << " yr): max V (QD balance) = " << Vstart << " m/s > V_on; dynamic phase "
+                   << phase << "\n\n";
+      }
+      std::cout << std::setw(10) << "step" << std::setw(14) << "tau [s]"
                 << std::setw(14) << "max V" << std::setw(14) << "max VdT/Dc" << std::setw(28)
                 << "sigma_n_eff [MPa]" << std::setw(26) << "sigma_PC [MPa]"
                 << std::setw(14) << "s/step" << std::setw(28) << "max V at x, y, z [km]"
@@ -379,9 +382,13 @@ PhaseEnd RunFirstDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg,
          r[6] = peakV(j);
          r[7] = dyn.Psi()(j);
       }
-      cycle::WriteFaultTable(prefix + "_fault.txt", mpi.GetComm(),
+      const std::string fault_file =
+         prefix + (phase == 1 ? std::string("_fault.txt")
+                              : "_fault_phase" + std::to_string(phase) + ".txt");
+      cycle::WriteFaultTable(fault_file, mpi.GetComm(),
                              "fd_cycle fault table at t = " + std::to_string(t) +
-                             " s, end of the first dynamic phase (" + reason + "); t_rupture: "
+                             " s, end of dynamic phase " + std::to_string(phase) + " (from t = " +
+                             std::to_string(t_s) + " s; " + reason + "); t_rupture: "
                              "first V >= 1e-3 m/s, -1 = never; commit " + commit,
                              {"x(m)", "y(m)", "z(m)", "t_rupture(s)", "slip_strike(m)",
                               "slip_dip(m)", "peak_V(m/s)", "psi"}, tab);
@@ -392,12 +399,13 @@ PhaseEnd RunFirstDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg,
       const real_t step_max = mpi.GlobalMax(step_avg);
       if (root)
       {
-         std::cout << std::setprecision(6) << "\n=== fd_cycle dynamic phase 1 summary ===\n"
+         std::cout << std::setprecision(6) << "\n=== fd_cycle dynamic phase " << phase
+                   << " summary ===\n"
                    << "  commit: " << commit << "\n"
                    << "  end: " << reason << " at t = " << t << " s (phase length "
                    << dyn.Tau() << " s, " << dyn.Steps() << " steps of " << dyn.Dt() << " s)"
                    << (to_qd ? "; back to QD" : "; the run stops") << "\n"
-                   << "  max V: at t = 0 (QD balance) " << Vstart << ", after step 1 "
+                   << "  max V: at the start (QD balance) " << Vstart << ", after step 1 "
                    << first.max_V << ", over the phase " << worst.max_V << " m/s\n"
                    << "  max |V| dt / Dc: " << worst.max_V_dt_over_Dc
                    << " (the operator aborts above 2)\n"
@@ -412,7 +420,8 @@ PhaseEnd RunFirstDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg,
                    << " s (slowest rank), on " << mpi.Size() << " ranks; loop with output "
                    << loop_s << " s\n"
                    << "  events: " << out.NumEvents() << (out.InEvent() ? " (still open)" : "")
-                   << "\n  files: " << prefix << "_{<stations>,global,catalog,switch,fault}.txt\n"
+                   << "\n  files: " << prefix << "_{<stations>,global,catalog,switch}.txt, "
+                   << fault_file << "\n"
                    << std::flush;
       }
       phase_over = true;
@@ -519,6 +528,7 @@ PhaseEnd RunFirstDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg,
       const bool too_long = (verdict == cycle::DynVerdict::TooLong);
       finish_phase(too_long ? "T_max" : "max_dyn_steps", false);
       end.rc = too_long ? 4 : 0;
+      end.t = t;
       return end;
    }
    if (!end.back_to_qd) { return end; }   // max_dynamic_phases reached
@@ -592,10 +602,10 @@ int main(int argc, char *argv[])
                   "Checkpoint every N accepted QD steps, 0 = none (overrides "
                   "[cycle.checkpoint].every_qd_steps; -1 keeps the deck value).");
    args.AddOption(&max_dyn_steps, "-nd", "--max-dyn-steps",
-                  "Switching on: stop the dynamic phase after this many steps "
-                  "(-1 = until the controller ends it).");
+                  "Switching on: stop the run in a dynamic phase after this many of its "
+                  "steps (-1 = until the controller ends it).");
    args.AddOption(&end_phase_after, "-epa", "--end-phase-after",
-                  "Switching on, smoke tests only: end the first dynamic phase after "
+                  "Switching on, smoke tests only: end every dynamic phase after "
                   "this many steps as if the controller had ended it (-1 = off).");
    args.AddOption(&log_every, "-le", "--log-every",
                   "Switching on: a log line every this many dynamic steps.");
@@ -617,7 +627,8 @@ int main(int argc, char *argv[])
    if (root)
    {
       std::cout << "seas_fd_cycle_driver ("
-                << (cfg.switching ? "P3: the first event dynamic, then QD" : "P1: QD regime")
+                << (cfg.switching ? "P4: QD and dynamic regimes, switched on max V"
+                                  : "P1: QD regime")
                 << ")\n"
                 << "  commit: " << commit
                 << (cycle::BuildIsClean() ? "" : "   [not a clean build of a commit]") << "\n"
@@ -756,96 +767,125 @@ int main(int argc, char *argv[])
          cycle::WriteCycleCheckpoint(ckpt_prefix, info, d, mpi);
       };
 
-      // P1, a restart, or after the switch back: the QD regime.
-      bool run_qd = !cfg.switching || !restart_prefix.empty();
+      // One dynamic regime for the whole run; every dynamic phase re-enters it.
+      std::unique_ptr<cycle::DynPhase> dyn;
+      if (cfg.switching)
+      {
+         const double w = MPI_Wtime();
+         dyn = std::make_unique<cycle::DynPhase>(pmesh, cfg, qd.Table(), par, pre);
+         PrintDynamicSetup(mpi, cfg, *dyn, MPI_Wtime() - w);
+      }
+      auto dynamic_phase = [&](real_t ts, real_t Vs)
+      {
+         return RunDynamicPhase(mpi, cfg, qd, *dyn, *out, ctl, commit, ts, Vs, max_dyn_steps,
+                                end_phase_after, log_every, rejections_before, checkpoint);
+      };
+
+      // A fresh switched run starts from the QD balance at t = 0: dynamic if
+      // its max V is above V_on (the BP5-FD first event), else in QD.  P1
+      // and a restart start in QD.
+      bool run_qd = true;
       if (cfg.switching && restart_prefix.empty())
       {
-         // P2 and P3: the first event dynamic from t = 0, then back to QD.
-         const PhaseEnd end = RunFirstDynamicPhase(mpi, cfg, pmesh, qd, par, pre, *out, ctl,
-                                                   commit, max_dyn_steps, end_phase_after,
-                                                   log_every, rejections_before, checkpoint);
-         rc = end.rc;
-         run_qd = end.back_to_qd;
-         t = end.t;
-         dt = cfg.dt_init;
+         const real_t Vstart = qd.Solve(t);
+         if (ctl.Start(Vstart) == cycle::Regime::Dynamic)
+         {
+            // The rows at t = 0 from the QD fields (as the P1 monitor's start step).
+            auto fill0 = [&qd](cycle::StationFields &f) { qd.FillStationFields(f); };
+            out->UpdateEvents(t, Vstart);
+            out->Write(t, Vstart, fill0);
+            out->WriteGlobal(t, Vstart);
+            const PhaseEnd end = dynamic_phase(t, Vstart);
+            rc = end.rc;
+            run_qd = end.back_to_qd;
+            t = end.t;
+            dt = cfg.dt_init;
+         }
+         else if (root)
+         {
+            std::cout << "\n  initial max V (QD balance) = " << Vstart << " m/s, not above V_on "
+                      << "= " << cfg.switch_cfg.V_on << " m/s: the run starts in the QD regime\n";
+         }
       }
-      if (run_qd)
+
+      // The QD regime until t_final, --max-steps, a NaN or the next
+      // QD -> dynamic switch (P4); after each dynamic phase it continues
+      // from the switch back.
+      const real_t yr = BP5Params::seconds_per_year;
+      auto fill = [&qd](cycle::StationFields &f) { qd.FillStationFields(f); };
+      bool diverged = false, to_dynamic = false, qd_ran = false, qd_done = false;
+      auto monitor = [&](int step, real_t tt) -> bool
       {
-         auto fill = [&qd](cycle::StationFields &f) { qd.FillStationFields(f); };
-         bool diverged = false, to_dynamic = false;
+         const real_t Vmax = qd.MaxV();
+         bool bad = !std::isfinite(Vmax);
+         const Vector &st = qd.State();
+         for (int i = 0; i < std::min(st.Size(), 100) && !bad; i++)
+         {
+            if (!std::isfinite(st(i))) { bad = true; }
+         }
+         if (mpi.GlobalSumInt(bad ? 1 : 0) > 0)
+         {
+            if (root)
+            {
+               std::cerr << "NaN/Inf at step " << step << ", t = " << tt / yr
+                         << " yr, V_max = " << Vmax << "\n";
+            }
+            diverged = true;
+            return false;
+         }
+         out->UpdateEvents(tt, Vmax);
+         out->Write(tt, Vmax, fill);
+         out->WriteGlobal(tt, Vmax);
+         if (cfg.switching && ctl.GoDynamic(Vmax))
+         {
+            // A new event: the dynamic regime takes over at this step (P4).
+            // No checkpoint here: a restart from it would switch one step
+            // later (its start step is not monitored).
+            to_dynamic = true;
+            return false;
+         }
+         if (cfg.checkpoint_every > 0 && step % cfg.checkpoint_every == 0)
+         {
+            checkpoint(step, tt);
+            qd.RestartStage();
+         }
+         if (root && (step % 10 == 0 || Vmax > cfg.output.event_V))
+         {
+            std::cout << std::setw(10) << step << std::setw(16) << std::scientific
+                      << std::setprecision(6) << tt / yr << std::setw(14)
+                      << std::setprecision(3) << qd.NextDt() << std::setw(16)
+                      << std::setprecision(3) << Vmax << std::setw(8) << out->NumEvents()
+                      << "\n" << std::flush;
+         }
+         return true;
+      };
+      while (run_qd)
+      {
          if (root)
          {
             std::cout << "\n" << std::setw(10) << "Step" << std::setw(16) << "Time [yr]"
                       << std::setw(14) << "dt [s]" << std::setw(16) << "V_max [m/s]"
                       << std::setw(8) << "EQs" << "\n" << std::string(64, '-') << "\n";
          }
-         const real_t yr = BP5Params::seconds_per_year;
-         auto monitor = [&](int step, real_t tt) -> bool
-         {
-            const real_t Vmax = qd.MaxV();
-            bool bad = !std::isfinite(Vmax);
-            const Vector &st = qd.State();
-            for (int i = 0; i < std::min(st.Size(), 100) && !bad; i++)
-            {
-               if (!std::isfinite(st(i))) { bad = true; }
-            }
-            if (mpi.GlobalSumInt(bad ? 1 : 0) > 0)
-            {
-               if (root)
-               {
-                  std::cerr << "NaN/Inf at step " << step << ", t = " << tt / yr
-                            << " yr, V_max = " << Vmax << "\n";
-               }
-               diverged = true;
-               return false;
-            }
-            out->UpdateEvents(tt, Vmax);
-            out->Write(tt, Vmax, fill);
-            out->WriteGlobal(tt, Vmax);
-            if (cfg.checkpoint_every > 0 && step % cfg.checkpoint_every == 0)
-            {
-               checkpoint(step, tt);
-               qd.RestartStage();
-            }
-            if (cfg.switching && ctl.GoDynamic(Vmax))
-            {
-               // A new event: the QD -> dynamic switch at t > 0 is P4.
-               if (root)
-               {
-                  std::cerr << "STOP: max V = " << Vmax << " m/s > V_on = "
-                            << cfg.switch_cfg.V_on << " m/s at step " << step << ", t = "
-                            << tt / yr << " yr: the QD -> dynamic switch at t > 0 is plan "
-                            "phase P4, not in this build.\n";
-               }
-               out->SwitchLog(tt, Vmax, "QD", "stop", "QD_to_dynamic_is_P4");
-               to_dynamic = true;
-               return false;
-            }
-            if (root && (step % 10 == 0 || Vmax > cfg.output.event_V))
-            {
-               std::cout << std::setw(10) << step << std::setw(16) << std::scientific
-                         << std::setprecision(6) << tt / yr << std::setw(14)
-                         << std::setprecision(3) << qd.NextDt() << std::setw(16)
-                         << std::setprecision(3) << Vmax << std::setw(8) << out->NumEvents()
-                         << "\n" << std::flush;
-            }
-            return true;
-         };
-
+         to_dynamic = false;
+         qd_ran = true;
          qd.Run(t, dt, cfg.t_final, max_steps, monitor);
-         const int steps = qd.StepNumber();
+         if (diverged) { rc = 3; break; }
+         if (!to_dynamic) { qd_done = true; break; }   // t_final or --max-steps
 
-         if (diverged)
-         {
-            rc = 3;
-         }
-         else if (to_dynamic)
-         {
-            rc = 6;
-            if (cfg.checkpoint_every > 0) { checkpoint(steps, t); }
-            out->ForceWrite(t, qd.MaxV(), fill);
-         }
-         else
+         // ---- QD -> dynamic (P4): the QD balance at the accepted step ----
+         const real_t Vqd = qd.Solve(t);
+         const PhaseEnd end = dynamic_phase(t, Vqd);
+         rc = end.rc;
+         t = end.t;
+         if (!end.back_to_qd) { break; }
+         dt = cfg.dt_init;
+      }
+
+      if (qd_ran)
+      {
+         const int steps = qd.StepNumber();
+         if (qd_done)
          {
             if (cfg.checkpoint_every > 0) { checkpoint(steps, t); }
             out->ForceWrite(t, qd.MaxV(), fill);
@@ -853,15 +893,23 @@ int main(int argc, char *argv[])
          out->Flush();
          if (root)
          {
+            // rc 7 (the guard) and 3 (a non-finite balance) stop at the switch back.
+            const std::string ph = std::to_string(ctl.Phases());
+            const std::string stopped =
+               (rc == 7 || rc == 3) ? "stopped at the switch back after dynamic phase " + ph
+                                    : "stopped in dynamic phase " + ph;
             std::cout << "\n=== fd_cycle summary ===\n"
                       << "  commit: " << commit << "\n"
                       << "  final time: " << t << " s (" << t / yr << " yr)\n"
                       << "  TS steps: " << steps << "\n"
                       << "  step rejections: " << rejections_before + qd.Rejections() << "\n"
+                      << "  dynamic phases: " << ctl.Phases() << "\n"
                       << "  events: " << out->NumEvents() << "\n"
-                      << "  status: " << (diverged     ? "DIVERGED"
-                                          : to_dynamic ? "stopped at a QD -> dynamic switch (P4)"
-                                                       : "done") << "\n";
+                      << "  status: " << (diverged  ? "DIVERGED"
+                                          : qd_done ? "done"
+                                                    : stopped + " (exit " +
+                                                      std::to_string(rc) + ")")
+                      << "\n";
          }
       }
    }

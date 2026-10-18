@@ -21,6 +21,7 @@
 #   2. test-cycle-p3 on 1 and 2 ranks (bit for bit on 1 rank)
 #   3. test-cycle-p2 (frame_map on 1, 2, 4, 8 ranks; the rest on 2)
 #   4. test_cycle_restart.sh: the P1 gold deck, 25 + 25 steps vs 50, 1 rank
+#   5. test-cycle-p4 on 1 and 2 ranks (the QD -> dynamic hand-over, re-entry)
 # Exits non-zero when any step fails, so discovery_switch.sbatch can wait on
 # it with --dependency=afterok.  Cost: 1 node x <= 4 h on the SCEC condo.
 # Submit only on Chunhui Zhao's typed go for this job.
@@ -67,6 +68,13 @@ MPIRUN=mpirun tests/cycle/test_cycle_restart.sh config/fd_cycle/bp5_gold.toml "$
    > "$RUNS/test_restart.log" 2>&1; rc=$?
 echo "test_cycle_restart.sh exit $rc in $(( $(date +%s) - s )) s"
 grep -E "PASSED|FAILED|differ" "$RUNS/test_restart.log" | tail -10
+[ $rc -eq 0 ] || fails=$((fails + 1))
+
+# 5. P4 tests
+s=$(date +%s)
+$MK test-cycle-p4 > "$RUNS/test_p4.log" 2>&1; rc=$?
+echo "test-cycle-p4 exit $rc in $(( $(date +%s) - s )) s"
+grep -E "^  (ok  |FAIL)|test_cycle_p4: (PASSED|FAILED)" "$RUNS/test_p4.log"
 [ $rc -eq 0 ] || fails=$((fails + 1))
 
 echo "total $(( $(date +%s) - T0 )) s, failing steps: $fails"
