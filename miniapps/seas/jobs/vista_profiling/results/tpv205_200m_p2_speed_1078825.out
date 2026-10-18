@@ -1,0 +1,36 @@
+commit 6d41ba7751f7fda7c9372fe087cfb0f9c635a8ff
+host i614-034.vista.tacc.utexas.edu  nodes 16  ranks 2304
+deck tpv205/configs/tpv205_nitsche.toml  mesh tpv205/mesh/tpv2053d_200m.msh sha256 30c63b923781177830330a36aebcc4159cfc8043374ea4dcd883a9b2eec13538  order 2  tfinal 1.0
+modules: ucc/1.9.0 ucx/1.22.0 cmake/4.1.1 xalt/3.1 TACC gcc/14.2.0 nvpl/26.9 cuda/12.6 openmpi/5.0.5 hypre/2.31.0 metis/5.1.0.3 phdf5/1.14.6
+=== off [--fast-fault 0 --fused-spmv 0 --fast-fault-output 0]: driver exit 0, 330 s in the job
+  fault ParaView output: /scratch/10024/zhaochun/nitsche_profiling/tpv205_200m_p2_speed_1078825/off/fault.vtkhdf, 26228 fault faces x 4 sub-triangles (13156 faces re-wound to nhat); face map vs DOF positions max error 0 m
+  fault ParaView output: 49 frames in /scratch/10024/zhaochun/nitsche_profiling/tpv205_200m_p2_speed_1078825/off/fault.vtkhdf; on rank 0 19.8744 s (0.4056 s/frame: pack 3.63349e-06, gather + HDF write 0.405596; SAFS writer)
+  time in ode.Step per rank after step 1: min 149.305 s, mean 185.694 s, max 199.607 s (26.9995 ms/step at the max); step 1 1.29896 s (with the operator assembly); fast fault off, fused K/K_eta off
+  fault work: 7.673 ms/step on the busiest rank; cost per step 28.36 us per tet, 0 us per fault-face side (w = 0 tets)
+=== done: 7394 steps, t = 1.00004 s; max|V| 3.7397 m/s; max|V|dt/Dc 0.0012645; sigma_n_eff in [1.08368e+08, 1.28537e+08] Pa; sigma_pc in [1.08408e+08, 1.28413e+08] Pa; wall 321.29 s ===
+first node memory: peak in use 147.4 GB of 237.6 GB (2 s samples)
+=== on []: driver exit 0, 252 s in the job
+  fault ParaView output: /scratch/10024/zhaochun/nitsche_profiling/tpv205_200m_p2_speed_1078825/on/fault.vtkhdf, 26228 fault faces x 4 sub-triangles (13156 faces re-wound to nhat); face map vs DOF positions max error 0 m
+  fault ParaView output: 49 frames in /scratch/10024/zhaochun/nitsche_profiling/tpv205_200m_p2_speed_1078825/on/fault.vtkhdf; on rank 0 6.20695 s (0.126672 s/frame: pack 3.40947e-06, gather + HDF write 0.126669 = gather 0.0037958 + write 0.12266; fast writer)
+  time in ode.Step per rank after step 1: min 89.0374 s, mean 110.316 s, max 121.067 s (16.3759 ms/step at the max); step 1 1.61377 s (with the operator assembly); fast fault on, fused K/K_eta on (union pattern adds 6306728 of 8495420451 entries)
+  fault work: 3.298 ms/step on the busiest rank; cost per step 18.04 us per tet, 3.732 us per fault-face side (w = 0.2068 tets)
+=== done: 7394 steps, t = 1.00004 s; max|V| 3.7397 m/s; max|V|dt/Dc 0.0012645; sigma_n_eff in [1.08368e+08, 1.28537e+08] Pa; sigma_pc in [1.08408e+08, 1.28413e+08] Pa; wall 243.814 s ===
+first node memory: peak in use 146.4 GB of 237.6 GB (2 s samples)
+=== weighted [--fault-weight 0.25]: driver exit 0, 251 s in the job
+  partition: METIS with fault weight w = 0.25 (26228 fault faces); weighted max/mean 1.0299
+  fault ParaView output: /scratch/10024/zhaochun/nitsche_profiling/tpv205_200m_p2_speed_1078825/weighted/fault.vtkhdf, 26228 fault faces x 4 sub-triangles (13201 faces re-wound to nhat); face map vs DOF positions max error 0 m
+  fault ParaView output: 49 frames in /scratch/10024/zhaochun/nitsche_profiling/tpv205_200m_p2_speed_1078825/weighted/fault.vtkhdf; on rank 0 6.07768 s (0.124034 s/frame: pack 2.94065e-06, gather + HDF write 0.124031 = gather 0.00346187 + write 0.120381; fast writer)
+  time in ode.Step per rank after step 1: min 86.6713 s, mean 110.922 s, max 120.182 s (16.2562 ms/step at the max); step 1 1.53213 s (with the operator assembly); fast fault on, fused K/K_eta on (union pattern adds 6307032 of 8495420660 entries)
+  fault work: 3.656 ms/step on the busiest rank; cost per step 18.13 us per tet, 4.211 us per fault-face side (w = 0.2323 tets)
+=== done: 7394 steps, t = 1.00004 s; max|V| 3.7397 m/s; max|V|dt/Dc 0.0012645; sigma_n_eff in [1.08368e+08, 1.28537e+08] Pa; sigma_pc in [1.08408e+08, 1.28413e+08] Pa; wall 241.696 s ===
+first node memory: peak in use 161.4 GB of 237.6 GB (2 s samples)
+=== stations (per quantity: max |a - b| over max |a| of slip, V, tau, sigma_n at that station) ===
+.../off vs tpv205/gold/nitsche-kv0p1_p2_cd_pc_200m_jobid1075916_git81759da/results: 16 stations, 7394 rows each; 16 bitwise equal as printed; largest difference 0.000e+00
+.../on vs .../off: 16 stations, 7395 rows each; 0 bitwise equal as printed; largest difference 6.625e-11 (tpv205_station_x2_0_x3_7.5.dat slip)
+.../weighted vs .../off: 16 stations, 7395 rows each; 0 bitwise equal as printed; largest difference 6.625e-11 (tpv205_station_x2_0_x3_7.5.dat slip)
+512	.../RUN_INFO.txt
+200M	.../off
+199M	.../on
+6.5K	.../tpv205_nitsche.toml
+201M	.../weighted
+total 835 s
