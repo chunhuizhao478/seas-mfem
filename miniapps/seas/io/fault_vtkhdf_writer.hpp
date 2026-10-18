@@ -67,6 +67,48 @@ namespace seas
 namespace vtkhdf
 {
 
+/// The rank-0 serial mesh of the gathered fault triangles (2-D elements in
+/// 3-D space), one element per gathered triangle in gathered order.
+inline std::unique_ptr<Mesh> BuildFaultTriangleMesh(const vtu::GatheredFaultPack &g)
+{
+   const int ncells = static_cast<int>(g.triangles.size());
+   const int npts   = static_cast<int>(g.vertices.size());
+
+   // Build a serial 2D-in-3D Mesh of triangles.  spaceDim=3 because
+   // the fault sits in a 3D embedding space.
+   auto mesh = std::make_unique<Mesh>(/*Dim=*/2, /*NVert=*/npts,
+                                      /*NElem=*/ncells, /*NBdrElem=*/0,
+                                      /*spaceDim=*/3);
+   for (int i = 0; i < npts; ++i)
+   {
+      mesh->AddVertex(g.vertices[i][0], g.vertices[i][1],
+                      g.vertices[i][2]);
+   }
+   const int triangle_attr = 1;
+   for (int c = 0; c < ncells; ++c)
+   {
+      const int t[3] = { g.triangles[c][0], g.triangles[c][1],
+                         g.triangles[c][2] };
+      mesh->AddTriangle(t, triangle_attr);
+   }
+   // R-007 (REVIEW.md 2026-04-28): fix_orientation=true so any
+   // ParaView consumer that requests vtkPolyDataNormals or surface
+   // lighting gets consistent normals.  Costs nothing for cell-data
+   // bit-exactness (the data layout is unchanged).
+   //
+   // R-111: fix_orientation MAY swap the order of vertices within a
+   // triangle to enforce a positive Jacobian.  This is invariant for
+   // SCALAR cell-data (one value per triangle, the only data this
+   // writer emits).  If you ever add per-vertex or per-edge data, OR
+   // vector cell-data with an implicit per-vertex direction, this
+   // call must be revisited because the gathered (3*c, 3*c+1, 3*c+2)
+   // ordering will no longer match the rendered triangle's vertex
+   // ordering.
+   mesh->FinalizeTriMesh(/*generate_edges=*/0, /*refine=*/0,
+                         /*fix_orientation=*/true);
+   return mesh;
+}
+
 /// @brief Persistent state for the single-file fault VTKHDF writer.
 ///
 /// One instance per `seas::ParaViewOutput`.  All members live only on
@@ -133,41 +175,7 @@ struct FaultHDFState
                      << "' has " << g.field_arrays[k].size()
                      << " entries; expected " << g.triangles.size());
       }
-      const int ncells = static_cast<int>(g.triangles.size());
-      const int npts   = static_cast<int>(g.vertices.size());
-
-      // Build a serial 2D-in-3D Mesh of triangles.  spaceDim=3 because
-      // the fault sits in a 3D embedding space.
-      mesh = std::make_unique<Mesh>(/*Dim=*/2, /*NVert=*/npts,
-                                    /*NElem=*/ncells, /*NBdrElem=*/0,
-                                    /*spaceDim=*/3);
-      for (int i = 0; i < npts; ++i)
-      {
-         mesh->AddVertex(g.vertices[i][0], g.vertices[i][1],
-                          g.vertices[i][2]);
-      }
-      const int triangle_attr = 1;
-      for (int c = 0; c < ncells; ++c)
-      {
-         const int t[3] = { g.triangles[c][0], g.triangles[c][1],
-                            g.triangles[c][2] };
-         mesh->AddTriangle(t, triangle_attr);
-      }
-      // R-007 (REVIEW.md 2026-04-28): fix_orientation=true so any
-      // ParaView consumer that requests vtkPolyDataNormals or surface
-      // lighting gets consistent normals.  Costs nothing for cell-data
-      // bit-exactness (the data layout is unchanged).
-      //
-      // R-111: fix_orientation MAY swap the order of vertices within a
-      // triangle to enforce a positive Jacobian.  This is invariant for
-      // SCALAR cell-data (one value per triangle, the only data this
-      // writer emits).  If you ever add per-vertex or per-edge data, OR
-      // vector cell-data with an implicit per-vertex direction, this
-      // call must be revisited because the gathered (3*c, 3*c+1, 3*c+2)
-      // ordering will no longer match the rendered triangle's vertex
-      // ordering.
-      mesh->FinalizeTriMesh(/*generate_edges=*/0, /*refine=*/0,
-                            /*fix_orientation=*/true);
+      mesh = BuildFaultTriangleMesh(g);
 
       // L2 p=0 finite element space — one DOF per element.
       fec = std::make_unique<L2_FECollection>(0, mesh->Dimension());
