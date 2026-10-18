@@ -401,6 +401,7 @@ stage_mfem() {
    ext_libs="$(petsc_var PETSC_EXTERNAL_LIB_BASIC)"
    local mfem_cuda_args=()
    local mfem_cxx_args=(MFEM_CXX=mpicxx OPTIM_FLAGS="-O3 -std=c++17 ${CPU_FLAGS}")
+   local xl="-Wl,"
    if [ "${MODE}" = "cuda" ]; then
       # nvcc compiles MFEM (and seas, which builds with MFEM's compiler) with
       # mpicxx as its host compiler; host-only flags go through -Xcompiler.
@@ -416,7 +417,12 @@ stage_mfem() {
          MFEM_USE_CUDA=YES CUDA_DIR="${cuda_dir}" CUDA_ARCH="sm_${GPU_ARCH}"
          MFEM_USE_CUDSS=YES CUDSS_DIR="${CUDSS_DIR}"
       )
+      # nvcc links too and rejects -Wl,: linker flags go through -Xlinker=
+      # (MFEM's CUDA_XLINKER), as MFEM already does for PETSc's own libs.
+      xl="-Xlinker="
    fi
+   ext_libs="${ext_libs//-Wl,/${xl}}"
+   local lapack_lib="${MFEM_LAPACK_LIB//-Wl,/${xl}}"
    log "configuring MFEM in ${SCRIPT_DIR}"
    cd "${SCRIPT_DIR}"
    make config \
@@ -424,12 +430,12 @@ stage_mfem() {
       "${mfem_cxx_args[@]}" \
       MFEM_USE_METIS=YES MFEM_USE_METIS_5=YES \
       METIS_DIR="${P}" METIS_OPT="-I${P}/include" \
-      METIS_LIB="-Wl,-rpath,${P}/lib -L${P}/lib -lmetis" \
+      METIS_LIB="${xl}-rpath,${P}/lib -L${P}/lib -lmetis" \
       HYPRE_DIR="${P}" HYPRE_OPT="-I${P}/include" \
-      HYPRE_LIB="-Wl,-rpath,${P}/lib -L${P}/lib -lHYPRE" \
-      MFEM_USE_LAPACK=YES LAPACK_LIB="${MFEM_LAPACK_LIB}" \
+      HYPRE_LIB="${xl}-rpath,${P}/lib -L${P}/lib -lHYPRE" \
+      MFEM_USE_LAPACK=YES LAPACK_LIB="${lapack_lib}" \
       MFEM_USE_MUMPS=YES MUMPS_DIR="${P}" MUMPS_OPT="-I${P}/include" \
-      MUMPS_LIB="-Wl,-rpath,${P}/lib -L${P}/lib -ldmumps -lmumps_common -lpord ${ext_libs}" \
+      MUMPS_LIB="${xl}-rpath,${P}/lib -L${P}/lib -ldmumps -lmumps_common -lpord ${ext_libs}" \
       MFEM_USE_PETSC=YES PETSC_DIR="${P}" PETSC_ARCH= \
       MFEM_USE_HDF5=NO \
       "${mfem_cuda_args[@]}"
