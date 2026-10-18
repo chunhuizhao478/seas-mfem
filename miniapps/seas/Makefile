@@ -869,6 +869,7 @@ DOMAIN_HEADERS = common/seas_types.hpp \
                  domain/elasticity_operator_traction.inl \
                  domain/elasticity_operator_fault_ops.inl \
                  domain/fused_stiffness_pair.hpp \
+                 domain/dense_block_stiffness.hpp \
                  domain/boundary_config.hpp \
                  domain/domain_config.hpp \
                  domain/seas_boundary_tags.hpp \

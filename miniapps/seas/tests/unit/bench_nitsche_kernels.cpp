@@ -27,6 +27,10 @@
 //       only (the probe needs every fault face local).
 //   [F2] the production fused sweep (domain/fused_stiffness_pair.hpp, plan
 //       item 4) on the matrices AssembleStiffness keeps, any rank count.
+//   [D] the production dense-block products (domain/dense_block_stiffness.hpp,
+//       plan item 8a): K u alone and K u + K_eta v, against the hypre
+//       products and the item 4 sweep, any rank count; block bytes per tet
+//       and the largest asymmetry of the assembled matrices.
 //   [T2] the production per-face fault operators (ComputeTractionFast,
 //       AddSlipLoadFast; plan item 3) against ComputeTractionDiagnostics and
 //       AssembleSlipOnlyRHS, any rank count.
@@ -52,6 +56,7 @@
 
 #include "mfem.hpp"
 #include "../../domain/elasticity_operator.hpp"
+#include "../../domain/dense_block_stiffness.hpp"
 #include "../../domain/fused_stiffness_pair.hpp"
 #include "../../dynamic/lts_partition.hpp"
 #include "../../integrator/dg_elasticity_ip_combined_integrator.hpp"
@@ -165,6 +170,14 @@ void TimeAlternating(int reps, FA &&fa, FB &&fb, double &a_min, double &a_med, d
    a_med = glob[1];
    b_min = glob[2];
    b_med = glob[3];
+}
+
+/// x in scientific notation (std::to_string prints 0.000000 for round-off).
+std::string Sci(double x)
+{
+   std::ostringstream os;
+   os << std::scientific << std::setprecision(2) << x;
+   return os.str();
 }
 
 real_t RelDiff(const Vector &a, const Vector &b)
@@ -673,6 +686,82 @@ int main(int argc, char *argv[])
                       << t2min * 1e3 << " ms, median " << t2med * 1e3 << " ms; fused min " << tPmin * 1e3
                       << " ms, median " << tPmed * 1e3 << " ms; speedup " << t2min / tPmin << "x (min), "
                       << t2med / tPmed << "x (median)\n";
+         }
+      }
+   }
+
+   // ------------------------------------------------------------------ [D]
+   {
+      // the production dense blocks (plan item 8a) on the same matrices:
+      // K alone (the undamped decks) and K with K_eta in one sweep
+      DenseBlockStiffness d1, d2;
+      int ok[2] = {d1.Init(*pfes, elast.ParStiffness(), nullptr) ? 1 : 0,
+                   d2.Init(*pfes, elast.ParStiffness(), &kv.ParStiffness()) ? 1 : 0};
+      MPI_Allreduce(MPI_IN_PLACE, ok, 2, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+      Check(ok[0] == 1, "DenseBlockStiffness::Init accepts the production K (every entry in a block)");
+      Check(ok[1] == 1, "DenseBlockStiffness::Init accepts the production K and K_eta");
+      if (ok[0] && ok[1])
+      {
+         Vector z(n), z2(n);
+         elast.ApplyStiffness(u, Ku);
+         kv.ApplyStiffness(v, Ev);
+         d1.Mult(u, z);
+         const double r1 = RelDiff(z, Ku);
+         Check(r1 < 1e-13, "dense blocks K u equals ApplyStiffness (rel diff " + Sci(r1) + ")");
+         z = Ku;
+         z += Ev;
+         d2.Mult(u, v, y);
+         const double r2 = RelDiff(y, z);
+         Check(r2 < 1e-13, "dense blocks K u + K_eta v equals the two ApplyStiffness calls (rel diff "
+               + Sci(r2) + ")");
+         // with u = v the fused sweep must equal K u + K_eta u
+         kv.ApplyStiffness(u, Ev);
+         z = Ku;
+         z += Ev;
+         d2.Mult(u, u, z2);
+         const double r3 = RelDiff(z2, z);
+         Check(r3 < 1e-13, "dense blocks K u + K_eta u (same vector twice) equals the two products (rel diff "
+               + Sci(r3) + ")");
+         real_t as[4] = {d2.Asymmetry(0), d2.Asymmetry(1), d2.MaxEntry(0), d2.MaxEntry(1)};
+         MPI_Allreduce(MPI_IN_PLACE, as, 4, MPITypeMap<real_t>::mpi_type, MPI_MAX, MPI_COMM_WORLD);
+         long long c[5] = {d2.Bytes(), d1.Bytes(), d2.NumFaces(), d2.NumSharedBlocks(), d2.NumElements()};
+         MPI_Allreduce(MPI_IN_PLACE, c, 5, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+         FusedStiffnessPair pair;
+         int okp = pair.Init(elast.ParStiffness(), kv.ParStiffness()) ? 1 : 0;
+         MPI_Allreduce(MPI_IN_PLACE, &okp, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+         double tHmin, tHmed, tDmin, tDmed, tPmin = 0, tPmed = 0, tQmin = 0, tQmed = 0, tKmin, tKmed, t1min, t1med;
+         TimeAlternating(3 * reps, [&]() { elast.ApplyStiffness(u, Ku); kv.ApplyStiffness(v, Ev); },
+                         [&]() { d2.Mult(u, v, y); }, tHmin, tHmed, tDmin, tDmed);
+         if (okp)
+         {
+            TimeAlternating(3 * reps, [&]() { pair.Mult(u, v, z); }, [&]() { d2.Mult(u, v, y); },
+                            tPmin, tPmed, tQmin, tQmed);
+         }
+         TimeAlternating(3 * reps, [&]() { elast.ApplyStiffness(u, Ku); }, [&]() { d1.Mult(u, z); },
+                         tKmin, tKmed, t1min, t1med);
+         if (g_rank == 0)
+         {
+            const double csr2 = 2.0 * (12.0 * nnz + 4.0 * rows);   // two CSR matrices (values + cols + row ptr)
+            std::cout << std::setprecision(4) << "\n[D] dense blocks (plan item 8a), block size "
+                      << d2.BlockSize() << "\n  " << c[4] << " elements, " << c[2] << " interior faces, "
+                      << c[3] << " shared-face blocks; largest asymmetry |A_ij - A_ji| / max|A|: K "
+                      << as[0] / as[2] << ", K_eta " << as[1] / as[3] << "\n  bytes per tet: K and K_eta "
+                      << double(c[0]) / ne_glob / 1e3 << " kB, K alone " << double(c[1]) / ne_glob / 1e3
+                      << " kB; the two CSR matrices " << csr2 / ne_glob / 1e3 << " kB ("
+                      << csr2 / c[0] << "x more)\n"
+                      << "  K u + K_eta v, timed in alternation, " << 3 * reps << " pairs: two ApplyStiffness min "
+                      << tHmin * 1e3 << " ms, median " << tHmed * 1e3 << " ms; dense min " << tDmin * 1e3
+                      << " ms, median " << tDmed * 1e3 << " ms; speedup " << tHmin / tDmin << "x (min), "
+                      << tHmed / tDmed << "x (median)\n";
+            if (okp)
+            {
+               std::cout << "  against the item 4 sweep: fused CSR min " << tPmin * 1e3 << " ms, median "
+                         << tPmed * 1e3 << " ms; dense min " << tQmin * 1e3 << " ms, median " << tQmed * 1e3
+                         << " ms; speedup " << tPmin / tQmin << "x (min), " << tPmed / tQmed << "x (median)\n";
+            }
+            std::cout << "  K u alone: ApplyStiffness min " << tKmin * 1e3 << " ms, median " << tKmed * 1e3
+                      << " ms; dense min " << t1min * 1e3 << " ms, median " << t1med * 1e3 << " ms; speedup "
+                      << tKmin / t1min << "x (min), " << tKmed / t1med << "x (median)\n";
          }
       }
    }

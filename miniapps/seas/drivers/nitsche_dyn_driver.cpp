@@ -668,7 +668,8 @@ int main(int argc, char *argv[])
                       " [--order p] [--tfinal s] [--output-dir d] [--prefix name]"
                       " [--station-every n] [--dump-every n] [--log-every n]"
                       " [--station-copies average|first] [--fast-fault 0|1]"
-                      " [--fused-spmv 0|1] [--fault-weight w] [--fast-fault-output 0|1]\n";
+                      " [--fused-spmv 0|1] [--dense-blocks 0|1] [--fault-weight w]"
+                      " [--fast-fault-output 0|1]\n";
       }
       return 1;
    }
@@ -702,6 +703,9 @@ int main(int argc, char *argv[])
    // face operators, fused K u + K_eta v, fault-weighted partition.  1 = on.
    const int fast_fault = ArgInt(argc, argv, "--fast-fault", 1);
    const int fused_spmv = ArgInt(argc, argv, "--fused-spmv", 1);
+   // item 8a (2026-10-18): K u (+ K_eta v) from dense element and face
+   // blocks; takes precedence over --fused-spmv, which applies when it is 0
+   const int dense_blocks = ArgInt(argc, argv, "--dense-blocks", 1);
    const int fast_fault_output = ArgInt(argc, argv, "--fast-fault-output", 1);
    const real_t fault_weight = ArgReal(argc, argv, "--fault-weight", kDefaultFaultWeight);
    MFEM_VERIFY(station_copies == "average" || station_copies == "first",
@@ -1497,6 +1501,7 @@ int main(int argc, char *argv[])
    }
    op.SetFastFaultKernels(fast_fault != 0);
    op.SetFusedStiffness(fused_spmv != 0);
+   op.SetDenseBlocks(dense_blocks != 0);
    CentralDifferenceSolver ode;
    ode.Init(op);
    if (stations)
@@ -1645,6 +1650,11 @@ int main(int argc, char *argv[])
          {
             std::cout << " (union pattern adds " << op.FusedExtraEntries() << " of "
                       << op.FusedEntriesK() << " entries)";
+         }
+         std::cout << ", dense blocks " << (op.DenseBlocksActive() ? "on" : "off");
+         if (op.DenseBlocksActive())
+         {
+            std::cout << " (" << op.DenseBlockBytes() / 1e6 << " MB over all ranks)";
          }
          std::cout << "\n";
       }

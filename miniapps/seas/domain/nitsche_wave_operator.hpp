@@ -104,6 +104,7 @@
 #include "nitsche_mass.hpp"
 #include "elasticity_operator.hpp"
 #include "fused_stiffness_pair.hpp"
+#include "dense_block_stiffness.hpp"
 #include "../integrator/dg_absorbing_bc_integrator.hpp"
 #include "../fault/fault_orientation.hpp"
 #include "../fault/fault_frame.hpp"
@@ -718,6 +719,15 @@ public:
    bool FastFaultKernelsActive() const { return fast_fault_state_ == 1; }
    /// True once the fused sweep is in use (after the first acceleration).
    bool FusedStiffnessActive() const { return fused_state_ == 1; }
+   /// Profiling plan item 8a: K x (+ K_eta v) from dense element and face
+   /// blocks in one sweep (default on).  It replaces the item 4 sweep and
+   /// the CSR products; when the blocks cannot be built (DenseBlockStiffness
+   /// ::Init) the operator falls back to them.  Call before the first step.
+   void SetDenseBlocks(bool on) { dense_enabled_ = on; dense_state_ = 0; }
+   /// True once the dense blocks are in use (after the first acceleration).
+   bool DenseBlocksActive() const { return dense_state_ == 1; }
+   /// Bytes of the dense blocks summed over the ranks (0 when not in use).
+   long long DenseBlockBytes() const { return dense_bytes_; }
    /// Seconds this rank spent on fault work since construction: AdvanceFault_
    /// up to its global reductions, plus the slip loads (profiling; the
    /// partition weight of plan item 6 comes from it).
@@ -830,8 +840,18 @@ private:
    void Acceleration_(const Vector &x, const Vector *v, const Vector *d,
                       const NitscheMass &Minv, Vector &a) const
    {
-      const bool fuse = kv_ && v && UseFused_();
-      if (fuse) { fused_.Mult(x, *v, Kx_); }   // K x + K_eta v
+      const bool dense = UseDense_();
+      const bool fuse = !dense && kv_ && v && UseFused_();
+      if (dense)
+      {
+         if (kv_)
+         {
+            MFEM_VERIFY(v, "NitscheWaveOperator: Kelvin-Voigt needs the velocity");
+            dense_.Mult(x, *v, Kx_);   // K x + K_eta v
+         }
+         else { dense_.Mult(x, Kx_); }
+      }
+      else if (fuse) { fused_.Mult(x, *v, Kx_); }   // K x + K_eta v
       else { elast_->ApplyStiffness(x, Kx_); }
       elast_->AssembleDirichletOnlyRHS(F_, GetTime());
       F_ -= Kx_;
@@ -859,7 +879,7 @@ private:
       {
          // Kelvin-Voigt: -(K_eta v - G_eta V) with the stored slip rate V
          // (V^{n+1} in ImplicitSolve, after the fault advance)
-         if (!fuse)
+         if (!fuse && !dense)
          {
             kv_->ApplyStiffness(*v, Kv_v_);
             F_ -= Kv_v_;
@@ -906,6 +926,39 @@ private:
       // SetKelvinVoigt after the first build (kv_ is a global property)
       if (fast_fault_state_ == 1 && kv_ && !kv_->HasFaultFaceOps()) { kv_->BuildFaultFaceOps(); }
       return fast_fault_state_ == 1;
+   }
+
+   /// Collective on the first call: read K (and K_eta) into dense blocks
+   /// (plan item 8a) and free the hypre matrices they replace, as UseFused_
+   /// does.  Read again when the Kelvin-Voigt layer was set after the first
+   /// read (kv_ is a global property).
+   bool UseDense_() const
+   {
+      if (dense_state_ == 1 && dense_.NumMatrices() != (kv_ ? 2 : 1)) { dense_state_ = 0; }
+      if (dense_state_ == 0)
+      {
+         int ok = dense_enabled_ ? 1 : 0;
+         if (ok)
+         {
+            ok = dense_.Init(elast_->GetFESpace(), elast_->ParStiffness(),
+                             kv_ ? &kv_->ParStiffness() : nullptr) ? 1 : 0;
+         }
+         MPI_Allreduce(MPI_IN_PLACE, &ok, 1, MPI_INT, MPI_MIN, mesh_.GetComm());
+         dense_state_ = ok ? 1 : -1;
+         if (ok)
+         {
+            long long b = dense_.Bytes();
+            MPI_Allreduce(MPI_IN_PLACE, &b, 1, MPI_LONG_LONG, MPI_SUM, mesh_.GetComm());
+            dense_bytes_ = b;
+            elast_->ReleaseStiffness();
+            if (kv_) { kv_->ReleaseStiffness(); }
+         }
+         else if (dense_enabled_) { dense_ = DenseBlockStiffness(); }   // free what Init built
+#if defined(__GLIBC__)
+         if (dense_enabled_) { malloc_trim(0); }
+#endif
+      }
+      return dense_state_ == 1;
    }
 
    /// Collective on the first call: set up the fused K/K_eta sweep (union
@@ -1364,6 +1417,10 @@ private:
    mutable int fused_state_ = 0;   ///< 0 not tried, 1 fused, -1 two SpMVs
    mutable FusedStiffnessPair fused_;
    mutable long long fused_extra_ = 0, fused_nnz_k_ = 0;
+   bool dense_enabled_ = true;
+   mutable int dense_state_ = 0;   ///< 0 not tried, 1 dense blocks, -1 fused or CSR
+   mutable DenseBlockStiffness dense_;
+   mutable long long dense_bytes_ = 0;
    mutable double fault_sec_ = 0.0;
 };
 
