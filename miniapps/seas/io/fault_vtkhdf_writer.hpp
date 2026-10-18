@@ -50,15 +50,20 @@
 #include "fault_vtu_binary.hpp"   // vtu::LocalFaultPack, GatheredFaultPack,
                                    // GatherFaultPackToRoot
 
+#include <algorithm>
+#include <chrono>
 #include <memory>
 #include <string>
 #include <vector>
+
+#include <sys/stat.h>
 
 #ifndef MFEM_USE_HDF5
 #error "fault_vtkhdf_writer.hpp requires MFEM_USE_HDF5=YES.  Either enable HDF5 in config/config.mk and rebuild MFEM, or use Phase 1's binary VTU path (the default in this build)."
 #endif
 
 #include "fem/datacollection.hpp"  // ParaViewHDFDataCollection
+#include "mesh/vtkhdf.hpp"         // VTKHDF (FaultHDFStream)
 
 namespace mfem
 {
@@ -308,6 +313,212 @@ inline void WriteFaultPackHdf(FaultHDFState &state,
    state.dc->SetTime(time);
    state.dc->Save();
 }
+
+/// @brief Faster writer of the same <prefix>/fault.vtkhdf as
+/// WriteFaultPackHdf, for a fault whose geometry and field list never
+/// change.  Plan item 1 of the Nitsche profiling plan (nitsche-profiling,
+/// Chunhui Zhao 2026-10-17).  Per frame it saves:
+///   - the gather: the geometry crosses to rank 0 once; later frames send
+///     only the field values, all fields in one MPI_Gatherv;
+///   - the per-cell GridFunction evaluation of SaveGridFunction: values go
+///     straight to VTKHDF::SavePointData (each cell value at the cell's 3
+///     points, exactly what SaveGridFunction writes for an L2 p = 0 field);
+///   - the re-compression of every dataset's last, partly filled 0.5 MB
+///     chunk: new datasets are chunked to their first append
+///     (VTKHDF::SetChunkToFirstAppend);
+///   - the constant fields (constant[k] != 0): written at the first frame
+///     only; later steps keep their Steps/PointDataOffsets entry at the
+///     first frame's data, which VTKHDF readers follow.
+/// The values, point order, field names and step layout are otherwise those
+/// of WriteFaultPackHdf with the same filter.  Collective; the file lives on
+/// rank 0.
+class FaultHDFStream
+{
+public:
+   /// Chunk filter, as FaultHDFState::compression_alg / compression_param.
+   /// Call before the first Write.
+   void SetCompression(ParaViewHDFDataCollection::HDFCompression alg, double param)
+   {
+      alg_ = alg;
+      param_ = param;
+   }
+
+   void Write(const std::string &prefix, real_t time, const vtu::LocalFaultPack &local,
+              const std::vector<char> &constant, int rank, int nranks
+#ifdef MFEM_USE_MPI
+              , MPI_Comm comm = MPI_COMM_NULL
+#endif
+             )
+   {
+      const double t0 = Now_();
+#ifdef MFEM_USE_MPI
+      const bool par = nranks > 1 && comm != MPI_COMM_NULL;
+#else
+      const bool par = false;
+#endif
+      const std::size_t nf = local.field_arrays.size();
+      if (frames_ == 0)
+      {
+         MFEM_VERIFY(constant.size() == nf, "FaultHDFStream: " << constant.size()
+                     << " constant flags for " << nf << " fields");
+         constant_ = constant;
+         names_ = local.field_names;
+         ncell_ = static_cast<int>(local.triangles.size());
+         for (std::size_t k = 0; k < nf; k++) { if (!constant_[k]) { var_.push_back(static_cast<int>(k)); } }
+         vtu::GatheredFaultPack g = vtu::GatherFaultPackToRoot(local, rank, nranks
+#ifdef MFEM_USE_MPI
+                                                                , comm
+#endif
+                                                               );
+#ifdef MFEM_USE_MPI
+         if (par)
+         {
+            counts_.assign(rank == 0 ? nranks : 0, 0);
+            MPI_Gather(&ncell_, 1, MPI_INT, rank == 0 ? counts_.data() : nullptr, 1, MPI_INT, 0, comm);
+         }
+#endif
+         gather_sec_ += Now_() - t0;
+         if (rank == 0) { Open_(prefix, g); }
+         if (rank == 0) { Save_(time, g.field_arrays); }
+      }
+      else
+      {
+         MFEM_VERIFY(static_cast<int>(local.triangles.size()) == ncell_ && local.field_names == names_,
+                     "FaultHDFStream: the fault geometry or field list changed after the first frame");
+         if (!par)
+         {
+            gather_sec_ += Now_() - t0;
+            if (rank == 0) { Save_(time, local.field_arrays); }
+         }
+#ifdef MFEM_USE_MPI
+         else
+         {
+            const int nv = static_cast<int>(var_.size());
+            send_.resize(static_cast<std::size_t>(nv) * ncell_);
+            for (int v = 0; v < nv; v++)
+            {
+               std::copy(local.field_arrays[var_[v]].begin(), local.field_arrays[var_[v]].end(),
+                         send_.begin() + static_cast<std::size_t>(v) * ncell_);
+            }
+            std::vector<int> cnt, dsp;
+            int total = 0;
+            if (rank == 0)
+            {
+               cnt.resize(nranks);
+               dsp.resize(nranks);
+               for (int r = 0; r < nranks; r++)
+               {
+                  cnt[r] = nv * counts_[r];
+                  dsp[r] = total;
+                  total += cnt[r];
+               }
+               recv_.resize(total);
+            }
+            MPI_Gatherv(send_.data(), static_cast<int>(send_.size()), MPI_DOUBLE,
+                        rank == 0 ? recv_.data() : nullptr, rank == 0 ? cnt.data() : nullptr,
+                        rank == 0 ? dsp.data() : nullptr, MPI_DOUBLE, 0, comm);
+            if (rank == 0)
+            {
+               // rank r's block: nv fields x counts_[r] cells, field-major
+               arrays_.assign(nf, std::vector<double>());
+               for (int v = 0; v < nv; v++) { arrays_[var_[v]].resize(ncell_total_); }
+               int cell0 = 0;
+               for (int r = 0; r < nranks; r++)
+               {
+                  for (int v = 0; v < nv; v++)
+                  {
+                     const double *b = recv_.data() + dsp[r] + static_cast<std::size_t>(v) * counts_[r];
+                     std::copy(b, b + counts_[r], arrays_[var_[v]].begin() + cell0);
+                  }
+                  cell0 += counts_[r];
+               }
+            }
+            gather_sec_ += Now_() - t0;
+            if (rank == 0) { Save_(time, arrays_); }
+         }
+#endif
+      }
+      frames_++;
+   }
+
+   int Frames() const { return frames_; }
+   /// Seconds in the gather (all ranks) and in the HDF5 write (rank 0).
+   double GatherSeconds() const { return gather_sec_; }
+   double WriteSeconds() const { return write_sec_; }
+
+private:
+   static double Now_()
+   {
+      return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+   }
+
+   /// Rank 0: the mesh and the file, with the filter mapping of
+   /// ParaViewHDFDataCollection::TSave.
+   void Open_(const std::string &prefix, const vtu::GatheredFaultPack &g)
+   {
+      ncell_total_ = static_cast<int>(g.triangles.size());
+      mesh_ = BuildFaultTriangleMesh(g);
+      std::string dir = prefix;
+      if (!dir.empty() && dir.back() != '/') { dir += '/'; }
+      if (!dir.empty()) { ::mkdir(dir.c_str(), 0775); }
+      file_ = std::make_unique<VTKHDF>(dir + "fault.vtkhdf");
+      const bool compression = (alg_ == ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy)
+                               || param_ >= 0.0;
+      const int level = (alg_ == ParaViewHDFDataCollection::HDFCompression::Deflate && param_ >= 0.0)
+                        ? static_cast<int>(param_) : -1;
+      if (alg_ == ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy)
+      {
+         file_->SetZfpAccuracy(param_);
+      }
+      else { file_->SetCompressionAlgorithm(VTKHDF::CompressionAlgorithm::Deflate); }
+      if (compression) { file_->EnableCompression(level >= 0 ? level : 6); }
+      else { file_->DisableCompression(); }
+      file_->SetChunkToFirstAppend(true);
+      // the data collection writes its fields in name order (std::map)
+      order_.resize(names_.size());
+      for (std::size_t k = 0; k < order_.size(); k++) { order_[k] = static_cast<int>(k); }
+      std::sort(order_.begin(), order_.end(), [&](int a, int b) { return names_[a] < names_[b]; });
+      // points per cell of SaveMesh(mesh, high_order = false, ref = 1)
+      ppc_ = GlobGeometryRefiner.Refine(Geometry::TRIANGLE, 1, 1)->RefPts.GetNPoints();
+   }
+
+   /// Rank 0: one step.  arrays[k] = per-cell values of field k (constant
+   /// fields are read at the first frame only).
+   void Save_(real_t time, const std::vector<std::vector<double>> &arrays)
+   {
+      const double t0 = Now_();
+      file_->SaveMesh<double>(*mesh_, /*high_order=*/false, /*ref=*/1);
+      for (int k : order_)
+      {
+         if (frames_ > 0 && constant_[k]) { continue; }
+         const std::vector<double> &a = arrays[k];
+         MFEM_VERIFY(static_cast<int>(a.size()) == ncell_total_, "FaultHDFStream: field '"
+                     << names_[k] << "' has " << a.size() << " cells, the mesh " << ncell_total_);
+         pts_.resize(static_cast<std::size_t>(ppc_) * a.size());
+         for (std::size_t c = 0; c < a.size(); c++)
+         {
+            for (int i = 0; i < ppc_; i++) { pts_[ppc_ * c + i] = a[c]; }
+         }
+         file_->SavePointData<double>(names_[k], pts_, 1);
+      }
+      file_->UpdateSteps(time);
+      file_->Flush();
+      write_sec_ += Now_() - t0;
+   }
+
+   ParaViewHDFDataCollection::HDFCompression alg_ =
+      ParaViewHDFDataCollection::HDFCompression::Deflate;
+   double param_ = 6.0;
+   int frames_ = 0, ncell_ = 0, ncell_total_ = 0, ppc_ = 0;
+   std::vector<std::string> names_;
+   std::vector<char> constant_;
+   std::vector<int> var_, order_, counts_;
+   std::vector<double> send_, recv_, pts_;
+   std::vector<std::vector<double>> arrays_;
+   std::unique_ptr<Mesh> mesh_;
+   std::unique_ptr<VTKHDF> file_;
+   double gather_sec_ = 0.0, write_sec_ = 0.0;
+};
 
 } // namespace vtkhdf
 } // namespace seas

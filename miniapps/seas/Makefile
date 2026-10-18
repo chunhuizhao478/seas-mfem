@@ -867,6 +867,8 @@ DOMAIN_HEADERS = common/seas_types.hpp \
                  domain/elasticity_operator_setup.inl \
                  domain/elasticity_operator_assembly.inl \
                  domain/elasticity_operator_traction.inl \
+                 domain/elasticity_operator_fault_ops.inl \
+                 domain/fused_stiffness_pair.hpp \
                  domain/boundary_config.hpp \
                  domain/domain_config.hpp \
                  domain/seas_boundary_tags.hpp \
@@ -3369,6 +3371,7 @@ NITSCHE_DYN_DRIVER_SRC = drivers/nitsche_dyn_driver.cpp
 NITSCHE_DYN_DRIVER_OBJ = $(NITSCHE_DYN_DRIVER_SRC:.cpp=.o)
 $(NITSCHE_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
                              domain/nitsche_wave_operator.hpp \
+                             dynamic/lts_partition.hpp \
                              domain/nitsche_energy.hpp \
                              spatial/code/spatial_friction.hpp \
                              dynamic/fault_station_file.hpp \
@@ -3381,10 +3384,11 @@ $(NITSCHE_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
 	    -c $< -o $@
 
 seas_nitsche_dyn_driver: $(NITSCHE_DYN_DRIVER_OBJ) $(SPATIAL_FRICTION_OBJ) \
-                         $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+                         $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+                         $(LTS_PARTITION_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(NITSCHE_DYN_DRIVER_OBJ) \
 	    $(SPATIAL_FRICTION_OBJ) $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
-	    $(MFEM_LIBS)
+	    $(LTS_PARTITION_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # P6 long checks (minutes each; np=8 unless noted): T-15 energy balance and
@@ -6707,6 +6711,6 @@ $(BENCH_NITSCHE_KERNELS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) 
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
 	    -c $< -o $@
 
-seas_bench_nitsche_kernels: $(BENCH_NITSCHE_KERNELS_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
-	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(BENCH_NITSCHE_KERNELS_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+seas_bench_nitsche_kernels: $(BENCH_NITSCHE_KERNELS_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) $(LTS_PARTITION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(BENCH_NITSCHE_KERNELS_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) $(LTS_PARTITION_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)

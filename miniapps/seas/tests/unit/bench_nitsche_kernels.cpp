@@ -24,13 +24,20 @@
 //       per-face dense operator T_f = A_f [u_1; u_2; slip_f] built once by
 //       probing ComputeTraction; checked against ComputeTraction.  Serial
 //       only (the probe needs every fault face local).
+//   [F2] the production fused sweep (domain/fused_stiffness_pair.hpp, plan
+//       item 4) on the matrices AssembleStiffness keeps, any rank count.
+//   [T2] the production per-face fault operators (ComputeTractionFast,
+//       AddSlipLoadFast; plan item 3) against ComputeTractionDiagnostics and
+//       AssembleSlipOnlyRHS, any rank count.
 //   [P] partition balance (serial run, --partitions n1,n2,...): METIS
 //       partitions of the mesh, tets and fault faces per part, and the
 //       predicted step-time imbalance max/mean from the measured costs per
 //       tet and per fault face.
 //   [H] fault output back end (--hdf-dir): per-frame cost of
 //       ParaViewHDFDataCollection::Save for the fault writer's layout, deflate
-//       level 1 (the decks), 0 and no filter.
+//       level 1 (the decks), 0 and no filter; then the two production writers
+//       on the same triangles, 1 rank, deflate level 1 and no filter: the SAFS
+//       writer vtkhdf::WriteFaultPackHdf and vtkhdf::FaultHDFStream (plan item 1).
 //
 // Usage (from miniapps/seas):
 //   ./seas_bench_nitsche_kernels --mesh tpv205/mesh/tpv2053d_1000m.msh --order 1
@@ -44,7 +51,12 @@
 
 #include "mfem.hpp"
 #include "../../domain/elasticity_operator.hpp"
+#include "../../domain/fused_stiffness_pair.hpp"
+#include "../../dynamic/lts_partition.hpp"
 #include "../../integrator/dg_elasticity_ip_combined_integrator.hpp"
+#ifdef MFEM_USE_HDF5
+#include "../../io/fault_vtkhdf_writer.hpp"
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -121,6 +133,37 @@ double TimeMedian(int reps, F &&f)
    double med = t[reps / 2], glob = 0.0;
    MPI_Allreduce(&med, &glob, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
    return glob;
+}
+
+/// A and B timed in alternation (A, B, A, B, ...) so that both see the same
+/// machine state; min and median of each, max over ranks.  Used where the
+/// difference is small against the run-to-run noise of a shared machine.
+template <typename FA, typename FB>
+void TimeAlternating(int reps, FA &&fa, FB &&fb, double &a_min, double &a_med, double &b_min,
+                     double &b_med)
+{
+   fa();
+   fb();
+   std::vector<double> ta(reps), tb(reps);
+   for (int r = 0; r < reps; r++)
+   {
+      MPI_Barrier(MPI_COMM_WORLD);
+      double t0 = Now();
+      fa();
+      ta[r] = Now() - t0;
+      MPI_Barrier(MPI_COMM_WORLD);
+      t0 = Now();
+      fb();
+      tb[r] = Now() - t0;
+   }
+   std::sort(ta.begin(), ta.end());
+   std::sort(tb.begin(), tb.end());
+   double loc[4] = {ta[0], ta[reps / 2], tb[0], tb[reps / 2]}, glob[4];
+   MPI_Allreduce(loc, glob, 4, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+   a_min = glob[0];
+   a_med = glob[1];
+   b_min = glob[2];
+   b_med = glob[3];
 }
 
 real_t RelDiff(const Vector &a, const Vector &b)
@@ -261,7 +304,7 @@ struct FaceTractionOp
 void PartitionBalance(Mesh &smesh, int fault_attr, const std::vector<int> &part_list,
                       double c_tet, double c_face)
 {
-   std::cout << std::setprecision(4) << "\n[P] partition balance (METIS, unweighted); c_tet = "
+   std::cout << std::setprecision(4) << "\n[P] partition balance (METIS); c_tet = "
              << c_tet * 1e9 << " ns, c_face = " << c_face * 1e9 << " ns per step (ratio "
              << c_face / c_tet << ")\n";
    std::vector<int> nff(smesh.GetNE(), 0);
@@ -276,30 +319,56 @@ void PartitionBalance(Mesh &smesh, int fault_attr, const std::vector<int> &part_
       nfault++;
    }
    std::cout << "  mesh: " << smesh.GetNE() << " tets, " << nfault << " fault faces\n";
+   // the driver's weighted cut (plan item 6): METIS weight 1 + w per
+   // fault-face side, w = c_side / c_tet
+   const double w = 0.5 * c_face / c_tet;
+   const int ne = smesh.GetNE();
+   const Table &e2e = smesh.ElementToElementTable();
+   const std::vector<int> xadj(e2e.GetI(), e2e.GetI() + ne + 1);
+   const std::vector<int> adj(e2e.GetJ(), e2e.GetJ() + e2e.Size_of_connections());
+   const std::vector<int> cluster(ne, 0);
+   std::vector<double> cost(ne);
+   for (int e = 0; e < ne; e++) { cost[e] = 100.0 * (1.0 + w * nff[e]); }
    for (int np : part_list)
    {
-      int *pa = smesh.GeneratePartitioning(np, 1);
-      std::vector<long long> ne_p(np, 0), nf_p(np, 0);
-      for (int e = 0; e < smesh.GetNE(); e++) { ne_p[pa[e]]++; nf_p[pa[e]] += nff[e]; }
-      delete [] pa;
-      double tmax = 0.0, tsum = 0.0, emax = 0.0, tmax_bulk = 0.0;
-      long long fmax = 0, nfr = 0;
-      for (int r = 0; r < np; r++)
+      for (int weighted = 0; weighted < 2; weighted++)
       {
-         // each side of a fault face costs half a face (the two sides of a
-         // face split over two ranks are both computed)
-         const double tr = ne_p[r] * c_tet + 0.5 * nf_p[r] * c_face;
-         tmax = std::max(tmax, tr);
-         tmax_bulk = std::max(tmax_bulk, ne_p[r] * c_tet);
-         tsum += tr;
-         emax = std::max<double>(emax, ne_p[r]);
-         fmax = std::max(fmax, nf_p[r]);
-         nfr += nf_p[r] > 0 ? 1 : 0;
+         std::vector<int> part;
+         if (weighted)
+         {
+            LtsPartitionOptions popt;
+            popt.imbalance = 1.03;   // METIS's default for k-way, as MFEM's cut
+            BuildLtsAwarePartition(ne, xadj, adj, cluster, 1, np, &cost, {}, popt, part);
+         }
+         else
+         {
+            int *pa = smesh.GeneratePartitioning(np, 1);
+            part.assign(pa, pa + ne);
+            delete [] pa;
+         }
+         std::vector<long long> ne_p(np, 0), nf_p(np, 0);
+         for (int e = 0; e < ne; e++) { ne_p[part[e]]++; nf_p[part[e]] += nff[e]; }
+         double tmax = 0.0, tsum = 0.0, emax = 0.0, tmax_bulk = 0.0;
+         long long fmax = 0, nfr = 0;
+         for (int r = 0; r < np; r++)
+         {
+            // each side of a fault face costs half a face (the two sides of a
+            // face split over two ranks are both computed)
+            const double tr = ne_p[r] * c_tet + 0.5 * nf_p[r] * c_face;
+            tmax = std::max(tmax, tr);
+            tmax_bulk = std::max(tmax_bulk, ne_p[r] * c_tet);
+            tsum += tr;
+            emax = std::max<double>(emax, ne_p[r]);
+            fmax = std::max(fmax, nf_p[r]);
+            nfr += nf_p[r] > 0 ? 1 : 0;
+         }
+         std::cout << "  " << np << " parts, " << (weighted ? "weighted w = " : "MFEM default cut")
+                   << (weighted ? std::to_string(w) : std::string()) << ": tets/part mean "
+                   << double(ne) / np << " max " << emax << "; parts with fault faces " << nfr << " ("
+                   << 100.0 * nfr / np << "%), fault-face sides per part max " << fmax
+                   << "; predicted step time max/mean " << tmax / (tsum / np) << " (bulk only "
+                   << tmax_bulk / (tsum / np) << ")\n";
       }
-      std::cout << "  " << np << " parts: tets/part mean " << double(smesh.GetNE()) / np << " max " << emax
-                << "; parts with fault faces " << nfr << " (" << 100.0 * nfr / np << "%), fault-face sides "
-                << "per part max " << fmax << "; predicted step time max/mean " << tmax / (tsum / np)
-                << " (bulk only " << tmax_bulk / (tsum / np) << ")\n";
    }
 }
 
@@ -344,6 +413,68 @@ void HdfFrameCost(const std::string &dir, int cells, int nfields, int frames)
       std::cout << "  " << std::left << std::setw(18) << m.name << std::right << " first frame " << t[0] * 1e3
                 << " ms, later frames " << tail / (frames - 1) * 1e3 << " ms each\n";
    }
+#ifdef MFEM_USE_HDF5
+   // The production writers on the same triangles, as the driver calls them
+   // (the last two fields constant, as param_a, param_Dc).
+   vtu::LocalFaultPack pack;
+   for (int e = 0; e < tri.GetNE(); e++)
+   {
+      Array<int> v;
+      tri.GetElementVertices(e, v);
+      const int b = static_cast<int>(pack.vertices.size());
+      for (int i = 0; i < 3; i++)
+      {
+         const real_t *x = tri.GetVertex(v[i]);
+         pack.vertices.push_back({x[0], 0.0, -x[1]});
+      }
+      pack.triangles.push_back({b, b + 1, b + 2});
+   }
+   std::vector<char> constant(nfields, 0);
+   for (int k = 0; k < nfields; k++)
+   {
+      pack.field_names.push_back("f" + std::to_string(10 + k));
+      pack.field_arrays.emplace_back(tri.GetNE(), 0.0);
+      if (k >= nfields - 2) { constant[k] = 1; }
+   }
+   const auto fill = [&](int f)
+   {
+      for (int k = 0; k < nfields; k++)
+         for (int e = 0; e < tri.GetNE(); e++)
+         {
+            pack.field_arrays[k][e] = constant[k] ? std::cos(0.001 * e + k)
+                                      : std::sin(0.001 * e + 0.1 * f + k);
+         }
+   };
+   for (int run = 0; run < 4; run++)
+   {
+      // SAFS writer / FaultHDFStream, each with deflate 1 and with no filter
+      const int w = run / 2;
+      const double level = (run % 2 == 0) ? 1.0 : -1.0;
+      const std::string sub = dir + (w == 0 ? "/hdf_safs" : "/hdf_stream") + (level < 0 ? "_none" : "_d1");
+      vtkhdf::FaultHDFState state;
+      state.compression_alg = ParaViewHDFDataCollection::HDFCompression::Deflate;
+      state.compression_param = level;
+      vtkhdf::FaultHDFStream stream;
+      stream.SetCompression(ParaViewHDFDataCollection::HDFCompression::Deflate, level);
+      std::vector<double> t(frames);
+      for (int f = 0; f < frames; f++)
+      {
+         fill(f);
+         const double t0 = Now();
+         if (w == 0) { vtkhdf::WriteFaultPackHdf(state, sub, f, 0.02 * f, pack, 0, 1, MPI_COMM_SELF); }
+         else { stream.Write(sub, 0.02 * f, pack, constant, 0, 1, MPI_COMM_SELF); }
+         t[f] = Now() - t0;
+      }
+      double tail = 0.0;
+      for (int f = 1; f < frames; f++) { tail += t[f]; }
+      std::ifstream fs(sub + "/fault.vtkhdf", std::ios::binary | std::ios::ate);
+      const double mb = fs ? static_cast<double>(fs.tellg()) / 1e6 : -1.0;
+      std::cout << "  " << std::left << std::setw(18) << (w == 0 ? "SAFS writer" : "FaultHDFStream")
+                << std::right << " first frame " << t[0] * 1e3 << " ms, later frames "
+                << tail / (frames - 1) * 1e3 << " ms each (" << (level < 0 ? "no filter" : "deflate 1")
+                << ", production call; file " << mb << " MB)\n";
+   }
+#endif
 }
 
 }  // namespace
@@ -505,6 +636,43 @@ int main(int argc, char *argv[])
          std::cout << std::setprecision(4) << "\n[F] fused sweep: K u + K_eta v\n"
                    << "  two hypre products " << tKE * 1e3 << " ms; fused " << tF * 1e3 << " ms; speedup "
                    << tKE / tF << "x\n";
+      }
+   }
+
+   // ------------------------------------------------------------------ [F2]
+   {
+      // the production fused sweep (FusedStiffnessPair, plan item 4) on the
+      // matrices AssembleStiffness keeps (finalized with skip_zeros = 1, so
+      // the two patterns may differ: union pattern), any rank count
+      FusedStiffnessPair pair;
+      int ok = pair.Init(elast.ParStiffness(), kv.ParStiffness()) ? 1 : 0;
+      MPI_Allreduce(MPI_IN_PLACE, &ok, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+      Check(ok == 1, "FusedStiffnessPair::Init accepts the production K and K_eta");
+      if (ok)
+      {
+         long long c[2] = {pair.ExtraEntries(), pair.EntriesK()};
+         MPI_Allreduce(MPI_IN_PLACE, c, 2, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+         Vector z(n);
+         elast.ApplyStiffness(u, Ku);
+         kv.ApplyStiffness(v, Ev);
+         z = Ku;
+         z += Ev;
+         pair.Mult(u, v, y);
+         const double rd = RelDiff(y, z);
+         Check(rd < 1e-13, "FusedStiffnessPair K u + K_eta v equals the two ApplyStiffness calls "
+               "(rel diff " + std::to_string(rd) + ")");
+         double t2min, t2med, tPmin, tPmed;
+         TimeAlternating(3 * reps, [&]() { elast.ApplyStiffness(u, Ku); kv.ApplyStiffness(v, Ev); },
+                         [&]() { pair.Mult(u, v, y); }, t2min, t2med, tPmin, tPmed);
+         if (g_rank == 0)
+         {
+            std::cout << std::setprecision(4) << "\n[F2] FusedStiffnessPair on the production K, K_eta\n"
+                      << "  union pattern adds " << c[0] << " of " << c[1] << " entries (" << 100.0 * c[0] / c[1]
+                      << "%)\n  timed in alternation, " << 3 * reps << " pairs: two ApplyStiffness min "
+                      << t2min * 1e3 << " ms, median " << t2med * 1e3 << " ms; fused min " << tPmin * 1e3
+                      << " ms, median " << tPmed * 1e3 << " ms; speedup " << t2min / tPmin << "x (min), "
+                      << t2med / tPmed << "x (median)\n";
+         }
       }
    }
 
@@ -707,6 +875,42 @@ int main(int argc, char *argv[])
                    << tTd / tTpre << "x vs the Nitsche call)\n";
       }
       std::cout << "  AssembleSlipOnlyRHS (G d)                               " << tGd * 1e3 << " ms\n";
+   }
+
+   // ------------------------------------------------------------------ [T2]
+   {
+      // the production per-face operators (plan item 3) against the calls
+      // they replace in the Nitsche step, any rank count (shared fault faces
+      // exercise the face-neighbour exchange)
+      MPI_Barrier(MPI_COMM_WORLD);
+      double t0 = Now();
+      elast.BuildFaultFaceOps();
+      double t_build = Now() - t0;
+      MPI_Allreduce(MPI_IN_PLACE, &t_build, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+      Vector Tf, Tnf, g1(n), g2(n);
+      elast.ComputeTractionDiagnostics(ugf, slip, T, Ts, Tc, jr, &Tn);
+      elast.ComputeTractionFast(u, slip, Tf, Tnf);
+      const real_t e1 = RelDiff(Tf, T), e2 = RelDiff(Tnf, Tn);
+      std::ostringstream m1;
+      m1 << "ComputeTractionFast equals ComputeTractionDiagnostics (shear rel diff " << e1
+         << ", normal " << e2 << ")";
+      Check(e1 < 1e-11 && e2 < 1e-11, m1.str());
+      elast.AssembleSlipOnlyRHS(g1, slip);
+      g2 = 0.0;
+      elast.AddSlipLoadFast(slip, g2);
+      const real_t e3 = RelDiff(g2, g1);
+      std::ostringstream m2;
+      m2 << "AddSlipLoadFast equals AssembleSlipOnlyRHS (rel diff " << e3 << ")";
+      Check(e3 < 1e-11, m2.str());
+      const double tTf = TimeMedian(reps, [&]() { elast.ComputeTractionFast(u, slip, Tf, Tnf); });
+      const double tGf = TimeMedian(reps, [&]() { elast.AddSlipLoadFast(slip, g2); });
+      if (g_rank == 0)
+      {
+         std::cout << std::setprecision(4) << "\n[T2] production per-face fault operators (plan item 3)\n"
+                   << "  build " << t_build << " s; ComputeTractionFast " << tTf * 1e3 << " ms ("
+                   << tTd / tTf << "x vs ComputeTractionDiagnostics); AddSlipLoadFast " << tGf * 1e3
+                   << " ms (" << tGd / tGf << "x vs AssembleSlipOnlyRHS)\n";
+      }
    }
 
    // ------------------------------------------------------------------ [P]
