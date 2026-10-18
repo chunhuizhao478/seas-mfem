@@ -17,7 +17,8 @@
 //   [V] the volume part alone (MFEM ElasticityIntegrator): full assembly
 //       (CSR), MFEM partial assembly (AssemblyLevel::PARTIAL, non-tensor
 //       kernels, valid on tets) and dense element blocks; checked against
-//       each other.
+//       each other.  Runs after [T2] (partial assembly gives the mesh nodes,
+//       which deletes its face-neighbour data).
 //   [T] fault traction: ComputeTractionDiagnostics as the Nitsche path calls
 //       it (shear + normal + stress/correction/jump diagnostics),
 //       ComputeTraction (shear + normal only), and a prototype precomputed
@@ -676,63 +677,6 @@ int main(int argc, char *argv[])
       }
    }
 
-   // ------------------------------------------------------------------ [V]
-   if (!skip_volume)
-   {
-      ParBilinearForm af(pfes), ap(pfes);
-      af.AddDomainIntegrator(new ElasticityIntegrator(lam_c, mu_c));
-      af.Assemble(0);
-      af.Finalize(0);
-      std::unique_ptr<HypreParMatrix> KV(af.ParallelAssemble());
-      ap.SetAssemblyLevel(AssemblyLevel::PARTIAL);
-      ap.AddDomainIntegrator(new ElasticityIntegrator(lam_c, mu_c));
-      ap.Assemble();
-      // dense element blocks, element vdofs (byNODES within the element)
-      const int ne = pm.GetNE();
-      std::vector<DenseMatrix> blk(ne);
-      std::vector<Array<int>> evd(ne);
-      {
-         ElasticityIntegrator ei(lam_c, mu_c);
-         for (int e = 0; e < ne; e++)
-         {
-            pfes->GetElementVDofs(e, evd[e]);
-            ei.AssembleElementMatrix(*pfes->GetFE(e), *pm.GetElementTransformation(e), blk[e]);
-         }
-      }
-      auto block_mult = [&](const Vector &x, Vector &z) {
-         z = 0.0;
-         Vector xe, ze;
-         for (int e = 0; e < ne; e++)
-         {
-            x.GetSubVector(evd[e], xe);
-            ze.SetSize(xe.Size());
-            blk[e].Mult(xe, ze);
-            z.AddElementVector(evd[e], ze);
-         }
-      };
-      Vector z1(n), z2(n), z3(n);
-      KV->Mult(u, z1);
-      ap.Mult(u, z2);
-      block_mult(u, z3);
-      Check(RelDiff(z2, z1) < 1e-12, "volume part: MFEM partial assembly equals full assembly (rel diff "
-            + std::to_string(RelDiff(z2, z1)) + ")");
-      Check(RelDiff(z3, z1) < 1e-12, "volume part: dense element blocks equal full assembly (rel diff "
-            + std::to_string(RelDiff(z3, z1)) + ")");
-      const double tVf = TimeMedian(reps, [&]() { KV->Mult(u, z1); });
-      const double tVp = TimeMedian(reps, [&]() { ap.Mult(u, z2); });
-      const double tVb = TimeMedian(reps, [&]() { block_mult(u, z3); });
-      if (g_rank == 0)
-      {
-         std::cout << std::setprecision(4) << "\n[V] volume term only (ElasticityIntegrator)\n"
-                   << "  nnz " << KV->NNZ() << " (" << 100.0 * KV->NNZ() / nnz << "% of K)\n"
-                   << "  full assembly (CSR) " << tVf * 1e3 << " ms; partial assembly " << tVp * 1e3
-                   << " ms (" << tVf / tVp << "x); dense element blocks " << tVb * 1e3 << " ms ("
-                   << tVf / tVb << "x)\n"
-                   << "  so the face part of K u is about " << (tK - tVf) * 1e3 << " ms of the "
-                   << tK * 1e3 << " ms\n";
-      }
-   }
-
    // ------------------------------------------------------------------ [T]
    const int nfd = elast.GetNumFaultDOFs(), nbf = elast.GetNbfPerFace();
    const int nfi = elast.GetFaultInteriorFaces().Size(), nfs = elast.GetFaultSharedFaces().Size();
@@ -910,6 +854,66 @@ int main(int argc, char *argv[])
                    << "  build " << t_build << " s; ComputeTractionFast " << tTf * 1e3 << " ms ("
                    << tTd / tTf << "x vs ComputeTractionDiagnostics); AddSlipLoadFast " << tGf * 1e3
                    << " ms (" << tGd / tGf << "x vs AssembleSlipOnlyRHS)\n";
+      }
+   }
+
+   // ------------------------------------------------------------------ [V]
+   // after [T] and [T2]: MFEM partial assembly calls Mesh::EnsureNodes, and
+   // ParMesh::SetCurvature then deletes the face-neighbour data that the
+   // traction calls need on ranks with shared fault faces
+   if (!skip_volume)
+   {
+      ParBilinearForm af(pfes), ap(pfes);
+      af.AddDomainIntegrator(new ElasticityIntegrator(lam_c, mu_c));
+      af.Assemble(0);
+      af.Finalize(0);
+      std::unique_ptr<HypreParMatrix> KV(af.ParallelAssemble());
+      ap.SetAssemblyLevel(AssemblyLevel::PARTIAL);
+      ap.AddDomainIntegrator(new ElasticityIntegrator(lam_c, mu_c));
+      ap.Assemble();
+      // dense element blocks, element vdofs (byNODES within the element)
+      const int ne = pm.GetNE();
+      std::vector<DenseMatrix> blk(ne);
+      std::vector<Array<int>> evd(ne);
+      {
+         ElasticityIntegrator ei(lam_c, mu_c);
+         for (int e = 0; e < ne; e++)
+         {
+            pfes->GetElementVDofs(e, evd[e]);
+            ei.AssembleElementMatrix(*pfes->GetFE(e), *pm.GetElementTransformation(e), blk[e]);
+         }
+      }
+      auto block_mult = [&](const Vector &x, Vector &z) {
+         z = 0.0;
+         Vector xe, ze;
+         for (int e = 0; e < ne; e++)
+         {
+            x.GetSubVector(evd[e], xe);
+            ze.SetSize(xe.Size());
+            blk[e].Mult(xe, ze);
+            z.AddElementVector(evd[e], ze);
+         }
+      };
+      Vector z1(n), z2(n), z3(n);
+      KV->Mult(u, z1);
+      ap.Mult(u, z2);
+      block_mult(u, z3);
+      Check(RelDiff(z2, z1) < 1e-12, "volume part: MFEM partial assembly equals full assembly (rel diff "
+            + std::to_string(RelDiff(z2, z1)) + ")");
+      Check(RelDiff(z3, z1) < 1e-12, "volume part: dense element blocks equal full assembly (rel diff "
+            + std::to_string(RelDiff(z3, z1)) + ")");
+      const double tVf = TimeMedian(reps, [&]() { KV->Mult(u, z1); });
+      const double tVp = TimeMedian(reps, [&]() { ap.Mult(u, z2); });
+      const double tVb = TimeMedian(reps, [&]() { block_mult(u, z3); });
+      if (g_rank == 0)
+      {
+         std::cout << std::setprecision(4) << "\n[V] volume term only (ElasticityIntegrator)\n"
+                   << "  nnz " << KV->NNZ() << " (" << 100.0 * KV->NNZ() / nnz << "% of K)\n"
+                   << "  full assembly (CSR) " << tVf * 1e3 << " ms; partial assembly " << tVp * 1e3
+                   << " ms (" << tVf / tVp << "x); dense element blocks " << tVb * 1e3 << " ms ("
+                   << tVf / tVb << "x)\n"
+                   << "  so the face part of K u is about " << (tK - tVf) * 1e3 << " ms of the "
+                   << tK * 1e3 << " ms\n";
       }
    }
 
