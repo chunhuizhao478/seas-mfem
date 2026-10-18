@@ -1,0 +1,12 @@
+# SCEC TPV104 on-fault stations, written by scripts/make_fault_stations.py; do not edit by hand.
+# Global frame of the mesh: X along strike, Y fault normal, Z up (m); fault on Y = 0.
+name,x,y,z
+x2_0_x3_3,0,0,-3000
+x2_0_x3_7.5,0,0,-7500
+x2_0_x3_12,0,0,-12000
+x2_9_x3_7.5,9000,0,-7500
+x2_12_x3_3,12000,0,-3000
+x2_12_x3_12,12000,0,-12000
+x2_-9_x3_7.5,-9000,0,-7500
+x2_-12_x3_3,-12000,0,-3000
+x2_-12_x3_12,-12000,0,-12000
