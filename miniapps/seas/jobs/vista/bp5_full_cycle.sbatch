@@ -40,7 +40,7 @@ mkdir -p "${OUT}"
 g0_provenance "${OUT}"
 echo "BP5 full cycle: p=${ORDER}, t_final ${TFINAL_YR} yr (${TFINAL_S} s), ${NRANKS} ranks -> ${OUT}"
 
-ibrun ./seas_bp5_full --mesh "${G0_MESH_PROD}" "${G0_V63_FLAGS[@]}" \
+ibrun ./seas_bp5_full --mesh "${G0_MESH_PROD}" "${G0_V63_FLAGS[@]}" --qd-operators loops \
       --order "${ORDER}" --tfinal "${TFINAL_S}" \
       --checkpoint-interval 5000 \
       --output-dir "${OUT}" --output-prefix "${PFX}" > "${OUT}/run.log" 2>&1

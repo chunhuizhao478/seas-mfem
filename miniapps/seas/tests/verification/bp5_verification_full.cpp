@@ -76,8 +76,11 @@
 //                              t*T_D, built once with blocked solves; no
 //                              volume solve per stage.  Needs --qd-operators
 //                              matrix, a linear elastic bulk and loading
-//                              g(t) = t*g_hat; CPU only.  G is dense,
-//                              (2|3)*N_f x 2*N_f (37.5 GB for production p=1)
+//                              g(t) = t*g_hat.  G is dense, (2|3)*N_f x
+//                              2*N_f (37.5 GB for production p=1).  With
+//                              --device (GPU plan G3c) G is read from
+//                              --qd-green-cache, written by a CPU run, and
+//                              kept on the device (cuBLAS on a GPU)
 //   --qd-green-block M         Unit slips per blocked solve (default 64)
 //   --qd-green-cache FILE      Read G from FILE if it exists, else build it
 //                              and write FILE (any rank count)
@@ -85,6 +88,9 @@
 //                              after the build or read (default 1e-8)
 //   --qd-green-check N         Every N stages also run the solve path and
 //                              report the difference (default 0 = off)
+//   --qd-green-gpu-mpi         With --device and more than one rank: give
+//                              MPI device pointers (CUDA-aware MPI) instead
+//                              of staging through the host (default off)
 
 #include "mfem.hpp"
 #ifdef MFEM_USE_PETSC
@@ -1337,6 +1343,7 @@ int main(int argc, char *argv[])
       {
          qd_green_check = std::atoi(argv[++i]);
       }
+      if (arg == "--qd-green-gpu-mpi") { qd_green_config.gpu_mpi = true; }
       if (arg == "--device-id" && i + 1 < argc)
       {
          device_id_override = std::atoi(argv[++i]);

@@ -38,6 +38,15 @@
 // stores a position key per fault DOF (its node, then its face's centroid,
 // 6 coordinates), and a read matches every owned DOF to a file row by its
 // key: one file serves any number of ranks.
+//
+// GPU plan G3c: with a device backend, UseDevice() moves G and T_D to the
+// device once (after the build or the read; on a CUDA device the host copy
+// of G is freed), and Apply() then reads the owned slip and writes the
+// tractions on the device: cuBLAS dgemv on a CUDA device, an mfem::forall
+// row loop on the debug device.  One rank needs no MPI and no host copy;
+// several ranks pass the all-gather and the return to the owners device
+// pointers with CUDA-aware MPI (--qd-green-gpu-mpi), or stage them through
+// the host.  Double precision only.
 
 #ifndef MFEM_SEAS_QD_GREEN_OPERATOR_HPP
 #define MFEM_SEAS_QD_GREEN_OPERATOR_HPP
@@ -57,6 +66,7 @@ struct QDGreenConfig
    int block = 64;           ///< unit slips per blocked solve while building
    std::string cache_path;   ///< read G here if present, else build + write
    double tol = 1e-8;        ///< validation: max rel. difference to a solve
+   bool gpu_mpi = false;     ///< G3c: device pointers to MPI (CUDA-aware)
 };
 
 } // namespace seas
@@ -108,7 +118,8 @@ public:
          row_lo_[r] = (static_cast<long long>(nf_) * r) / nranks_;
       }
       nb_ = static_cast<int>(row_lo_[rank_ + 1] - row_lo_[rank_]);
-      G_.assign(static_cast<size_t>(nb_) * ncomp_ * ncols_, 0.0);
+      g_size_ = static_cast<size_t>(nb_) * ncomp_ * ncols_;
+      G_.assign(g_size_, 0.0);
       TD_.assign(static_cast<size_t>(nb_) * ncomp_, 0.0);
       have_cols_.assign(static_cast<size_t>(ncols_), 0);
 
@@ -137,13 +148,115 @@ public:
       delta_all_.SetSize(static_cast<int>(ncols_));
    }
 
+   ~QDGreenOperator()
+   {
+#ifdef MFEM_USE_CUDA
+      if (d_G_alloc_) { CuMemFree(d_G_alloc_); }
+#endif
+   }
+
+   QDGreenOperator(const QDGreenOperator &) = delete;
+   QDGreenOperator &operator=(const QDGreenOperator &) = delete;
+
    int NComp() const { return ncomp_; }
    HYPRE_BigInt NumFaultDofs() const { return nf_; }
    HYPRE_BigInt NumColumns() const { return ncols_; }
    /// Rows (fault DOFs × ncomp) this rank holds.
    int NumLocalRows() const { return nb_ * ncomp_; }
    /// Bytes of G on this rank.
-   double LocalBytes() const { return double(G_.size()) * sizeof(real_t); }
+   double LocalBytes() const { return double(g_size_) * sizeof(real_t); }
+
+   /// GPU plan G3c: move G and T_D to the device.  From then on Apply()
+   /// reads the owned slip and writes the tractions on the device, and G
+   /// can no longer be set, read or written (call WriteFile() first).  On
+   /// a CUDA device G goes into one device allocation (it can pass 2^31
+   /// values, beyond an mfem::Vector) and its host copy is freed; on the
+   /// debug device it stays where it is.  @a gpu_mpi: give MPI device
+   /// pointers (CUDA-aware MPI) when there is more than one rank, else
+   /// stage the fault-sized messages through the host.  Collective.
+   void UseDevice(bool gpu_mpi)
+   {
+      MFEM_VERIFY(!on_device_, "QD Green: UseDevice() called twice");
+      MFEM_VERIFY(Device::Allows(Backend::DEVICE_MASK),
+                  "QD Green: UseDevice() needs a device backend (--device)");
+      MFEM_VERIFY(!Device::Allows(Backend::HIP_MASK), "QD Green: the "
+                  "device product is implemented for CUDA (and the debug "
+                  "device), not HIP");
+#ifdef MFEM_USE_SINGLE
+      MFEM_ABORT("QD Green: the device product is double precision only");
+#endif
+      const int nrows = nb_ * ncomp_;
+      TD_dev_.UseDevice(true);
+      TD_dev_.SetSize(nrows);
+      {
+         real_t *td = TD_dev_.HostWrite();
+         for (int i = 0; i < nrows; i++) { td[i] = TD_[i]; }
+      }
+      TD_dev_.Read();
+      y_dev_.UseDevice(true);
+      y_dev_.SetSize(nrows);
+      recv_dev_.UseDevice(true);
+      recv_dev_.SetSize(nown_ * ncomp_);
+      delta_all_.UseDevice(true);
+
+      // The return to the owners sends y as it is: this rank's rows, in g
+      // order, are the owners' pieces in rank order; and receives the owned
+      // rows in g order.  Check that, and keep the counts.
+      a2a_scount_.assign(nranks_, 0);
+      a2a_sdispl_.assign(nranks_, 0);
+      a2a_rcount_.assign(nranks_, 0);
+      a2a_rdispl_.assign(nranks_, 0);
+      int stot = 0, rtot = 0;
+      for (int r = 0; r < nranks_; r++)
+      {
+         a2a_sdispl_[r] = stot;
+         a2a_scount_[r] = static_cast<int>(from_own_n_[r] * ncomp_);
+         MFEM_VERIFY(from_own_n_[r] == 0 ||
+                     (from_own_lo_[r] - row_lo_[rank_]) * ncomp_ == stot,
+                     "QD Green: rows of rank " << rank_ << " are not in the "
+                     "owners' rank order");
+         stot += a2a_scount_[r];
+         a2a_rdispl_[r] = rtot;
+         a2a_rcount_[r] = static_cast<int>(to_rows_n_[r] * ncomp_);
+         MFEM_VERIFY(to_rows_n_[r] == 0 ||
+                     (to_rows_lo_[r] - own_lo_[rank_]) * ncomp_ == rtot,
+                     "QD Green: owned rows of rank " << rank_ << " do not "
+                     "arrive in g order");
+         rtot += a2a_rcount_[r];
+      }
+      MFEM_VERIFY(stot == nrows && rtot == nown_ * ncomp_, "QD Green: the "
+                  "return to the owners sends " << stot << " of " << nrows
+                  << " rows and receives " << rtot << " of "
+                  << nown_ * ncomp_);
+
+#ifdef MFEM_USE_CUDA
+      if (Device::Allows(Backend::CUDA_MASK))
+      {
+         const size_t bytes = g_size_ * sizeof(real_t);
+         if (bytes > 0)
+         {
+            CuMemAlloc(&d_G_alloc_, bytes);
+            CuMemcpyHtoD(d_G_alloc_, G_.data(), bytes);
+         }
+         std::vector<real_t>().swap(G_);
+         dG_ = static_cast<const real_t *>(d_G_alloc_);
+         product_ = "cuBLAS dgemv";
+      }
+      else
+#endif
+      {
+         dG_ = G_.data();
+         product_ = "mfem::forall row loop";
+      }
+      gpu_mpi_ = gpu_mpi;
+      on_device_ = true;
+   }
+
+   /// Whether UseDevice() was called.
+   bool OnDevice() const { return on_device_; }
+   /// How Apply() forms the product: "host loop", "cuBLAS dgemv" or
+   /// "mfem::forall row loop".
+   const char *ProductName() const { return product_; }
 
    /// Position keys of the owned fault DOFs, 6 per DOF (node x, y, z, then
    /// the centroid x, y, z of its fault face), for WriteFile and ReadFile.
@@ -162,6 +275,7 @@ public:
    void SetColumns(HYPRE_BigInt j0, int m, const std::vector<Vector> &Ts,
                    const std::vector<Vector> &Tn)
    {
+      MFEM_VERIFY(!on_device_, "QD Green: SetColumns() after UseDevice()");
       MFEM_VERIFY(j0 >= 0 && j0 + m <= ncols_,
                   "QD Green: columns [" << j0 << ", " << j0 + m
                   << ") outside [0, " << ncols_ << ")");
@@ -191,6 +305,7 @@ public:
    /// Collective.
    void SetLoading(const Vector &TDs, const Vector &TDn)
    {
+      MFEM_VERIFY(!on_device_, "QD Green: SetLoading() after UseDevice()");
       std::vector<Vector> Ts(1), Tn(1);
       Ts[0] = TDs;
       Tn[0] = TDn;
@@ -235,6 +350,11 @@ public:
       MFEM_VERIFY(Tn_owned == nullptr || ncomp_ == 3,
                   "QD Green: normal traction requested, but G was built "
                   "without the normal rows");
+      if (on_device_)
+      {
+         ApplyDevice(t, slip_owned, T_owned, Tn_owned, timers);
+         return;
+      }
       {
          ScopedStageTimer timer(timers, StageTimers::SlipExpand);
          const real_t *s = slip_owned.HostRead();
@@ -276,6 +396,8 @@ public:
    /// number of ranks.  Collective.
    void WriteFile(const std::string &path, const std::string &info) const
    {
+      MFEM_VERIFY(!on_device_, "QD Green: WriteFile() after UseDevice() (the "
+                  "host copy of G may be gone)");
       MPI_File fh;
       int err = MPI_File_open(comm_, path.c_str(),
                               MPI_MODE_CREATE | MPI_MODE_WRONLY,
@@ -306,6 +428,7 @@ public:
    /// Collective.
    bool ReadFile(const std::string &path, std::string &info)
    {
+      MFEM_VERIFY(!on_device_, "QD Green: ReadFile() after UseDevice()");
       MPI_File fh;
       int err = MPI_File_open(comm_, path.c_str(), MPI_MODE_RDONLY,
                               MPI_INFO_NULL, &fh);
@@ -600,6 +723,132 @@ private:
                     rdispl.data(), MPITypeMap<real_t>::mpi_type, comm_);
    }
 
+public:
+   // Public only because nvcc does not allow an extended __host__ __device__
+   // lambda inside a private member function; call Apply().
+
+   /// Apply() after UseDevice(): the same three steps on device vectors.
+   void ApplyDevice(real_t t, const Vector &slip_owned, Vector &T_owned,
+                    Vector *Tn_owned, StageTimers *timers) const
+   {
+      const int nrows = nb_ * ncomp_;
+      const real_t *d = nullptr;
+      {
+         ScopedStageTimer timer(timers, StageTimers::SlipExpand);
+         if (nranks_ == 1)
+         {
+            d = slip_owned.Read(true);
+         }
+         else if (gpu_mpi_)
+         {
+            // Kernels that wrote the slip run asynchronously; MPI reads the
+            // buffer on its own streams.
+            const real_t *s = slip_owned.Read(true);
+            MFEM_STREAM_SYNC;
+            MPI_Allgatherv(s, 2 * nown_,
+                           MPITypeMap<real_t>::mpi_type,
+                           delta_all_.Write(true), slip_counts_.data(),
+                           slip_displs_.data(), MPITypeMap<real_t>::mpi_type,
+                           comm_);
+            d = delta_all_.Read(true);
+         }
+         else
+         {
+            MPI_Allgatherv(slip_owned.HostRead(), 2 * nown_,
+                           MPITypeMap<real_t>::mpi_type,
+                           delta_all_.HostWrite(), slip_counts_.data(),
+                           slip_displs_.data(), MPITypeMap<real_t>::mpi_type,
+                           comm_);
+            d = delta_all_.Read(true);
+         }
+      }
+      {
+         ScopedStageTimer timer(timers, StageTimers::Solve);
+         real_t *y = y_dev_.Write(true);
+         const real_t *td = TD_dev_.Read(true);
+         mfem::forall(nrows, [=] MFEM_HOST_DEVICE (int i)
+         {
+            y[i] = t * td[i];
+         });
+         RowProductAdd(d, y);
+      }
+      ScopedStageTimer timer(timers, StageTimers::Traction);
+      const real_t *src = nullptr;
+      if (nranks_ == 1)
+      {
+         src = y_dev_.Read(true);
+      }
+      else if (gpu_mpi_)
+      {
+         const real_t *yd = y_dev_.Read(true);
+         MFEM_STREAM_SYNC;
+         MPI_Alltoallv(yd, a2a_scount_.data(),
+                       a2a_sdispl_.data(), MPITypeMap<real_t>::mpi_type,
+                       recv_dev_.Write(true), a2a_rcount_.data(),
+                       a2a_rdispl_.data(), MPITypeMap<real_t>::mpi_type,
+                       comm_);
+         src = recv_dev_.Read(true);
+      }
+      else
+      {
+         MPI_Alltoallv(y_dev_.HostRead(), a2a_scount_.data(),
+                       a2a_sdispl_.data(), MPITypeMap<real_t>::mpi_type,
+                       recv_dev_.HostWrite(), a2a_rcount_.data(),
+                       a2a_rdispl_.data(), MPITypeMap<real_t>::mpi_type,
+                       comm_);
+         src = recv_dev_.Read(true);
+      }
+      T_owned.SetSize(2 * nown_);
+      real_t *T = T_owned.Write(true);
+      real_t *Tn = nullptr;
+      if (Tn_owned)
+      {
+         Tn_owned->SetSize(nown_);
+         Tn = Tn_owned->Write(true);
+      }
+      const int nc = ncomp_;
+      mfem::forall(nown_, [=] MFEM_HOST_DEVICE (int o)
+      {
+         T[2 * o] = src[nc * o];
+         T[2 * o + 1] = src[nc * o + 1];
+         if (Tn) { Tn[o] = src[nc * o + 2]; }
+      });
+   }
+
+   /// y += G_rows·d on the device (d: 2·N_f values).
+   void RowProductAdd(const real_t *d, real_t *y) const
+   {
+      const int nrows = nb_ * ncomp_;
+      if (nrows == 0) { return; }
+#ifdef MFEM_USE_CUDA
+      if (Device::Allows(Backend::CUDA_MASK))
+      {
+#ifndef MFEM_USE_SINGLE
+         // G is row-major, so as a column-major matrix it is G^T with
+         // leading dimension N_cols: y = op(A)·d with op = transpose.
+         const double one = 1.0;
+         const cublasStatus_t st = cublasDgemv_64(
+            GPUBlas::Handle(), CUBLAS_OP_T, static_cast<int64_t>(ncols_),
+            static_cast<int64_t>(nrows), &one, dG_,
+            static_cast<int64_t>(ncols_), d, 1, &one, y, 1);
+         MFEM_VERIFY(st == CUBLAS_STATUS_SUCCESS, "QD Green: cublasDgemv_64 "
+                     "failed with status " << static_cast<int>(st));
+#endif
+         return;
+      }
+#endif
+      const real_t *G = dG_;
+      const long long n = static_cast<long long>(ncols_);
+      mfem::forall(nrows, [=] MFEM_HOST_DEVICE (int row)
+      {
+         const real_t *a = G + static_cast<size_t>(row) * n;
+         real_t s = 0.0;
+         for (long long j = 0; j < n; j++) { s += a[j] * d[j]; }
+         y[row] += s;
+      });
+   }
+
+private:
    /// y_ (this rank's rows) -> owned tractions.
    void FromRows(Vector &T_owned, Vector *Tn_owned) const
    {
@@ -672,6 +921,17 @@ private:
    std::vector<real_t> keys_;   ///< 6 per owned fault DOF (SetKeys)
    mutable Vector delta_all_;
    mutable std::vector<real_t> y_, send_, recv_;
+   size_t g_size_ = 0;          ///< entries of G on this rank
+
+   // GPU plan G3c (UseDevice)
+   bool on_device_ = false;
+   bool gpu_mpi_ = false;
+   const char *product_ = "host loop";
+   const real_t *dG_ = nullptr;   ///< G for the device product
+   void *d_G_alloc_ = nullptr;    ///< CUDA allocation behind dG_, or null
+   Vector TD_dev_;
+   mutable Vector y_dev_, recv_dev_;
+   std::vector<int> a2a_scount_, a2a_sdispl_, a2a_rcount_, a2a_rdispl_;
 };
 
 } // namespace seas

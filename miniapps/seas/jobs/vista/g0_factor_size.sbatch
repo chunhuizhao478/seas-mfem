@@ -48,7 +48,7 @@ mkdir -p "${OUT}"
 g0_provenance "${OUT}"
 
 echo "=== ${CASE}: ${SLURM_JOB_NUM_NODES} nodes, ${SLURM_NTASKS} ranks, start $(date -u +%T) ==="
-ibrun ./seas_bp5_full --mesh "${MESH_FILE}" "${G0_V63_FLAGS[@]}" \
+ibrun ./seas_bp5_full --mesh "${MESH_FILE}" "${G0_V63_FLAGS[@]}" --qd-operators loops \
       --order "${ORDER}" --matrix-stats --exit-after-factorize \
       --output-dir "${OUT}" --output-prefix "${PFX}" > "${OUT}/run.log" 2>&1
 rc=$?

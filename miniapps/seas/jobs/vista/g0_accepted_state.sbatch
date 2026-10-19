@@ -47,7 +47,7 @@ OUT="bp5/results_g0_vista/accepted_state/${TAG}"
 mkdir -p "${OUT}"
 g0_provenance "${OUT}"
 
-ibrun ./seas_bp5_full --mesh "${G0_MESH_PROD}" "${G0_V63_FLAGS[@]}" \
+ibrun ./seas_bp5_full --mesh "${G0_MESH_PROD}" "${G0_V63_FLAGS[@]}" --qd-operators loops \
       --order "${ORDER}" --check-accepted-state --checkpoint-interval 0 \
       "${EXTRA[@]}" --output-dir "${OUT}" --output-prefix "g0_accst" \
       > "${OUT}/run.log" 2>&1

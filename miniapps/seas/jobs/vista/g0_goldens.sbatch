@@ -50,7 +50,7 @@ fi
 mkdir -p "${OUT}"/run_a "${OUT}"/run_b "${OUT}"/run_p
 g0_provenance "${OUT}"
 
-COMMON=(--mesh "${G0_MESH_PROD}" "${G0_V63_FLAGS[@]}" --order "${ORDER}"
+COMMON=(--mesh "${G0_MESH_PROD}" "${G0_V63_FLAGS[@]}" --qd-operators loops --order "${ORDER}"
         --max-steps 50 --write-every-step --checkpoint-interval 0)
 
 run() {
