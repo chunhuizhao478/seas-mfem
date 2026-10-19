@@ -105,6 +105,7 @@
 #include "elasticity_operator.hpp"
 #include "fused_stiffness_pair.hpp"
 #include "dense_block_stiffness.hpp"
+#include "../common/stage_timers.hpp"
 #include "../integrator/dg_absorbing_bc_integrator.hpp"
 #include "../fault/fault_orientation.hpp"
 #include "../fault/fault_frame.hpp"
@@ -115,6 +116,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <random>
 #include <vector>
 #if defined(__GLIBC__)
 #include <malloc.h>   // malloc_trim
@@ -429,6 +431,22 @@ public:
    const Vector &FacePenalty() const { return sigF_face_; }
    const Vector &FacePenaltySpread() const { return spread_face_; }
 
+   /// Test only (GPU dynamic-rupture plan D0 floors, as seas_bp5_full
+   /// --perturb-initial-state): scale every entry of the projected prestress
+   /// by 1 + 1e-15 r, r uniform in [-1, 1], from a generator seeded with
+   /// seed + 1000003 rank.  Call before the initial fault state is seeded
+   /// from BackgroundTraction, so that state matches the perturbed
+   /// prestress.  The pattern depends on the partition; any pattern serves
+   /// to show how far a round-off change in the data moves a run.
+   void PerturbPrestress(unsigned long long seed)
+   {
+      MFEM_VERIFY(has_fault_, "PerturbPrestress: the operator has no fault");
+      std::mt19937_64 gen(seed + 1000003ULL
+                          * static_cast<unsigned long long>(Mpi::WorldRank()));
+      std::uniform_real_distribution<double> dist(-1.0, 1.0);
+      for (int i = 0; i < S0_own_.Size(); i++) { S0_own_(i) *= 1.0 + 1e-15 * dist(gen); }
+   }
+
    /// Projected prestress plus nucleation traction at time t (box 8).
    void BackgroundTraction(real_t t, Vector &S) const
    {
@@ -724,6 +742,15 @@ public:
    /// the CSR products; when the blocks cannot be built (DenseBlockStiffness
    /// ::Init) the operator falls back to them.  Call before the first step.
    void SetDenseBlocks(bool on) { dense_enabled_ = on; dense_state_ = 0; }
+   /// GPU dynamic-rupture plan D0: time the parts of each step into
+   /// @a timers (StageTimers::Dyn*; null = no timing).  The timers only
+   /// read clocks, so the results are the same bits with and without them.
+   void SetStageTimers(StageTimers *timers)
+   {
+      timers_ = timers;
+      dense_.SetStageTimers(timers);
+      fused_.SetStageTimers(timers);
+   }
    /// True once the dense blocks are in use (after the first acceleration).
    bool DenseBlocksActive() const { return dense_state_ == 1; }
    /// Bytes of the dense blocks summed over the ranks (0 when not in use).
@@ -840,23 +867,31 @@ private:
    void Acceleration_(const Vector &x, const Vector *v, const Vector *d,
                       const NitscheMass &Minv, Vector &a) const
    {
+      ScopedStageTimer acc_timer(timers_, StageTimers::DynAcceleration);
       const bool dense = UseDense_();
       const bool fuse = !dense && kv_ && v && UseFused_();
-      if (dense)
       {
-         if (kv_)
+         ScopedStageTimer timer(timers_, StageTimers::DynStiffness);
+         if (dense)
          {
-            MFEM_VERIFY(v, "NitscheWaveOperator: Kelvin-Voigt needs the velocity");
-            dense_.Mult(x, *v, Kx_);   // K x + K_eta v
+            if (kv_)
+            {
+               MFEM_VERIFY(v, "NitscheWaveOperator: Kelvin-Voigt needs the velocity");
+               dense_.Mult(x, *v, Kx_);   // K x + K_eta v
+            }
+            else { dense_.Mult(x, Kx_); }
          }
-         else { dense_.Mult(x, Kx_); }
+         else if (fuse) { fused_.Mult(x, *v, Kx_); }   // K x + K_eta v
+         else { elast_->ApplyStiffness(x, Kx_); }
       }
-      else if (fuse) { fused_.Mult(x, *v, Kx_); }   // K x + K_eta v
-      else { elast_->ApplyStiffness(x, Kx_); }
-      elast_->AssembleDirichletOnlyRHS(F_, GetTime());
+      {
+         ScopedStageTimer timer(timers_, StageTimers::DynDirichletRHS);
+         elast_->AssembleDirichletOnlyRHS(F_, GetTime());
+      }
       F_ -= Kx_;
       if (d)
       {
+         ScopedStageTimer timer(timers_, StageTimers::DynSlipLoad);
          const double tf0 = MPI_Wtime();
          if (UseFastFault_())
          {
@@ -872,6 +907,7 @@ private:
       }
       if (!damping_blocks_.empty() && v)
       {
+         ScopedStageTimer timer(timers_, StageTimers::DynDamping);
          ApplyDamping(*v, Cv_);
          F_ -= Cv_;
       }
@@ -881,16 +917,19 @@ private:
          // (V^{n+1} in ImplicitSolve, after the fault advance)
          if (!fuse && !dense)
          {
+            ScopedStageTimer timer(timers_, StageTimers::DynStiffness);
             kv_->ApplyStiffness(*v, Kv_v_);
             F_ -= Kv_v_;
          }
          if (kv_vD_)
          {
+            ScopedStageTimer timer(timers_, StageTimers::DynDirichletRHS);
             kv_->AssembleDirichletOnlyRHS(FvD_, GetTime() - kv_tv_shift_);
             F_ += FvD_;
          }
          if (has_fault_)
          {
+            ScopedStageTimer timer(timers_, StageTimers::DynSlipLoad);
             const double tf0 = MPI_Wtime();
             if (UseFastFault_())
             {
@@ -905,6 +944,7 @@ private:
             fault_sec_ += MPI_Wtime() - tf0;
          }
       }
+      ScopedStageTimer timer(timers_, StageTimers::DynMassInverse);
       Minv.Apply(F_, a);
    }
 
@@ -995,6 +1035,7 @@ private:
       MFEM_VERIFY(!pc_ || pc_seeded_, "NitscheWaveOperator: Prakash-Clifton is on "
                   "but sigma* was never seeded (SetPrakashCliftonState)");
       ++steps_;
+      ScopedStageTimer adv_timer(timers_, StageTimers::DynFaultAdvance);
       const double tf0 = MPI_Wtime();
       const real_t dt = dt_;
       // 3, 4
@@ -1010,16 +1051,19 @@ private:
          psistar_(j) = psi_(j) + dt * r0_(j);
       }
       // 5-8
-      TrialTraction(x, dstar_, Town_);
-      if (kv_)
       {
-         // Kelvin-Voigt: X* gains T_eta(Udot*, 0); its slope sigma_F^eta in
-         // V^{n+1} goes into gamma (CloseDOF)
-         MFEM_VERIFY(v, "NitscheWaveOperator: the Kelvin-Voigt layer needs Udot*");
-         kv_zero_.SetSize(3 * no_);
-         kv_zero_ = 0.0;
-         KVTrialTraction(*v, kv_zero_, kvT_);
-         Town_ += kvT_;
+         ScopedStageTimer timer(timers_, StageTimers::DynFaultTraction);
+         TrialTraction(x, dstar_, Town_);
+         if (kv_)
+         {
+            // Kelvin-Voigt: X* gains T_eta(Udot*, 0); its slope sigma_F^eta in
+            // V^{n+1} goes into gamma (CloseDOF)
+            MFEM_VERIFY(v, "NitscheWaveOperator: the Kelvin-Voigt layer needs Udot*");
+            kv_zero_.SetSize(3 * no_);
+            kv_zero_ = 0.0;
+            KVTrialTraction(*v, kv_zero_, kvT_);
+            Town_ += kvT_;
+         }
       }
       BackgroundTraction(t, S_);
       // 9-11
@@ -1079,6 +1123,7 @@ private:
          max_ratio = std::max(max_ratio, ratio);
       }
       fault_sec_ += MPI_Wtime() - tf0;
+      ScopedStageTimer red_timer(timers_, StageTimers::DynFaultReduce);
       real_t red[4] = {-min_sig, max_sig, max_V, max_ratio};
       MPI_Allreduce(MPI_IN_PLACE, red, 4, MPITypeMap<real_t>::mpi_type, MPI_MAX,
                     mesh_.GetComm());
@@ -1422,6 +1467,7 @@ private:
    mutable DenseBlockStiffness dense_;
    mutable long long dense_bytes_ = 0;
    mutable double fault_sec_ = 0.0;
+   StageTimers *timers_ = nullptr;   ///< D0 step-part timers (null: off)
 };
 
 #endif // MFEM_USE_MPI

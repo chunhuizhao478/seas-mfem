@@ -29,8 +29,20 @@
 #          built from those tarballs, installed in ${PETSC_PREFIX}
 #          (MODE=cuda: also unpacks cuDSS into ${CUDSS_DIR}).
 #   mfem   Configure and build MFEM (this checkout, in place) against it.
-#   seas   Build seas_bp5_full and the unit tests G0 runs
-#          (seas_test_elasticity_operator, seas_test_g0_matrix_only).
+#   seas   Build SEAS_TARGETS: by default seas_bp5_full and the unit tests
+#          G0 runs (seas_test_elasticity_operator, seas_test_g0_matrix_only).
+#   hdf5-fetch  On a LOGIN node: download the HDF5 release into
+#          ${HDF5_ROOT}/downloads and check its sha256 (fetch does this too
+#          when WITH_HDF5=1).
+#   hdf5   Parallel HDF5 (HDF5_VERSION) built from that tarball with the
+#          loaded MPI, installed in ${HDF5_PREFIX}.
+#
+# The Nitsche dynamic-rupture driver (GPU dynamic-rupture plan D0) writes
+# fault.vtkhdf through MFEM's HDF5 support, so its builds set WITH_HDF5=1:
+# the mfem stage then configures MFEM_USE_HDF5=YES against ${HDF5_PREFIX},
+# and the seas stage passes it to the SEAS Makefile.  Example:
+#   WITH_HDF5=1 STAGE="hdf5 mfem seas" SEAS_TARGETS="seas_nitsche_dyn_driver ..."
+# The default (WITH_HDF5=0) is the quasi-dynamic build, unchanged.
 #
 # Vista login nodes give one core per user, so run deps, mfem and seas in a
 # compute job (jobs/vista/g0_build.sbatch).  Each stage writes what it used
@@ -48,6 +60,19 @@
 #                               (-L/-l flags only; rpaths are added for MFEM)
 #   CPU_FLAGS="-mcpu=neoverse-v2"   (Grace on both Vista and Horizon)
 #   JOBS=<n>                    parallel make (default: nproc)
+#   SEAS_TARGETS="..."          seas stage targets (default: the three above;
+#                               any other list rebuilds every SEAS object,
+#                               since the SEAS Makefile has no header deps)
+#   PROVENANCE_FILE=<file>      provenance log (default
+#                               ${DEPS_ROOT}/build_provenance_${MODE}.txt), so a
+#                               build that only links an existing DEPS_ROOT
+#                               can log elsewhere
+#   WITH_HDF5=0|1               MFEM with parallel HDF5 (default 0)
+#   HDF5_VERSION=1.14.6         HDF5 release (HDF5_SHA256 pins its tarball)
+#   HDF5_ROOT=${DEPS_ROOT}      where HDF5's downloads, source and install go
+#   HDF5_PREFIX=<dir>           HDF5 install (default
+#                               ${HDF5_ROOT}/hdf5-${HDF5_VERSION}-${MODE}: the
+#                               MPI module differs between the modes)
 #   MODE=cuda only:
 #   CUDA_MODULE=cuda/13.0       CUDA toolkit module added to MODULES
 #   GPU_ARCH=90                 CUDA compute capability (90 GH200, 100 GB200)
@@ -76,6 +101,16 @@ else
 fi
 CPU_FLAGS="${CPU_FLAGS:--mcpu=neoverse-v2}"
 JOBS="${JOBS:-$(nproc)}"
+SEAS_TARGETS_G0="seas_bp5_full seas_test_elasticity_operator seas_test_g0_matrix_only"
+SEAS_TARGETS="${SEAS_TARGETS:-${SEAS_TARGETS_G0}}"
+WITH_HDF5="${WITH_HDF5:-0}"
+HDF5_VERSION="${HDF5_VERSION:-1.14.6}"
+# sha256 of the HDFGroup GitHub release tarball hdf5-1.14.6.tar.gz
+HDF5_SHA256="${HDF5_SHA256:-e4defbac30f50d64e1556374aa49e574417c9e72c6b1de7a4ff88c4b1bea6e9b}"
+HDF5_ROOT="${HDF5_ROOT:-${DEPS_ROOT}}"
+HDF5_PREFIX="${HDF5_PREFIX:-${HDF5_ROOT}/hdf5-${HDF5_VERSION}-${MODE}}"
+HDF5_TARBALL="hdf5-${HDF5_VERSION}.tar.gz"
+HDF5_URL="https://github.com/HDFGroup/hdf5/releases/download/hdf5_${HDF5_VERSION}/${HDF5_TARBALL}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOWNLOADS="${DEPS_ROOT}/downloads"
@@ -88,7 +123,7 @@ if [ "${MODE}" = "cuda" ]; then
 else
    PETSC_BUILD_ARCH=arch-linux-c-opt
 fi
-PROVENANCE="${DEPS_ROOT}/build_provenance_${MODE}.txt"
+PROVENANCE="${PROVENANCE_FILE:-${DEPS_ROOT}/build_provenance_${MODE}.txt}"
 PETSC_TARBALL="petsc-${PETSC_VERSION}.tar.gz"
 PETSC_URLS=(
    "https://web.cels.anl.gov/projects/petsc/download/release-snapshots/${PETSC_TARBALL}"
@@ -97,6 +132,10 @@ PETSC_URLS=(
 
 if [ "${MODE}" != "cpu" ] && [ "${MODE}" != "cuda" ]; then
    echo "ERROR: MODE must be cpu or cuda (got '${MODE}')." >&2
+   exit 1
+fi
+if [ "${WITH_HDF5}" != 0 ] && [ "${WITH_HDF5}" != 1 ]; then
+   echo "ERROR: WITH_HDF5 must be 0 or 1 (got '${WITH_HDF5}')." >&2
    exit 1
 fi
 CUDSS_DIR="${CUDSS_DIR:-${DEPS_ROOT}/cudss-${CUDSS_VERSION}}"
@@ -179,10 +218,13 @@ record_toolchain() {
          echo "cudss: ${CUDSS_DIR} (CUDSS_VERSION ${CUDSS_VERSION})"
       fi
       echo "petsc: ${PETSC_VERSION} at ${PETSC_PREFIX}"
+      if [ "${WITH_HDF5}" = 1 ]; then
+         echo "hdf5: ${HDF5_VERSION} at ${HDF5_PREFIX}"
+      fi
    } >> "${PROVENANCE}"
 }
 
-mkdir -p "${DEPS_ROOT}" "${DOWNLOADS}" "${DEPS_ROOT}/src"
+mkdir -p "${DEPS_ROOT}" "${DOWNLOADS}" "${DEPS_ROOT}/src" "$(dirname "${PROVENANCE}")"
 
 # --------------------------------------------------------------------------
 # PETSc configure arguments (shared by fetch and deps)
@@ -308,6 +350,7 @@ PY
    log "downloads in ${DOWNLOADS}:"
    ls -la "${DOWNLOADS}"
    record_toolchain fetch
+   if [ "${WITH_HDF5}" = 1 ]; then stage_hdf5_fetch; fi
 }
 
 # cuDSS from its wheel: nvidia/cuNN/{include,lib} -> ${CUDSS_DIR}/{include,lib},
@@ -343,6 +386,60 @@ PY
       echo "ERROR: cuDSS unpack into ${CUDSS_DIR} incomplete" >&2
       exit 1
    }
+}
+
+# --------------------------------------------------------------------------
+# Stages: hdf5-fetch (login node) and hdf5 (compute node)
+# --------------------------------------------------------------------------
+stage_hdf5_fetch() {
+   local dl="${HDF5_ROOT}/downloads"
+   mkdir -p "${dl}"
+   if [ ! -f "${dl}/${HDF5_TARBALL}" ]; then
+      log "downloading ${HDF5_URL}"
+      curl -fL --retry 3 -o "${dl}/${HDF5_TARBALL}.part" "${HDF5_URL}" \
+         || { echo "ERROR: could not download ${HDF5_URL}" >&2; exit 1; }
+      mv "${dl}/${HDF5_TARBALL}.part" "${dl}/${HDF5_TARBALL}"
+   fi
+   echo "${HDF5_SHA256}  ${dl}/${HDF5_TARBALL}" | sha256sum -c - \
+      || { echo "ERROR: ${dl}/${HDF5_TARBALL} does not match HDF5_SHA256" >&2; exit 1; }
+   record_toolchain hdf5-fetch
+}
+
+stage_hdf5() {
+   local dl="${HDF5_ROOT}/downloads"
+   local src="${HDF5_ROOT}/src/hdf5-${HDF5_VERSION}-${MODE}"
+   if [ -f "${HDF5_PREFIX}/include/hdf5.h" ] && [ -f "${HDF5_PREFIX}/lib/libhdf5.settings" ]; then
+      log "HDF5 already installed in ${HDF5_PREFIX}; skipping (remove it to rebuild)"
+   else
+      [ -f "${dl}/${HDF5_TARBALL}" ] || {
+         echo "ERROR: ${dl}/${HDF5_TARBALL} missing; run STAGE=hdf5-fetch on a login node." >&2
+         exit 1
+      }
+      echo "${HDF5_SHA256}  ${dl}/${HDF5_TARBALL}" | sha256sum -c - \
+         || { echo "ERROR: ${dl}/${HDF5_TARBALL} does not match HDF5_SHA256" >&2; exit 1; }
+      log "building parallel HDF5 ${HDF5_VERSION} in ${src}"
+      # The release tarball's entries start with ./hdf5-<version>/.
+      rm -rf "${src}" "${src}.tmp"
+      mkdir -p "${src}.tmp"
+      tar -xzf "${dl}/${HDF5_TARBALL}" -C "${src}.tmp"
+      [ -f "${src}.tmp/hdf5-${HDF5_VERSION}/configure" ] || {
+         echo "ERROR: no hdf5-${HDF5_VERSION}/configure in ${HDF5_TARBALL}" >&2
+         exit 1
+      }
+      mv "${src}.tmp/hdf5-${HDF5_VERSION}" "${src}"
+      rmdir "${src}.tmp"
+      ( cd "${src}" && CC=mpicc CFLAGS="-O2 ${CPU_FLAGS}" ./configure \
+           --prefix="${HDF5_PREFIX}" --enable-parallel --enable-shared \
+           --enable-hl --disable-fortran --disable-cxx --disable-tests )
+      ( cd "${src}" && make -j"${JOBS}" && make install )
+   fi
+   grep -q 'Parallel HDF5: yes' "${HDF5_PREFIX}/lib/libhdf5.settings" || {
+      echo "ERROR: ${HDF5_PREFIX} is not a parallel HDF5 build (libhdf5.settings)." >&2
+      exit 1
+   }
+   record_toolchain hdf5
+   grep -E 'HDF5 Version|Compiler:|Parallel HDF5|High-level library|I/O filters' \
+      "${HDF5_PREFIX}/lib/libhdf5.settings" >> "${PROVENANCE}" || true
 }
 
 # --------------------------------------------------------------------------
@@ -423,6 +520,17 @@ stage_mfem() {
    fi
    ext_libs="${ext_libs//-Wl,/${xl}}"
    local lapack_lib="${MFEM_LAPACK_LIB//-Wl,/${xl}}"
+   local mfem_hdf5_args=(MFEM_USE_HDF5=NO)
+   if [ "${WITH_HDF5}" = 1 ]; then
+      [ -f "${HDF5_PREFIX}/include/hdf5.h" ] || {
+         echo "ERROR: no HDF5 in ${HDF5_PREFIX}; run STAGE=hdf5 first." >&2
+         exit 1
+      }
+      mfem_hdf5_args=(
+         MFEM_USE_HDF5=YES HDF5_DIR="${HDF5_PREFIX}" HDF5_OPT="-I${HDF5_PREFIX}/include"
+         HDF5_LIB="${xl}-rpath,${HDF5_PREFIX}/lib -L${HDF5_PREFIX}/lib -lhdf5_hl -lhdf5 -lz"
+      )
+   fi
    log "configuring MFEM in ${SCRIPT_DIR}"
    cd "${SCRIPT_DIR}"
    make config \
@@ -437,7 +545,7 @@ stage_mfem() {
       MFEM_USE_MUMPS=YES MUMPS_DIR="${P}" MUMPS_OPT="-I${P}/include" \
       MUMPS_LIB="${xl}-rpath,${P}/lib -L${P}/lib -ldmumps -lmumps_common -lpord ${ext_libs}" \
       MFEM_USE_PETSC=YES PETSC_DIR="${P}" PETSC_ARCH= \
-      MFEM_USE_HDF5=NO \
+      "${mfem_hdf5_args[@]}" \
       "${mfem_cuda_args[@]}"
    make -j"${JOBS}" lib
    record_toolchain mfem
@@ -450,19 +558,41 @@ stage_mfem() {
 # --------------------------------------------------------------------------
 stage_seas() {
    cd "${SCRIPT_DIR}/miniapps/seas"
-   # Start from fresh objects for the binaries G0 uses.
-   rm -f tests/verification/bp5_verification_full.o \
-         tests/unit/test_elasticity_operator.o tests/unit/test_g0_matrix_only.o
-   make -j"${JOBS}" seas_bp5_full seas_test_elasticity_operator \
-        seas_test_g0_matrix_only
+   if [ "${SEAS_TARGETS}" = "${SEAS_TARGETS_G0}" ]; then
+      # Start from fresh objects for the binaries G0 uses.
+      rm -f tests/verification/bp5_verification_full.o \
+            tests/unit/test_elasticity_operator.o tests/unit/test_g0_matrix_only.o
+   else
+      # Other targets link shared SEAS objects too; the Makefile has no
+      # header dependencies, so every object is rebuilt (as build_vista.sh).
+      find . -name '*.o' -not -path './extern/*' -delete
+   fi
+   local seas_hdf5_args=()
+   if [ "${WITH_HDF5}" = 1 ]; then
+      grep -q '^MFEM_USE_HDF5 *= YES' "${SCRIPT_DIR}/config/config.mk" || {
+         echo "ERROR: WITH_HDF5=1 but MFEM is configured without HDF5; rerun STAGE=mfem." >&2
+         exit 1
+      }
+      # The SEAS Makefile's own HDF5 flags (DataField3D); SEAS_FS_LIB= skips
+      # its std::filesystem probe, as build_vista.sh does.
+      seas_hdf5_args=(HDF5_DIR="${HDF5_PREFIX}" SEAS_FS_LIB=)
+   fi
+   # shellcheck disable=SC2086
+   make -j"${JOBS}" "${seas_hdf5_args[@]}" ${SEAS_TARGETS}
+   local t
+   for t in ${SEAS_TARGETS}; do
+      [ -x "${t}" ] || { echo "ERROR: ${t} missing after make" >&2; exit 1; }
+   done
    record_toolchain seas
-   ls -la seas_bp5_full seas_test_elasticity_operator \
-          seas_test_g0_matrix_only >> "${PROVENANCE}"
+   # shellcheck disable=SC2086
+   ls -la ${SEAS_TARGETS} >> "${PROVENANCE}"
 }
 
 for s in ${STAGE}; do
    case "${s}" in
       fetch) stage_fetch ;;
+      hdf5-fetch) stage_hdf5_fetch ;;
+      hdf5)  stage_hdf5 ;;
       deps)  stage_deps ;;
       mfem)  stage_mfem ;;
       seas)  stage_seas ;;

@@ -38,6 +38,7 @@
 // After Init the caller may free both HypreParMatrix objects.
 
 #include "mfem.hpp"
+#include "../common/stage_timers.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -51,6 +52,9 @@ namespace seas
 class DenseBlockStiffness
 {
 public:
+   /// Time the halo wait of Mult as StageTimers::DynHaloWait (null: off).
+   void SetStageTimers(StageTimers *timers) { timers_ = timers; }
+
    /// Read the blocks of K (and of E, when not null).  False (nothing
    /// usable) when the space is not DG with one block size, a matrix has an
    /// entry outside the element and face blocks, or the halo cannot be
@@ -501,7 +505,10 @@ private:
          }
          for (int a = 0; a < nb; a++) { y[ie[a]] = acc[a]; }
       }
-      MPI_Waitall(q, reqs_.data(), MPI_STATUSES_IGNORE);
+      {
+         ScopedStageTimer wait(timers_, StageTimers::DynHaloWait);
+         MPI_Waitall(q, reqs_.data(), MPI_STATUSES_IGNORE);
+      }
       const real_t *h = recv_buf_.data(), *Sp = S_.data();
       for (int s = 0; s < ns_; s++)
       {
@@ -532,6 +539,7 @@ private:
    std::vector<int> send_procs_, send_starts_, send_map_, recv_procs_, recv_starts_;
    mutable std::vector<real_t> send_buf_, recv_buf_;
    mutable std::vector<MPI_Request> reqs_;
+   StageTimers *timers_ = nullptr;
 };
 
 } // namespace seas

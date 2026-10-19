@@ -14,6 +14,13 @@
 // calls) and of the accepted-step monitor.  Enabled by seas_bp5_full
 // --stage-timers N (GPU plan G0: where a stage spends its time on the CPU).
 //
+// The Dyn* parts are the explicit Nitsche step (NitscheWaveOperator and
+// seas_nitsche_dyn_driver --stage-timers N; GPU dynamic-rupture plan D0):
+// the fault advance with its trial traction and reduction, the acceleration
+// with its stiffness product (and the halo wait inside it), slip load,
+// Dirichlet data, damping and mass inverse, and the driver's output.  They
+// come after the quasi-dynamic parts, whose indices and names are unchanged.
+//
 // Timers are rank-local and never synchronize across ranks; the driver
 // reduces them when it prints.  On a GPU the driver sets a device sync
 // (SetDeviceSync), called at every start and stop, so asynchronous kernels
@@ -62,6 +69,19 @@ public:
       MonitorTotal,      ///< whole accepted-step monitor
       MonitorOutput,     ///< station, ParaView and global output
       MonitorCheckpoint, ///< checkpoint writes
+      DynStep,           ///< Nitsche: whole CentralDifferenceSolver::Step
+      DynFaultAdvance,   ///< Nitsche: whole fault advance (boxes 3-11)
+      DynFaultTraction,  ///< Nitsche: trial traction T_h(U, d*) (boxes 5-8)
+      DynFaultReduce,    ///< Nitsche: step-record reduction over ranks
+      DynAcceleration,   ///< Nitsche: whole a = Minv (F - K x + G d - ...)
+      DynStiffness,      ///< Nitsche: K x (+ K_eta v), halo wait included
+      DynHaloWait,       ///< Nitsche: wait for the halo in the dense/fused product
+      DynSlipLoad,       ///< Nitsche: G d (+ G_eta V)
+      DynDirichletRHS,   ///< Nitsche: Dirichlet data (+ its K_eta part)
+      DynDamping,        ///< Nitsche: absorbing-face term C v
+      DynMassInverse,    ///< Nitsche: Minv applied to the right-hand side
+      DynOutput,         ///< Nitsche driver: after-step bookkeeping, energy
+                         ///< monitor, stations, dumps, ParaView, log
       NumParts
    };
 
@@ -71,7 +91,10 @@ public:
       {
          "matrix_setup", "slip_expand", "slip_rhs", "dirichlet_rhs",
          "solve", "solve_post", "traction", "friction", "stage_total",
-         "monitor_total", "monitor_output", "monitor_checkpoint"
+         "monitor_total", "monitor_output", "monitor_checkpoint",
+         "step", "fault_advance", "fault_traction", "fault_reduce",
+         "acceleration", "stiffness", "halo_wait", "slip_load",
+         "dirichlet_rhs", "damping", "mass_inverse", "output"
       };
       return names[p];
    }
@@ -84,7 +107,11 @@ public:
          "seas:matrix_setup", "seas:slip_expand", "seas:slip_rhs",
          "seas:dirichlet_rhs", "seas:solve", "seas:solve_post",
          "seas:traction", "seas:friction", "seas:stage_total",
-         "seas:monitor_total", "seas:monitor_output", "seas:monitor_checkpoint"
+         "seas:monitor_total", "seas:monitor_output", "seas:monitor_checkpoint",
+         "seas:dyn_step", "seas:dyn_fault_advance", "seas:dyn_fault_traction",
+         "seas:dyn_fault_reduce", "seas:dyn_acceleration", "seas:dyn_stiffness",
+         "seas:dyn_halo_wait", "seas:dyn_slip_load", "seas:dyn_dirichlet_rhs",
+         "seas:dyn_damping", "seas:dyn_mass_inverse", "seas:dyn_output"
       };
       return names[p];
    }

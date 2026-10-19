@@ -4979,6 +4979,11 @@ test-elasticity-operator: seas_test_elasticity_operator
 test-bp5-gate-check:
 	python3 tests/unit/test_bp5_gate_check.py
 
+# GPU dynamic-rupture plan D0: the Nitsche gate checker
+# (scripts/nitsche_gate_check.py), Python only.
+test-nitsche-gate-check:
+	python3 tests/unit/test_nitsche_gate_check.py
+
 # GPU plan G0: --exit-after-assembly statistics, on 1 and 2 ranks.
 test-g0-matrix-only: seas_test_g0_matrix_only
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_g0_matrix_only

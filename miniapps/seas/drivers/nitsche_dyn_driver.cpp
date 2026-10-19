@@ -29,6 +29,18 @@
 //   <prefix>_rupture_time_r<rank>.csv  first |V| > 1 mm/s per fault DOF;
 //   stdout log every --log-every steps.
 //
+// Measurement flags (GPU dynamic-rupture plan D0, Chunhui Zhao, 2026-10-19):
+//   --stage-timers N   print the time split of a step (StageTimers::Dyn*)
+//                      every N steps and at the end; step 1, which also
+//                      assembles the operators, is left out.  0 = off.  The
+//                      timers only read clocks: the results are the same bits.
+//   --max-steps N      stop after N steps (before --tfinal if that comes
+//                      later); 0 = no limit.  For the 200-step gates.
+//   --perturb-initial-state SEED  test only: scale the projected prestress
+//                      by 1 + 1e-15 r (NitscheWaveOperator::PerturbPrestress)
+//                      before the initial fault state is seeded, for the
+//                      round-off floor of a golden.  -1 = off.
+//
 // Station copies (Chunhui Zhao, 2026-10-14): a station sits on a fault point
 // that carries one DOF per adjacent fault face (DG copies).  With
 // --station-copies average (default) the station files hold the face-area-
@@ -649,6 +661,90 @@ private:
 };
 #endif // MFEM_USE_HDF5
 
+/// --stage-timers: print the time split of the steps timed so far.
+/// Collective: every rank calls it at the same step.  "max" is the slowest
+/// rank, "mean" the average over ranks; per-call and per-step figures use the
+/// slowest rank.  Derived rows (computed per rank, then reduced):
+/// fault_closure = fault_advance - fault_traction - fault_reduce (boxes 3-4
+/// and 9-11), accel_other = acceleration minus its timed parts (vector
+/// sums), newmark = step - fault_advance - acceleration (the solver's
+/// predictor and corrector), loop_other = loop - step - output.
+void PrintNitscheStageTimers(const StageTimers &timers, long steps, double loop_sec,
+                             const char *when)
+{
+   using ST = StageTimers;
+   const int parts[] = {ST::DynStep, ST::DynFaultAdvance, ST::DynFaultTraction,
+                        ST::DynFaultReduce, ST::DynAcceleration, ST::DynStiffness,
+                        ST::DynHaloWait, ST::DynSlipLoad, ST::DynDirichletRHS,
+                        ST::DynDamping, ST::DynMassInverse, ST::DynOutput};
+   const int np = sizeof(parts) / sizeof(parts[0]);
+   const int n = np + 4;   // + fault_closure, accel_other, newmark, loop_other
+   auto sec_of = [&](int part) { return timers.Seconds(part); };
+   std::vector<double> sec(n), sec_max(n), sec_sum(n);
+   std::vector<long long> calls(n, 0), calls_max(n);
+   for (int i = 0; i < np; i++)
+   {
+      sec[i] = sec_of(parts[i]);
+      calls[i] = timers.Calls(parts[i]);
+   }
+   sec[np] = sec_of(ST::DynFaultAdvance) - sec_of(ST::DynFaultTraction)
+             - sec_of(ST::DynFaultReduce);
+   calls[np] = timers.Calls(ST::DynFaultAdvance);
+   sec[np + 1] = sec_of(ST::DynAcceleration) - sec_of(ST::DynStiffness)
+                 - sec_of(ST::DynSlipLoad) - sec_of(ST::DynDirichletRHS)
+                 - sec_of(ST::DynDamping) - sec_of(ST::DynMassInverse);
+   calls[np + 1] = timers.Calls(ST::DynAcceleration);
+   sec[np + 2] = sec_of(ST::DynStep) - sec_of(ST::DynFaultAdvance)
+                 - sec_of(ST::DynAcceleration);
+   calls[np + 2] = timers.Calls(ST::DynStep);
+   sec[np + 3] = loop_sec - sec_of(ST::DynStep) - sec_of(ST::DynOutput);
+   calls[np + 3] = steps;
+   double loop_max = 0.0;
+   MPI_Reduce(sec.data(), sec_max.data(), n, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+   MPI_Reduce(sec.data(), sec_sum.data(), n, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+   MPI_Reduce(calls.data(), calls_max.data(), n, MPI_LONG_LONG, MPI_MAX, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&loop_sec, &loop_max, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+   if (g_rank != 0) { return; }
+
+   const int nranks = Mpi::WorldSize();
+   const long st = std::max(steps, 1L);
+   std::ostringstream o;
+   o << "\n[STAGE-TIMERS] " << when << ": " << steps << " steps after step 1, loop wall "
+     << std::fixed << std::setprecision(3) << loop_max << " s (" << std::scientific
+     << std::setprecision(4) << loop_max / st << " s/step), " << nranks << " ranks\n";
+   o << "[STAGE-TIMERS] " << std::left << std::setw(20) << "part" << std::right
+     << std::setw(10) << "calls" << std::setw(14) << "max s" << std::setw(14) << "mean s"
+     << std::setw(14) << "ms/call" << std::setw(14) << "ms/step" << std::setw(9) << "% loop"
+     << "\n";
+   auto row = [&](const char *name, int i, int indent)
+   {
+      const double per_call = calls_max[i] > 0 ? 1e3 * sec_max[i] / calls_max[i] : 0.0;
+      o << "[STAGE-TIMERS] " << std::string(indent, ' ') << std::left
+        << std::setw(20 - indent) << name << std::right << std::setw(10) << calls_max[i]
+        << std::scientific << std::setprecision(4) << std::setw(14) << sec_max[i]
+        << std::setw(14) << sec_sum[i] / nranks << std::setw(14) << per_call
+        << std::setw(14) << 1e3 * sec_max[i] / st << std::fixed << std::setprecision(2)
+        << std::setw(9) << (loop_max > 0.0 ? 100.0 * sec_max[i] / loop_max : 0.0) << "\n";
+   };
+   row(ST::Name(ST::DynStep), 0, 0);
+   row(ST::Name(ST::DynFaultAdvance), 1, 2);
+   row(ST::Name(ST::DynFaultTraction), 2, 4);
+   row("fault_closure", np, 4);
+   row(ST::Name(ST::DynFaultReduce), 3, 4);
+   row(ST::Name(ST::DynAcceleration), 4, 2);
+   row(ST::Name(ST::DynStiffness), 5, 4);
+   row(ST::Name(ST::DynHaloWait), 6, 6);
+   row(ST::Name(ST::DynSlipLoad), 7, 4);
+   row(ST::Name(ST::DynDirichletRHS), 8, 4);
+   row(ST::Name(ST::DynDamping), 9, 4);
+   row(ST::Name(ST::DynMassInverse), 10, 4);
+   row("accel_other", np + 1, 4);
+   row("newmark", np + 2, 2);
+   row(ST::Name(ST::DynOutput), 11, 0);
+   row("loop_other", np + 3, 0);
+   std::cout << o.str() << std::flush;
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -669,7 +765,8 @@ int main(int argc, char *argv[])
                       " [--station-every n] [--dump-every n] [--log-every n]"
                       " [--station-copies average|first] [--fast-fault 0|1]"
                       " [--fused-spmv 0|1] [--dense-blocks 0|1] [--fault-weight w]"
-                      " [--fast-fault-output 0|1]\n";
+                      " [--fast-fault-output 0|1] [--stage-timers n] [--max-steps n]"
+                      " [--perturb-initial-state seed]\n";
       }
       return 1;
    }
@@ -708,6 +805,15 @@ int main(int argc, char *argv[])
    const int dense_blocks = ArgInt(argc, argv, "--dense-blocks", 1);
    const int fast_fault_output = ArgInt(argc, argv, "--fast-fault-output", 1);
    const real_t fault_weight = ArgReal(argc, argv, "--fault-weight", kDefaultFaultWeight);
+   // GPU dynamic-rupture plan D0 (header): step-part timers, a step limit,
+   // and the test-only round-off perturbation of the prestress
+   const int stage_timers_every = ArgInt(argc, argv, "--stage-timers", 0);
+   const int max_steps = ArgInt(argc, argv, "--max-steps", 0);
+   const long long perturb_seed = std::atoll(
+      ArgStr(argc, argv, "--perturb-initial-state", "-1").c_str());
+   MFEM_VERIFY(stage_timers_every >= 0, "--stage-timers N needs N >= 0");
+   MFEM_VERIFY(max_steps >= 0, "--max-steps N needs N >= 0");
+   MFEM_VERIFY(perturb_seed >= -1, "--perturb-initial-state SEED needs SEED >= 0 (-1 = off)");
    MFEM_VERIFY(station_copies == "average" || station_copies == "first",
                "--station-copies " << station_copies << ": expected average or first");
    const real_t cfl = cfg.numerics.cfl;
@@ -1099,6 +1205,18 @@ int main(int argc, char *argv[])
       }
    }
 
+   // --perturb-initial-state (test only): perturb the prestress the initial
+   // fault state is seeded from (header)
+   if (perturb_seed >= 0)
+   {
+      op.PerturbPrestress(static_cast<unsigned long long>(perturb_seed));
+      if (g_rank == 0)
+      {
+         std::cout << "  [perturb] projected prestress scaled by 1 + 1e-15 r (seed "
+                   << perturb_seed << ")\n";
+      }
+   }
+
    // initial fault state: d = 0, psi from the continuous friction condition
    // at the projected prestress, V = V_init along -X_tan (C-07)
    const int no = op.NumOwnedFaultDOFs();
@@ -1440,7 +1558,8 @@ int main(int argc, char *argv[])
 
    std::unique_ptr<NitscheEnergyMonitor> mon;
 
-   const long nsteps = std::lround(std::ceil((tfinal - cfg.time.t_initial) / dt - 1e-9));
+   const long nsteps_tfinal = std::lround(std::ceil((tfinal - cfg.time.t_initial) / dt - 1e-9));
+   const long nsteps = max_steps > 0 ? std::min<long>(nsteps_tfinal, max_steps) : nsteps_tfinal;
    if (g_rank == 0)
    {
       long long nloc = op.Height();
@@ -1502,6 +1621,10 @@ int main(int argc, char *argv[])
    op.SetFastFaultKernels(fast_fault != 0);
    op.SetFusedStiffness(fused_spmv != 0);
    op.SetDenseBlocks(dense_blocks != 0);
+   StageTimers stage_timers;
+   StageTimers *timers = stage_timers_every > 0 ? &stage_timers : nullptr;
+   op.SetStageTimers(timers);
+   double timed_loop0 = 0.0;   // MPI_Wtime() at the end of step 1
    CentralDifferenceSolver ode;
    ode.Init(op);
    if (stations)
@@ -1519,10 +1642,13 @@ int main(int argc, char *argv[])
    {
       real_t h = dt;
       const auto ts0 = std::chrono::steady_clock::now();
+      if (timers) { timers->Start(StageTimers::DynStep); }
       ode.Step(U, Ud, t, h);
+      if (timers) { timers->Stop(StageTimers::DynStep); }
       const double ds = std::chrono::duration<double>(std::chrono::steady_clock::now() - ts0).count();
       if (s == 1) { step1_sec = ds; fault_sec1 = op.FaultSeconds(); }
       else { step_sec += ds; }
+      if (timers) { timers->Start(StageTimers::DynOutput); }
       const NitscheStepRecord &rec = op.LastStep();
       max_ratio_run = std::max(max_ratio_run, rec.max_V_dt_over_Dc);
       max_V_run = std::max(max_V_run, rec.max_V);
@@ -1599,6 +1725,25 @@ int main(int argc, char *argv[])
          std::cout << "  wall " << wall << " s\n" << std::flush;
          (void)rho;
       }
+      if (timers)
+      {
+         timers->Stop(StageTimers::DynOutput);
+         if (s == 1)
+         {
+            // step 1 also assembles K, K_eta, the dense blocks and the fault
+            // face operators: leave it out of the split
+            timers->ResetStageParts();
+            timed_loop0 = MPI_Wtime();
+         }
+         else if (s % stage_timers_every == 0 && s != nsteps)
+         {
+            PrintNitscheStageTimers(*timers, s - 1, MPI_Wtime() - timed_loop0, "every N steps");
+         }
+      }
+   }
+   if (timers)
+   {
+      PrintNitscheStageTimers(*timers, nsteps - 1, MPI_Wtime() - timed_loop0, "end of run");
    }
    if (stations) { stations->Close(); }
 
