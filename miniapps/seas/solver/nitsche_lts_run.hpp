@@ -12,9 +12,27 @@
 // BuildLtsClustering with the rules (face neighbours differ by at most one
 // cluster, both tets of a fault face in one cluster), no wiggle (cluster 0
 // steps at min_e dt_e, the global step) and a hard cluster cap.  Then the
-// whole fault goes into one cluster c_F, the fastest one any fault tet is in
-// (design §3.4 step 1): every fault tet takes dt_e = min(dt_e, dt0 2^c_F) and
-// the clustering is repeated until no rule moves a fault tet below c_F.
+// whole fault and `buffer` layers of face neighbours around the fault tets
+// go into one cluster c_F, the fastest one any of these tets is in (design
+// §3.4 step 1, with the buffer added): every such tet takes dt_e =
+// min(dt_e, dt0 2^c_F) and the clustering is repeated until no rule moves
+// one below c_F.
+//
+// Why the buffer: a row that two clusters kick (the rows of the tets on
+// either side of a cluster seam) does not keep a static state at rest.  With
+// K u = 0 but the faster cluster's share F_f = -(K^(f) u) != 0 there, the
+// faster kicks give +dt0 F_f / M on the ticks the slower cluster does not
+// end, and the slower ends (of twice the weight) give the opposite, so u
+// carries a ripple of period 2 dt0 proportional to the static stress around
+// the seam.  On the fault that ripple tips the traction over the strength
+// (stick-slip chatter in the stations).  The ripple decays steeply from the
+// seam through cluster-c_F tets, which step well below their own CFL step.
+// TPV205 1000 m p = 1 (cloud, P5 follow-up, 2026-10-19), worst period-2
+// sigma_n at the stations over 0-4 s: 0.064 MPa with no buffer, 1.3e-3
+// with one layer, 7e-5 with two and 4.9e-5 with three, as global stepping;
+// over 8-12 s two layers still leave up to 9 times global stepping's
+// ripple, three leave none.  The buffer tets are in c_F's patch anyway, so
+// the cost is small.
 //
 // NitscheLtsBlocks: K^(c) = sum_{e in c} G_e and K_eta^(c) as dense blocks
 // (the layout of DenseBlockStiffness, plan item 8a), built from the
@@ -101,14 +119,16 @@ struct NitscheLtsAssignment
    double ideal = 1.0;              ///< element updates, global over clustered
    int passes = 0;                  ///< clusterings until the fault sat in one cluster
    long long fault_tets = 0;
+   long long buffer_tets = 0;       ///< tets put into c_F around the fault tets
    std::vector<long long> cells;    ///< per cluster
    std::vector<std::pair<int, int>> fault_pairs;
 };
 
-/// See the file comment.  cap: hard cluster cap (<= 0: none).
+/// See the file comment.  cap: hard cluster cap (<= 0: none); buffer: the
+/// layers of face neighbours of the fault tets that go into c_F with them.
 inline NitscheLtsAssignment BuildNitscheLtsAssignment(Mesh &mesh, int order, real_t cfl_eff,
                                                       real_t cp, int fault_attr, real_t dt_max,
-                                                      int cap)
+                                                      int cap, int buffer)
 {
    NitscheLtsMesh m = BuildNitscheLtsMesh(mesh, order, cfl_eff, cp, fault_attr);
    const int ne = static_cast<int>(m.dt.size());
@@ -116,12 +136,26 @@ inline NitscheLtsAssignment BuildNitscheLtsAssignment(Mesh &mesh, int order, rea
    for (double &d : dt) { d = std::min(d, static_cast<double>(dt_max)); }
    std::vector<char> on_fault(ne, 0);
    for (const auto &pr : m.fault_pairs) { on_fault[pr.first] = on_fault[pr.second] = 1; }
+   const Table &e2e = mesh.ElementToElementTable();
+   // in_fc: the tets that go into c_F, the fault tets and buffer layers of
+   // face neighbours around them
+   std::vector<char> in_fc = on_fault;
+   for (int layer = 0; layer < buffer; layer++)
+   {
+      std::vector<char> next = in_fc;
+      for (int e = 0; e < ne; e++)
+      {
+         if (!in_fc[e]) { continue; }
+         const int *row = e2e.GetRow(e);
+         for (int j = 0; j < e2e.RowSize(e); j++) { next[row[j]] = 1; }
+      }
+      in_fc.swap(next);
+   }
    LtsClusteringOptions opt;
    opt.wiggle_scan = false;
    opt.lambda_fixed = 1.0;
    opt.nc_cap = cap;
    opt.merge_loss_tol = std::numeric_limits<double>::infinity();   // a hard cap
-   const Table &e2e = mesh.ElementToElementTable();
    NitscheLtsAssignment a;
    LtsClustering cl;
    for (a.passes = 1;; a.passes++)
@@ -130,7 +164,7 @@ inline NitscheLtsAssignment BuildNitscheLtsAssignment(Mesh &mesh, int order, rea
       int cmin = INT_MAX, cmax = -1;
       for (int e = 0; e < ne; e++)
       {
-         if (!on_fault[e]) { continue; }
+         if (!in_fc[e]) { continue; }
          cmin = std::min(cmin, cl.cluster[e]);
          cmax = std::max(cmax, cl.cluster[e]);
       }
@@ -139,7 +173,7 @@ inline NitscheLtsAssignment BuildNitscheLtsAssignment(Mesh &mesh, int order, rea
       MFEM_VERIFY(a.passes < 64, "BuildNitscheLtsAssignment: the fault tets do not "
                   "settle in one cluster after " << a.passes << " clusterings");
       const double dtf = std::ldexp(cl.dt_base, cmin);
-      for (int e = 0; e < ne; e++) { if (on_fault[e]) { dt[e] = std::min(dt[e], dtf); } }
+      for (int e = 0; e < ne; e++) { if (in_fc[e]) { dt[e] = std::min(dt[e], dtf); } }
    }
    a.cluster = cl.cluster;
    a.num_clusters = cl.num_clusters;
@@ -147,6 +181,8 @@ inline NitscheLtsAssignment BuildNitscheLtsAssignment(Mesh &mesh, int order, rea
    a.ideal = cl.lambda * HarmonicUpdateSpeedup(cl);
    a.cells = cl.cells_per_cluster();
    for (char f : on_fault) { a.fault_tets += f; }
+   for (char f : in_fc) { a.buffer_tets += f; }
+   a.buffer_tets -= a.fault_tets;
    a.fault_pairs = m.fault_pairs;
    // every element steps no faster than its own CFL step (BuildLtsClustering
    // asserts it against the lowered dt; this is the original one)

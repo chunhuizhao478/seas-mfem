@@ -90,7 +90,8 @@
 // the multirate leapfrog, dt0 = the global step; "off" (default) is
 // CentralDifferenceSolver, every bit as before.  The clusters come from the
 // serial mesh (rate-2 rules, no wiggle, hard cap [numerics] lts_nc_cap or
-// --lts-cap, default 4 here), with the whole fault in one cluster c_F; on
+// --lts-cap, default 4 here), with the whole fault and --lts-fault-buffer
+// layers of face neighbours around it (default 3) in one cluster c_F; on
 // more than one rank the partition is BuildLtsAwarePartition (every cluster
 // balanced per rank, fault faces on one rank, --fault-weight as cost).  The
 // fault closes every 2^c_F ticks, and the stations, dumps and fault frames
@@ -699,7 +700,8 @@ int main(int argc, char *argv[])
                       " [--fused-spmv 0|1] [--dense-blocks 0|1] [--fault-weight w]"
                       " [--fast-fault-output 0|1] [--lts-report 0|1]"
                       " [--lts-report-cap n] [--lts-report-ranks a,b,...]"
-                      " [--lts off|rate2] [--lts-cap n] [--lts-same-step 0|1]\n";
+                      " [--lts off|rate2] [--lts-cap n] [--lts-fault-buffer n]"
+                      " [--lts-same-step 0|1]\n";
       }
       return 1;
    }
@@ -761,6 +763,8 @@ int main(int argc, char *argv[])
    const int lts_cap = ArgInt(argc, argv, "--lts-cap",
                               (t_num && t_num->contains("lts_nc_cap")) ? cfg.numerics.lts_nc_cap : 4);
    const bool lts_same = ArgInt(argc, argv, "--lts-same-step", 0) != 0;
+   const int lts_buffer = ArgInt(argc, argv, "--lts-fault-buffer", 3);
+   MFEM_VERIFY(lts_buffer >= 0, "--lts-fault-buffer " << lts_buffer << ": expected >= 0");
    MFEM_VERIFY(!lts_same || lts_on, "--lts-same-step needs --lts rate2");
    MFEM_VERIFY(station_copies == "average" || station_copies == "first",
                "--station-copies " << station_copies << ": expected average or first");
@@ -886,7 +890,7 @@ int main(int argc, char *argv[])
          const auto &mf = cfg.material_fallback;
          const real_t cp = std::sqrt((mf.lambda + 2.0 * mf.mu) / mf.rho);
          lts_asg = BuildNitscheLtsAssignment(*smesh, p, cfl * kCeig[p], cp, cfg.boundary.fault_attr,
-                                             cfg.time.dt_max, lts_cap);
+                                             cfg.time.dt_max, lts_cap, lts_buffer);
          hdr[0] = lts_asg.num_clusters;
          hdr[1] = lts_asg.fault_cluster;
          hdr[2] = lts_asg.passes;
@@ -897,7 +901,8 @@ int main(int argc, char *argv[])
                    << " clusters (hard cap " << lts_cap << "), dt0 = " << dt0 << " s; tets per cluster";
          for (long long c : lts_asg.cells) { std::cout << " " << c; }
          std::cout << "; ideal " << lts_asg.ideal << "x; fault (" << lts_asg.fault_tets
-                   << " tets) in cluster " << lts_asg.fault_cluster << " after "
+                   << " tets, " << lts_asg.buffer_tets << " buffer tets in " << lts_buffer
+                   << " layer(s)) in cluster " << lts_asg.fault_cluster << " after "
                    << lts_asg.passes << " clustering(s)\n";
       }
       MPI_Bcast(hdr, 4, MPI_INT, 0, MPI_COMM_WORLD);
