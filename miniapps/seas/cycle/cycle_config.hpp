@@ -69,6 +69,21 @@
 //                   and [[cycle.output.station]] name, x (global XYZ)
 //   [cycle.checkpoint] every_qd_steps (0 = no checkpoint; else also one at
 //                   the end of a run, as seas_bp5_full) [0]
+//   [cycle.snapshots.fault], [cycle.snapshots.surface]  whole-field
+//                   snapshots, one VTKHDF file per kind (cycle/snapshots.hpp).
+//                   A table that is present is on unless enabled = false.
+//                   dt_qd [3.15576e8 s = 10 yr]: a snapshot at the first QD
+//                   step at or after each multiple of dt_qd since t = 0;
+//                   dt_dyn [0.1 s]: at the first dynamic step at or after
+//                   each multiple of dt_dyn since the phase started.  Plus
+//                   one at the start, at every switch and at the end.
+//                   surface only: attrs [[1]] (boundary attributes) and the
+//                   plane n . x = plane_offset (plane_normal [[0, 0, 1]],
+//                   plane_offset [0], plane_tol [1e-3] m): a boundary face
+//                   is taken when its attribute is listed and all its
+//                   vertices lie on the plane (attribute 1 also holds the
+//                   bottom of the BP5 mesh).
+//   [cycle.snapshots.volume]  only enabled = false (not implemented)
 //
 // The dynamic regime reads the keys the Nitsche driver reads, from the same
 // shared sections (drivers/nitsche_dyn_driver.cpp:616-648, 708-736,
@@ -139,6 +154,26 @@ struct OutputConfig
    std::array<real_t, 3> plane_axis1 = {{1.0, 0.0, 0.0}};
    std::array<real_t, 3> plane_axis2 = {{0.0, 0.0, -1.0}};
    std::vector<StationSpec> stations;
+};
+
+/// One [cycle.snapshots.<kind>] table.
+struct SnapshotKindConfig
+{
+   bool enabled = false;
+   real_t dt_qd = 10.0 * 365.25 * 24.0 * 3600.0;   ///< [s], marks from t = 0
+   real_t dt_dyn = 0.1;                            ///< [s], marks from the phase start
+};
+
+/// [cycle.snapshots]: the fault and the free surface (volume: not implemented).
+struct SnapshotConfig
+{
+   SnapshotKindConfig fault;
+   SnapshotKindConfig surface;
+   std::vector<int> surface_attrs = {1};
+   std::array<real_t, 3> surface_normal = {{0.0, 0.0, 1.0}};   ///< unit
+   real_t surface_offset = 0.0;   ///< the plane n . x = offset [m]
+   real_t surface_tol = 1.0e-3;   ///< [m]
+   bool Any() const { return fault.enabled || surface.enabled; }
 };
 
 /// [cycle.qd]
@@ -213,6 +248,7 @@ struct CycleConfig
    PrestressConfig prestress;     ///< include_eta: [cycle.prestress].eta_V_init
    FaultFieldsConfig fields;
    OutputConfig output;
+   SnapshotConfig snapshots;
    int checkpoint_every = 0;
 
    // Shortcuts into `shared`, checked by Load.
@@ -325,6 +361,23 @@ inline std::vector<real_t> PositiveReals(const toml::value &t, const std::string
    return out;
 }
 
+/// A non-empty array of integers.
+inline std::vector<int> Ints(const toml::value &t, const std::string &sec,
+                             const std::string &key, const std::vector<int> &def)
+{
+   if (!t.contains(key)) { return def; }
+   const toml::value &v = t.at(key);
+   MFEM_VERIFY(v.is_array() && !v.as_array().empty(),
+               "[" << sec << "]." << key << " must be a non-empty array of integers");
+   std::vector<int> out;
+   for (const toml::value &c : v.as_array())
+   {
+      MFEM_VERIFY(c.is_integer(), "[" << sec << "]." << key << " must hold integers only");
+      out.push_back(static_cast<int>(c.as_integer()));
+   }
+   return out;
+}
+
 /// Refuses keys a table does not know, so a misspelt key cannot fall back to
 /// its default unnoticed.
 inline void OnlyKeys(const toml::value &t, const std::string &sec,
@@ -337,6 +390,22 @@ inline void OnlyKeys(const toml::value &t, const std::string &sec,
       for (const auto &k : known) { if (kv.first == k) { ok = true; break; } }
       MFEM_VERIFY(ok, "[" << sec << "] has an unknown key '" << kv.first << "'");
    }
+}
+
+/// One [cycle.snapshots.<kind>] table: present means on unless enabled = false.
+inline SnapshotKindConfig SnapshotKind(const toml::value &t, const std::string &sec,
+                                       const std::vector<std::string> &extra_keys)
+{
+   std::vector<std::string> known = {"enabled", "dt_qd", "dt_dyn"};
+   known.insert(known.end(), extra_keys.begin(), extra_keys.end());
+   OnlyKeys(t, sec, known);
+   SnapshotKindConfig k;
+   k.enabled = Bool(t, sec, "enabled", true);
+   k.dt_qd = Real(t, sec, "dt_qd", k.dt_qd);
+   k.dt_dyn = Real(t, sec, "dt_dyn", k.dt_dyn);
+   MFEM_VERIFY(k.dt_qd > 0.0 && k.dt_dyn > 0.0,
+               "[" << sec << "] dt_qd and dt_dyn must be > 0");
+   return k;
 }
 
 inline RectTaperSpec Field(const toml::value &fields, const std::string &name)
@@ -425,7 +494,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
    const toml::value &cy = root.at("cycle");
    OnlyKeys(cy, "cycle", {"ic", "switching", "qd_radiation_damping", "mesh_scale",
                           "plate_rate", "penalty_factor", "qd", "switch", "probe",
-                          "prestress", "fields", "output", "checkpoint"});
+                          "prestress", "fields", "output", "checkpoint", "snapshots"});
    c.ic = Str(cy, "cycle", "ic", "", true);
    MFEM_VERIFY(c.ic == "gold" || c.ic == "scec_fd",
                "[cycle].ic must be \"gold\" or \"scec_fd\"; got \"" << c.ic << "\"");
@@ -568,6 +637,40 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       OnlyKeys(k, "cycle.checkpoint", {"every_qd_steps"});
       c.checkpoint_every = Int(k, "cycle.checkpoint", "every_qd_steps", 0);
       MFEM_VERIFY(c.checkpoint_every >= 0, "[cycle.checkpoint].every_qd_steps must be >= 0");
+   }
+
+   if (cy.contains("snapshots"))
+   {
+      const toml::value &sn = cy.at("snapshots");
+      OnlyKeys(sn, "cycle.snapshots", {"fault", "surface", "volume"});
+      SnapshotConfig &sc = c.snapshots;
+      if (sn.contains("fault"))
+      {
+         sc.fault = SnapshotKind(sn.at("fault"), "cycle.snapshots.fault", {});
+      }
+      if (sn.contains("surface"))
+      {
+         const std::string sec = "cycle.snapshots.surface";
+         const toml::value &s2 = sn.at("surface");
+         sc.surface = SnapshotKind(s2, sec, {"attrs", "plane_normal", "plane_offset",
+                                             "plane_tol"});
+         sc.surface_attrs = Ints(s2, sec, "attrs", sc.surface_attrs);
+         sc.surface_normal = Vec3(s2, sec, "plane_normal", sc.surface_normal);
+         sc.surface_offset = Real(s2, sec, "plane_offset", sc.surface_offset);
+         sc.surface_tol = Real(s2, sec, "plane_tol", sc.surface_tol);
+         const std::array<real_t, 3> &n = sc.surface_normal;
+         MFEM_VERIFY(std::abs(n[0] * n[0] + n[1] * n[1] + n[2] * n[2] - 1.0) < 1e-12,
+                     "[" << sec << "].plane_normal must be a unit vector");
+         MFEM_VERIFY(sc.surface_tol > 0.0, "[" << sec << "].plane_tol must be > 0");
+      }
+      if (sn.contains("volume"))
+      {
+         const toml::value &v = sn.at("volume");
+         OnlyKeys(v, "cycle.snapshots.volume", {"enabled"});
+         MFEM_VERIFY(v.contains("enabled") && !Bool(v, "cycle.snapshots.volume", "enabled", true),
+                     "[cycle.snapshots.volume] is not implemented: only enabled = false "
+                     "is accepted");
+      }
    }
 
    // ---- the dynamic regime's numerics (shared sections, Nitsche keys) ----

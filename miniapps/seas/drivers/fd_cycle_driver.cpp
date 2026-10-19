@@ -40,6 +40,10 @@
 //     stopped for a switch: Vqd = qd.Solve(t); RunDynamicPhase(t)
 //         (back to QD at its end, unless it stops the run); next loop
 //   end: Checkpoint (if N > 0), out.ForceWrite (seas_bp5_full's final row)
+//   snapshots ([cycle.snapshots], cycle/snapshots.hpp): with the station
+//   rows, at the QD and dynamic marks, at every switch and at the end
+//   --wall-limit S: at the first QD step after S seconds of wall time,
+//   a checkpoint and a clean stop (exit 8), for chained jobs
 //
 // The per-step work and its order follow seas_bp5_full's TS monitor
 // (tests/verification/bp5_verification_full.cpp:529-718), so with the gold
@@ -65,7 +69,8 @@
 // or every N QD steps after it), with the dynamic phases so far counted.
 // Exit codes: 0 done (or --max-dyn-steps), 2 no PETSc, 3 non-finite, 4 a
 // dynamic phase reached T_max, 7 the guard: the QD balance after a switch
-// back is above V_on.
+// back is above V_on, 8 stopped at --wall-limit (checkpoint written; a
+// --restart from it continues the run and its files).
 
 #include "mfem.hpp"
 #include "../cycle/build_info.hpp"
@@ -79,6 +84,7 @@
 #include "../cycle/regime_controller.hpp"
 #include "../cycle/state_bridge.hpp"
 #include "../cycle/dyn_phase.hpp"
+#include "../cycle/snapshots.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -237,7 +243,8 @@ void PrintDynamicSetup(const MPIContext &mpi, const cycle::CycleConfig &cfg,
 /// reached T_max, 7 the guard.
 PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::QDPhase &qd,
                          cycle::DynPhase &dyn, cycle::FdCycleOutput &out,
-                         cycle::RegimeController &ctl, const std::string &commit, real_t t_s,
+                         cycle::Snapshots &snaps, cycle::RegimeController &ctl,
+                         const std::string &commit, real_t t_s,
                          real_t Vstart, long max_dyn_steps, long end_phase_after,
                          int log_every, int &rejections_before,
                          const std::function<void(int, real_t)> &checkpoint)
@@ -260,6 +267,7 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
    ctl.EnterDynamic(t);
    const int phase = ctl.Phases();
    out.SwitchLog(t, Vstart, "QD", "dynamic", t == 0.0 ? "start" : "V_on");
+   snaps.EnterDynamic();
 
    // ---- the switch probe (plan P3): one controller per pair ----
    std::vector<cycle::RegimeController> probes;
@@ -362,6 +370,7 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
       out.ForceWrite(t, Vmax, fill_dyn);
       out.WriteGlobal(t, Vmax);
       out.Flush();
+      snaps.Dyn(t, dyn.Tau(), dyn.Steps(), phase, fill_dyn, dyn.U(), dyn.Ud(), true);
       out.SwitchLog(t, Vmax, "dynamic", to_qd ? "QD" : "stop", reason);
 
       // One file for the fault: rupture time, final slip, peak V, final psi.
@@ -447,6 +456,7 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
          track(t);
          out.UpdateEvents(t, Vmax);
          if (out.Write(t, Vmax, fill_dyn)) { out.WriteGlobal(t, Vmax); }
+         snaps.Dyn(t, dyn.Tau(), dyn.Steps(), phase, fill_dyn, dyn.U(), dyn.Ud());
          verdict = ctl.AfterDynStep(Vmax, t, dyn.Tau());
       }
       for (size_t k = 0; k < probes.size(); k++)
@@ -544,6 +554,7 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
                 << " s): max V dynamic " << snap_Vmax << " m/s, QD balance " << Vqd
                 << " m/s\n" << std::flush;
    }
+   snaps.ResetQDHistory(end.t, qd.Displacement());
    if (!std::isfinite(Vqd))
    {
       if (root) { std::cerr << "ERROR: the QD balance after the switch back is not finite.\n"; }
@@ -585,6 +596,7 @@ int main(int argc, char *argv[])
    int max_dyn_steps = -1;
    int end_phase_after = -1;
    int log_every = 1000;
+   double wall_limit = -1.0;
 
    OptionsParser args(argc, argv);
    args.AddOption(&deck, "-d", "--deck", "Cycle deck (TOML): [cycle] and the shared sections.");
@@ -609,6 +621,9 @@ int main(int argc, char *argv[])
                   "this many steps as if the controller had ended it (-1 = off).");
    args.AddOption(&log_every, "-le", "--log-every",
                   "Switching on: a log line every this many dynamic steps.");
+   args.AddOption(&wall_limit, "-wl", "--wall-limit",
+                  "Stop with a checkpoint (exit 8) at the first QD step after this many "
+                  "seconds of wall time since the start (-1 = off; needs checkpoints).");
    args.Parse();
    if (!args.Good())
    {
@@ -616,11 +631,15 @@ int main(int argc, char *argv[])
       return 1;
    }
 
+   const double wall_start = MPI_Wtime();
    const std::string commit = cycle::BuildCommit();
    cycle::CycleConfig cfg = cycle::CycleConfig::Load(deck);
    // Run-time overrides: where the files go and how often to checkpoint.
    if (output_dir[0] != '\0') { cfg.output.dir = output_dir; }
    if (checkpoint_every >= 0) { cfg.checkpoint_every = checkpoint_every; }
+   MFEM_VERIFY(wall_limit < 0.0 || cfg.checkpoint_every > 0,
+               "--wall-limit needs checkpoints ([cycle.checkpoint].every_qd_steps or "
+               "--checkpoint-every > 0): the stop writes one to continue from");
    const std::string restart_prefix = restart;
    const std::string ckpt_prefix = cfg.output.dir + "/" + cfg.output.prefix;
 
@@ -644,7 +663,20 @@ int main(int argc, char *argv[])
                 << "  t_final: " << cfg.t_final << " s, dt_init: " << cfg.dt_init << " s\n"
                 << "  output: " << ckpt_prefix << "_*\n"
                 << "  checkpoint every: " << cfg.checkpoint_every << " QD steps"
-                << (cfg.checkpoint_every > 0 ? "" : " (none)") << "\n";
+                << (cfg.checkpoint_every > 0 ? "" : " (none)") << "\n"
+                << "  wall limit: "
+                << (wall_limit > 0.0 ? std::to_string(wall_limit) + " s" : std::string("none"))
+                << "\n";
+      const cycle::SnapshotConfig &sc = cfg.snapshots;
+      std::cout << "  snapshots: fault "
+                << (sc.fault.enabled ? "dt_qd " + std::to_string(sc.fault.dt_qd) + " s, dt_dyn " +
+                                       std::to_string(sc.fault.dt_dyn) + " s"
+                                     : std::string("off"))
+                << "; surface "
+                << (sc.surface.enabled ? "dt_qd " + std::to_string(sc.surface.dt_qd) +
+                                         " s, dt_dyn " + std::to_string(sc.surface.dt_dyn) + " s"
+                                       : std::string("off"))
+                << "\n";
    }
 
    if (root) { std::filesystem::create_directories(cfg.output.dir); }
@@ -713,6 +745,7 @@ int main(int argc, char *argv[])
       int rejections_before = 0;
       cycle::RegimeController ctl(cfg.switch_cfg);
       std::unique_ptr<cycle::FdCycleOutput> out;
+      std::vector<cycle::SnapshotFileState> snap_restart;
       const std::vector<cycle::StationLocation> locs = qd.LocateStations(cfg.output);
       qd.InitTS(dt);
       if (!restart_prefix.empty())
@@ -735,6 +768,7 @@ int main(int argc, char *argv[])
          qd.RestoreTS(info.step);
          out = std::make_unique<cycle::FdCycleOutput>(cfg.output, mpi.GetComm(), locs,
                                                       commit, &info.out);
+         snap_restart = info.snapshots;
          if (root)
          {
             std::cout << "  restarted from " << restart_prefix << ": step " << info.step
@@ -747,6 +781,24 @@ int main(int argc, char *argv[])
          out = std::make_unique<cycle::FdCycleOutput>(cfg.output, mpi.GetComm(), locs, commit);
       }
       if (cfg.switching) { out->OpenSwitchLog(commit); }
+      cycle::Snapshots snaps(cfg, mpi.GetComm(), pmesh, qd.Domain().GetFESpace(), qd.Table(),
+                             qd.Domain().GetNbfPerFace(), commit,
+                             restart_prefix.empty() ? nullptr : &snap_restart);
+      if (!restart_prefix.empty()) { snaps.ResetQDHistory(t, qd.Displacement()); }
+      if (root && snaps.Any())
+      {
+         if (cfg.snapshots.fault.enabled)
+         {
+            std::cout << "  fault snapshots: " << snaps.FaultPath() << " (" << snaps.FaultPoints()
+                      << " points, " << snaps.FaultSteps() << " snapshots so far)\n";
+         }
+         if (cfg.snapshots.surface.enabled)
+         {
+            std::cout << "  surface snapshots: " << snaps.SurfacePath() << " ("
+                      << snaps.SurfacePoints() << " points, " << snaps.SurfaceSteps()
+                      << " snapshots so far)\n";
+         }
+      }
 
       auto checkpoint = [&](int step, real_t tt)
       {
@@ -759,6 +811,7 @@ int main(int argc, char *argv[])
          info.ic = cfg.IcLabel();
          info.dyn_phases = ctl.Phases();
          info.out = out->GetState();
+         info.snapshots = snaps.GetState();
          cycle::CheckpointData d;
          d.state = qd.State();
          d.displacement = qd.Operator().GetDisplacement();
@@ -777,8 +830,9 @@ int main(int argc, char *argv[])
       }
       auto dynamic_phase = [&](real_t ts, real_t Vs)
       {
-         return RunDynamicPhase(mpi, cfg, qd, *dyn, *out, ctl, commit, ts, Vs, max_dyn_steps,
-                                end_phase_after, log_every, rejections_before, checkpoint);
+         return RunDynamicPhase(mpi, cfg, qd, *dyn, *out, snaps, ctl, commit, ts, Vs,
+                                max_dyn_steps, end_phase_after, log_every, rejections_before,
+                                checkpoint);
       };
 
       // A fresh switched run starts from the QD balance at t = 0: dynamic if
@@ -795,6 +849,7 @@ int main(int argc, char *argv[])
             out->UpdateEvents(t, Vstart);
             out->Write(t, Vstart, fill0);
             out->WriteGlobal(t, Vstart);
+            snaps.QD(t, qd.StepNumber(), 0, cycle::SnapReason::Start, fill0, qd.Displacement());
             const PhaseEnd end = dynamic_phase(t, Vstart);
             rc = end.rc;
             run_qd = end.back_to_qd;
@@ -814,6 +869,7 @@ int main(int argc, char *argv[])
       const real_t yr = BP5Params::seconds_per_year;
       auto fill = [&qd](cycle::StationFields &f) { qd.FillStationFields(f); };
       bool diverged = false, to_dynamic = false, qd_ran = false, qd_done = false;
+      bool wall_stop = false;
       auto monitor = [&](int step, real_t tt) -> bool
       {
          const real_t Vmax = qd.MaxV();
@@ -836,7 +892,11 @@ int main(int argc, char *argv[])
          out->UpdateEvents(tt, Vmax);
          out->Write(tt, Vmax, fill);
          out->WriteGlobal(tt, Vmax);
-         if (cfg.switching && ctl.GoDynamic(Vmax))
+         const bool go = cfg.switching && ctl.GoDynamic(Vmax);
+         snaps.QD(tt, step, ctl.Phases(),
+                  go ? cycle::SnapReason::ToDynamic : cycle::SnapReason::Cadence, fill,
+                  qd.Displacement());
+         if (go)
          {
             // A new event: the dynamic regime takes over at this step (P4).
             // No checkpoint here: a restart from it would switch one step
@@ -844,10 +904,28 @@ int main(int argc, char *argv[])
             to_dynamic = true;
             return false;
          }
-         if (cfg.checkpoint_every > 0 && step % cfg.checkpoint_every == 0)
+         const bool ckpt = cfg.checkpoint_every > 0 && step % cfg.checkpoint_every == 0;
+         if (ckpt)
          {
             checkpoint(step, tt);
             qd.RestartStage();
+         }
+         if (wall_limit > 0.0)
+         {
+            // Rank 0's clock decides, so every rank stops at the same step.
+            int over = (MPI_Wtime() - wall_start >= wall_limit) ? 1 : 0;
+            MPI_Bcast(&over, 1, MPI_INT, 0, mpi.GetComm());
+            if (over)
+            {
+               if (!ckpt) { checkpoint(step, tt); }
+               if (root)
+               {
+                  std::cout << "  wall limit " << wall_limit << " s reached at step " << step
+                            << ", t = " << tt / yr << " yr: checkpoint written, stopping\n";
+               }
+               wall_stop = true;
+               return false;
+            }
          }
          if (root && (step % 10 == 0 || Vmax > cfg.output.event_V))
          {
@@ -871,6 +949,7 @@ int main(int argc, char *argv[])
          qd_ran = true;
          qd.Run(t, dt, cfg.t_final, max_steps, monitor);
          if (diverged) { rc = 3; break; }
+         if (wall_stop) { rc = 8; break; }
          if (!to_dynamic) { qd_done = true; break; }   // t_final or --max-steps
 
          // ---- QD -> dynamic (P4): the QD balance at the accepted step ----
@@ -889,6 +968,7 @@ int main(int argc, char *argv[])
          {
             if (cfg.checkpoint_every > 0) { checkpoint(steps, t); }
             out->ForceWrite(t, qd.MaxV(), fill);
+            snaps.QD(t, steps, ctl.Phases(), cycle::SnapReason::End, fill, qd.Displacement());
          }
          out->Flush();
          if (root)
@@ -896,8 +976,9 @@ int main(int argc, char *argv[])
             // rc 7 (the guard) and 3 (a non-finite balance) stop at the switch back.
             const std::string ph = std::to_string(ctl.Phases());
             const std::string stopped =
-               (rc == 7 || rc == 3) ? "stopped at the switch back after dynamic phase " + ph
-                                    : "stopped in dynamic phase " + ph;
+               (rc == 8)              ? std::string("stopped at the wall limit")
+               : (rc == 7 || rc == 3) ? "stopped at the switch back after dynamic phase " + ph
+                                      : "stopped in dynamic phase " + ph;
             std::cout << "\n=== fd_cycle summary ===\n"
                       << "  commit: " << commit << "\n"
                       << "  final time: " << t << " s (" << t / yr << " yr)\n"
@@ -905,6 +986,8 @@ int main(int argc, char *argv[])
                       << "  step rejections: " << rejections_before + qd.Rejections() << "\n"
                       << "  dynamic phases: " << ctl.Phases() << "\n"
                       << "  events: " << out->NumEvents() << "\n"
+                      << "  snapshots: fault " << snaps.FaultSteps() << ", surface "
+                      << snaps.SurfaceSteps() << "\n"
                       << "  status: " << (diverged  ? "DIVERGED"
                                           : qd_done ? "done"
                                                     : stopped + " (exit " +

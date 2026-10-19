@@ -86,7 +86,17 @@ struct StationFields
    Vector tau_a_dip, tau_a_strike;   ///< e.g. the prestress
    Vector tau_b_dip, tau_b_strike;   ///< e.g. the elastic traction
    Vector theta;                     ///< state variable theta [s]
+   Vector sigma_n;                   ///< sigma_n_eff, compression positive [Pa]
    real_t eta = 0.0;                 ///< multiplies E(V) in tau
+};
+
+/// What a checkpoint keeps of one snapshot file (cycle/snapshots.hpp).
+struct SnapshotFileState
+{
+   std::string kind;        ///< "fault" or "surface"
+   long long steps = 0;     ///< snapshots in the file
+   long long qd_mark = -1;  ///< last QD mark written
+   real_t last_t = -1e30;   ///< time of the last snapshot
 };
 
 /// One output file, appended row by row in the ProbeOutput format.

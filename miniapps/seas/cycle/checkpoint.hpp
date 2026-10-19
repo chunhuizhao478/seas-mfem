@@ -8,12 +8,14 @@
 //      step, event counters, state, displacement, traction, slip rate;
 //   2. io/petsc_ts_checkpoint.hpp WritePetscTSCheckpoint (PETSC_TS_V2):
 //      time, next dt, TS step number, rejections;
-//   3. the cycle block (FD_CYCLE_V2), appended here: the commit of the binary
+//   3. the cycle block (FD_CYCLE_V3), appended here: the commit of the binary
 //      that wrote it (rule M10), the IC set, the regime, the step, the
 //      number of dynamic phases entered so far (the regime controller's
-//      state in the QD regime), and FdCycleOutput's state (cadence clock,
-//      event state, file sizes).  V1 (P1) had no phase count, which reads
-//      as 0, and no catalog last-above time (see ReadCycleCheckpoint).
+//      state in the QD regime), FdCycleOutput's state (cadence clock,
+//      event state, file sizes) and each snapshot file's count, last QD
+//      mark and last time (snapshots.hpp).  V1 (P1) had no phase count,
+//      which reads as 0, and no catalog last-above time (see
+//      ReadCycleCheckpoint); V1 and V2 have no snapshot record.
 // Blocks 1 and 2 are written by the existing functions unchanged, so the
 // readers of seas_bp5_full can read the first two blocks.
 //
@@ -38,6 +40,7 @@
 #include <iomanip>
 #include <limits>
 #include <string>
+#include <vector>
 
 namespace mfem
 {
@@ -58,6 +61,7 @@ struct CheckpointInfo
    std::string regime = "QD";
    int dyn_phases = 0;   ///< dynamic phases entered before this checkpoint
    FdCycleOutput::State out;
+   std::vector<SnapshotFileState> snapshots;   ///< empty: none (or V1, V2)
 };
 
 /// The vectors of a QD checkpoint (this rank's owned data).
@@ -84,7 +88,7 @@ inline void WriteCycleCheckpoint(const std::string &prefix, const CheckpointInfo
       MFEM_VERIFY(out.good(), "WriteCycleCheckpoint: cannot append to " << fn);
       const FdCycleOutput::State &o = info.out;
       out << std::setprecision(17) << std::scientific;
-      out << "FD_CYCLE_V2\n";
+      out << "FD_CYCLE_V3\n";
       out << "commit " << info.commit << "\n";
       out << "ic " << info.ic << "\n";
       out << "regime " << info.regime << "\n";
@@ -101,6 +105,11 @@ inline void WriteCycleCheckpoint(const std::string &prefix, const CheckpointInfo
       for (size_t i = 0; i < o.files.size(); i++)
       {
          out << o.files[i] << " " << o.sizes[i] << "\n";
+      }
+      out << "snapshots " << info.snapshots.size() << "\n";
+      for (const SnapshotFileState &sf : info.snapshots)
+      {
+         out << sf.kind << " " << sf.steps << " " << sf.qd_mark << " " << sf.last_t << "\n";
       }
       out << "FD_CYCLE_END\n";
       out.close();
@@ -145,8 +154,9 @@ inline void ReadCycleCheckpoint(const std::string &prefix, const std::string &co
    {
       if (tok == "FD_CYCLE_V1") { version = 1; break; }
       if (tok == "FD_CYCLE_V2") { version = 2; break; }
+      if (tok == "FD_CYCLE_V3") { version = 3; break; }
    }
-   MFEM_VERIFY(version > 0, "ReadCycleCheckpoint: " << fn << " has no FD_CYCLE_V1/V2 "
+   MFEM_VERIFY(version > 0, "ReadCycleCheckpoint: " << fn << " has no FD_CYCLE_V1/V2/V3 "
                "block (not written by seas_fd_cycle_driver)");
    auto tag = [&](const char *want)
    {
@@ -182,6 +192,18 @@ inline void ReadCycleCheckpoint(const std::string &prefix, const std::string &co
    o.files.resize(nfiles);
    o.sizes.resize(nfiles);
    for (size_t i = 0; i < nfiles; i++) { in >> o.files[i] >> o.sizes[i]; }
+   info.snapshots.clear();
+   if (version >= 3)
+   {
+      size_t ns = 0;
+      tag("snapshots"); in >> ns;
+      info.snapshots.resize(ns);
+      for (SnapshotFileState &sf : info.snapshots)
+      {
+         in >> sf.kind >> sf.steps >> sf.qd_mark >> sf.last_t;
+      }
+   }
+   MFEM_VERIFY(!in.fail(), "ReadCycleCheckpoint: " << fn << ": cannot read the cycle block");
    tag("FD_CYCLE_END");
    MFEM_VERIFY(step == info.step, "ReadCycleCheckpoint: cycle block step " << step
                << " differs from block 1 step " << info.step);

@@ -10,6 +10,7 @@
 #   make -f cycle/cycle.mk test-cycle-p2          # P2, regime hand-over tests
 #   make -f cycle/cycle.mk test-cycle-p3          # P3, the switch back to QD
 #   make -f cycle/cycle.mk test-cycle-p4          # P4, QD -> dynamic at t > 0
+#   make -f cycle/cycle.mk test-cycle-snapshots   # the snapshot files, 7 runs
 #   make -f cycle/cycle.mk cycle-owned-check      # rule M1, owned paths only
 #   make -f cycle/cycle.mk cycle-all              # all builds and checks (default)
 # Without the conda HDF5 (CONDA_PREFIX), point HDF5_INCFLAGS and HDF5_LIBS at
@@ -184,6 +185,14 @@ test-cycle-p4: seas_test_cycle_p4
 	      --deck $(CYCLE_P4_DECK) || exit 1; \
 	done
 
+# The fault and surface snapshot files (tests/cycle/test_cycle_snapshots.sh):
+# seven short runs on CYCLE_SNAP_NP ranks in CYCLE_SNAP_WORK (replaced).
+CYCLE_SNAP_NP ?= 2
+CYCLE_SNAP_WORK ?= ../../../runs_test_cycle_snapshots
+test-cycle-snapshots: seas_fd_cycle_driver
+	MPIRUN="$(MFEM_MPIEXEC) $(CYCLE_P2_MPIFLAGS)" \
+	   tests/cycle/test_cycle_snapshots.sh $(CYCLE_SNAP_WORK) $(CYCLE_SNAP_NP)
+
 # Rule M1: the branch changes only its own paths, plus the shared files that
 # hold its hooks (document/fd_cycle_dev/HOOKS.md), and those by additions
 # only.  CYCLE_BASE is the shared branch this one merges from (M7); the check
@@ -228,4 +237,5 @@ cycle-clean:
 	      seas_test_cycle_p4 $(CYCLE_STAMP)
 
 .PHONY: cycle-all cycle-clean cycle-owned-check test-cycle-api-pin \
-        test-cycle-params-parity test-cycle-p2 test-cycle-p3 test-cycle-p4
+        test-cycle-params-parity test-cycle-p2 test-cycle-p3 test-cycle-p4 \
+        test-cycle-snapshots

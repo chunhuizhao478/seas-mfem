@@ -22,6 +22,8 @@
 #   3. test-cycle-p2 (frame_map on 1, 2, 4, 8 ranks; the rest on 2)
 #   4. test_cycle_restart.sh: the P1 gold deck, 25 + 25 steps vs 50, 1 rank
 #   5. test-cycle-p4 on 1 and 2 ranks (the QD -> dynamic hand-over, re-entry)
+#   6. test-cycle-snapshots on 2 ranks: the fault and surface snapshot files
+#      through a switch, restarts, a trim and a wall-limit stop (HDF5 1.14.3)
 # Exits non-zero when any step fails, so discovery_switch.sbatch can wait on
 # it with --dependency=afterok.  Cost: 1 node x <= 4 h on the SCEC condo.
 # Submit only on Chunhui Zhao's typed go for this job.
@@ -75,6 +77,14 @@ s=$(date +%s)
 $MK test-cycle-p4 > "$RUNS/test_p4.log" 2>&1; rc=$?
 echo "test-cycle-p4 exit $rc in $(( $(date +%s) - s )) s"
 grep -E "^  (ok  |FAIL)|test_cycle_p4: (PASSED|FAILED)" "$RUNS/test_p4.log"
+[ $rc -eq 0 ] || fails=$((fails + 1))
+
+# 6. Snapshot files (MUMPS as the production decks)
+s=$(date +%s)
+SOLVER=mumps $MK test-cycle-snapshots CYCLE_SNAP_WORK="$RUNS/snapshots" \
+   > "$RUNS/test_snapshots.log" 2>&1; rc=$?
+echo "test-cycle-snapshots exit $rc in $(( $(date +%s) - s )) s"
+grep -E "NOTE|^[A-G]: exit|wall limit:|FAIL|test_cycle_snapshots: (PASSED|FAILED)" "$RUNS/test_snapshots.log"
 [ $rc -eq 0 ] || fails=$((fails + 1))
 
 echo "total $(( $(date +%s) - T0 )) s, failing steps: $fails"

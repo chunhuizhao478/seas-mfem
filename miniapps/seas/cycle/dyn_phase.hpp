@@ -289,7 +289,9 @@ public:
 
    /// Station fields on owned fault DOFs (kernel components; see the file
    /// comment).  Before the first step the traction is T_h(U, d) plus the
-   /// background at tau.
+   /// background at tau.  sigma_n (for the snapshots) is the last step's
+   /// sigma_n_eff = -(T + S).n of box 8, before the Prakash-Clifton
+   /// regularization; before the first step, -(T_h + S).n.
    void FillStationFields(StationFields &f)
    {
       const int N = W_->NumOwnedFaultDOFs();
@@ -320,6 +322,8 @@ public:
          T += S;
       }
       frames_.TractionToKernel(T, tau_k, sn);
+      const bool stepped = (steps_ > 0 && W_->LastSigmaEff().Size() == N);
+      f.sigma_n = stepped ? W_->LastSigmaEff() : sn;
       for (Vector *v : {&f.slip_dip, &f.slip_strike, &f.V_dip, &f.V_strike,
                         &f.tau_a_dip, &f.tau_a_strike, &f.tau_b_dip, &f.tau_b_strike,
                         &f.theta})

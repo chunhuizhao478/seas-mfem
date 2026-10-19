@@ -253,7 +253,8 @@ public:
    /// Station fields from the accepted state, as ParallelBP5BenchmarkOutput::
    /// Write forms them: V re-solved from (traction, state) and the normal
    /// traction the solver used, both from the last right-hand-side
-   /// evaluation (station sigma_n fix ef70517 of gpu-qd-bp5).
+   /// evaluation (station sigma_n fix ef70517 of gpu-qd-bp5).  sigma_n is
+   /// SigmaN (for the snapshots; the station rows do not use it).
    void FillStationFields(StationFields &f) const
    {
       const Vector &trac = op_->GetTraction();
@@ -280,6 +281,7 @@ public:
          f.tau_b_strike(i) = trac(2 * i + 1);
       }
       f.theta = theta;
+      SigmaN(f.sigma_n);
       f.eta = eta_;
    }
 
