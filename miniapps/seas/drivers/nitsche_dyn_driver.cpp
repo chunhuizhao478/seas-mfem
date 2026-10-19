@@ -50,8 +50,34 @@
 // before.  The station files are unchanged (sigma_n there stays sigma_eff);
 // sigma* goes to the fault CSV dump and to fault.vtkhdf (normal_stress_pc).
 //
-// Scope (Chunhui Zhao, 2026-10-14): tetrahedral meshes; constant material
-// (the sidecar / depth-profile / halfspace selections are P8).
+// Scope (Chunhui Zhao, 2026-10-14): tetrahedral meshes.
+//
+// Material (TPV6/TPV7/TPV31 plan rev 1, Chunhui Zhao, 2026-10-19): [material]
+// kind constant, depth_profile_1d or halfspace_across_fault (the shared
+// loader's tables; dynamic/nitsche_deck_fields.hpp).  The operator samples the
+// material once per element at its centroid, so every surface where it jumps
+// (the halfspace plane, a depth where the layer table jumps) must be a mesh
+// surface: the run aborts, naming the surface, when an element has vertices
+// strictly on both sides.  The sidecar material is not wired; the rate-and-
+// state laws take the constant material only.
+//
+// Shear-modulus scaling (same plan, TPV31): optional top-level
+// [stress_scale_by_mu] mu_ref_pa multiplies the prestress (background and
+// [[stress_region]] tensors) by mu(x) / mu_ref_pa at each fault quadrature
+// point.  [nucleation] kind "instantaneous_overstress_circular": strike
+// overstress delta_tau_pa x cosine taper (radius_m, taper_m) x mu(x) /
+// mu_ref_pa (when mu_ref_pa > 0), present from t = 0.  Both need a shear
+// modulus that is single valued on the fault (not halfspace_across_fault).
+// Both nucleation kinds are refused on a fault that is not planar (the
+// overstress is one tensor in the frame of the reference normal).
+// The shared loader skips keys it does not read, so this driver refuses
+// unknown keys in the tables it reads for these features.
+//
+// Per-side stations (same plan, TPV6/TPV7): [output.stations] per_side = true
+// also writes <prefix>_station_<name>_{farside,nearside}.dat, displacement,
+// velocity and traction on each side of the fault in the column order of the
+// SCEC split-node files (dynamic/fault_side_stations.hpp; far side = plus
+// side of the fault orientation).
 //
 // Laws (benchmark plan rev 1.3, Chunhui Zhao, 2026-10-16): rate and state
 // with the aging law (RateStateClosure); rate and state with the slip law and
@@ -89,6 +115,8 @@
 #include "../spatial/code/spatial_friction.hpp"
 #include "../dynamic/spatial_nucleation.hpp"
 #include "../dynamic/fault_station_file.hpp"
+#include "../dynamic/fault_side_stations.hpp"
+#include "../dynamic/nitsche_deck_fields.hpp"
 #include "../dynamic/lts_partition.hpp"   // METIS with element weights (plan item 6)
 #ifdef MFEM_USE_HDF5
 #include "../io/fault_vtkhdf_writer.hpp"
@@ -165,6 +193,25 @@ bool TomlBool(const toml::value *t, const char *key, bool def)
 {
    if (!t || !t->contains(key)) { return def; }
    return t->at(key).as_boolean();
+}
+/// Refuse a key of table `t` (named `where` in the message) outside `known`:
+/// the shared loader skips keys it does not read, so a misspelt key of a
+/// table this driver relies on would otherwise be ignored without a word.
+void RefuseUnknownKeys(const toml::value &t, const std::string &where,
+                       const std::vector<std::string> &known)
+{
+   MFEM_VERIFY(t.is_table(), where << " must be a table");
+   for (const auto &kv : t.as_table())
+   {
+      bool ok = false;
+      for (const std::string &k : known) { ok = ok || kv.first == k; }
+      if (!ok)
+      {
+         std::string list;
+         for (const std::string &k : known) { list += (list.empty() ? "" : ", ") + k; }
+         MFEM_ABORT(where << ": unknown key '" << kv.first << "' (known: " << list << ")");
+      }
+   }
 }
 
 /// Station copy average (header, "Station copies").  Every owned DOF within
@@ -830,12 +877,64 @@ int main(int argc, char *argv[])
    smesh.reset();
 
    // ------------------------------------------------------------ material
-   MFEM_VERIFY(cfg.material.kind == spatial::MaterialKind::Constant && !cfg.velocity.use_sidecar,
-               "Nitsche driver (P7): only the constant material "
-               "([velocity] use_sidecar = false, [material] kind constant) is "
-               "wired; the sidecar / depth-profile / halfspace selections are P8.");
-   MaterialField material = MaterialField::MakeConstant(
-      cfg.material_fallback.lambda, cfg.material_fallback.mu, cfg.material_fallback.rho);
+   // (header, "Material").  deck_material owns the coefficients `material`
+   // points to and lives to the end of main.  The heterogeneous kinds read
+   // tables of the shared loader, which fills defaults for absent keys (n_y =
+   // -1, depth_top_m = 0, ...): here every key must be typed and known.
+   if (cfg.material.kind != spatial::MaterialKind::Constant)
+   {
+      const toml::value &tm = root.at("material");
+      RefuseUnknownKeys(tm, "[material]", {"kind", "depth_axis", "halfspace_across_fault"});
+      auto require_all = [](const toml::value &tb, const std::string &where,
+                            const std::vector<std::string> &keys) {
+         RefuseUnknownKeys(tb, where, keys);
+         for (const std::string &k : keys)
+         {
+            MFEM_VERIFY(tb.contains(k), where << " needs " << k << " (no defaults)");
+         }
+      };
+      if (cfg.material.kind == spatial::MaterialKind::HalfspaceAcrossFault)
+      {
+         require_all(tm.at("halfspace_across_fault"), "[material.halfspace_across_fault]",
+                     {"vp_near", "vs_near", "rho_near", "vp_far", "vs_far", "rho_far",
+                      "x0_x", "x0_y", "x0_z", "n_x", "n_y", "n_z"});
+      }
+      if (cfg.material.kind == spatial::MaterialKind::DepthProfile1D)
+      {
+         MFEM_VERIFY(tm.contains("depth_axis"), "[material] depth_axis is required with kind "
+                     "depth_profile_1d (no default)");
+         const toml::value &mp = root.at("material_profile");
+         RefuseUnknownKeys(mp, "[material_profile]", {"layer"});
+         const toml::value &layers = mp.at("layer");
+         for (size_t i = 0; i < layers.size(); i++)
+         {
+            require_all(layers.at(i), "[[material_profile.layer]] entry " + std::to_string(i + 1),
+                        {"depth_top_m", "depth_bot_m", "vp_ms", "vs_ms", "rho_kgm3", "interp"});
+         }
+      }
+   }
+   NitscheDeckMaterial deck_material = BuildNitscheDeckMaterial(cfg);
+   MaterialField material = deck_material.field;
+   {
+      const real_t tol = 1e-6;   // m
+      std::vector<long long> across = CountElementsAcrossJumps(pmesh, deck_material.jumps, tol);
+      MPI_Allreduce(MPI_IN_PLACE, across.data(), static_cast<int>(across.size()), MPI_LONG_LONG,
+                    MPI_SUM, MPI_COMM_WORLD);
+      if (g_rank == 0) { std::cout << deck_material.log << std::flush; }
+      const MaterialJumps &J = deck_material.jumps;
+      MFEM_VERIFY(across[0] == 0, "[material] halfspace_across_fault: " << across[0]
+                  << " elements have vertices on both sides of the plane x0 (" << J.x0[0] << ", "
+                  << J.x0[1] << ", " << J.x0[2] << "), n (" << J.n[0] << ", " << J.n[1] << ", "
+                  << J.n[2] << "); the material is sampled once per element, so the plane must "
+                  "be a mesh surface (mesh " << mesh_path << ")");
+      for (size_t k = 0; k < J.depths.size(); k++)
+      {
+         MFEM_VERIFY(across[1 + k] == 0, "[material] depth_profile_1d: " << across[1 + k]
+                     << " elements have vertices above and below the jump at depth "
+                     << J.depths[k] << " m; the material is sampled once per element, so the "
+                     "depth must be a mesh surface (mesh " << mesh_path << ")");
+      }
+   }
 
    // ------------------------------------------------------------ boundary
    MFEM_VERIFY(cfg.boundary.fault_attr > 0, "[boundary] fault_attr is required");
@@ -960,6 +1059,24 @@ int main(int argc, char *argv[])
       }
       for (int i = 0; i < 9; i++) { s[i] = src[i]; }
    };
+   // [stress_scale_by_mu] (header, "Shear-modulus scaling")
+   if (root.contains("stress_scale_by_mu"))
+   {
+      const toml::value &tsc = root.at("stress_scale_by_mu");
+      RefuseUnknownKeys(tsc, "[stress_scale_by_mu]", {"mu_ref_pa"});
+      MFEM_VERIFY(tsc.contains("mu_ref_pa"), "[stress_scale_by_mu] needs mu_ref_pa (Pa)");
+      const real_t mu_ref = TomlReal(&tsc, "mu_ref_pa", 0.0);
+      MFEM_VERIFY(mu_ref > 0.0, "[stress_scale_by_mu] mu_ref_pa = " << mu_ref << " must be > 0");
+      MFEM_VERIFY(static_cast<bool>(deck_material.mu_at), "[stress_scale_by_mu] needs a shear "
+                  "modulus that is single valued on the fault; [material] kind "
+                  "halfspace_across_fault has one on each side");
+      fs.prestress = ScaleByShearModulus(fs.prestress, deck_material.mu_at, mu_ref);
+      if (g_rank == 0)
+      {
+         std::cout << "  prestress scaled by mu(x) / " << mu_ref << " Pa at each fault "
+                   "quadrature point\n";
+      }
+   }
 
    // pin frame (F1 with the reference normal): nhat, shat, dhat
    real_t pn[3], pu[3], ps[3], pd[3];
@@ -970,11 +1087,33 @@ int main(int argc, char *argv[])
    ff::Cross(ps, pn, pd);
 
    // ------------------------------------------------------------ nucleation
-   if (cfg.nucleation.enabled)
+   if (cfg.nucleation.enabled
+       && cfg.nucleation.kind == spatial::NucleationKind::InstantaneousOverstressCircular)
+   {
+      // (header, "Shear-modulus scaling"): present from t = 0
+      RefuseUnknownKeys(root.at("nucleation").at("instantaneous_overstress_circular"),
+                        "[nucleation.instantaneous_overstress_circular]",
+                        {"center_x_m", "center_y_m", "center_z_m", "radius_m", "taper_m",
+                         "delta_tau_pa", "mu_ref_pa"});
+      const auto &spec = cfg.nucleation.instantaneous_circular;
+      fs.nucleation_spatial = InstantaneousCircularOverstress(spec, ps, pn, pd, deck_material.mu_at);
+      fs.nucleation_temporal = [](real_t) { return real_t(1.0); };
+      if (g_rank == 0)
+      {
+         std::cout << "  nucleation: instantaneous circular, delta_tau " << spec.delta_tau_pa
+                   << " Pa within " << spec.radius_m << " m of (" << spec.center_x_m << ", "
+                   << spec.center_y_m << ", " << spec.center_z_m << "), cosine taper over "
+                   << spec.taper_m << " m";
+         if (spec.mu_ref_pa > 0.0) { std::cout << ", times mu(x) / " << spec.mu_ref_pa << " Pa"; }
+         std::cout << "; from t = 0\n";
+      }
+   }
+   else if (cfg.nucleation.enabled)
    {
       MFEM_VERIFY(cfg.nucleation.kind == spatial::NucleationKind::GradualOverstressCompactCircular,
-                  "Nitsche driver (P7): only [nucleation] kind = "
-                  "\"gradual_overstress_compact_circular\" is wired");
+                  "Nitsche driver: [nucleation] kind must be "
+                  "\"gradual_overstress_compact_circular\" or "
+                  "\"instantaneous_overstress_circular\"");
       const auto spec = cfg.nucleation.compact_circular;
       MFEM_VERIFY(spec.radius_m > 0.0 && spec.T_nuc_s > 0.0, "compact-circular nucleation: "
                   "radius_m and T_nuc_s must be > 0");
@@ -1007,6 +1146,9 @@ int main(int argc, char *argv[])
    real_t b0 = 0.0, f00 = 0.0, V00 = 0.0;
    if (is_rs)
    {
+      MFEM_VERIFY(cfg.material.kind == spatial::MaterialKind::Constant, "Nitsche driver: the "
+                  "rate-and-state laws take the constant material only (ResolveRateState is "
+                  "called with element 0 for every fault point)");
       rs = *cfg.rate_state;
       rs.eta_auto = false;      // eta is quasi-dynamic radiation damping; the
       rs.eta_default = 0.0;     // Nitsche closure uses gamma = 1/2 sigma_F dt
@@ -1058,6 +1200,19 @@ int main(int argc, char *argv[])
    MFEM_VERIFY(op.Orientation().GetReport().junction_edges == 0,
                "[fault_geometry] junction_policy = \"refuse\": the fault has "
                << op.Orientation().GetReport().junction_edges << " junction edges");
+   // Both nucleation kinds are one global tensor in the pinned frame (shat,
+   // nhat): the intended along-strike overstress only where the face normal
+   // is nhat, so a fault that is not planar is refused
+   // (nitsche_deck_fields.hpp, MaxFaultNormalDeviation).
+   if (cfg.nucleation.enabled)
+   {
+      real_t dev = MaxFaultNormalDeviation(op.Orientation(), pn);
+      MPI_Allreduce(MPI_IN_PLACE, &dev, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+      MFEM_VERIFY(dev <= 1e-6, "[nucleation]: the overstress is one tensor in the frame of the "
+                  "reference normal, which needs a planar fault; a fault face normal is "
+                  << std::asin(std::min(dev, real_t(1.0))) * 180.0 / M_PI
+                  << " degrees off [fault_geometry] ref_normal (mesh " << mesh_path << ")");
+   }
    const real_t dt_cfl = ComputeMaxDt(op.Sample(), pmesh, p, cfl * kCeig[p]);
    const real_t dt = std::min(dt_cfl, cfg.time.dt_max);
    op.SetTimeStep(dt);
@@ -1210,8 +1365,47 @@ int main(int argc, char *argv[])
    // ------------------------------------------------------------ nucleation check
    // The projected SCEC along-strike traction -(S.shat) at the fault DOF
    // nearest the deck's hypocentre against the analytic tau_0 + delta_tau
-   // F(r) G(t) at that DOF's position (plan P7 decision 9).
-   if (cfg.nucleation.enabled)
+   // F(r) G(t) at that DOF's position (plan P7 decision 9).  The
+   // instantaneous kind is on from t = 0, so there the analytic value is the
+   // deck's prestress plus overstress tensors at the DOF, times its nhat.
+   if (cfg.nucleation.enabled
+       && cfg.nucleation.kind == spatial::NucleationKind::InstantaneousOverstressCircular)
+   {
+      const real_t h[3] = {cfg.hypocenter.x_m, cfg.hypocenter.y_m, cfg.hypocenter.z_m};
+      struct { double d; int r; } loc = {1e300, g_rank}, glob;
+      int jh = -1;
+      for (int j = 0; j < no; j++)
+      {
+         const real_t *x = &op.FaultPositions()(3 * j);
+         const real_t dd = std::hypot(x[0] - h[0], x[1] - h[1], x[2] - h[2]);
+         if (dd < loc.d) { loc.d = dd; jh = j; }
+      }
+      MPI_Allreduce(&loc, &glob, 1, MPI_DOUBLE_INT, MPI_MINLOC, MPI_COMM_WORLD);
+      if (glob.r == g_rank && jh >= 0)
+      {
+         const real_t *x = &op.FaultPositions()(3 * jh);
+         const real_t *nn = &op.FaultFrames()(9 * jh), *ss = &op.FaultFrames()(9 * jh + 6);
+         real_t s0[9], s1[9], T[3];
+         fs.prestress(x, s0);
+         fs.nucleation_spatial(x, s1);
+         for (int i = 0; i < 3; i++)
+         {
+            T[i] = 0.0;
+            for (int j = 0; j < 3; j++) { T[i] += (s0[3 * i + j] + s1[3 * i + j]) * nn[j]; }
+         }
+         const real_t ana = -ff::Dot(T, ss);
+         Vector S;
+         op.BackgroundTraction(0.0, S);
+         const real_t proj = -ff::Dot(&S(3 * jh), ss);
+         std::cout << std::setprecision(8) << "  nucleation check at the fault DOF nearest the hypocentre ("
+                   << x[0] << ", " << x[1] << ", " << x[2] << "), " << glob.d << " m away: projected "
+                   "-T.shat " << proj / 1e6 << " MPa, deck prestress + overstress at the DOF "
+                   << ana / 1e6 << " MPa, difference " << proj - ana << " Pa (constant in time)\n"
+                   << std::flush;
+      }
+      MPI_Barrier(MPI_COMM_WORLD);
+   }
+   else if (cfg.nucleation.enabled)
    {
       const auto &spec = cfg.nucleation.compact_circular;
       const real_t h[3] = {cfg.hypocenter.x_m, cfg.hypocenter.y_m, cfg.hypocenter.z_m};
@@ -1256,12 +1450,15 @@ int main(int argc, char *argv[])
    // stations from the station file the deck names (header, "Stations")
    std::unique_ptr<FaultStationWriter> stations;
    std::unique_ptr<StationCopyAverage> station_avg;
+   std::unique_ptr<FaultSideStationWriter> side_stations;
    std::string state_label = "log10_theta";
    if (t_st)
    {
       MFEM_VERIFY(t_st->is_table() && t_st->contains("file") && t_st->contains("snap_tolerance_m"),
                   "[output.stations] needs file (the station CSV) and snap_tolerance_m (m); "
                   "there are no defaults");
+      RefuseUnknownKeys(*t_st, "[output.stations]", {"file", "snap_tolerance_m", "per_side"});
+      const bool per_side = TomlBool(t_st, "per_side", false);
       const std::string st_path = TomlStr(t_st, "file", "");
       const real_t snap_tol = TomlReal(t_st, "snap_tolerance_m", 0.0);
       MFEM_VERIFY(snap_tol > 0.0, "[output.stations] snap_tolerance_m = " << snap_tol
@@ -1315,6 +1512,21 @@ int main(int argc, char *argv[])
       {
          station_avg = std::make_unique<StationCopyAverage>(op, st_list, out_dir, prefix);
       }
+      if (per_side)
+      {
+         side_stations = std::make_unique<FaultSideStationWriter>(op, st_list, snap, pu, out_dir,
+                                                                  prefix);
+         if (g_rank == 0)
+         {
+            std::cout << "  per-side stations (far = plus side, near = minus side), copies far/near:";
+            for (size_t s = 0; s < st_list.size(); s++)
+            {
+               std::cout << " " << st_list[s].name << " " << side_stations->NumCopies(s, 0) << "/"
+                         << side_stations->NumCopies(s, 1);
+            }
+            std::cout << "\n" << std::flush;
+         }
+      }
       if (g_rank == 0)
       {
          std::ofstream h(out_dir + "/" + prefix + "_station_conventions.txt");
@@ -1323,13 +1535,19 @@ int main(int argc, char *argv[])
            << "), up = (" << pu[0] << ", " << pu[1] << ", " << pu[2] << ")\n"
            << "#        shat = up x nhat / |up x nhat| = (" << ps[0] << ", " << ps[1] << ", " << ps[2]
            << "), dhat = shat x nhat = (" << pd[0] << ", " << pd[1] << ", " << pd[2] << ")\n"
-           << "# pin: orientation propagated, pinned by the reference normal; plus side = side nhat points into\n"
+           << "# pin: orientation propagated, pinned by the reference normal; plus side = the side nhat\n"
+           << "#      points away from (nhat is the plus side's outward normal, FaultOrientation S3),\n"
+           << "#      minus side = the side nhat points into\n"
            << "# columns: t slip1 slip2 V1 V2 tau1 tau2 sigma_n " << state_label << "\n"
            << "#   slip1 = delta.dhat (SCEC v-slip)      slip2 = delta.shat (SCEC h-slip)\n"
            << "#   V1    = V.dhat     (SCEC v-slip-rate) V2    = V.shat     (SCEC h-slip-rate)\n"
            << "#   tau1  = -T.dhat    (SCEC v-shear-stress, Pa)  tau2 = -T.shat (SCEC h-shear-stress, Pa)\n"
            << "#   sigma_n = -T.nhat (compression positive, Pa); T = total traction on the face with normal nhat\n"
            << "#   delta = u(+) - u(-), V = d delta/dt (SCEC slip definition)\n"
+           << (per_side ? "# per-side files " + prefix + "_station_<name>_{farside,nearside}.dat: far = plus side, "
+                          "near = minus side;\n#   columns t h_disp h_vel h_stress v_disp v_vel v_stress n_disp n_vel "
+                          "n_stress, h = shat, v = dhat,\n#   n = -nhat (near side to far side); h_stress = tau2, "
+                          "v_stress = tau1, n_stress = -sigma_n\n" : std::string())
            << "#   " << state_label << (law.kind == LawKind::Aging
                                         ? ": log10 of theta = (Dc/V_0) exp((psi - f_0)/b), deck constants\n"
                                         : law.kind == LawKind::SlipWeakening
@@ -1509,6 +1727,7 @@ int main(int argc, char *argv[])
       fill_dofdata();
       if (station_avg) { station_avg->Apply(t, dofdata); }
       stations->WriteStep(t, dofdata);
+      if (side_stations) { side_stations->WriteStep(t, U, Ud, dofdata); }
    }
    real_t max_ratio_run = 0.0, max_V_run = 0.0, min_sig_run = 1e300, max_sig_run = -1e300;
    real_t min_pc_run = 1e300, max_pc_run = -1e300;
@@ -1552,6 +1771,7 @@ int main(int argc, char *argv[])
          fill_dofdata();
          if (station_avg) { station_avg->Apply(t, dofdata); }
          stations->WriteStep(t, dofdata);
+         if (side_stations) { side_stations->WriteStep(t, U, Ud, dofdata); }
       }
       if (dump && s % dump_every == 0)
       {
@@ -1601,6 +1821,7 @@ int main(int argc, char *argv[])
       }
    }
    if (stations) { stations->Close(); }
+   if (side_stations) { side_stations->Close(); }
 
    // rupture times
    {

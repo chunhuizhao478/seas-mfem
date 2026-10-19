@@ -3158,6 +3158,37 @@ test-nitsche-p5: seas_test_nitsche_p5
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_p5
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_p5
 
+# Nitsche TPV6/TPV7/TPV31 setup (plan rev 1, phase A): the deck material per
+# element, the bimaterial fault penalty and time step, the mu-scaled prestress,
+# the instantaneous nucleation and its planar-fault check, the cohesion rule
+# and the per-side station writer.  Reads the TPV6 and TPV31 decks.
+TEST_NITSCHE_TPV_SETUP_SRC = tests/verification/test_nitsche_tpv_setup.cpp
+TEST_NITSCHE_TPV_SETUP_OBJ = $(TEST_NITSCHE_TPV_SETUP_SRC:.cpp=.o)
+$(TEST_NITSCHE_TPV_SETUP_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             domain/nitsche_wave_operator.hpp \
+                             dynamic/fault_side_stations.hpp \
+                             dynamic/fault_station_file.hpp \
+                             dynamic/nitsche_deck_fields.hpp \
+                             dynamic/heterogeneous_material.hpp \
+                             friction/slip_weakening_closure.hpp \
+                             solver/nitsche_cfl.hpp \
+                             spatial/code/spatial_friction.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_tpv_setup: $(TEST_NITSCHE_TPV_SETUP_OBJ) $(SPATIAL_FRICTION_OBJ) \
+                             $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_TPV_SETUP_OBJ) $(SPATIAL_FRICTION_OBJ) $(SPATIAL_NUCLEATION_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-tpv-setup: seas_test_nitsche_tpv_setup
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_tpv_setup
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_tpv_setup
+
 # Nitsche dynamic rupture PF (fault coordinate layer: N-08 orientation, N-09
 # frame, the kernel dictionary): T-14, T-16, spec T11(a)/T12.
 TEST_NITSCHE_PF_SRC = tests/verification/test_nitsche_pf.cpp
@@ -3376,6 +3407,9 @@ $(NITSCHE_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
                              domain/nitsche_energy.hpp \
                              spatial/code/spatial_friction.hpp \
                              dynamic/fault_station_file.hpp \
+                             dynamic/fault_side_stations.hpp \
+                             dynamic/nitsche_deck_fields.hpp \
+                             dynamic/heterogeneous_material.hpp \
                              friction/rate_state_closure.hpp \
                              friction/rate_state_srw_closure.hpp \
                              friction/slip_weakening_closure.hpp \

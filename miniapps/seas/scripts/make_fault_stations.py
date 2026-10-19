@@ -24,15 +24,22 @@ The positions are the on-fault station lists of the benchmark descriptions:
   tpv205  TPV5_forwebsite.pdf, "Diagram showing locations of on-fault
           stations" (sixteen points; the same positions as the DRDG3D files
           in tpv205/benchmark_data/)
-TPV104 and TPV205 stations are named like the SCEC reference files
-(x2_<strike km>_x3_<depth km>).
+  tpv6    2007RuthRalphletter2.pdf, on-fault stations (five points; the
+          same positions as the DRDG3D files in tpv6/benchmark_data/)
+  tpv7    the same five points as TPV6
+  tpv31   TPV31_32_Description_v03.pdf, on-fault stations (thirty points:
+          strike 0, 6, 12 km at ten depths; the same positions as the
+          SeisSol and EQdyna files in tpv31/benchmark_data/)
+TPV104, TPV205, TPV6, TPV7 and TPV31 stations are named like the SCEC
+reference files (x2_<strike km>_x3_<depth km>).
 
 Usage (from miniapps/seas):
     python3 scripts/make_fault_stations.py                # all problems
     python3 scripts/make_fault_stations.py tpv205         # one problem
     python3 scripts/make_fault_stations.py --check        # files up to date?
 
-Scope: Chunhui Zhao, 2026-10-16 (TPV205/TPV104 plan rev 1.3, decision Q4).
+Scope: Chunhui Zhao, 2026-10-16 (TPV205/TPV104 plan rev 1.3, decision Q4); TPV6, TPV7
+and TPV31 added 2026-10-19 (TPV6/TPV7/TPV31 plan rev 1).
 """
 import argparse
 import os
@@ -44,6 +51,8 @@ _TPV102_POINTS = [(0, 3), (0, 7.5), (0, 12), (9, 7.5), (12, 3), (12, 12),
 _TPV205_POINTS = [(-12, 0), (-12, 7.5), (-7.5, 0), (-7.5, 7.5), (-4.5, 0), (-4.5, 7.5),
                   (0, 0), (0, 3), (0, 7.5), (0, 12), (4.5, 0), (4.5, 7.5),
                   (7.5, 0), (7.5, 7.5), (12, 0), (12, 7.5)]
+_TPV6_POINTS = [(0, 0), (-12, 0), (12, 0), (-12, 7.5), (12, 7.5)]
+_TPV31_POINTS = [(s, d) for s in (0, 6, 12) for d in (0, 0.2, 0.5, 1, 2.4, 3, 5, 7.5, 10, 12)]
 
 
 def _km(v):
@@ -64,6 +73,9 @@ PROBLEMS = {
     "tpv102": ("SCEC TPV102 on-fault stations", [(flt_name(s, d), s, d) for s, d in _TPV102_POINTS]),
     "tpv104": ("SCEC TPV104 on-fault stations", [(scec_name(s, d), s, d) for s, d in _TPV102_POINTS]),
     "tpv205": ("SCEC TPV205 (TPV5) on-fault stations", [(scec_name(s, d), s, d) for s, d in _TPV205_POINTS]),
+    "tpv6": ("SCEC TPV6 on-fault stations", [(scec_name(s, d), s, d) for s, d in _TPV6_POINTS]),
+    "tpv7": ("SCEC TPV7 on-fault stations", [(scec_name(s, d), s, d) for s, d in _TPV6_POINTS]),
+    "tpv31": ("SCEC TPV31 on-fault stations", [(scec_name(s, d), s, d) for s, d in _TPV31_POINTS]),
 }
 
 
