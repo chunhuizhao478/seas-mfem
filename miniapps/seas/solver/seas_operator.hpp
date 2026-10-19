@@ -98,7 +98,26 @@ public:
    }
 
    /// @brief Get current displacement solution.
+   ///
+   /// With --qd-green the stages compute no displacement: call
+   /// RefreshDisplacement() first to solve it for the last stage.
    const GridFuncType &GetDisplacement() const { return *u_gf_; }
+
+   /// @brief QD speed item 3: with the Green's-function stage, solve the
+   /// displacement of the last Mult() (its time and slip) once, through
+   /// the stage operators, if no stage has done so since.  No-op
+   /// otherwise.  The solve is timed in the stage timers' solve parts.
+   /// Collective.
+   void RefreshDisplacement() const
+   {
+      if (!qd_green_ || !u_stale_) { return; }
+      domain_->SolveStage(green_last_t_, slip_, *u_gf_, green_T_,
+                          qd_matrix_normal_ ? &green_Tn_ : nullptr);
+      u_stale_ = false;
+   }
+
+   /// @brief Whether stages run through the Green's function (--qd-green).
+   bool QDGreenActive() const { return qd_green_; }
 
    /// @brief Set displacement from checkpoint data.
    void SetDisplacement(const Vector &u) { *u_gf_ = u; }
@@ -181,6 +200,39 @@ public:
       qd_matrix_normal_ = elastic_sigma_n_;
    }
 
+   /// QD speed item 3 (--qd-green, opt-in): run each stage as
+   /// T = G·δ + t·T_D through the discrete Green's function, built (or read
+   /// from config.cache_path) now from the stage operators, so call it
+   /// after SetQDOperators(true).  Valid only while K is constant (linear
+   /// elastic bulk, fixed mesh) and g(t) = t·ĝ; the build checks the
+   /// loading and compares G with a solve.  @a check_every > 0: every that
+   /// many stages, also run the solve path and report the difference.
+   void SetQDGreen(const QDGreenConfig &config, int check_every)
+   {
+      MFEM_VERIFY(qd_matrix_, "--qd-green needs --qd-operators matrix");
+      domain_->BuildQDGreen(config);
+      qd_green_ = true;
+      green_check_every_ = check_every;
+   }
+
+   /// Checks of --qd-green-check so far: count and the largest relative
+   /// differences (shear, normal) to the solve path.  Prints on the root.
+   void PrintQDGreenCheckSummary(std::ostream &os) const
+   {
+      if (!qd_green_ || (mpi_ctx_ && !mpi_ctx_->IsRoot())) { return; }
+      os << "[QD-GREEN] stages " << green_stages_ << ", checks "
+         << green_checks_;
+      if (green_checks_ > 0)
+      {
+         os << ", largest rel. difference to the solve path: shear "
+            << std::scientific << std::setprecision(3) << green_check_max_s_;
+         if (qd_matrix_normal_) { os << ", normal " << green_check_max_n_; }
+         os << std::defaultfloat;
+      }
+      os << "\n";
+      os.flush();
+   }
+
 private:
    DomainOpType *domain_;
    FaultOpType *fault_;
@@ -213,6 +265,18 @@ private:
    // GPU plan G2: stages through the domain's stage operators
    bool qd_matrix_ = false;
    bool qd_matrix_normal_ = false;  // elastic sigma_n when they were built
+
+   // QD speed item 3: stages through the Green's function
+   bool qd_green_ = false;
+   int green_check_every_ = 0;
+   mutable long long green_stages_ = 0, green_checks_ = 0;
+   mutable real_t green_check_max_s_ = 0.0, green_check_max_n_ = 0.0;
+   mutable real_t green_last_t_ = 0.0;
+   mutable bool u_stale_ = false;   // u_gf_ older than the last stage
+   mutable Vector green_T_, green_Tn_;
+   /// --qd-green-check: the solve path at the last stage's time and slip,
+   /// compared with traction_ / normal_traction_.  Collective.
+   void CheckGreenStage() const;
 
    // v51 flags
    bool zero_dip_traction_ = false;
@@ -254,6 +318,46 @@ SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::SEASQuasiDynamicO
    traction_.SetSize(fault_->TractionSize());
    local_traction_.SetSize(domain_->NumSlipComponents() * domain_->GetNumFaultDOFs());
    local_normal_traction_.SetSize(domain_->GetNumFaultDOFs());
+}
+
+template <typename MeshType, typename DomainOpType, typename FaultOpType>
+void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::CheckGreenStage() const
+{
+   domain_->SolveStage(green_last_t_, slip_, *u_gf_, green_T_,
+                       qd_matrix_normal_ ? &green_Tn_ : nullptr);
+   u_stale_ = false;
+   auto rel = [this](const Vector &a, const Vector &b)
+   {
+      real_t num = 0.0, den = 0.0;
+      a.HostRead();
+      b.HostRead();
+      for (int i = 0; i < a.Size(); i++)
+      {
+         num = std::max(num, std::abs(a(i) - b(i)));
+         den = std::max(den, std::abs(b(i)));
+      }
+      if (mpi_ctx_)
+      {
+         num = mpi_ctx_->GlobalMax(num);
+         den = mpi_ctx_->GlobalMax(den);
+      }
+      return den > 0.0 ? num / den : num;
+   };
+   const real_t rs = rel(traction_, green_T_);
+   const real_t rn = qd_matrix_normal_ ? rel(normal_traction_, green_Tn_)
+                                       : 0.0;
+   green_checks_++;
+   green_check_max_s_ = std::max(green_check_max_s_, rs);
+   green_check_max_n_ = std::max(green_check_max_n_, rn);
+   if (!mpi_ctx_ || mpi_ctx_->IsRoot())
+   {
+      std::cout << "[QD-GREEN] check at stage " << green_stages_ << " (t = "
+                << std::scientific << std::setprecision(6) << green_last_t_
+                << " s): rel. difference to the solve path shear "
+                << std::setprecision(3) << rs;
+      if (qd_matrix_normal_) { std::cout << ", normal " << rn; }
+      std::cout << std::defaultfloat << "\n";
+   }
 }
 
 template <typename MeshType, typename DomainOpType, typename FaultOpType>
@@ -381,7 +485,27 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
    }
 #endif
 
-   if (qd_matrix_)
+   if (qd_green_)
+   {
+      // QD speed item 3: T = G·δ + t·T_D, T_n likewise; no volume solve,
+      // so u_gf_ is left as it was (RefreshDisplacement()).
+      MFEM_VERIFY(!(face_tracer_ && face_tracer_->IsActive()),
+                  "--qd-green: the face tracer needs the decomposed "
+                  "traction of the face loops");
+      MFEM_VERIFY(qd_matrix_normal_ == elastic_sigma_n_,
+                  "--qd-green: elastic sigma_n changed after G was built");
+      if (stage_timers_) { stage_timers_->Stop(StageTimers::SlipExpand); }
+      domain_->GreenStage(t, slip_, traction_,
+                          elastic_sigma_n_ ? &normal_traction_ : nullptr);
+      green_last_t_ = t;
+      u_stale_ = true;
+      green_stages_++;
+      if (green_check_every_ > 0 && green_stages_ % green_check_every_ == 0)
+      {
+         CheckGreenStage();
+      }
+   }
+   else if (qd_matrix_)
    {
       // GPU plan G2: b = B·δ + D·g(t), solve, T = C_u·u + C_δ·δ and
       // T_n = N_u·u + N_δ·δ on owned fault DOFs (no local fault vectors).

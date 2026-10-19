@@ -14,6 +14,7 @@
 
 #include "mfem.hpp"
 #include "../common/seas_types.hpp"
+#include "qd_green_operator.hpp"
 
 namespace mfem
 {
@@ -302,6 +303,30 @@ public:
    {
       MFEM_ABORT("This domain operator has no QD stage operators "
                  "(--qd-operators matrix)");
+   }
+
+   /// @brief QD speed item 3 (--qd-green): build, or read from
+   /// @a config.cache_path, the discrete Green's function of the stage
+   /// operators (qd_green_operator.hpp), for GreenStage().  Needs
+   /// BuildQDStageOperators() first.
+   ///
+   /// Default: not supported.  ElasticityDomainOperator overrides it for a
+   /// parallel mesh with the IP method.
+   virtual void BuildQDGreen(const QDGreenConfig &config)
+   {
+      MFEM_ABORT("This domain operator has no QD Green's function "
+                 "(--qd-green); block = " << config.block);
+   }
+
+   /// @brief QD speed item 3: one quasi-dynamic stage through the Green's
+   /// function, T = G·δ + t·T_D (and T_n with @a normal_owned).  No volume
+   /// solve: the displacement is not computed.
+   virtual void GreenStage(real_t /*time*/, const Vector & /*slip_owned*/,
+                           Vector & /*traction_owned*/,
+                           Vector * /*normal_owned*/)
+   {
+      MFEM_ABORT("This domain operator has no QD Green's function "
+                 "(--qd-green)");
    }
 };
 

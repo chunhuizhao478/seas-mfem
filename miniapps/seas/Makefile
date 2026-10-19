@@ -873,6 +873,7 @@ DOMAIN_HEADERS = common/seas_types.hpp \
                  domain/elasticity_operator_traction.inl \
                  domain/elasticity_operator_qd.inl \
                  domain/qd_stage_operators.hpp \
+                 domain/qd_green_operator.hpp \
                  domain/matrix_stats.hpp \
                  domain/boundary_config.hpp \
                  domain/domain_config.hpp \
