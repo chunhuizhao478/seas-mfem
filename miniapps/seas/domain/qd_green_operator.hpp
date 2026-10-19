@@ -274,30 +274,126 @@ public:
    /// Write G and T_D to @a path: a header, then the rows of every fault
    /// DOF in global order, then T_D.  The layout does not depend on the
    /// number of ranks.  Collective.
+   ///
+   /// No two ranks write at the same time where their blocks meet.  With
+   /// Open MPI 5's MPI-IO (OMPIO), independent writes by neighbouring ranks
+   /// into the same file page lost one rank's part of that page: Vista job
+   /// 1080407 (/scratch on NFS) got two runs of zero keys (447 of 27,936
+   /// fault DOFs), and a Mac retest got 1,792 zero bytes at the start of
+   /// rank 5's G rows, up to the next 4 KiB page boundary.  So even ranks
+   /// write their rows, then odd ranks, then rank 0 writes the header, the
+   /// keys and T_D (gathered), with sync, barrier, sync between the phases.
+   /// Afterwards every rank reads back the first and last 64 KiB of its
+   /// rows, and rank 0 the keys and T_D; on any difference the file is
+   /// deleted and the run stops.
    void WriteFile(const std::string &path, const std::string &info) const
    {
+      MFEM_VERIFY(keys_.size() == static_cast<size_t>(kKey) * nown_,
+                  "QD Green: SetKeys() was not called before WriteFile()");
+      for (int o = 0; o < nown_; o++)
+      {
+         const real_t *k = &keys_[static_cast<size_t>(kKey) * o];
+         bool finite = true, apart = false;
+         for (int c = 0; c < kKey; c++)
+         {
+            finite = finite && std::isfinite(k[c]);
+         }
+         for (int d = 0; d < 3; d++) { apart = apart || k[d] != k[3 + d]; }
+         MFEM_VERIFY(finite && apart, "QD Green: the position key of owned "
+                     "fault DOF " << own_lo_[rank_] + o << " on rank "
+                     << rank_ << " is " << (finite ? "its face centroid"
+                                            : "not finite")
+                     << " (node " << k[0] << ", " << k[1] << ", " << k[2]
+                     << "); not writing '" << path << "'");
+      }
+      // Keys in owned order and T_D in row order, on rank 0
+      std::vector<real_t> keys_all, td_all;
+      Gather(keys_, own_lo_, own_n_, kKey, keys_all);
+      std::vector<long long> nrow(nranks_);
+      for (int r = 0; r < nranks_; r++)
+      {
+         nrow[r] = row_lo_[r + 1] - row_lo_[r];
+      }
+      Gather(TD_, row_lo_, nrow, ncomp_, td_all);
+
       MPI_File fh;
       int err = MPI_File_open(comm_, path.c_str(),
                               MPI_MODE_CREATE | MPI_MODE_WRONLY,
                               MPI_INFO_NULL, &fh);
       MFEM_VERIFY(err == MPI_SUCCESS, "QD Green: cannot create cache file '"
                   << path << "' (MPI_File_open error " << err << ")");
-      MFEM_VERIFY(keys_.size() == static_cast<size_t>(kKey) * nown_,
-                  "QD Green: SetKeys() was not called before WriteFile()");
       MPI_File_set_size(fh, 0);
+      auto settle = [&]()
+      {
+         CheckIO(MPI_File_sync(fh), path, "sync");
+         MPI_Barrier(comm_);
+         CheckIO(MPI_File_sync(fh), path, "sync");
+      };
+      for (int phase = 0; phase < 2; phase++)
+      {
+         if (rank_ % 2 == phase)
+         {
+            WriteChunked(fh, RowOffset(row_lo_[rank_]), G_.data(), G_.size(),
+                         path);
+         }
+         settle();
+      }
       if (rank_ == 0)
       {
          Header h = MakeHeader();
          std::strncpy(h.info, info.c_str(), sizeof(h.info) - 1);
          CheckIO(MPI_File_write_at(fh, 0, &h, sizeof(Header), MPI_BYTE,
                                    MPI_STATUS_IGNORE), path, "header");
+         WriteChunked(fh, KeyOffset(0), keys_all.data(), keys_all.size(),
+                      path);
+         WriteChunked(fh, TDOffset(0), td_all.data(), td_all.size(), path);
       }
-      WriteChunked(fh, KeyOffset(own_lo_[rank_]), keys_.data(), keys_.size(),
-                   path);
-      WriteChunked(fh, RowOffset(row_lo_[rank_]), G_.data(), G_.size(), path);
-      WriteChunked(fh, TDOffset(row_lo_[rank_]), TD_.data(), TD_.size(),
-                   path);
+      settle();
+      CheckIO(MPI_File_close(&fh), path, "close");
+
+      // Read back the ends of every rank's rows, and the keys and T_D
+      CheckIO(MPI_File_open(comm_, path.c_str(), MPI_MODE_RDONLY,
+                            MPI_INFO_NULL, &fh), path, "reopen");
+      int bad = 0;
+      const size_t edge = std::min(G_.size(), size_t(8192));
+      std::vector<real_t> back(edge);
+      if (edge > 0)
+      {
+         ReadChunked(fh, RowOffset(row_lo_[rank_]), back.data(), edge, path);
+         bad |= std::memcmp(back.data(), G_.data(),
+                            edge * sizeof(real_t)) != 0;
+         const size_t last = G_.size() - edge;
+         ReadChunked(fh, RowOffset(row_lo_[rank_]) +
+                     MPI_Offset(last * sizeof(real_t)), back.data(), edge,
+                     path);
+         bad |= std::memcmp(back.data(), G_.data() + last,
+                            edge * sizeof(real_t)) != 0;
+      }
+      if (rank_ == 0)
+      {
+         back.resize(keys_all.size());
+         ReadChunked(fh, KeyOffset(0), back.data(), back.size(), path);
+         bad |= 2 * (std::memcmp(back.data(), keys_all.data(),
+                                 back.size() * sizeof(real_t)) != 0);
+         back.resize(td_all.size());
+         ReadChunked(fh, TDOffset(0), back.data(), back.size(), path);
+         bad |= 4 * (std::memcmp(back.data(), td_all.data(),
+                                 back.size() * sizeof(real_t)) != 0);
+      }
       MPI_File_close(&fh);
+      int bad_all = 0, first_bad = bad ? rank_ : nranks_;
+      MPI_Allreduce(&bad, &bad_all, 1, MPI_INT, MPI_BOR, comm_);
+      MPI_Allreduce(MPI_IN_PLACE, &first_bad, 1, MPI_INT, MPI_MIN, comm_);
+      if (bad_all != 0 && rank_ == 0)
+      {
+         MPI_File_delete(path.c_str(), MPI_INFO_NULL);
+      }
+      MFEM_VERIFY(bad_all == 0, "QD Green: read back from '" << path
+                  << "', " << ((bad_all & 1) ? "G rows " : "")
+                  << ((bad_all & 2) ? "keys " : "")
+                  << ((bad_all & 4) ? "T_D " : "")
+                  << "differ from what was written (first on rank "
+                  << first_bad << "); the file was deleted");
    }
 
    /// Read G and T_D from @a path, written by WriteFile for the same
@@ -428,6 +524,29 @@ private:
    {
       MFEM_VERIFY(err == MPI_SUCCESS, "QD Green: I/O error " << err
                   << " on " << what << " of '" << path << "'");
+   }
+
+   /// @a all on rank 0 = every rank's @a mine (@a n[r] entries of @a w
+   /// values each), placed at entry @a lo[r].  Collective.
+   void Gather(const std::vector<real_t> &mine,
+               const std::vector<long long> &lo,
+               const std::vector<long long> &n, int w,
+               std::vector<real_t> &all) const
+   {
+      std::vector<int> cnt(nranks_), dsp(nranks_);
+      long long total = 0;
+      for (int r = 0; r < nranks_; r++)
+      {
+         cnt[r] = static_cast<int>(w * n[r]);
+         dsp[r] = static_cast<int>(w * lo[r]);
+         total += n[r];
+      }
+      MFEM_VERIFY(static_cast<long long>(mine.size()) == w * n[rank_],
+                  "QD Green: gather size mismatch on rank " << rank_);
+      all.assign(rank_ == 0 ? static_cast<size_t>(w * total) : 0, 0.0);
+      MPI_Gatherv(mine.data(), cnt[rank_], MPITypeMap<real_t>::mpi_type,
+                  all.data(), cnt.data(), dsp.data(),
+                  MPITypeMap<real_t>::mpi_type, 0, comm_);
    }
 
    // Independent writes in pieces of at most 2^27 values (1 GiB), so no
