@@ -3094,6 +3094,7 @@ $(TEST_NITSCHE_LTS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
                              solver/nitsche_cfl.hpp \
                              solver/nitsche_lts_setup.hpp \
                              solver/nitsche_lts_stepper.hpp \
+                             solver/nitsche_lts_run.hpp \
                              integrator/dg_elasticity_ip_combined_integrator.hpp \
                              dynamic/lts_clustering.hpp \
                              $(MFEM_LIB_FILE) $(CONFIG_MK)
@@ -3407,6 +3408,7 @@ $(NITSCHE_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
                              dynamic/lts_partition.hpp \
                              dynamic/lts_clustering.hpp \
                              solver/nitsche_lts_setup.hpp \
+                             solver/nitsche_lts_run.hpp \
                              domain/nitsche_energy.hpp \
                              spatial/code/spatial_friction.hpp \
                              dynamic/fault_station_file.hpp \

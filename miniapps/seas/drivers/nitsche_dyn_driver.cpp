@@ -84,6 +84,25 @@
 // clustering of its partition section (hard cap n; 0 = no cap; default 4)
 // and --lts-report-ranks a,b,... the rank counts there (default: this run's
 // rank count when it is above 1).
+//
+// Local time stepping (plan item 7, P3 and P4; solver/nitsche_lts_run.hpp):
+// [numerics] lts = "rate2" (or --lts rate2) steps cluster c at 2^c dt0 with
+// the multirate leapfrog, dt0 = the global step; "off" (default) is
+// CentralDifferenceSolver, every bit as before.  The clusters come from the
+// serial mesh (rate-2 rules, no wiggle, hard cap [numerics] lts_nc_cap or
+// --lts-cap, default 4 here), with the whole fault in one cluster c_F; on
+// more than one rank the partition is BuildLtsAwarePartition (every cluster
+// balanced per rank, fault faces on one rank, --fault-weight as cost).  The
+// fault closes every 2^c_F ticks, and the stations, dumps and fault frames
+// follow those fault steps.  The step record (max|V|, sigma ranges) is
+// reduced over the ranks once per sync interval, as the extremes over its
+// fault steps, so the log lines come at sync points.  With energy_balance
+// the energy is evaluated at sync points and without the modified-energy
+// term (the multirate scheme has no known discrete energy), so rho measures
+// the time discretisation error.  Each rank posts one halo exchange per tick
+// (checked at the end).  LTS needs cfl <= 0.6 (the accepted multirate
+// limit, Chunhui Zhao 2026-10-19) and kv_scale = "node".  --lts-same-step 1
+// (test only): the same clusters, every one at dt0.
 
 #include "mfem.hpp"
 #include "../domain/nitsche_wave_operator.hpp"
@@ -98,6 +117,7 @@
 #include "../dynamic/fault_station_file.hpp"
 #include "../dynamic/lts_partition.hpp"   // METIS with element weights (plan item 6)
 #include "../solver/nitsche_lts_setup.hpp"   // --lts-report (plan item 7, P0)
+#include "../solver/nitsche_lts_run.hpp"     // --lts rate2 (plan item 7, P3/P4)
 #ifdef MFEM_USE_HDF5
 #include "../io/fault_vtkhdf_writer.hpp"
 #include "../io/paraview_output.hpp"   // ParaViewOutput::ProbeH5ZZfpPluginOrAbort
@@ -678,7 +698,8 @@ int main(int argc, char *argv[])
                       " [--station-copies average|first] [--fast-fault 0|1]"
                       " [--fused-spmv 0|1] [--dense-blocks 0|1] [--fault-weight w]"
                       " [--fast-fault-output 0|1] [--lts-report 0|1]"
-                      " [--lts-report-cap n] [--lts-report-ranks a,b,...]\n";
+                      " [--lts-report-cap n] [--lts-report-ranks a,b,...]"
+                      " [--lts off|rate2] [--lts-cap n] [--lts-same-step 0|1]\n";
       }
       return 1;
    }
@@ -732,6 +753,15 @@ int main(int argc, char *argv[])
          MFEM_VERIFY(r >= 2, "--lts-report-ranks: rank counts must be >= 2; got " << r);
       }
    }
+   // plan item 7: local time stepping (header)
+   const std::string lts_mode = ArgStr(argc, argv, "--lts", cfg.numerics.lts);
+   MFEM_VERIFY(lts_mode == "off" || lts_mode == "rate2", "--lts / [numerics] lts = '"
+               << lts_mode << "': expected \"off\" or \"rate2\"");
+   const bool lts_on = (lts_mode == "rate2");
+   const int lts_cap = ArgInt(argc, argv, "--lts-cap",
+                              (t_num && t_num->contains("lts_nc_cap")) ? cfg.numerics.lts_nc_cap : 4);
+   const bool lts_same = ArgInt(argc, argv, "--lts-same-step", 0) != 0;
+   MFEM_VERIFY(!lts_same || lts_on, "--lts-same-step needs --lts rate2");
    MFEM_VERIFY(station_copies == "average" || station_copies == "first",
                "--station-copies " << station_copies << ": expected average or first");
    const real_t cfl = cfg.numerics.cfl;
@@ -752,6 +782,9 @@ int main(int argc, char *argv[])
    }
    MFEM_VERIFY(p >= 1 && p <= 4, "order p must be in 1..4 (P3 constants); got " << p);
    MFEM_VERIFY(cfl > 0.0 && cfl <= 1.0, "[numerics] cfl (fraction of C(p)) must be in (0,1]");
+   MFEM_VERIFY(!lts_on || cfl <= 0.6, "[numerics] cfl = " << cfl << ": local time stepping "
+               "needs cfl <= 0.6 (the accepted multirate step limit; undamped resonance bands "
+               "start near 0.65)");
    MakeDirs(out_dir);
 
    // [output] ParaView keys, SAFS semantics (spatial_dyn_driver): the master
@@ -798,7 +831,8 @@ int main(int argc, char *argv[])
       // velocity-stress numerics keys: listed once, ignored
       const char *vs_keys[] = {"ader_order", "time_integrator", "mixed_flux",
                                "interior_flux", "fault_iterator", "use_pml",
-                               "cfl_safety", "cfl_dg_safety", "lts"};
+                               "cfl_safety", "cfl_dg_safety", "lts_wiggle",
+                               "lts_merge_loss_tol", "lts_sync_dt", "lts_fault_maxdiff"};
       std::string ign;
       for (const char *k : vs_keys) { if (t_num && t_num->contains(k)) { ign += std::string(" ") + k; } }
       if (!ign.empty()) { std::cout << "  ignored [numerics] keys (velocity-stress path):" << ign << "\n"; }
@@ -839,10 +873,92 @@ int main(int argc, char *argv[])
       MPI_Barrier(MPI_COMM_WORLD);
       return 0;
    }
+   // Plan item 7: the clusters of the serial mesh, on rank 0 (header)
+   NitscheLtsAssignment lts_asg;
+   if (lts_on)
+   {
+      MFEM_VERIFY(cfg.boundary.fault_attr > 0, "[boundary] fault_attr is required");
+      const int ne = smesh->GetNE();
+      int hdr[4] = {0, 0, 0, 0};
+      double dt0 = 0.0;
+      if (g_rank == 0)
+      {
+         const auto &mf = cfg.material_fallback;
+         const real_t cp = std::sqrt((mf.lambda + 2.0 * mf.mu) / mf.rho);
+         lts_asg = BuildNitscheLtsAssignment(*smesh, p, cfl * kCeig[p], cp, cfg.boundary.fault_attr,
+                                             cfg.time.dt_max, lts_cap);
+         hdr[0] = lts_asg.num_clusters;
+         hdr[1] = lts_asg.fault_cluster;
+         hdr[2] = lts_asg.passes;
+         hdr[3] = static_cast<int>(lts_asg.fault_pairs.size());
+         dt0 = lts_asg.dt0;
+         std::cout << std::setprecision(6) << "  LTS (plan item 7): rate2" << (lts_same ? " with "
+                   "--lts-same-step (every cluster at dt0; test)" : "") << ", " << lts_asg.num_clusters
+                   << " clusters (hard cap " << lts_cap << "), dt0 = " << dt0 << " s; tets per cluster";
+         for (long long c : lts_asg.cells) { std::cout << " " << c; }
+         std::cout << "; ideal " << lts_asg.ideal << "x; fault (" << lts_asg.fault_tets
+                   << " tets) in cluster " << lts_asg.fault_cluster << " after "
+                   << lts_asg.passes << " clustering(s)\n";
+      }
+      MPI_Bcast(hdr, 4, MPI_INT, 0, MPI_COMM_WORLD);
+      MPI_Bcast(&dt0, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+      lts_asg.cluster.resize(ne);
+      MPI_Bcast(lts_asg.cluster.data(), ne, MPI_INT, 0, MPI_COMM_WORLD);
+      lts_asg.num_clusters = hdr[0];
+      lts_asg.fault_cluster = hdr[1];
+      lts_asg.passes = hdr[2];
+      lts_asg.dt0 = dt0;
+      MFEM_VERIFY(hdr[3] > 0, "--lts rate2: the mesh has no fault faces (attr "
+                  << cfg.boundary.fault_attr << ")");
+   }
    // Plan item 6: METIS weight per element 1 + w (number of its fault faces),
    // so ranks that own fault faces get fewer tets (w = 0: MFEM's default cut).
+   // With LTS (plan item 7) the same weight goes to the multi-constraint cut.
    std::vector<int> part;
-   if (fault_weight > 0.0 && Mpi::WorldSize() > 1)
+   if (lts_on && Mpi::WorldSize() > 1)
+   {
+      const int ne = smesh->GetNE();
+      part.resize(ne);
+      if (g_rank == 0)
+      {
+         std::vector<double> cost;
+         if (fault_weight > 0.0)
+         {
+            // integer METIS weights: 100 per tet + 100 w per fault-face side
+            cost.assign(ne, 100.0);
+            for (const auto &pr : lts_asg.fault_pairs)
+            {
+               cost[pr.first] += 100.0 * fault_weight;
+               cost[pr.second] += 100.0 * fault_weight;
+            }
+         }
+         const Table &e2e = smesh->ElementToElementTable();
+         std::vector<int> xadj(e2e.GetI(), e2e.GetI() + ne + 1);
+         std::vector<int> adj(e2e.GetJ(), e2e.GetJ() + e2e.Size_of_connections());
+         LtsPartitionOptions popt;
+         try
+         {
+            BuildLtsAwarePartition(ne, xadj, adj, lts_asg.cluster, lts_asg.num_clusters,
+                                   Mpi::WorldSize(), cost.empty() ? nullptr : &cost,
+                                   lts_asg.fault_pairs, popt, part);
+         }
+         catch (const std::exception &ex)
+         {
+            MFEM_ABORT("--lts rate2: BuildLtsAwarePartition failed on " << Mpi::WorldSize()
+                       << " ranks: " << ex.what());
+         }
+         const LtsPartitionImbalance imb = ComputeLtsPartitionImbalance(
+            lts_asg.cluster, lts_asg.num_clusters, part, Mpi::WorldSize(),
+            cost.empty() ? nullptr : &cost, lts_asg.fault_pairs);
+         std::cout << std::setprecision(4) << "  partition: multi-constraint (BuildLtsAwarePartition, "
+                   << "fault weight w = " << fault_weight << "); max/mean overall " << imb.overall
+                   << ", per cluster";
+         for (double x : imb.per_cluster) { std::cout << " " << x; }
+         std::cout << ", fault tets " << imb.fault << "\n";
+      }
+      MPI_Bcast(part.data(), ne, MPI_INT, 0, MPI_COMM_WORLD);
+   }
+   else if (fault_weight > 0.0 && Mpi::WorldSize() > 1)
    {
       MFEM_VERIFY(cfg.boundary.fault_attr > 0, "[boundary] fault_attr is required");
       const int ne = smesh->GetNE();
@@ -876,6 +992,59 @@ int main(int argc, char *argv[])
       }
    }
    ParMesh pmesh(MPI_COMM_WORLD, *smesh, part.empty() ? nullptr : part.data());
+   // LTS: the clusters of the local elements (the serial elements of this
+   // rank, in serial order, as ParMesh builds them; checked by centroid) and
+   // of the face-neighbour elements
+   std::vector<int> lts_cl, lts_cl_nbr;
+   if (lts_on)
+   {
+      auto centroid = [](const Mesh &m, int e, real_t c[3]) {
+         Array<int> v;
+         m.GetElementVertices(e, v);
+         c[0] = c[1] = c[2] = 0.0;
+         for (int k = 0; k < v.Size(); k++)
+            for (int d = 0; d < 3; d++) { c[d] += m.GetVertex(v[k])[d] / v.Size(); }
+      };
+      for (int i = 0; i < smesh->GetNE(); i++)
+      {
+         if (part.empty() || part[i] == g_rank)
+         {
+            const int k = static_cast<int>(lts_cl.size());
+            MFEM_VERIFY(k < pmesh.GetNE(), "--lts: more serial elements on rank " << g_rank
+                        << " than its " << pmesh.GetNE() << " local elements");
+            real_t a[3], b[3];
+            centroid(*smesh, i, a);
+            centroid(pmesh, k, b);
+            const real_t dd = std::hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+            MFEM_VERIFY(dd <= 1e-9 * (1.0 + std::hypot(a[0], a[1], a[2])), "--lts: local element "
+                        << k << " of rank " << g_rank << " is not serial element " << i
+                        << " (centroids " << dd << " m apart)");
+            lts_cl.push_back(lts_asg.cluster[i]);
+         }
+      }
+      MFEM_VERIFY(static_cast<int>(lts_cl.size()) == pmesh.GetNE(), "--lts: rank " << g_rank
+                  << " has " << pmesh.GetNE() << " local elements but " << lts_cl.size()
+                  << " serial elements");
+      pmesh.ExchangeFaceNbrData();
+      DG_FECollection fec0(0, 3);
+      ParFiniteElementSpace fes0(&pmesh, &fec0);
+      ParGridFunction g0(&fes0);
+      Array<int> d0;
+      for (int e = 0; e < pmesh.GetNE(); e++)
+      {
+         fes0.GetElementDofs(e, d0);
+         g0(d0[0]) = lts_cl[e];
+      }
+      g0.ExchangeFaceNbrData();
+      lts_cl_nbr.resize(pmesh.GetNFaceNeighborElements());
+      for (int j = 0; j < pmesh.GetNFaceNeighborElements(); j++)
+      {
+         fes0.GetFaceNbrElementVDofs(j, d0);
+         lts_cl_nbr[j] = static_cast<int>(std::lround(g0.FaceNbrData()(d0[0])));
+      }
+      lts_asg.cluster.clear();
+      lts_asg.cluster.shrink_to_fit();
+   }
    smesh.reset();
 
    // ------------------------------------------------------------ boundary
@@ -1100,7 +1269,22 @@ int main(int argc, char *argv[])
                "[fault_geometry] junction_policy = \"refuse\": the fault has "
                << op.Orientation().GetReport().junction_edges << " junction edges");
    const real_t dt_cfl = ComputeMaxDt(op.Sample(), pmesh, p, cfl * kCeig[p]);
-   const real_t dt = std::min(dt_cfl, cfg.time.dt_max);
+   const real_t dt_gts = std::min(dt_cfl, cfg.time.dt_max);
+   // the step of the fault (and of the outputs): the global step, or with LTS
+   // the fault cluster's step dt0 2^c_F
+   const real_t dt = !lts_on ? dt_gts
+                     : (lts_same ? lts_asg.dt0 : std::ldexp(lts_asg.dt0, lts_asg.fault_cluster));
+   if (lts_on)
+   {
+      MFEM_VERIFY(lts_asg.dt0 <= dt_gts * (1.0 + 1e-12), "--lts: dt0 = " << lts_asg.dt0
+                  << " s exceeds the global step " << dt_gts << " s");
+      if (g_rank == 0)
+      {
+         std::cout << std::setprecision(12) << "  LTS: dt0 = " << lts_asg.dt0 << " s, global dt = "
+                   << dt_gts << " s (relative difference "
+                   << (dt_gts - lts_asg.dt0) / dt_gts << "); fault step dt_F = " << dt << " s\n";
+      }
+   }
    op.SetTimeStep(dt);
 
    // Kelvin-Voigt damping (Day et al. 2005 eq. A8): [numerics] kv_eta =
@@ -1481,7 +1665,18 @@ int main(int argc, char *argv[])
 
    std::unique_ptr<NitscheEnergyMonitor> mon;
 
-   const long nsteps = std::lround(std::ceil((tfinal - cfg.time.t_initial) / dt - 1e-9));
+   long nsteps = std::lround(std::ceil((tfinal - cfg.time.t_initial) / dt - 1e-9));
+   // LTS: a whole number of sync intervals, nsteps fault steps
+   int lts_ticks_sync = 1, lts_ticks_fault = 1;
+   long lts_nsync = 0;
+   if (lts_on)
+   {
+      lts_ticks_sync = lts_same ? 1 : (1 << (lts_asg.num_clusters - 1));
+      lts_ticks_fault = lts_same ? 1 : (1 << lts_asg.fault_cluster);
+      const real_t tsync = lts_ticks_sync * lts_asg.dt0;
+      lts_nsync = std::lround(std::ceil((tfinal - cfg.time.t_initial) / tsync - 1e-9));
+      nsteps = lts_nsync * (lts_ticks_sync / lts_ticks_fault);
+   }
    if (g_rank == 0)
    {
       long long nloc = op.Height();
@@ -1492,6 +1687,13 @@ int main(int argc, char *argv[])
                 << " -> " << dt_cfl << "; dt_max " << cfg.time.dt_max << "), " << nsteps
                 << " steps to t = " << tfinal << " s; penalty_factor " << penalty_factor
                 << "; energy balance " << (energy_on ? "on" : "off") << "\n";
+      if (lts_on)
+      {
+         std::cout << "  LTS: " << lts_nsync << " sync intervals of " << lts_ticks_sync
+                   << " ticks (" << lts_ticks_sync * lts_asg.dt0 << " s), the fault every "
+                   << lts_ticks_fault << " tick(s): " << nsteps << " fault steps to t = "
+                   << cfg.time.t_initial + lts_nsync * lts_ticks_sync * lts_asg.dt0 << " s\n";
+      }
       if (pc_on)
       {
          std::cout << "  Prakash-Clifton regularization of the law's normal stress: v_star = "
@@ -1508,12 +1710,19 @@ int main(int argc, char *argv[])
    Ud = 0.0;
    real_t t = cfg.time.t_initial;
    op.SetTime(t);
+   // energy records: er is the latest, er_prev the one before it; W_fric is
+   // the trapezoid of P_fric over the evaluation instants (every step, or
+   // every sync point with LTS), the scale for sum rho in the closing line
+   NitscheEnergyRecord er, er_prev;
+   real_t W_fric = 0.0;
    if (energy_on)
    {
       mon = std::make_unique<NitscheEnergyMonitor>(op);
       Vector A0(n);
-      op.Mult(U, Ud, A0);
-      mon->Start(mon->Evaluate(U, Ud, A0, t));
+      if (lts_on) { A0 = 0.0; }   // LTS: the plain energy (header)
+      else { op.Mult(U, Ud, A0); }
+      er_prev = mon->Evaluate(U, Ud, A0, t);
+      mon->Start(er_prev);
    }
    // --kv-station-sigma 1: write, per station, the Kelvin-Voigt fault penalty sigma_F^eta (Pa s/m)
    // averaged over the DG copies exactly as the station traction is (columns tau1 = tau2 =
@@ -1544,7 +1753,28 @@ int main(int argc, char *argv[])
    op.SetFusedStiffness(fused_spmv != 0);
    op.SetDenseBlocks(dense_blocks != 0);
    CentralDifferenceSolver ode;
-   ode.Init(op);
+   std::unique_ptr<NitscheLtsRun> lts_run;
+   if (lts_on)
+   {
+      const auto tl0 = std::chrono::steady_clock::now();
+      lts_run = std::make_unique<NitscheLtsRun>(op, lts_cl, lts_cl_nbr, lts_asg.num_clusters,
+                                                lts_asg.fault_cluster, lts_asg.dt0,
+                                                penalty_factor, lts_same);
+      lts_run->Init(U, Ud, t);
+      const double tl = std::chrono::duration<double>(std::chrono::steady_clock::now() - tl0).count();
+      long long b = lts_run->Blocks().Bytes();
+      double tlm = tl;
+      MPI_Allreduce(MPI_IN_PLACE, &b, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+      MPI_Allreduce(MPI_IN_PLACE, &tlm, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+      if (g_rank == 0)
+      {
+         std::cout << std::setprecision(6) << "  LTS: cluster blocks " << b / 1e6
+                   << " MB over all ranks, built in " << tlm << " s (with the first forces)\n";
+      }
+   }
+   else { ode.Init(op); }
+   Vector lts_zero_acc;
+   if (lts_on && mon) { lts_zero_acc.SetSize(n); lts_zero_acc = 0.0; }
    if (stations)
    {
       fill_dofdata();
@@ -1556,23 +1786,36 @@ int main(int argc, char *argv[])
    // this rank's time inside ode.Step; step 1 is kept apart because it also
    // assembles K, K_eta, the fused pattern and the fault face operators
    double step_sec = 0.0, step1_sec = 0.0, fault_sec1 = 0.0;
+   long lts_next_log = log_every;   // LTS: log at the first sync point from here
    for (long s = 1; s <= nsteps; s++)
    {
       real_t h = dt;
       const auto ts0 = std::chrono::steady_clock::now();
-      ode.Step(U, Ud, t, h);
+      bool sync = true;   // v synchronised (always without LTS)
+      if (lts_run)
+      {
+         sync = lts_run->FaultStep(U, Ud, t);
+         op.SetTime(t);
+      }
+      else { ode.Step(U, Ud, t, h); }
       const double ds = std::chrono::duration<double>(std::chrono::steady_clock::now() - ts0).count();
       if (s == 1) { step1_sec = ds; fault_sec1 = op.FaultSeconds(); }
       else { step_sec += ds; }
+      // with LTS the record is reduced over the ranks once per sync interval
+      // (extremes over its fault steps); between sync points it is this
+      // rank's, so the run extremes and the log lines use sync points only
       const NitscheStepRecord &rec = op.LastStep();
-      max_ratio_run = std::max(max_ratio_run, rec.max_V_dt_over_Dc);
-      max_V_run = std::max(max_V_run, rec.max_V);
-      min_sig_run = std::min(min_sig_run, rec.min_sigma_eff);
-      max_sig_run = std::max(max_sig_run, rec.max_sigma_eff);
-      if (pc_on)
+      if (sync)
       {
-         min_pc_run = std::min(min_pc_run, rec.min_sigma_pc);
-         max_pc_run = std::max(max_pc_run, rec.max_sigma_pc);
+         max_ratio_run = std::max(max_ratio_run, rec.max_V_dt_over_Dc);
+         max_V_run = std::max(max_V_run, rec.max_V);
+         min_sig_run = std::min(min_sig_run, rec.min_sigma_eff);
+         max_sig_run = std::max(max_sig_run, rec.max_sigma_eff);
+         if (pc_on)
+         {
+            min_pc_run = std::min(min_pc_run, rec.min_sigma_pc);
+            max_pc_run = std::max(max_pc_run, rec.max_sigma_pc);
+         }
       }
       MFEM_VERIFY(std::isfinite(rec.max_V), "non-finite slip rate at step " << s);
       const Vector &V = op.SlipRate();
@@ -1582,11 +1825,12 @@ int main(int argc, char *argv[])
                                          + V(3 * j + 2) * V(3 * j + 2)) > 1e-3) { trupt[j] = t; }
       }
       real_t rho = 0.0;
-      NitscheEnergyRecord er;
-      if (mon)
+      if (mon && sync)
       {
-         er = mon->Evaluate(U, Ud, op.LastAcceleration(), t);
+         er = mon->Evaluate(U, Ud, lts_run ? lts_zero_acc : op.LastAcceleration(), t);
          rho = mon->Step(er);
+         W_fric += 0.5 * (er.t - er_prev.t) * (er.P_fric + er_prev.P_fric);
+         er_prev = er;
       }
       if (stations && s % station_every == 0)
       {
@@ -1626,7 +1870,10 @@ int main(int argc, char *argv[])
          }
       }
 #endif
-      if (g_rank == 0 && (s % log_every == 0 || s == nsteps))
+      const bool log_now = lts_run ? (sync && (s >= lts_next_log || s == nsteps))
+                                   : (s % log_every == 0 || s == nsteps);
+      if (lts_run && log_now) { lts_next_log = (s / log_every + 1) * log_every; }
+      if (g_rank == 0 && log_now)
       {
          const real_t wall = std::chrono::duration<real_t>(std::chrono::steady_clock::now() - wall0).count();
          std::cout << std::setprecision(6) << "  step " << s << " t = " << t << "  max|V| = "
@@ -1636,12 +1883,26 @@ int main(int argc, char *argv[])
          {
             std::cout << "  sigma_pc in [" << rec.min_sigma_pc << ", " << rec.max_sigma_pc << "]";
          }
-         if (mon) { std::cout << "  E_h = " << er.E_h << "  sum rho = " << mon->SumRho(); }
+         if (mon)
+         {
+            std::cout << "  E_h = " << er.E_h << "  sum rho = " << mon->SumRho()
+                      << "  W_fric = " << W_fric;
+         }
          std::cout << "  wall " << wall << " s\n" << std::flush;
          (void)rho;
       }
    }
    if (stations) { stations->Close(); }
+   if (mon && g_rank == 0)
+   {
+      std::cout << std::setprecision(6) << "  energy balance: sum rho = " << mon->SumRho()
+                << " J, sum |rho| = " << mon->SumAbsRho() << " J, friction work W_fric = "
+                << W_fric << " J (trapezoid over " << (lts_run ? "sync points" : "steps")
+                << "), sum rho / |W_fric| = "
+                << (W_fric != 0.0 ? mon->SumRho() / std::abs(W_fric) : 0.0)
+                << ", sum |rho| / |W_fric| = "
+                << (W_fric != 0.0 ? mon->SumAbsRho() / std::abs(W_fric) : 0.0) << "\n";
+   }
 
    // rupture times
    {
@@ -1698,6 +1959,39 @@ int main(int argc, char *argv[])
             std::cout << " (" << op.DenseBlockBytes() / 1e6 << " MB over all ranks)";
          }
          std::cout << "\n";
+      }
+      if (lts_run)
+      {
+         // element updates: patch elements kicked, against the global step's
+         // two kicks of every element per dt0 tick
+         long long w[3] = {lts_run->PatchUpdates(), pmesh.GetNE(), lts_run->Blocks().ExchangeRounds()};
+         long long hv = lts_run->Blocks().ExchangeValues();
+         // P4 (b): one merged exchange per tick plus Init's, on every rank
+         int bad_rounds = (w[2] != lts_run->Ticks() + 1) ? 1 : 0;
+         MPI_Allreduce(MPI_IN_PLACE, &bad_rounds, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+         MFEM_VERIFY(bad_rounds == 0, "LTS: " << bad_rounds << " rank(s) posted a halo count "
+                     "other than ticks + 1 (" << lts_run->Ticks() + 1 << "); this rank "
+                     << w[2]);
+         MPI_Allreduce(MPI_IN_PLACE, w, 3, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+         MPI_Allreduce(MPI_IN_PLACE, &hv, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+         // exposed exchange: seconds in WaitHalo, and its share of this
+         // rank's stepping time (step 1 included, as WaitHalo's count is)
+         const double wsec = lts_run->Blocks().WaitSeconds();
+         double wr[3] = {wsec, wsec, wsec / std::max(step_sec + step1_sec, 1e-300)};
+         MPI_Allreduce(MPI_IN_PLACE, &wr[0], 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+         MPI_Allreduce(MPI_IN_PLACE, &wr[1], 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+         MPI_Allreduce(MPI_IN_PLACE, &wr[2], 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+         if (g_rank == 0)
+         {
+            const long long ticks = lts_run->Ticks();
+            std::cout << std::setprecision(6) << "  LTS: " << ticks << " ticks; patch element kicks "
+                      << w[0] << " = " << double(w[0]) / (2.0 * double(w[1]) * double(ticks))
+                      << " of global stepping's per tick; halo rounds " << w[2] / Mpi::WorldSize()
+                      << " per rank (= ticks + 1 on every rank), " << hv
+                      << " values received over all ranks; halo wait max " << wr[0] << " s, mean "
+                      << wr[1] / Mpi::WorldSize() << " s, largest share of a rank's stepping "
+                      << wr[2] << "\n";
+         }
       }
       // cost model for the partition weight (plan item 6), after step 1: per
       // step, c_tet per tet of the non-fault work and c_side per fault-face

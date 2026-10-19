@@ -200,6 +200,13 @@ public:
    /// half_dt the damping blocks were built with (0 without blocks).
    real_t HalfDt() const { return half_dt_; }   // the scalar, not half_dt_per_elem
    int NumDampedElements() const { return static_cast<int>(block_inv_.size()); }
+   /// (rho_e M_e (x) I_3 + half_dt C_e)^{-1} of damped element e (3 nd x
+   /// 3 nd, element-local byNODES), or null for an undamped element.
+   const DenseMatrix *ElementBlockInverse(int e) const
+   {
+      auto it = block_inv_.find(e);
+      return it == block_inv_.end() ? nullptr : &it->second;
+   }
 
 private:
    DG_FECollection fec_;
