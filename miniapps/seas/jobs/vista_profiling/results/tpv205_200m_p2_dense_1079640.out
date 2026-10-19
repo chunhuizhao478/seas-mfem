@@ -1,0 +1,32 @@
+commit 7cab0859316fc398f56094cc0238e5068034c308
+host i614-022.vista.tacc.utexas.edu  nodes 16  ranks 2304
+deck tpv205/configs/tpv205_nitsche.toml  mesh tpv205/mesh/tpv2053d_200m.msh sha256 30c63b923781177830330a36aebcc4159cfc8043374ea4dcd883a9b2eec13538  order 2  tfinal 1.0
+modules: ucc/1.9.0 ucx/1.22.0 cmake/4.1.1 xalt/3.1 TACC gcc/14.2.0 nvpl/26.9 cuda/12.6 openmpi/5.0.5 hypre/2.31.0 metis/5.1.0.3 phdf5/1.14.6
+=== off [--fast-fault 0 --fused-spmv 0 --fast-fault-output 0 --dense-blocks 0]: driver exit 0, 331 s in the job
+  fault ParaView output: .../off/fault.vtkhdf, 26228 fault faces x 4 sub-triangles (13156 faces re-wound to nhat); face map vs DOF positions max error 0 m
+  fault ParaView output: 49 frames in .../off/fault.vtkhdf; on rank 0 20.5263 s (0.418905 s/frame: pack 1.50267e-06, gather + HDF write 0.418903; SAFS writer)
+  time in ode.Step per rank after step 1: min 159.686 s, mean 188.136 s, max 201.698 s (27.2823 ms/step at the max); step 1 1.6002 s (with the operator assembly); fast fault off, fused K/K_eta off, dense blocks off
+  fault work: 6.779 ms/step on the busiest rank; cost per step 28.72 us per tet, 0 us per fault-face side (w = 0 tets)
+=== done: 7394 steps, t = 1.00004 s; max|V| 3.7397 m/s; max|V|dt/Dc 0.0012645; sigma_n_eff in [1.08368e+08, 1.28537e+08] Pa; sigma_pc in [1.08408e+08, 1.28413e+08] Pa; wall 322.111 s ===
+first node memory: peak in use 138.6 GB of 237.6 GB (2 s samples)
+=== item4 [--dense-blocks 0]: driver exit 0, 265 s in the job
+  fault ParaView output: .../item4/fault.vtkhdf, 26228 fault faces x 4 sub-triangles (13156 faces re-wound to nhat); face map vs DOF positions max error 0 m
+  fault ParaView output: 49 frames in .../item4/fault.vtkhdf; on rank 0 6.00989 s (0.122651 s/frame: pack 1.43408e-06, gather + HDF write 0.122649 = gather 0.00343873 + write 0.119; fast writer)
+  time in ode.Step per rank after step 1: min 90.4737 s, mean 113.312 s, max 125.038 s (16.913 ms/step at the max); step 1 2.33276 s (with the operator assembly); fast fault on, fused K/K_eta on (union pattern adds 6306728 of 8495420451 entries), dense blocks off
+  fault work: 3.016 ms/step on the busiest rank; cost per step 18.54 us per tet, 3.7 us per fault-face side (w = 0.1996 tets)
+=== done: 7394 steps, t = 1.00004 s; max|V| 3.7397 m/s; max|V|dt/Dc 0.0012645; sigma_n_eff in [1.08368e+08, 1.28537e+08] Pa; sigma_pc in [1.08408e+08, 1.28413e+08] Pa; wall 256.959 s ===
+first node memory: peak in use 138.6 GB of 237.6 GB (2 s samples)
+=== dense []: driver exit 0, 206 s in the job
+  fault ParaView output: .../dense/fault.vtkhdf, 26228 fault faces x 4 sub-triangles (13156 faces re-wound to nhat); face map vs DOF positions max error 0 m
+  fault ParaView output: 49 frames in .../dense/fault.vtkhdf; on rank 0 5.97334 s (0.121905 s/frame: pack 1.34269e-06, gather + HDF write 0.121904 = gather 0.00377478 + write 0.1179; fast writer)
+  time in ode.Step per rank after step 1: min 58.9122 s, mean 64.8903 s, max 69.23 s (9.36426 ms/step at the max); step 1 1.45988 s (with the operator assembly); fast fault on, fused K/K_eta off, dense blocks on (74021.5 MB over all ranks)
+  fault work: 1.271 ms/step on the busiest rank; cost per step 10.6 us per tet, 2.736 us per fault-face side (w = 0.2582 tets)
+=== done: 7394 steps, t = 1.00004 s; max|V| 3.7397 m/s; max|V|dt/Dc 0.0012645; sigma_n_eff in [1.08368e+08, 1.28537e+08] Pa; sigma_pc in [1.08408e+08, 1.28413e+08] Pa; wall 196.923 s ===
+first node memory: peak in use 138.2 GB of 237.6 GB (2 s samples)
+=== stations (per quantity: max |a - b| over max |a| of slip, V, tau, sigma_n at that station) ===
+off vs tpv205/gold/nitsche-kv0p1_p2_cd_pc_200m_jobid1075916_git81759da/results: 16 stations, 7394 rows each; 16 bitwise equal as printed; largest difference 0.000e+00
+item4 vs off: 16 stations, 7395 rows each; 0 bitwise equal as printed; largest difference 6.625e-11 (tpv205_station_x2_0_x3_7.5.dat slip)
+dense vs off: 16 stations, 7395 rows each; 0 bitwise equal as printed; largest difference 2.691e-11 (tpv205_station_x2_0_x3_7.5.dat V)
+dense vs item4: 16 stations, 7395 rows each; 0 bitwise equal as printed; largest difference 6.625e-11 (tpv205_station_x2_0_x3_7.5.dat slip)
+du: RUN_INFO.txt 512 | dense 199M | item4 199M | off 200M | tpv205_nitsche.toml 6.5K
+total 804 s

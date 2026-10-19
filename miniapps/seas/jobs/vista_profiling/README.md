@@ -41,10 +41,17 @@ hypre/2.31.0, metis/5.1.0.3, phdf5/1.14.6.
 | 1078824 | 6d41ba7 | `build_profiling_vista.sbatch` | Build and the six gate test sets pass (74, 22, 49, 13, 9, 42 passed; 0 failed). The 16-rank bench crashed after its `[V]` section: MFEM partial assembly deletes the mesh's face-neighbour data, which the traction checks need on ranks with shared fault faces. Bench only; fixed in 0c83fb5. |
 | 1078825 | 6d41ba7 | `speed_compare_tpv205_200m_p2.sbatch` | `results/tpv205_200m_p2_speed_1078825.out`. `off` equals gold 1075916 bitwise at all 16 stations; `on` and `weighted` differ from `off` by at most 6.6e-11 relative. Time in `ode.Step` on the slowest rank: 27.00 ms per step `off`, 16.38 ms `on` (1.65x), 16.26 ms `weighted` (1.66x). Wall time of the 1 s run: 321 s `off`, 244 s `on`. First-node memory peak: 147, 146, 161 GB of 238 GB. |
 | 1078847 | 0c83fb5 | `build_profiling_vista.sbatch` | Build and gate tests pass. `results/bench_np16_1078847.log`: 9 of 9 checks pass on 16 ranks (10 shared fault faces); `ComputeTractionFast` 38.5x and `AddSlipLoadFast` 47x faster than the calls they replace. `results/bench_h_1078847.txt`: fault writers at the 200 m fault size. |
+| 1079599 | 7cab085 | `build_profiling_vista.sbatch` | Build and the six gate test sets pass (74, 22, 49, 13, 9, 42 passed; 0 failed). Bench on 16 ranks (TPV205 1000 m, p = 1): 14 of 14 checks pass; `[D]` dense blocks give `K u + K_eta v` 1.52x faster than the two hypre products and 1.57x faster than the item 4 sweep (minimum of 60 pairs). The bench log stays on Vista (`miniapps/seas/bench_np16_1079599.log` in the clone). |
+| 1079640 | 7cab085 | `speed_dense_tpv205_200m_p2.sbatch` | `results/tpv205_200m_p2_dense_1079640.out`. `off` equals gold 1075916 bitwise at all 16 stations; `item4` and `dense` differ from `off` by at most 6.6e-11 and 2.7e-11 relative. Time in `ode.Step` on the slowest rank: 27.28 ms per step `off`, 16.91 ms `item4`, 9.36 ms `dense` (1.81x against `item4`, 2.91x against `off`). Wall time of the 1 s run: 322, 257, 197 s. Dense blocks 68.9 GiB over all ranks; first-node memory peak 138.6, 138.6, 138.2 GiB of 237.6 GiB. |
 
 The run outputs (fault files, stations, driver logs) stayed on Vista in
-`$SCRATCH/nitsche_profiling/tpv205_200m_p2_speed_1078825/{off,on,weighted}`.
+`$SCRATCH/nitsche_profiling/tpv205_200m_p2_speed_1078825/{off,on,weighted}` and
+`$SCRATCH/nitsche_profiling/tpv205_200m_p2_dense_1079640/{off,item4,dense}`.
 Scratch is purged, and these runs are not golds. The bench log in `results/`
 has its repeated lines collapsed (libcuda "(ignored)" lines and duplicated
-audit / `[K-DIAG]` blocks). The analysis is in §7 of
-`miniapps/seas/document/nitsche_profiling_dev/nitsche-speedups-impl-rev1.1.pdf`.
+audit / `[K-DIAG]` blocks). `results/tpv205_200m_p2_dense_1079640.out` is the
+job stdout as relayed from Vista, with the run-directory paths shortened to
+`.../` and the `du` listing joined onto one line. The analysis is in §7 of
+`miniapps/seas/document/nitsche_profiling_dev/nitsche-speedups-impl-rev1.1.pdf`
+(items 1 to 6) and §6 of `nitsche-dense-blocks-8a-rev1.1.pdf` in the same
+folder (item 8a).
