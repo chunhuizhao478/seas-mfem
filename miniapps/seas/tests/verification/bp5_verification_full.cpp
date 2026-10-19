@@ -65,7 +65,9 @@
 //                              mfem::Device string (GPU plan G1)
 //   --device-id N              GPU for this rank (default: node-local rank
 //                              modulo the number of visible GPUs)
-//   --qd-operators MODE        loops (default): per-stage face loops;
+//   --qd-operators MODE        auto (default): matrix with --dg-method IP,
+//                              loops with BR2 or SEAS_DEBUG_FACE_TRACE;
+//                              loops: per-stage face loops;
 //                              matrix: B, D, C, N operators built once,
 //                              b = B*slip + D*g(t), T = C_u*u + C_d*slip
 //                              (GPU plan G2; IP only, no face tracer)
@@ -1173,7 +1175,7 @@ int main(int argc, char *argv[])
    std::string device_str = "cpu";     // --device STR
    int device_id_override = -1;        // --device-id N (-1 = automatic)
    // GPU plan G2.
-   std::string qd_operators = "loops"; // --qd-operators loops|matrix
+   std::string qd_operators = "auto";  // --qd-operators auto|loops|matrix
 
    for (int i = 1; i < argc; i++)
    {
@@ -1293,8 +1295,9 @@ int main(int argc, char *argv[])
       if (arg == "--qd-operators" && i + 1 < argc)
       {
          qd_operators = argv[++i];
-         MFEM_VERIFY(qd_operators == "loops" || qd_operators == "matrix",
-                     "--qd-operators: loops or matrix, got '"
+         MFEM_VERIFY(qd_operators == "auto" || qd_operators == "loops" ||
+                     qd_operators == "matrix",
+                     "--qd-operators: auto, loops or matrix, got '"
                      << qd_operators << "'");
       }
       if (arg == "--device-id" && i + 1 < argc)
@@ -1596,6 +1599,39 @@ int main(int argc, char *argv[])
    else if (dg_method_str == "BR2" || dg_method_str == "br2")
    {
       dg_method = DGMethod::BR2;
+   }
+
+   auto env_truthy = [](const char *name) -> bool
+   {
+      const char *v = std::getenv(name);
+      if (!v || !*v) { return false; }
+      std::string s(v);
+      std::transform(s.begin(), s.end(), s.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      return !(s == "0" || s == "false" || s == "off" || s == "no");
+   };
+
+   // QD speed item 1: the stage operators are the default wherever they
+   // apply.  They need the IP method, and the face tracer
+   // (SEAS_DEBUG_FACE_TRACE, below) needs the loops' decomposed traction.
+   std::string qd_operators_why = "--qd-operators";
+   if (qd_operators == "auto")
+   {
+      if (dg_method != DGMethod::IP)
+      {
+         qd_operators = "loops";
+         qd_operators_why = "default; matrix needs --dg-method IP";
+      }
+      else if (env_truthy("SEAS_DEBUG_FACE_TRACE"))
+      {
+         qd_operators = "loops";
+         qd_operators_why = "default; SEAS_DEBUG_FACE_TRACE needs the loops";
+      }
+      else
+      {
+         qd_operators = "matrix";
+         qd_operators_why = "default";
+      }
    }
 
    // Process --solver flag
@@ -2166,21 +2202,13 @@ int main(int argc, char *argv[])
    }
    if (mpi.IsRoot())
    {
-      std::cout << "  [G2] qd-operators: " << qd_operators << "\n";
+      std::cout << "  [G2] qd-operators: " << qd_operators << " ("
+                << qd_operators_why << ")\n";
    }
 
    // Face tracer for per-face diagnostics (rank-local, no MPI)
    // Coordinate window selects faces in the region where prior blowups occurred.
    // All ranks participate; max_traced_faces limits output per rank.
-   auto env_truthy = [](const char *name) -> bool
-   {
-      const char *v = std::getenv(name);
-      if (!v || !*v) { return false; }
-      std::string s(v);
-      std::transform(s.begin(), s.end(), s.begin(),
-                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-      return !(s == "0" || s == "false" || s == "off" || s == "no");
-   };
    auto env_int = [](const char *name, int default_value) -> int
    {
       const char *v = std::getenv(name);
