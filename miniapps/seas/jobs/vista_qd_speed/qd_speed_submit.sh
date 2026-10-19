@@ -19,6 +19,12 @@
 #           against G0's goldens, and which path it picks (1 node, 8 ranks)
 #   timing  jobs/vista_qd_speed/qd_speed_timing.sbatch at every layout
 #           below, 1,000 steps per run at p=1
+#   green   the same script with MODES="green default" (QD speed item 3,
+#           --qd-green) on 1, 2 and 4 full nodes: g_n1_r144 builds G
+#           (37.5 GB at p=1) and writes the cache file (GREEN_CACHE in the
+#           script); g_n2_r288 and g_n4_r576 wait for it (afterok) and
+#           read it.  Each also runs the default solve at its layout.
+#           Not in the default STEPS; GREEN_LAYOUTS limits it
 # Layouts (nodes x ranks, CPUs per rank):
 #   n1_r144  1 x 144, 1   loops and the new default, twice each
 #   n1_r72   1 x 72,  2   default
@@ -36,6 +42,7 @@ SUBMIT="${SUBMIT:-0}"
 STEPS="${STEPS:-build gate timing}"
 BUILD_JOB="${BUILD_JOB:-}"
 LAYOUTS="${LAYOUTS:-n1_r144 n1_r72 n1_r36 n2_r288 n2_r144 n2_r72}"
+GREEN_LAYOUTS="${GREEN_LAYOUTS:-g_n1_r144 g_n2_r288 g_n4_r576}"
 
 if [ ! -f jobs/vista_qd_speed/qd_speed_timing.sbatch ]; then
    echo "ERROR: run from miniapps/seas" >&2
@@ -96,5 +103,22 @@ if has timing; then
       sub "timing ${name}" "${DEP[@]}" -N "${nodes}" -n "${ranks}" \
           --ntasks-per-node="$((ranks / nodes))" -c "${cpt}" \
           -t "${hh}:${mm}:${ss}" jobs/vista_qd_speed/qd_speed_timing.sbatch
+   done
+fi
+
+if has green; then
+   # name:nodes:ranks:walltime; the first one builds G, the others read it.
+   GREEN_DEP=("${DEP[@]}")
+   for spec in g_n1_r144:1:144:02:00:00 g_n2_r288:2:288:01:00:00 \
+               g_n4_r576:4:576:01:00:00; do
+      IFS=: read -r name nodes ranks hh mm ss <<< "${spec}"
+      [[ " ${GREEN_LAYOUTS} " == *" ${name} "* ]] || continue
+      sub "green ${name}" "${GREEN_DEP[@]}" -J qd_green_timing \
+          --export="ALL,MODES=green default" -N "${nodes}" -n "${ranks}" \
+          --ntasks-per-node="$((ranks / nodes))" -c 1 \
+          -t "${hh}:${mm}:${ss}" jobs/vista_qd_speed/qd_speed_timing.sbatch
+      if [ "${name}" = g_n1_r144 ]; then
+         GREEN_DEP=(--dependency="afterok:${JOB}" --kill-on-invalid-dep=yes)
+      fi
    done
 fi

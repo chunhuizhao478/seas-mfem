@@ -16,7 +16,9 @@ part's time; gemv_bw.txt gives the layout's bandwidth.  One line per run:
 
 Times are the slowest rank's (the table's "max s" column), as the table
 prints them.  A run without a table (stopped early) is listed with its exit
-code only.
+code only.  In a green run (--qd-green) "solve" is the G product; the
+[QD-GREEN] lines of those runs (qd_green.txt: G size, build or read time,
+check against the solve path) follow the table.
 """
 import os
 import re
@@ -74,6 +76,7 @@ def main(argv):
             "rhs ms", "trac ms", "fric ms", "solve %", "face %", "setup s",
             "GB/s/node")
     print("  ".join(f"{c:>10}" for c in cols))
+    green = []
     for root in argv:
         layout = os.path.basename(os.path.normpath(root))
         m = re.match(r"timing_(n\d+_r\d+_c\d+)", layout)
@@ -85,6 +88,10 @@ def main(argv):
             bw = m.group(1) if m else ""
         for _, mode, d in run_dirs(root):
             ec = "?"
+            gp = os.path.join(d, "qd_green.txt")
+            if os.path.exists(gp):
+                green += [f"{layout} {os.path.basename(d)}: {line.rstrip()}"
+                          for line in open(gp) if line.strip()]
             if os.path.exists(os.path.join(d, "exit_code")):
                 ec = open(os.path.join(d, "exit_code")).read().strip()
             tpath = os.path.join(d, "stage_timers_final.txt")
@@ -109,6 +116,8 @@ def main(argv):
                     f"{share('slip_expand', 'slip_rhs', 'dirichlet_rhs', 'traction'):.1f}",
                     f"{t.get('setup', 0.0):.1f}", bw)
             print("  ".join(f"{v:>10}" for v in vals))
+    for line in green:
+        print(line)
     return 0
 
 

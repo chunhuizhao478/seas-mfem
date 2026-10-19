@@ -30,9 +30,16 @@
 #        default  no --qd-operators flag: the new default, which must say
 #                 "qd-operators: matrix (default)" in its log;
 #        matrix   --qd-operators matrix;
+#        green    --qd-green --qd-green-cache GREEN_CACHE (QD speed item
+#                 3): reads G from GREEN_CACHE, or builds it and writes it
+#                 there when the file does not exist.  Two jobs must not
+#                 build the same file at once: qd_speed_submit.sh makes the
+#                 other green jobs wait for the first (afterok);
 #      repeating a mode measures the run-to-run spread;
 #   3. timing_summary.txt: one line per run (s/step, solve ms/call and the
-#      other parts) from the end-of-run [STAGE-TIMERS] table.
+#      other parts) from the end-of-run [STAGE-TIMERS] table, then the
+#      [QD-GREEN] build or read lines.  In a green run "solve" is the
+#      G product.
 #
 # Ranks per node below 144 leave cores idle: the BLAS (NVPL *_seq) and
 # MUMPS of the G0 build are sequential, so threads per rank would not be
@@ -71,7 +78,8 @@ if [ -z "${MODES:-}" ]; then
       MODES="default"
    fi
 fi
-GOLD_README_KNOBS+=(ORDER STEPS MODES)
+GREEN_CACHE="${GREEN_CACHE:-${SCRATCH:-${WORK}}/seas-qd-green/bp5_prod_p${ORDER}.bin}"
+GOLD_README_KNOBS+=(ORDER STEPS MODES GREEN_CACHE)
 
 cd "${SEAS_DIR}"
 OUT_ROOT="bp5/results_qd_speed/timing_n${NNODES}_r${NRANKS}_c${CPT}_p${ORDER}_job${SLURM_JOB_ID}"
@@ -81,6 +89,7 @@ g0_provenance "${OUT_ROOT}"
    echo "layout: ${NNODES} node(s), ${NRANKS} ranks, ${CPT} CPUs per rank," \
         "SLURM_TASKS_PER_NODE=${SLURM_TASKS_PER_NODE:-?}"
    echo "modes: ${MODES}; order ${ORDER}; ${STEPS} steps"
+   echo "green cache: ${GREEN_CACHE}"
 } >> "${OUT_ROOT}/provenance.txt"
 
 # ---- 1. Layout and bandwidth ----
@@ -105,6 +114,8 @@ for MODE in ${MODES}; do
    case "${MODE}" in
       loops|matrix) OPS=(--qd-operators "${MODE}") ;;
       default)      OPS=() ;;
+      green)        mkdir -p "$(dirname "${GREEN_CACHE}")"
+                    OPS=(--qd-green --qd-green-cache "${GREEN_CACHE}") ;;
       *) echo "ERROR: unknown mode ${MODE}" >&2; overall=1; continue ;;
    esac
    echo "=== ${TAG}: start $(date -u +%T) ==="
@@ -123,6 +134,13 @@ for MODE in ${MODES}; do
    sed -n '/^\[STAGE-TIMERS\] end of run/,$p' "${OUT}/run.log" \
       | grep '^\[STAGE-TIMERS\]' > "${OUT}/stage_timers_final.txt"
    grep '\[QD-OPERATORS\]' "${OUT}/run.log" > "${OUT}/qd_operators.txt"
+   if [ "${MODE}" = green ]; then
+      grep '\[QD-GREEN\]' "${OUT}/run.log" > "${OUT}/qd_green.txt"
+      if ! grep -q '\[QD-GREEN\] check against the solve path' "${OUT}/qd_green.txt"; then
+         echo "ERROR: ${TAG}: no '[QD-GREEN] check against the solve path' line." >&2
+         overall=1
+      fi
+   fi
 done
 
 # ---- 3. Summary ----
