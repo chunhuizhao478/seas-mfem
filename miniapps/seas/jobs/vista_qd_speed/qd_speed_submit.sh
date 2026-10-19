@@ -40,6 +40,10 @@
 #           The green runs read GREEN_CACHE and must not build it (two
 #           builds of one file at once): the step stops unless the file
 #           exists.  Not in the default STEPS; EVENT_LAYOUTS limits it
+#   compress  jobs/vista_qd_speed/qd_green_compress.sbatch: how far the
+#           p = 1 cache compresses at round-off-level product error (QD
+#           speed item 4, measurement only; 1 node, up to 3 h).  Reads
+#           GREEN_CACHE; stops if it is missing.  Not in the default STEPS
 # Layouts (nodes x ranks, CPUs per rank):
 #   n1_r144  1 x 144, 1   loops and the new default, twice each
 #   n1_r72   1 x 72,  2   default
@@ -160,4 +164,14 @@ if has events; then
           -N "${nodes}" -n "${ranks}" --ntasks-per-node="$((ranks / nodes))" -c 1 \
           -t "${hh}:${mm}:${ss}" jobs/vista_qd_speed/qd_speed_timing.sbatch
    done
+fi
+
+if has compress; then
+   GREEN_CACHE_P1="${GREEN_CACHE:-${SCRATCH:-${WORK}}/seas-qd-green/bp5_prod_p1.bin}"
+   if [ ! -f "${GREEN_CACHE_P1}" ]; then
+      echo "ERROR: compress: no Green's cache ${GREEN_CACHE_P1}." >&2
+      exit 1
+   fi
+   sub "compress" --export="ALL,GREEN_CACHE=${GREEN_CACHE_P1}" \
+       jobs/vista_qd_speed/qd_green_compress.sbatch
 fi
