@@ -29,6 +29,11 @@
 // Apply uses it there.  Every other element keeps the scalar path; with no
 // blocks the result is bit-identical to P2/P3.
 //
+// Local time stepping (profiling plan item 7, lts-kernels-design-rev1 §3.4
+// step 6): half_dt_per_elem, when given, replaces half_dt per element, so
+// each damped element uses half of its own cluster's step.  Without it every
+// bit is as before.
+//
 // Scope (Chunhui Zhao, 2026-10-13): tetrahedral meshes only.
 
 #ifndef MFEM_SEAS_NITSCHE_MASS_HPP
@@ -52,13 +57,16 @@ class NitscheMass
 public:
    NitscheMass(ParMesh &mesh, int order, const Vector &rho_per_elem,
                const std::map<int, DenseMatrix> *damping_blocks = nullptr,
-               real_t half_dt = 0.0)
+               real_t half_dt = 0.0, const Vector *half_dt_per_elem = nullptr)
       : fec_(order, mesh.Dimension(), BasisType::GaussLobatto),
         fes_(&mesh, &fec_), half_dt_(half_dt)
    {
       const int ne = mesh.GetNE();
       MFEM_VERIFY(rho_per_elem.Size() == ne,
                   "NitscheMass: rho_per_elem has size " << rho_per_elem.Size()
+                  << " but the mesh has " << ne << " local elements.");
+      MFEM_VERIFY(!half_dt_per_elem || half_dt_per_elem->Size() == ne,
+                  "NitscheMass: half_dt_per_elem has size " << half_dt_per_elem->Size()
                   << " but the mesh has " << ne << " local elements.");
       for (int e = 0; e < ne; ++e)
       {
@@ -124,7 +132,7 @@ public:
                      {
                         B(c * nd + k, c * nd + l) = rho_per_elem(e) * M(k, l);
                      }
-               B.Add(half_dt, Ce);
+               B.Add(half_dt_per_elem ? (*half_dt_per_elem)(e) : half_dt, Ce);
                DenseMatrix &Binv = block_inv_[e];
                Binv.SetSize(3 * nd);
                DenseMatrixInverse B_inv(B);
@@ -190,7 +198,7 @@ public:
    const Array<int> &ElementScalarDofs(int e) const { return elem_dofs_[e]; }
    const DenseMatrix &ElementMassInverse(int e) const { return minv_[e]; }
    /// half_dt the damping blocks were built with (0 without blocks).
-   real_t HalfDt() const { return half_dt_; }
+   real_t HalfDt() const { return half_dt_; }   // the scalar, not half_dt_per_elem
    int NumDampedElements() const { return static_cast<int>(block_inv_.size()); }
 
 private:

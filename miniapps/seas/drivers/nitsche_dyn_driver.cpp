@@ -77,6 +77,13 @@
 // the tolerance.  No table, no station files.  The ninth column is
 // log10 theta (aging law, with V_0, f_0, b from [friction.rate_state]), psi
 // (strong rate weakening) or the slip path (slip weakening).
+//
+// --lts-report 1 (plan item 7, local time stepping, phase P0): rank 0 prints
+// the rate-2 cluster report of solver/nitsche_lts_setup.hpp for the serial
+// mesh and the run stops before the partition.  --lts-report-cap n picks the
+// clustering of its partition section (hard cap n; 0 = no cap; default 4)
+// and --lts-report-ranks a,b,... the rank counts there (default: this run's
+// rank count when it is above 1).
 
 #include "mfem.hpp"
 #include "../domain/nitsche_wave_operator.hpp"
@@ -90,6 +97,7 @@
 #include "../dynamic/spatial_nucleation.hpp"
 #include "../dynamic/fault_station_file.hpp"
 #include "../dynamic/lts_partition.hpp"   // METIS with element weights (plan item 6)
+#include "../solver/nitsche_lts_setup.hpp"   // --lts-report (plan item 7, P0)
 #ifdef MFEM_USE_HDF5
 #include "../io/fault_vtkhdf_writer.hpp"
 #include "../io/paraview_output.hpp"   // ParaViewOutput::ProbeH5ZZfpPluginOrAbort
@@ -669,7 +677,8 @@ int main(int argc, char *argv[])
                       " [--station-every n] [--dump-every n] [--log-every n]"
                       " [--station-copies average|first] [--fast-fault 0|1]"
                       " [--fused-spmv 0|1] [--dense-blocks 0|1] [--fault-weight w]"
-                      " [--fast-fault-output 0|1]\n";
+                      " [--fast-fault-output 0|1] [--lts-report 0|1]"
+                      " [--lts-report-cap n] [--lts-report-ranks a,b,...]\n";
       }
       return 1;
    }
@@ -708,6 +717,21 @@ int main(int argc, char *argv[])
    const int dense_blocks = ArgInt(argc, argv, "--dense-blocks", 1);
    const int fast_fault_output = ArgInt(argc, argv, "--fast-fault-output", 1);
    const real_t fault_weight = ArgReal(argc, argv, "--fault-weight", kDefaultFaultWeight);
+   const int lts_report = ArgInt(argc, argv, "--lts-report", 0);
+   const int lts_report_cap = ArgInt(argc, argv, "--lts-report-cap", 4);
+   std::vector<int> lts_report_ranks;
+   {
+      std::stringstream ss(ArgStr(argc, argv, "--lts-report-ranks", ""));
+      for (std::string tok; std::getline(ss, tok, ',');)
+      {
+         if (!tok.empty()) { lts_report_ranks.push_back(std::atoi(tok.c_str())); }
+      }
+      if (lts_report_ranks.empty() && nranks > 1) { lts_report_ranks.push_back(nranks); }
+      for (int r : lts_report_ranks)
+      {
+         MFEM_VERIFY(r >= 2, "--lts-report-ranks: rank counts must be >= 2; got " << r);
+      }
+   }
    MFEM_VERIFY(station_copies == "average" || station_copies == "first",
                "--station-copies " << station_copies << ": expected average or first");
    const real_t cfl = cfg.numerics.cfl;
@@ -780,6 +804,14 @@ int main(int argc, char *argv[])
       if (!ign.empty()) { std::cout << "  ignored [numerics] keys (velocity-stress path):" << ign << "\n"; }
    }
 
+   // ------------------------------------------------------------ material
+   MFEM_VERIFY(cfg.material.kind == spatial::MaterialKind::Constant && !cfg.velocity.use_sidecar,
+               "Nitsche driver (P7): only the constant material "
+               "([velocity] use_sidecar = false, [material] kind constant) is "
+               "wired; the sidecar / depth-profile / halfspace selections are P8.");
+   MaterialField material = MaterialField::MakeConstant(
+      cfg.material_fallback.lambda, cfg.material_fallback.mu, cfg.material_fallback.rho);
+
    // ------------------------------------------------------------ mesh
    std::unique_ptr<Mesh> smesh = std::make_unique<Mesh>(mesh_path.c_str(), 1, 1);
    MFEM_VERIFY(smesh->Dimension() == 3, "mesh must be 3-D");
@@ -790,6 +822,23 @@ int main(int argc, char *argv[])
                   << Geometry::Name[smesh->GetElementBaseGeometry(e)]);
    }
    const long long ne_global = smesh->GetNE();
+   if (lts_report)
+   {
+      MFEM_VERIFY(cfg.boundary.fault_attr > 0, "[boundary] fault_attr is required");
+      if (g_rank == 0)
+      {
+         const auto &mf = cfg.material_fallback;
+         const real_t cp = std::sqrt((mf.lambda + 2.0 * mf.mu) / mf.rho);
+         const NitscheLtsMesh lm = BuildNitscheLtsMesh(*smesh, p, cfl * kCeig[p], cp,
+                                                       cfg.boundary.fault_attr);
+         std::cout << "  LTS report: p = " << p << ", cfl " << cfl << " x C(p) " << kCeig[p]
+                   << ", c_p " << cp << " m/s\n";
+         PrintNitscheLtsReport(std::cout, *smesh, lm, lts_report_cap, lts_report_ranks);
+         std::cout << std::flush;
+      }
+      MPI_Barrier(MPI_COMM_WORLD);
+      return 0;
+   }
    // Plan item 6: METIS weight per element 1 + w (number of its fault faces),
    // so ranks that own fault faces get fewer tets (w = 0: MFEM's default cut).
    std::vector<int> part;
@@ -828,14 +877,6 @@ int main(int argc, char *argv[])
    }
    ParMesh pmesh(MPI_COMM_WORLD, *smesh, part.empty() ? nullptr : part.data());
    smesh.reset();
-
-   // ------------------------------------------------------------ material
-   MFEM_VERIFY(cfg.material.kind == spatial::MaterialKind::Constant && !cfg.velocity.use_sidecar,
-               "Nitsche driver (P7): only the constant material "
-               "([velocity] use_sidecar = false, [material] kind constant) is "
-               "wired; the sidecar / depth-profile / halfspace selections are P8.");
-   MaterialField material = MaterialField::MakeConstant(
-      cfg.material_fallback.lambda, cfg.material_fallback.mu, cfg.material_fallback.rho);
 
    // ------------------------------------------------------------ boundary
    MFEM_VERIFY(cfg.boundary.fault_attr > 0, "[boundary] fault_attr is required");

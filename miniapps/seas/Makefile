@@ -3082,6 +3082,35 @@ seas_test_nitsche_p3: $(TEST_NITSCHE_P3_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
 	    $(MFEM_LIBS) $(HDF5_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
+# Profiling plan item 7 (local time stepping), phases P1 and P2: the operator
+# split by element owner and the serial multirate leapfrog (L-1 .. L-6), with
+# Kelvin-Voigt damping and absorbing faces per cluster (L-7 .. L-10); one rank.
+TEST_NITSCHE_LTS_SRC = tests/verification/test_nitsche_lts.cpp
+TEST_NITSCHE_LTS_OBJ = $(TEST_NITSCHE_LTS_SRC:.cpp=.o)
+$(TEST_NITSCHE_LTS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             domain/nitsche_material_sample.hpp \
+                             domain/nitsche_wave_operator.hpp \
+                             domain/nitsche_mass.hpp \
+                             solver/nitsche_cfl.hpp \
+                             solver/nitsche_lts_setup.hpp \
+                             solver/nitsche_lts_stepper.hpp \
+                             integrator/dg_elasticity_ip_combined_integrator.hpp \
+                             dynamic/lts_clustering.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_lts: $(TEST_NITSCHE_LTS_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+                       $(LTS_CLUSTERING_OBJ) $(LTS_PARTITION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_LTS_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) $(LTS_CLUSTERING_OBJ) \
+	    $(LTS_PARTITION_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-lts: seas_test_nitsche_lts
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_lts
+
 # Kelvin-Voigt layer prototype (Chunhui Zhao, 2026-10-14): fault-free box,
 # CFL with damping, P_kv <= 0, energy balance, smooth vs grid-scale damping.
 TEST_NITSCHE_KV_SRC = tests/verification/test_nitsche_kv.cpp
@@ -3372,7 +3401,12 @@ NITSCHE_DYN_DRIVER_SRC = drivers/nitsche_dyn_driver.cpp
 NITSCHE_DYN_DRIVER_OBJ = $(NITSCHE_DYN_DRIVER_SRC:.cpp=.o)
 $(NITSCHE_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
                              domain/nitsche_wave_operator.hpp \
+                             domain/nitsche_mass.hpp \
+                             solver/nitsche_cfl.hpp \
+                             integrator/dg_elasticity_ip_combined_integrator.hpp \
                              dynamic/lts_partition.hpp \
+                             dynamic/lts_clustering.hpp \
+                             solver/nitsche_lts_setup.hpp \
                              domain/nitsche_energy.hpp \
                              spatial/code/spatial_friction.hpp \
                              dynamic/fault_station_file.hpp \
@@ -3386,10 +3420,10 @@ $(NITSCHE_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
 
 seas_nitsche_dyn_driver: $(NITSCHE_DYN_DRIVER_OBJ) $(SPATIAL_FRICTION_OBJ) \
                          $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
-                         $(LTS_PARTITION_OBJ)
+                         $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(NITSCHE_DYN_DRIVER_OBJ) \
 	    $(SPATIAL_FRICTION_OBJ) $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
-	    $(LTS_PARTITION_OBJ) $(MFEM_LIBS)
+	    $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # P6 long checks (minutes each; np=8 unless noted): T-15 energy balance and
