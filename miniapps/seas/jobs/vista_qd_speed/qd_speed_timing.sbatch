@@ -23,7 +23,8 @@
 #      bandwidth this layout gets.  An unbalanced layout stops the job
 #      before any timing run;
 #   2. for each mode in MODES (default "loops default loops default" on one
-#      full node, else "default"), 1,000 accepted steps of the v63 deck at
+#      full node, else "default"), RUN_STEPS (default 1,000) accepted steps
+#      of the v63 deck at
 #      p=ORDER (default 1) with --stage-timers 100, as G0's
 #      jobs/vista/g0_timing.sbatch, without checkpoints:
 #        loops    --qd-operators loops (the face loops, the old default);
@@ -67,7 +68,15 @@ fi
 echo "Checkout: ${SEAS_MFEM_ROOT} at $(git rev-parse HEAD) ($(git rev-parse --abbrev-ref HEAD))"
 
 ORDER="${ORDER:-1}"
-STEPS="${STEPS:-1000}"
+# Not STEPS: qd_speed_submit.sh's STEPS (its list of job kinds) reaches
+# this script through sbatch's environment, and was taken for the step
+# count (jobs 1080401-1080409 ran 0 steps with --max-steps "build timing
+# green").
+RUN_STEPS="${RUN_STEPS:-1000}"
+if ! [[ "${RUN_STEPS}" =~ ^[1-9][0-9]*$ ]]; then
+   echo "ERROR: RUN_STEPS='${RUN_STEPS}' is not a positive integer." >&2
+   exit 1
+fi
 NNODES="${SLURM_JOB_NUM_NODES:-1}"
 NRANKS="${SLURM_NTASKS:-144}"
 CPT="${SLURM_CPUS_PER_TASK:-1}"
@@ -79,7 +88,7 @@ if [ -z "${MODES:-}" ]; then
    fi
 fi
 GREEN_CACHE="${GREEN_CACHE:-${SCRATCH:-${WORK}}/seas-qd-green/bp5_prod_p${ORDER}.bin}"
-GOLD_README_KNOBS+=(ORDER STEPS MODES GREEN_CACHE)
+GOLD_README_KNOBS+=(ORDER RUN_STEPS MODES GREEN_CACHE)
 
 cd "${SEAS_DIR}"
 OUT_ROOT="bp5/results_qd_speed/timing_n${NNODES}_r${NRANKS}_c${CPT}_p${ORDER}_job${SLURM_JOB_ID}"
@@ -88,7 +97,7 @@ g0_provenance "${OUT_ROOT}"
 {
    echo "layout: ${NNODES} node(s), ${NRANKS} ranks, ${CPT} CPUs per rank," \
         "SLURM_TASKS_PER_NODE=${SLURM_TASKS_PER_NODE:-?}"
-   echo "modes: ${MODES}; order ${ORDER}; ${STEPS} steps"
+   echo "modes: ${MODES}; order ${ORDER}; ${RUN_STEPS} steps"
    echo "green cache: ${GREEN_CACHE}"
 } >> "${OUT_ROOT}/provenance.txt"
 
@@ -120,7 +129,7 @@ for MODE in ${MODES}; do
    esac
    echo "=== ${TAG}: start $(date -u +%T) ==="
    ibrun ./seas_bp5_full --mesh "${G0_MESH_PROD}" "${G0_V63_FLAGS[@]}" \
-         --order "${ORDER}" "${OPS[@]}" --max-steps "${STEPS}" \
+         --order "${ORDER}" "${OPS[@]}" --max-steps "${RUN_STEPS}" \
          --stage-timers 100 --checkpoint-interval 0 \
          --output-dir "${OUT}" --output-prefix "${PFX}" > "${OUT}/run.log" 2>&1
    rc=$?
@@ -133,6 +142,11 @@ for MODE in ${MODES}; do
    fi
    sed -n '/^\[STAGE-TIMERS\] end of run/,$p' "${OUT}/run.log" \
       | grep '^\[STAGE-TIMERS\]' > "${OUT}/stage_timers_final.txt"
+   if ! grep -q "end of run: ${RUN_STEPS} accepted steps" "${OUT}/stage_timers_final.txt"; then
+      echo "ERROR: ${TAG}: the run did not take ${RUN_STEPS} accepted steps:" \
+           "$(grep 'end of run' "${OUT}/stage_timers_final.txt")" >&2
+      overall=1
+   fi
    grep '\[QD-OPERATORS\]' "${OUT}/run.log" > "${OUT}/qd_operators.txt"
    if [ "${MODE}" = green ]; then
       grep '\[QD-GREEN\]' "${OUT}/run.log" > "${OUT}/qd_green.txt"
