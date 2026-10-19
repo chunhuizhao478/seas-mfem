@@ -6,7 +6,9 @@
 
    1. Layout.  Every rank reports its node, the CPUs it may run on
       (sched_getaffinity) and the socket of the first of them
-      (/sys/devices/system/cpu/cpuN/topology/physical_package_id); rank 0
+      (/sys/devices/system/cpu/cpuN/topology/physical_package_id, numbered
+      0, 1, ... in the order of the node's distinct ids: Vista's Grace
+      nodes report ids such as 56 and 2384); rank 0
       prints the ranks per node and socket and whether ranks are bound
       (one rank's CPU set smaller than the node).  "LAYOUT balanced" means
       every node holds the same number of ranks and, on every node, the
@@ -54,11 +56,22 @@ int main(int argc, char **argv) {
   /* CPUs allowed, first allowed CPU, its socket, sockets on the node */
   int info[4] = {CPU_COUNT(&set), -1, -1, 1};
   for (int c = 0; c < CPU_SETSIZE; c++) if (CPU_ISSET(c, &set)) { info[1] = c; break; }
-  info[2] = info[1] >= 0 ? cpu_package(info[1]) : -1;
   long ncpu_node = sysconf(_SC_NPROCESSORS_ONLN);
+  /* the node's distinct package ids, ascending (at most 8) */
+  int ids[8], nid = 0;
   for (int c = 0; c < ncpu_node; c++) {
-    int pk = cpu_package(c);
-    if (pk >= 0 && pk < 8 && pk + 1 > info[3]) info[3] = pk + 1;
+    int pk = cpu_package(c), k = 0;
+    if (pk < 0) continue;
+    while (k < nid && ids[k] < pk) k++;
+    if (k < nid && ids[k] == pk) continue;
+    if (nid == 8) continue;
+    memmove(ids + k + 1, ids + k, (nid - k) * sizeof(int));
+    ids[k] = pk; nid++;
+  }
+  if (nid > 0) info[3] = nid;
+  if (info[1] >= 0) {
+    int pk = cpu_package(info[1]);
+    for (int k = 0; k < nid; k++) if (ids[k] == pk) { info[2] = k; break; }
   }
 
   char *hosts = r ? NULL : malloc((size_t)p * HOSTLEN);
