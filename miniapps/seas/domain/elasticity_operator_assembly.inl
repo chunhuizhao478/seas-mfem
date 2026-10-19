@@ -312,6 +312,15 @@
             }
          }
 
+         if (solver_type_ == SolverType::OperatorOnly)
+         {
+            // Explicit time stepping: only ApplyStiffness is used, and in
+            // parallel it reads the HypreParMatrix alone.  Free the serial
+            // form and its local matrix (about half the operator memory).
+            cached_a_.reset();
+            stiffness_assembled_ = true;
+            return;
+         }
 #ifdef MFEM_USE_MUMPS
          const int mumps_print_level = matrix_stats_enabled_ ? 2 : 1;
          if (solver_type_ == SolverType::MUMPS)

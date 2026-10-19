@@ -36,6 +36,8 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <map>
+#include <vector>
 
 namespace mfem
 {
@@ -43,7 +45,11 @@ namespace seas
 {
 
 /// Linear solver type for the elasticity domain operator
-enum class SolverType { CG_AMG, MUMPS, MUMPS_BLR, GMRES_BlockILU, GMRES_AMG, SUPERLU, STRUMPACK };
+/// OperatorOnly: assemble K as a HypreParMatrix for ApplyStiffness and
+/// build no solver; the serial bilinear form is released after
+/// ParallelAssemble (explicit time stepping never calls Solve).
+enum class SolverType { CG_AMG, MUMPS, MUMPS_BLR, GMRES_BlockILU, GMRES_AMG, SUPERLU, STRUMPACK,
+                        OperatorOnly };
 
 /// Boundary condition mode for the elasticity domain operator
 ///
@@ -281,6 +287,25 @@ public:
    /// first use.  `u` must have the true-vector layout Solve uses (X_/B_).
    void ApplyStiffness(const Vector &u, Vector &Ku) const;
 
+#ifdef MFEM_USE_MPI
+   /// The assembled parallel K (assembles on first use; parallel meshes).
+   HypreParMatrix &ParStiffness() const
+   {
+      if (!stiffness_assembled_) { AssembleStiffness(); }
+      HypreParMatrix *K = cached_Ah_.As<HypreParMatrix>();
+      MFEM_VERIFY(K, "ParStiffness: no HypreParMatrix (serial mesh?)");
+      return *K;
+   }
+#endif
+   /// Free the assembled K (and the serial form, if kept).  The next
+   /// ApplyStiffness / Solve / ParStiffness assembles it again.
+   void ReleaseStiffness()
+   {
+      cached_Ah_.Clear();
+      cached_a_.reset();
+      stiffness_assembled_ = false;
+   }
+
    /// Assemble only the Dirichlet loading RHS contribution into the DG
    /// displacement space. Debug utility for first-step RHS comparison.
    void AssembleDirichletOnlyRHS(Vector &rhs, real_t time) const;
@@ -350,6 +375,24 @@ public:
    ///                  this is round-off (plan, "The scalar gamma").
    /// IP only.  Implementation: elasticity_operator_penalty.inl.
    void GetFaultFacePenalties(Vector &sigma_F_face, Vector &spread) const;
+
+   /// Profiling plan item 3: precompute, per fault face, the dense operators
+   /// of the IP traction recovery (A_f) and of the slip load (G_f) from the
+   /// production per-face kernels.  Collective.  IP only.
+   /// Implementation: elasticity_operator_fault_ops.inl.
+   void BuildFaultFaceOps();
+   bool HasFaultFaceOps() const { return ffo_.built; }
+   /// Local fault faces in the per-face operators: interior, shared.
+   int FaultFaceOpsInterior() const { return ffo_.nfi; }
+   int FaultFaceOpsShared() const { return ffo_.nf - ffo_.nfi; }
+   /// ComputeTraction(u, slip_bc, traction, &normal_traction) through the
+   /// stored A_f.  `u` is the local (true) displacement vector.  Collective:
+   /// exchanges u on the neighbour elements of shared fault faces only.
+   void ComputeTractionFast(const Vector &u, const Vector &slip_bc,
+                            Vector &traction, Vector &normal_traction) const;
+   /// rhs += AssembleSlipOnlyRHS(slip_bc) through the stored G_f (no
+   /// communication; rhs is not cleared).
+   void AddSlipLoadFast(const Vector &slip_bc, Vector &rhs) const;
 
    /// Access the constitutive model.
    const ConstitutiveModel &GetModel() const { return *model_; }
@@ -561,6 +604,32 @@ private:
 
    // Multi-DOF fault discretization (v45, Phase 2)
    std::unique_ptr<FaceQuadrature> face_quad_;
+
+   /// Per-fault-face operators (BuildFaultFaceOps); faces in ComputeTraction
+   /// order (interior, then shared).
+   struct FaultFaceOps
+   {
+      bool built = false;
+      int nf = 0, nfi = 0;
+      std::vector<int> n1, n2;              ///< element vdofs per side
+      std::vector<int> off_vd, vd;          ///< local vdofs (side 2 of a shared face: -1)
+      std::vector<int> off_A, off_G;
+      std::vector<real_t> A, G;             ///< row-major blocks
+      std::vector<int> nbr_face_elem;       ///< shared face -> face-neighbour element
+      std::vector<int> nbr_off;             ///< shared face -> offset in recv_buf
+      std::vector<int> recv_ranks, recv_off, send_ranks, send_off, send_elems, send_vd;
+      mutable std::vector<real_t> recv_buf, send_buf, x;
+#ifdef MFEM_USE_MPI
+      mutable std::vector<MPI_Request> reqs;
+#endif
+   };
+   FaultFaceOps ffo_;
+   void FaultFaceTractionKernel_(int idx, FaceElementTransformations &FTr,
+                                 const FiniteElement &fe1, const FiniteElement &fe2,
+                                 const Vector &u1, const Vector &u2,
+                                 const Vector &slip_bc, Vector &out) const;
+   void BuildFaultNbrExchange_();
+   void FaultNbrExchange_(const Vector &u) const;
    int nbf_per_face_ = 1;   // BR2: 1, IP: (p+1)(p+2)/2 on triangle faces
    int num_fault_faces_ = 0; // number of fault faces (interior + shared)
    int num_owned_fault_faces_ = 0;
@@ -666,6 +735,7 @@ private:
 
 #include "elasticity_operator_traction.inl"
 #include "elasticity_operator_penalty.inl"
+#include "elasticity_operator_fault_ops.inl"
 
 
 // Convenience type alias

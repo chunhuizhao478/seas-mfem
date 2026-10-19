@@ -89,6 +89,7 @@
 #include "../spatial/code/spatial_friction.hpp"
 #include "../dynamic/spatial_nucleation.hpp"
 #include "../dynamic/fault_station_file.hpp"
+#include "../dynamic/lts_partition.hpp"   // METIS with element weights (plan item 6)
 #ifdef MFEM_USE_HDF5
 #include "../io/fault_vtkhdf_writer.hpp"
 #include "../io/paraview_output.hpp"   // ParaViewOutput::ProbeH5ZZfpPluginOrAbort
@@ -127,6 +128,10 @@ std::string ArgStr(int argc, char *argv[], const char *flag, const std::string &
    for (int i = 1; i + 1 < argc; i++) { if (std::string(argv[i]) == flag) { return argv[i + 1]; } }
    return def;
 }
+/// --fault-weight default (plan item 6): extra METIS weight per fault-face
+/// side, in units of one tet.
+constexpr real_t kDefaultFaultWeight = 0.0;
+
 real_t ArgReal(int argc, char *argv[], const char *flag, real_t def)
 {
    const std::string v = ArgStr(argc, argv, flag, "");
@@ -420,13 +425,18 @@ void MakeDirs(const std::string &d)
 class FaultVTKHDFOutput
 {
 public:
+   /// fast: plan item 1 (vtkhdf::FaultHDFStream: same file, less work per
+   /// frame; param_a and param_Dc written once); else the SAFS writer.
    FaultVTKHDFOutput(NitscheWaveOperator &op, ParMesh &pmesh, int order,
                      const std::string &dir,
-                     ParaViewHDFDataCollection::HDFCompression alg, double param)
-      : op_(op), E_(op.Elasticity()), dir_(dir), fe_(order, BasisType::GaussLobatto)
+                     ParaViewHDFDataCollection::HDFCompression alg, double param,
+                     bool fast = true)
+      : op_(op), E_(op.Elasticity()), dir_(dir), fe_(order, BasisType::GaussLobatto),
+        fast_(fast)
    {
       state_.compression_alg = alg;
       state_.compression_param = param;
+      stream_.SetCompression(alg, param);
       nbf_ = E_.GetNbfPerFace();
       // the face basis must be the one the fault DOFs are nodal values of
       const IntegrationRule &nir = E_.GetFaceQuadrature()->GetNodalRule();
@@ -521,6 +531,8 @@ public:
                            "normal_stress", "param_a", "param_Dc"};
       if (op_.HasPrakashClifton()) { pack_.field_names.push_back("normal_stress_pc"); nc_ = 11; }
       pack_.field_arrays.assign(pack_.field_names.size(), std::vector<double>());
+      constant_.assign(pack_.field_names.size(), 0);
+      constant_[9] = constant_[10] = 1;   // param_a, param_Dc
    }
 
    /// Collective.  tau = -(X* + gamma V) and sigma_n_eff as the stations;
@@ -593,8 +605,12 @@ public:
          }
       }
       const auto t1 = std::chrono::steady_clock::now();
-      vtkhdf::WriteFaultPackHdf(state_, dir_, cycle, t, pack_, g_rank, Mpi::WorldSize(),
-                                MPI_COMM_WORLD);
+      if (fast_) { stream_.Write(dir_, t, pack_, constant_, g_rank, Mpi::WorldSize(), MPI_COMM_WORLD); }
+      else
+      {
+         vtkhdf::WriteFaultPackHdf(state_, dir_, cycle, t, pack_, g_rank, Mpi::WorldSize(),
+                                   MPI_COMM_WORLD);
+      }
       frames_++;
       const auto t2 = std::chrono::steady_clock::now();
       pack_seconds_ += std::chrono::duration<double>(t1 - t0).count();
@@ -604,6 +620,10 @@ public:
    int Frames() const { return frames_; }
    double Seconds() const { return seconds_; }
    double PackSeconds() const { return pack_seconds_; }
+   bool Fast() const { return fast_; }
+   /// fast writer only: gather and HDF5 write seconds on this rank
+   double GatherSeconds() const { return stream_.GatherSeconds(); }
+   double WriteSeconds() const { return stream_.WriteSeconds(); }
 
 private:
    /// sub-triangles of the 6 corners (0,1,2 vertices; 3,4,5 midpoints of
@@ -621,6 +641,9 @@ private:
    std::vector<std::array<int, 3>> corners_;
    vtu::LocalFaultPack pack_;
    vtkhdf::FaultHDFState state_;
+   vtkhdf::FaultHDFStream stream_;
+   std::vector<char> constant_;
+   bool fast_ = true;
    int frames_ = 0;
    double seconds_ = 0.0, pack_seconds_ = 0.0;
 };
@@ -644,7 +667,9 @@ int main(int argc, char *argv[])
          std::cerr << "usage: seas_nitsche_dyn_driver --config deck.toml [--mesh m.msh]"
                       " [--order p] [--tfinal s] [--output-dir d] [--prefix name]"
                       " [--station-every n] [--dump-every n] [--log-every n]"
-                      " [--station-copies average|first]\n";
+                      " [--station-copies average|first] [--fast-fault 0|1]"
+                      " [--fused-spmv 0|1] [--dense-blocks 0|1] [--fault-weight w]"
+                      " [--fast-fault-output 0|1]\n";
       }
       return 1;
    }
@@ -674,6 +699,15 @@ int main(int argc, char *argv[])
    const int dump_every = ArgInt(argc, argv, "--dump-every", 0);
    const int log_every = ArgInt(argc, argv, "--log-every", 100);
    const std::string station_copies = ArgStr(argc, argv, "--station-copies", "average");
+   // Profiling plan (Chunhui Zhao, 2026-10-17) items 3, 4, 6: precomputed fault
+   // face operators, fused K u + K_eta v, fault-weighted partition.  1 = on.
+   const int fast_fault = ArgInt(argc, argv, "--fast-fault", 1);
+   const int fused_spmv = ArgInt(argc, argv, "--fused-spmv", 1);
+   // item 8a (2026-10-18): K u (+ K_eta v) from dense element and face
+   // blocks; takes precedence over --fused-spmv, which applies when it is 0
+   const int dense_blocks = ArgInt(argc, argv, "--dense-blocks", 1);
+   const int fast_fault_output = ArgInt(argc, argv, "--fast-fault-output", 1);
+   const real_t fault_weight = ArgReal(argc, argv, "--fault-weight", kDefaultFaultWeight);
    MFEM_VERIFY(station_copies == "average" || station_copies == "first",
                "--station-copies " << station_copies << ": expected average or first");
    const real_t cfl = cfg.numerics.cfl;
@@ -756,7 +790,43 @@ int main(int argc, char *argv[])
                   << Geometry::Name[smesh->GetElementBaseGeometry(e)]);
    }
    const long long ne_global = smesh->GetNE();
-   ParMesh pmesh(MPI_COMM_WORLD, *smesh);
+   // Plan item 6: METIS weight per element 1 + w (number of its fault faces),
+   // so ranks that own fault faces get fewer tets (w = 0: MFEM's default cut).
+   std::vector<int> part;
+   if (fault_weight > 0.0 && Mpi::WorldSize() > 1)
+   {
+      MFEM_VERIFY(cfg.boundary.fault_attr > 0, "[boundary] fault_attr is required");
+      const int ne = smesh->GetNE();
+      std::vector<double> cost(ne, 1.0);
+      long long nface = 0;
+      for (int be = 0; be < smesh->GetNBE(); be++)
+      {
+         if (smesh->GetBdrAttribute(be) != cfg.boundary.fault_attr) { continue; }
+         int f, o, e1, e2;
+         smesh->GetBdrElementFace(be, &f, &o);
+         smesh->GetFaceElements(f, &e1, &e2);
+         if (e1 >= 0) { cost[e1] += fault_weight; }
+         if (e2 >= 0) { cost[e2] += fault_weight; }
+         nface++;
+      }
+      // integer METIS weights: 100 per tet + 100 w per fault-face side
+      for (double &c : cost) { c *= 100.0; }
+      const Table &e2e = smesh->ElementToElementTable();
+      std::vector<int> xadj(e2e.GetI(), e2e.GetI() + ne + 1);
+      std::vector<int> adj(e2e.GetJ(), e2e.GetJ() + e2e.Size_of_connections());
+      std::vector<int> cluster(ne, 0);
+      LtsPartitionOptions popt;
+      popt.imbalance = 1.03;   // METIS's default for k-way, as MFEM's cut
+      BuildLtsAwarePartition(ne, xadj, adj, cluster, 1, Mpi::WorldSize(), &cost, {}, popt, part);
+      const LtsPartitionImbalance imb =
+         ComputeLtsPartitionImbalance(cluster, 1, part, Mpi::WorldSize(), &cost, {});
+      if (g_rank == 0)
+      {
+         std::cout << "  partition: METIS with fault weight w = " << fault_weight << " ("
+                   << nface << " fault faces); weighted max/mean " << imb.overall << "\n";
+      }
+   }
+   ParMesh pmesh(MPI_COMM_WORLD, *smesh, part.empty() ? nullptr : part.data());
    smesh.reset();
 
    // ------------------------------------------------------------ material
@@ -1356,7 +1426,8 @@ int main(int argc, char *argv[])
       {
          param = ocfg.paraview_fault_deflate_level;
       }
-      pv = std::make_unique<FaultVTKHDFOutput>(op, pmesh, p, out_dir, alg, param);
+      pv = std::make_unique<FaultVTKHDFOutput>(op, pmesh, p, out_dir, alg, param,
+                                               fast_fault_output != 0);
       if (g_rank == 0)
       {
          std::cout << "  fault ParaView output every " << pv_every << " steps (" << pv_every * dt
@@ -1428,6 +1499,9 @@ int main(int argc, char *argv[])
       }
       return 0;
    }
+   op.SetFastFaultKernels(fast_fault != 0);
+   op.SetFusedStiffness(fused_spmv != 0);
+   op.SetDenseBlocks(dense_blocks != 0);
    CentralDifferenceSolver ode;
    ode.Init(op);
    if (stations)
@@ -1438,10 +1512,17 @@ int main(int argc, char *argv[])
    }
    real_t max_ratio_run = 0.0, max_V_run = 0.0, min_sig_run = 1e300, max_sig_run = -1e300;
    real_t min_pc_run = 1e300, max_pc_run = -1e300;
+   // this rank's time inside ode.Step; step 1 is kept apart because it also
+   // assembles K, K_eta, the fused pattern and the fault face operators
+   double step_sec = 0.0, step1_sec = 0.0, fault_sec1 = 0.0;
    for (long s = 1; s <= nsteps; s++)
    {
       real_t h = dt;
+      const auto ts0 = std::chrono::steady_clock::now();
       ode.Step(U, Ud, t, h);
+      const double ds = std::chrono::duration<double>(std::chrono::steady_clock::now() - ts0).count();
+      if (s == 1) { step1_sec = ds; fault_sec1 = op.FaultSeconds(); }
+      else { step_sec += ds; }
       const NitscheStepRecord &rec = op.LastStep();
       max_ratio_run = std::max(max_ratio_run, rec.max_V_dt_over_Dc);
       max_V_run = std::max(max_V_run, rec.max_V);
@@ -1540,10 +1621,66 @@ int main(int argc, char *argv[])
                 << (pv->Frames() ? pv->Seconds() / pv->Frames() : 0.0) << " s/frame: pack "
                 << (pv->Frames() ? pv->PackSeconds() / pv->Frames() : 0.0)
                 << ", gather + HDF write "
-                << (pv->Frames() ? (pv->Seconds() - pv->PackSeconds()) / pv->Frames() : 0.0)
-                << ")\n";
+                << (pv->Frames() ? (pv->Seconds() - pv->PackSeconds()) / pv->Frames() : 0.0);
+      if (pv->Fast() && pv->Frames())
+      {
+         std::cout << " = gather " << pv->GatherSeconds() / pv->Frames() << " + write "
+                   << pv->WriteSeconds() / pv->Frames();
+      }
+      std::cout << "; " << (pv->Fast() ? "fast" : "SAFS") << " writer)\n";
    }
 #endif
+   {
+      // per-rank time inside ode.Step after step 1: the spread shows load imbalance
+      const long ns = nsteps - 1;
+      double mn = step_sec, mx = step_sec, sm = step_sec, s1 = step1_sec;
+      MPI_Allreduce(MPI_IN_PLACE, &mn, 1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
+      MPI_Allreduce(MPI_IN_PLACE, &mx, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+      MPI_Allreduce(MPI_IN_PLACE, &sm, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+      MPI_Allreduce(MPI_IN_PLACE, &s1, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+      if (g_rank == 0)
+      {
+         std::cout << std::setprecision(6) << "  time in ode.Step per rank after step 1: min " << mn
+                   << " s, mean " << sm / Mpi::WorldSize() << " s, max " << mx << " s ("
+                   << (ns > 0 ? 1e3 * mx / ns : 0.0) << " ms/step at the max); step 1 " << s1
+                   << " s (with the operator assembly); fast fault "
+                   << (op.FastFaultKernelsActive() ? "on" : "off") << ", fused K/K_eta "
+                   << (op.FusedStiffnessActive() ? "on" : "off");
+         if (op.FusedStiffnessActive())
+         {
+            std::cout << " (union pattern adds " << op.FusedExtraEntries() << " of "
+                      << op.FusedEntriesK() << " entries)";
+         }
+         std::cout << ", dense blocks " << (op.DenseBlocksActive() ? "on" : "off");
+         if (op.DenseBlocksActive())
+         {
+            std::cout << " (" << op.DenseBlockBytes() / 1e6 << " MB over all ranks)";
+         }
+         std::cout << "\n";
+      }
+      // cost model for the partition weight (plan item 6), after step 1: per
+      // step, c_tet per tet of the non-fault work and c_side per fault-face
+      // side of the fault work (an interior face has two sides on this rank,
+      // a shared face one); w = c_side / c_tet.  On more than one rank the
+      // fault time also holds waits for neighbours, so 1-rank runs give the
+      // cleanest w.
+      const double fsec = op.FaultSeconds() - fault_sec1;
+      const auto &el = op.Elasticity();
+      double loc[3] = {step_sec - fsec, fsec,
+                       2.0 * el.FaultFaceOpsInterior() + el.FaultFaceOpsShared()};
+      double glob[3];
+      MPI_Allreduce(loc, glob, 3, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+      double fmx = fsec;
+      MPI_Allreduce(MPI_IN_PLACE, &fmx, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+      if (g_rank == 0 && ns > 0)
+      {
+         const double c_tet = glob[0] / ns / ne_global;
+         const double c_side = glob[2] > 0 ? glob[1] / ns / glob[2] : 0.0;
+         std::cout << std::setprecision(4) << "  fault work: " << 1e3 * fmx / ns
+                   << " ms/step on the busiest rank; cost per step " << 1e6 * c_tet << " us per tet, "
+                   << 1e6 * c_side << " us per fault-face side (w = " << c_side / c_tet << " tets)\n";
+      }
+   }
    const real_t wall = std::chrono::duration<real_t>(std::chrono::steady_clock::now() - wall0).count();
    if (g_rank == 0)
    {

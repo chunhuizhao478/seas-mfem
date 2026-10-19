@@ -103,6 +103,8 @@
 #include "nitsche_material_sample.hpp"
 #include "nitsche_mass.hpp"
 #include "elasticity_operator.hpp"
+#include "fused_stiffness_pair.hpp"
+#include "dense_block_stiffness.hpp"
 #include "../integrator/dg_absorbing_bc_integrator.hpp"
 #include "../fault/fault_orientation.hpp"
 #include "../fault/fault_frame.hpp"
@@ -114,6 +116,9 @@
 #include <limits>
 #include <memory>
 #include <vector>
+#if defined(__GLIBC__)
+#include <malloc.h>   // malloc_trim
+#endif
 
 namespace mfem
 {
@@ -197,7 +202,7 @@ public:
       elast_ = std::make_unique<ElasticityDomainOperator<ParMesh>>(
          mesh, order, sample_->Lambda(), sample_->Mu(), lam_fb, mu_fb,
          /*Vp=*/0.0, /*Wf=*/0.0, /*lf=*/0.0, bc, DGMethod::IP,
-         SolverType::CG_AMG, config);
+         SolverType::OperatorOnly, config);
 
       int nfd = elast_->GetNumFaultDOFs();
       MPI_Allreduce(MPI_IN_PLACE, &nfd, 1, MPI_INT, MPI_SUM, mesh.GetComm());
@@ -440,9 +445,16 @@ public:
    void TrialTraction(const Vector &x, const Vector &d, Vector &T)
    {
       ToKernelLocal_(d, slip_k_);
-      u_gf_->Vector::operator=(x);
-      elast_->ComputeTractionDiagnostics(*u_gf_, slip_k_, Tk_, Tks_, Tkc_, jr_k_,
-                                         &snk_);
+      if (UseFastFault_())
+      {
+         elast_->ComputeTractionFast(x, slip_k_, Tk_, snk_);
+      }
+      else
+      {
+         u_gf_->Vector::operator=(x);
+         elast_->ComputeTractionDiagnostics(*u_gf_, slip_k_, Tk_, Tks_, Tkc_, jr_k_,
+                                            &snk_);
+      }
       Tloc_.SetSize(3 * nd_);
       for (int k = 0; k < nd_; k++)
       {
@@ -458,7 +470,13 @@ public:
    void SlipLoad(const Vector &d, Vector &Gd) const
    {
       ToKernelLocal_(d, slip_k_);
-      elast_->AssembleSlipOnlyRHS(Gd, slip_k_);
+      if (UseFastFault_())
+      {
+         Gd.SetSize(height);
+         Gd = 0.0;
+         elast_->AddSlipLoadFast(slip_k_, Gd);
+      }
+      else { elast_->AssembleSlipOnlyRHS(Gd, slip_k_); }
    }
 
    /// Box 9 at one owned DOF j: X = (T + S) in the frame, the range check,
@@ -656,7 +674,7 @@ public:
       kv_ = std::make_unique<ElasticityDomainOperator<ParMesh>>(
          mesh_, order_, *kv_lam_coef_, *kv_mu_coef_, beta_mean * lam_fb_, beta_mean * mu_fb_,
          /*Vp=*/0.0, /*Wf=*/0.0, /*lf=*/0.0, bc_velocity ? *bc_velocity : bc_, DGMethod::IP,
-         SolverType::CG_AMG, config_);
+         SolverType::OperatorOnly, config_);
       kv_vD_ = (bc_velocity != nullptr);
       MFEM_VERIFY(!kv_vD_ || bc_velocity->dirichlet_attrs == bc_.dirichlet_attrs,
                   "SetKelvinVoigt: bc_velocity must have the same Dirichlet attributes");
@@ -691,6 +709,32 @@ public:
       }
    }
    bool HasKelvinVoigt() const { return static_cast<bool>(kv_); }
+   /// Profiling plan item 4: compute K x + K_eta v in one sweep over the
+   /// union of the two patterns (default on).  Call before the first step.
+   void SetFusedStiffness(bool on) { fused_enabled_ = on; fused_state_ = 0; }
+   /// Profiling plan item 3: fault traction and slip load through the
+   /// precomputed per-face operators (default on).  Call before the first
+   /// step; the operators are built (collectively) on first use.
+   void SetFastFaultKernels(bool on) { fast_fault_enabled_ = on; fast_fault_state_ = 0; }
+   bool FastFaultKernelsActive() const { return fast_fault_state_ == 1; }
+   /// True once the fused sweep is in use (after the first acceleration).
+   bool FusedStiffnessActive() const { return fused_state_ == 1; }
+   /// Profiling plan item 8a: K x (+ K_eta v) from dense element and face
+   /// blocks in one sweep (default on).  It replaces the item 4 sweep and
+   /// the CSR products; when the blocks cannot be built (DenseBlockStiffness
+   /// ::Init) the operator falls back to them.  Call before the first step.
+   void SetDenseBlocks(bool on) { dense_enabled_ = on; dense_state_ = 0; }
+   /// True once the dense blocks are in use (after the first acceleration).
+   bool DenseBlocksActive() const { return dense_state_ == 1; }
+   /// Bytes of the dense blocks summed over the ranks (0 when not in use).
+   long long DenseBlockBytes() const { return dense_bytes_; }
+   /// Seconds this rank spent on fault work since construction: AdvanceFault_
+   /// up to its global reductions, plus the slip loads (profiling; the
+   /// partition weight of plan item 6 comes from it).
+   double FaultSeconds() const { return fault_sec_; }
+   /// Global entries of K, and entries the union pattern added (zeros).
+   long long FusedEntriesK() const { return fused_nnz_k_; }
+   long long FusedExtraEntries() const { return fused_extra_; }
    /// Slope of the total fault traction in V^{n+1} at owned DOF j, the
    /// closure's gamma: 1/2 sigma_F dt (+ sigma_F^eta with Kelvin-Voigt).  The
    /// end-of-step traction is X* + gamma V.
@@ -752,15 +796,28 @@ public:
    void KVSlipLoad(const Vector &V, Vector &GV) const
    {
       ToKernelLocal_(V, slip_k_);
-      kv_->AssembleSlipOnlyRHS(GV, slip_k_);
+      if (UseFastFault_())
+      {
+         GV.SetSize(height);
+         GV = 0.0;
+         kv_->AddSlipLoadFast(slip_k_, GV);
+      }
+      else { kv_->AssembleSlipOnlyRHS(GV, slip_k_); }
    }
    /// T_eta(v, V): the damping operator's fault traction (3 no, global).
    void KVTrialTraction(const Vector &v, const Vector &V, Vector &T)
    {
       ToKernelLocal_(V, kv_slip_k_);
-      v_gf_->Vector::operator=(v);
-      kv_->ComputeTractionDiagnostics(*v_gf_, kv_slip_k_, kvTk_, kvTks_, kvTkc_, kvjr_,
-                                      &kvsn_);
+      if (UseFastFault_())
+      {
+         kv_->ComputeTractionFast(v, kv_slip_k_, kvTk_, kvsn_);
+      }
+      else
+      {
+         v_gf_->Vector::operator=(v);
+         kv_->ComputeTractionDiagnostics(*v_gf_, kv_slip_k_, kvTk_, kvTks_, kvTkc_, kvjr_,
+                                         &kvsn_);
+      }
       kvTloc_.SetSize(3 * nd_);
       for (int k = 0; k < nd_; k++)
       {
@@ -783,13 +840,35 @@ private:
    void Acceleration_(const Vector &x, const Vector *v, const Vector *d,
                       const NitscheMass &Minv, Vector &a) const
    {
-      elast_->ApplyStiffness(x, Kx_);
+      const bool dense = UseDense_();
+      const bool fuse = !dense && kv_ && v && UseFused_();
+      if (dense)
+      {
+         if (kv_)
+         {
+            MFEM_VERIFY(v, "NitscheWaveOperator: Kelvin-Voigt needs the velocity");
+            dense_.Mult(x, *v, Kx_);   // K x + K_eta v
+         }
+         else { dense_.Mult(x, Kx_); }
+      }
+      else if (fuse) { fused_.Mult(x, *v, Kx_); }   // K x + K_eta v
+      else { elast_->ApplyStiffness(x, Kx_); }
       elast_->AssembleDirichletOnlyRHS(F_, GetTime());
       F_ -= Kx_;
       if (d)
       {
-         SlipLoad(*d, Gd_);
-         F_ += Gd_;
+         const double tf0 = MPI_Wtime();
+         if (UseFastFault_())
+         {
+            ToKernelLocal_(*d, slip_k_);
+            elast_->AddSlipLoadFast(slip_k_, F_);
+         }
+         else
+         {
+            SlipLoad(*d, Gd_);
+            F_ += Gd_;
+         }
+         fault_sec_ += MPI_Wtime() - tf0;
       }
       if (!damping_blocks_.empty() && v)
       {
@@ -800,8 +879,11 @@ private:
       {
          // Kelvin-Voigt: -(K_eta v - G_eta V) with the stored slip rate V
          // (V^{n+1} in ImplicitSolve, after the fault advance)
-         kv_->ApplyStiffness(*v, Kv_v_);
-         F_ -= Kv_v_;
+         if (!fuse && !dense)
+         {
+            kv_->ApplyStiffness(*v, Kv_v_);
+            F_ -= Kv_v_;
+         }
          if (kv_vD_)
          {
             kv_->AssembleDirichletOnlyRHS(FvD_, GetTime() - kv_tv_shift_);
@@ -809,11 +891,101 @@ private:
          }
          if (has_fault_)
          {
-            KVSlipLoad(V_, GvV_);
-            F_ += GvV_;
+            const double tf0 = MPI_Wtime();
+            if (UseFastFault_())
+            {
+               ToKernelLocal_(V_, slip_k_);
+               kv_->AddSlipLoadFast(slip_k_, F_);
+            }
+            else
+            {
+               KVSlipLoad(V_, GvV_);
+               F_ += GvV_;
+            }
+            fault_sec_ += MPI_Wtime() - tf0;
          }
       }
       Minv.Apply(F_, a);
+   }
+
+   /// Collective on the first call: build the per-face fault operators of K
+   /// (and K_eta).  Every caller is reached on all ranks (has_fault_ is a
+   /// global flag).
+   bool UseFastFault_() const
+   {
+      if (fast_fault_state_ == 0)
+      {
+         fast_fault_state_ = -1;
+         if (fast_fault_enabled_ && has_fault_)
+         {
+            elast_->BuildFaultFaceOps();
+            if (kv_) { kv_->BuildFaultFaceOps(); }
+            fast_fault_state_ = 1;
+         }
+      }
+      // SetKelvinVoigt after the first build (kv_ is a global property)
+      if (fast_fault_state_ == 1 && kv_ && !kv_->HasFaultFaceOps()) { kv_->BuildFaultFaceOps(); }
+      return fast_fault_state_ == 1;
+   }
+
+   /// Collective on the first call: read K (and K_eta) into dense blocks
+   /// (plan item 8a) and free the hypre matrices they replace, as UseFused_
+   /// does.  Read again when the Kelvin-Voigt layer was set after the first
+   /// read (kv_ is a global property).
+   bool UseDense_() const
+   {
+      if (dense_state_ == 1 && dense_.NumMatrices() != (kv_ ? 2 : 1)) { dense_state_ = 0; }
+      if (dense_state_ == 0)
+      {
+         int ok = dense_enabled_ ? 1 : 0;
+         if (ok)
+         {
+            ok = dense_.Init(elast_->GetFESpace(), elast_->ParStiffness(),
+                             kv_ ? &kv_->ParStiffness() : nullptr) ? 1 : 0;
+         }
+         MPI_Allreduce(MPI_IN_PLACE, &ok, 1, MPI_INT, MPI_MIN, mesh_.GetComm());
+         dense_state_ = ok ? 1 : -1;
+         if (ok)
+         {
+            long long b = dense_.Bytes();
+            MPI_Allreduce(MPI_IN_PLACE, &b, 1, MPI_LONG_LONG, MPI_SUM, mesh_.GetComm());
+            dense_bytes_ = b;
+            elast_->ReleaseStiffness();
+            if (kv_) { kv_->ReleaseStiffness(); }
+         }
+         else if (dense_enabled_) { dense_ = DenseBlockStiffness(); }   // free what Init built
+#if defined(__GLIBC__)
+         if (dense_enabled_) { malloc_trim(0); }
+#endif
+      }
+      return dense_state_ == 1;
+   }
+
+   /// Collective on the first call: set up the fused K/K_eta sweep (union
+   /// pattern) and free the two hypre matrices it replaces.  Diagnostics
+   /// that still call ApplyStiffness re-assemble K or K_eta on demand.
+   bool UseFused_() const
+   {
+      if (fused_state_ == 0)
+      {
+         int ok = fused_enabled_ ? 1 : 0;
+         if (ok) { ok = fused_.Init(elast_->ParStiffness(), kv_->ParStiffness()) ? 1 : 0; }
+         MPI_Allreduce(MPI_IN_PLACE, &ok, 1, MPI_INT, MPI_MIN, mesh_.GetComm());
+         fused_state_ = ok ? 1 : -1;
+         if (ok)
+         {
+            long long c[2] = {fused_.ExtraEntries(), fused_.EntriesK()};
+            MPI_Allreduce(MPI_IN_PLACE, c, 2, MPI_LONG_LONG, MPI_SUM, mesh_.GetComm());
+            fused_extra_ = c[0];
+            fused_nnz_k_ = c[1];
+            elast_->ReleaseStiffness();
+            kv_->ReleaseStiffness();
+#if defined(__GLIBC__)
+            malloc_trim(0);   // hand the freed matrices back to the system
+#endif
+         }
+      }
+      return fused_state_ == 1;
    }
 
    /// Boxes 3-11 at t = t_{n+1}, x = U^{n+1}; v = Udot* (used only by the
@@ -823,6 +995,7 @@ private:
       MFEM_VERIFY(!pc_ || pc_seeded_, "NitscheWaveOperator: Prakash-Clifton is on "
                   "but sigma* was never seeded (SetPrakashCliftonState)");
       ++steps_;
+      const double tf0 = MPI_Wtime();
       const real_t dt = dt_;
       // 3, 4
       dstar_.SetSize(3 * no_);
@@ -905,6 +1078,7 @@ private:
          max_V = std::max(max_V, Vabs);
          max_ratio = std::max(max_ratio, ratio);
       }
+      fault_sec_ += MPI_Wtime() - tf0;
       real_t red[4] = {-min_sig, max_sig, max_V, max_ratio};
       MPI_Allreduce(MPI_IN_PLACE, red, 4, MPITypeMap<real_t>::mpi_type, MPI_MAX,
                     mesh_.GetComm());
@@ -1237,6 +1411,17 @@ private:
    Vector sigFkv_face_, sigFkv_own_, kvT_, kv_zero_;
    Vector kv_slip_k_, kvTk_, kvTks_, kvTkc_, kvjr_, kvsn_, kvTloc_;
    mutable Vector Kv_v_, GvV_, FvD_;
+   bool fused_enabled_ = true;
+   bool fast_fault_enabled_ = true;
+   mutable int fast_fault_state_ = 0;   ///< 0 not built, 1 on, -1 off
+   mutable int fused_state_ = 0;   ///< 0 not tried, 1 fused, -1 two SpMVs
+   mutable FusedStiffnessPair fused_;
+   mutable long long fused_extra_ = 0, fused_nnz_k_ = 0;
+   bool dense_enabled_ = true;
+   mutable int dense_state_ = 0;   ///< 0 not tried, 1 dense blocks, -1 fused or CSR
+   mutable DenseBlockStiffness dense_;
+   mutable long long dense_bytes_ = 0;
+   mutable double fault_sec_ = 0.0;
 };
 
 #endif // MFEM_USE_MPI
