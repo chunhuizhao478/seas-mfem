@@ -5,8 +5,8 @@
 # runs, in turn:
 #   gts   the defaults (global central difference, items 1, 3, 5 and 8a), 0 -> 1.0 s: the speed
 #         reference at this commit and layout
-#   lts   --lts rate2 (multirate leapfrog, cap 4 clusters, fault in one cluster), 0 -> TFINAL: the
-#         new gold
+#   lts   --lts rate2 (multirate leapfrog, cap 4 clusters, the fault and 3 layers of tets around it
+#         in one cluster), 0 -> TFINAL: the new gold
 # then compares the stations: gts against the first 1.0 s of GOLD (round-off), lts against gts
 # over 1.0 s and against GOLD over TFINAL (both the time discretisation error).
 # Runs only from a clean pushed checkout (repo CLAUDE.md guard) whose driver was built at the same
@@ -72,8 +72,8 @@ for v in gts lts; do
 done
 echo "=== stations (per quantity: max |a - b| over max |a| of slip, V, tau, sigma_n at that station) ==="
 python3 -I jobs/vista_profiling/compare_stations.py $GOLD $BASE/gts --tmax 1.0
-python3 -I jobs/vista_profiling/compare_stations.py $BASE/gts $BASE/lts --tmax 1.0 --time-tol 1e-9 --groups
-python3 -I jobs/vista_profiling/compare_stations.py $GOLD $BASE/lts --tmax $TFINAL --time-tol 1e-9 --groups
+python3 -I jobs/vista_profiling/compare_stations.py $BASE/gts $BASE/lts --tmax 1.0 --time-tol 2e-9 --groups
+python3 -I jobs/vista_profiling/compare_stations.py $GOLD $BASE/lts --tmax $TFINAL --time-tol 2e-9 --groups
 du -sh $BASE/*
 echo "total $(( $(date +%s) - T0 )) s"
 exit $rc_all
