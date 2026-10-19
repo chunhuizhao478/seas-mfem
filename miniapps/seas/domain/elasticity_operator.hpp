@@ -27,6 +27,9 @@
 #include "../integrator/dg_elasticity_ip_combined_integrator.hpp"
 #include "../fault/face_quadrature.hpp"
 #include "matrix_stats.hpp"
+#include "../common/stage_timers.hpp"
+#include "qd_stage_operators.hpp"
+#include "../solver/qd_linear_solver.hpp"
 
 #include <memory>
 #include <cmath>
@@ -44,12 +47,14 @@ namespace mfem
 namespace seas
 {
 
-/// Linear solver type for the elasticity domain operator
+/// Linear solver type for the elasticity domain operator.
 /// OperatorOnly: assemble K as a HypreParMatrix for ApplyStiffness and
 /// build no solver; the serial bilinear form is released after
 /// ParallelAssemble (explicit time stepping never calls Solve).
+/// CUDSS: cuDSS on the GPU (MFEM_USE_CUDSS), for the stage operators of
+/// GPU plan G3.
 enum class SolverType { CG_AMG, MUMPS, MUMPS_BLR, GMRES_BlockILU, GMRES_AMG, SUPERLU, STRUMPACK,
-                        OperatorOnly };
+                        OperatorOnly, CUDSS };
 
 /// Boundary condition mode for the elasticity domain operator
 ///
@@ -310,6 +315,33 @@ public:
    /// displacement space. Debug utility for first-step RHS comparison.
    void AssembleDirichletOnlyRHS(Vector &rhs, real_t time) const;
 
+#ifdef MFEM_USE_MPI
+   // GPU plan G2: a stage through prebuilt operators (qd_stage_operators.hpp,
+   // elasticity_operator_qd.inl).  Parallel mesh and IP only.
+   void BuildQDStageOperators(bool with_normal) override;
+   void SolveStage(real_t time, const Vector &slip_owned,
+                   GridFuncType &displacement, Vector &traction_owned,
+                   Vector *normal_owned) override;
+   /// The operators, or nullptr before BuildQDStageOperators().
+   const QDStageOperators *GetQDStageOperators() const { return qd_ops_.get(); }
+   /// The assembled stiffness matrix K, or nullptr before assembly (first
+   /// Solve(), SolveStage() or AssembleMatrixOnly()).
+   const HypreParMatrix *GetStiffnessMatrix() const
+   {
+      return cached_Ah_.Ptr() ? cached_Ah_.As<HypreParMatrix>() : nullptr;
+   }
+   /// The stage pieces on their own, for tests: b = B·δ + D·g(t) and the
+   /// traction products for a given displacement (true DOFs).
+   void QDStageRHS(real_t time, const Vector &slip_owned, Vector &b) const;
+   void QDStageTraction(const Vector &u, const Vector &slip_owned,
+                        Vector &traction_owned, Vector *normal_owned) const;
+   /// g(t) evaluations so far, their accepted / rejected steps and timing.
+   /// Collective; prints on rank 0.
+   void PrintQDStageEvalSummary(long long accepted_steps,
+                                long long rejected_steps,
+                                std::ostream &os) const;
+#endif
+
    FESpaceType &GetFESpace() override { return *fes_; }
    const FESpaceType &GetFESpace() const override { return *fes_; }
 
@@ -416,6 +448,23 @@ public:
    }
    bool MatrixStatsEnabled() const { return matrix_stats_enabled_; }
 
+   /// Assemble K (and write the matrix statistics when enabled) without
+   /// creating or factorizing the linear solver, for counting matrix sizes
+   /// on meshes whose factorization may not fit (seas_bp5_full
+   /// --exit-after-assembly).  The symmetry check of the statistics is
+   /// skipped here, since it holds a transposed copy of K.  Solve() aborts
+   /// afterwards.
+   void AssembleMatrixOnly()
+   {
+      MFEM_VERIFY(!stiffness_assembled_ && !assemble_matrix_only_,
+                  "AssembleMatrixOnly: K is already assembled");
+      assemble_matrix_only_ = true;
+      AssembleStiffness();
+   }
+
+   /// Time the parts of Solve() into @a timers (nullptr = no timing).
+   void SetStageTimers(StageTimers *timers) { stage_timers_ = timers; }
+
    struct FirstStepDebugConfig
    {
       bool enabled = false;
@@ -518,6 +567,37 @@ private:
    // One-shot matrix analysis (enabled via SetMatrixStatsConfig).
    bool matrix_stats_enabled_ = false;
    std::string matrix_stats_path_;
+   // Set by AssembleMatrixOnly(): stop after assembly, no solver.
+   bool assemble_matrix_only_ = false;
+
+   StageTimers *stage_timers_ = nullptr;
+
+#ifdef MFEM_USE_MPI
+   std::unique_ptr<QDStageOperators> qd_ops_;  // GPU plan G2
+#endif
+
+   /// Solve K X_ = B_ with B_ loaded, check, copy to displacement.
+   void SolveLoadedRHS(GridFuncType &displacement);
+
+   /// Face-local IP traction on fault face slot @a fi (interior faces
+   /// first, then shared): slip embedding, ComputeTractionAtQuadPoints and
+   /// the nl-weighted projection, as ComputeTraction does it.  u1_all,
+   /// u2_all: the two elements' displacement DOFs [ndof*3, byNODES];
+   /// face_slip: this face's [dip, strike] slip per face DOF [2*nbf];
+   /// trac_local: [ncomp*nbf], ncomp = 3 (normal, dip, strike) with
+   /// @a with_normal, else 2 (dip, strike).  ComputeTraction and the QD
+   /// stage operators (GPU plan G2) both call it.
+   void ComputeIPFaceTraction(int fi, FaceElementTransformations &FTr,
+                              const FiniteElement &fe1,
+                              const FiniteElement &fe2,
+                              const Vector &u1_all, const Vector &u2_all,
+                              const real_t *face_slip, bool with_normal,
+                              Vector &trac_local) const;
+
+#ifdef MFEM_USE_MPI
+   /// Fill qd_ops_->g with g(t) at the stored Dirichlet points.
+   void EvaluateQDDirichletValues(real_t time) const;
+#endif
 
    enum class DebugAssemblePhase { None, Slip, Dirichlet };
    mutable FirstStepDebugConfig first_step_debug_;
@@ -736,6 +816,9 @@ private:
 #include "elasticity_operator_traction.inl"
 #include "elasticity_operator_penalty.inl"
 #include "elasticity_operator_fault_ops.inl"
+
+
+#include "elasticity_operator_qd.inl"
 
 
 // Convenience type alias

@@ -226,7 +226,7 @@
             const int vdim = fes_->GetVDim();
             MatrixStats stats =
                ComputeMatrixStats(*K, dofs_per_elem, vdim, mesh_.GetComm(),
-                                  /*do_symmetry=*/true);
+                                  /*do_symmetry=*/!assemble_matrix_only_);
             int my_rank = 0;
             MPI_Comm_rank(mesh_.GetComm(), &my_rank);
             if (my_rank == 0)
@@ -321,27 +321,38 @@
             stiffness_assembled_ = true;
             return;
          }
+
+         // --exit-after-assembly: K and its statistics only, no solver.
+         if (assemble_matrix_only_) { return; }
+
+         // Direct solvers (MUMPS, MUMPS BLR, cuDSS) behind one interface,
+         // solver/qd_linear_solver.hpp (GPU plan G3).  cuDSS reads and
+         // writes device vectors: B_ and X_ live on the device.
+         if (solver_type_ == SolverType::CUDSS
 #ifdef MFEM_USE_MUMPS
-         const int mumps_print_level = matrix_stats_enabled_ ? 2 : 1;
-         if (solver_type_ == SolverType::MUMPS)
+             || solver_type_ == SolverType::MUMPS
+             || solver_type_ == SolverType::MUMPS_BLR
+#endif
+            )
          {
-            auto *mumps = new MUMPSSolver(mesh_.GetComm());
-            mumps->SetMatrixSymType(MUMPSSolver::MatType::SYMMETRIC_POSITIVE_DEFINITE);
-            mumps->SetPrintLevel(mumps_print_level);
-            mumps->SetOperator(*cached_Ah_.As<HypreParMatrix>());
-            solver_.reset(mumps);
-         }
-         else if (solver_type_ == SolverType::MUMPS_BLR)
-         {
-            auto *mumps = new MUMPSSolver(mesh_.GetComm());
-            mumps->SetMatrixSymType(MUMPSSolver::MatType::SYMMETRIC_POSITIVE_DEFINITE);
-            mumps->SetPrintLevel(mumps_print_level);
-            mumps->SetBLRTol(blr_tol_);
-            mumps->SetOperator(*cached_Ah_.As<HypreParMatrix>());
-            solver_.reset(mumps);
+            const QDLinearSolverKind kind =
+               (solver_type_ == SolverType::CUDSS) ? QDLinearSolverKind::CUDSS
+               : (solver_type_ == SolverType::MUMPS) ? QDLinearSolverKind::MUMPS
+               : QDLinearSolverKind::MUMPS_BLR;
+            QDLinearSolverSetup setup;
+            solver_ = MakeQDLinearSolver(kind, *cached_Ah_.As<HypreParMatrix>(),
+                                         matrix_stats_enabled_ ? 2 : 1,
+                                         blr_tol_, &setup);
+            if (kind == QDLinearSolverKind::CUDSS)
+            {
+               B_.UseDevice(true);
+               X_.UseDevice(true);
+            }
+            int rank = 0;
+            MPI_Comm_rank(mesh_.GetComm(), &rank);
+            if (rank == 0) { mfem::out << QDLinearSolverSummary(setup) << "\n"; }
          }
          else
-#endif
 #ifdef MFEM_USE_SUPERLU
          if (solver_type_ == SolverType::SUPERLU)
          {
@@ -440,6 +451,7 @@
       }
       else
       {
+         if (assemble_matrix_only_) { return; }
          SparseMatrix &A = cached_a_->SpMat();
          serial_prec_ = std::make_unique<GSSmoother>(A);
          static_cast<CGSolver*>(solver_.get())->SetPreconditioner(*serial_prec_);
@@ -1073,22 +1085,15 @@
    // Dirichlet loading assembly
    // ========================================================================
 
-   void AssembleDirichletLoading(Vector &rhs, real_t time) const
+   /// Boundary faces that get the Dirichlet boundary-face term, in boundary
+   /// element order, with their attributes: Dirichlet-marked boundary
+   /// elements whose face is not already an interior or shared Dirichlet
+   /// face.  Those are skipped here because they get the skeleton term
+   /// instead (doing both would double-load with incompatible DG formulas:
+   /// boundary uses c1=epsilon, skeleton uses c1=0.5*epsilon).  Shared by
+   /// AssembleDirichletLoading and the QD stage operators (GPU plan G2).
+   void CollectDirichletBoundaryFaces(Array<int> &faces, Array<int> &attrs) const
    {
-      // BP5 Dirichlet loading: u_D = (sgn(y)*Vp*t/2, 0, 0) on far-field,
-      //                        u_D = (Vp*t, 0, 0) on y=0 skeleton faces.
-      // Applied on attr-5 faces only (controlled by BCMode).
-      //
-      // DG Dirichlet BC contribution:
-      //   b[k,i] += c0 * [σ(φ_k e_i)·n]_u * u_D_u * (1/detJ)
-      //           + penalty * φ_k * u_D_i
-
-      int dim = 3;
-
-      // Build set of face indices already handled as interior/shared Dirichlet.
-      // These must NOT also be processed as boundary faces (would double-load
-      // with incompatible DG formulas: boundary uses c1=epsilon, skeleton uses
-      // c1=0.5*epsilon).
       std::set<int> dir_interior_set;
       for (int fi = 0; fi < dirichlet_interior_faces_.Size(); fi++)
       {
@@ -1105,18 +1110,43 @@
 #endif
       }
 
+      faces.SetSize(0);
+      attrs.SetSize(0);
       for (int be = 0; be < mesh_.GetNBE(); be++)
       {
          int attr = mesh_.GetBdrAttribute(be);
          if (dirichlet_bdr_marker_[attr - 1] != 1) { continue; }
 
-         // Get face transformation
          int face_idx, face_info;
          mesh_.GetBdrElementFace(be, &face_idx, &face_info);
 
-         // Skip faces already handled as interior or shared Dirichlet
          if (dir_interior_set.count(face_idx) > 0) { continue; }
          if (dir_shared_set.count(face_idx) > 0) { continue; }
+
+         faces.Append(face_idx);
+         attrs.Append(attr);
+      }
+   }
+
+   void AssembleDirichletLoading(Vector &rhs, real_t time) const
+   {
+      // BP5 Dirichlet loading: u_D = (sgn(y)*Vp*t/2, 0, 0) on far-field,
+      //                        u_D = (Vp*t, 0, 0) on y=0 skeleton faces.
+      // Applied on attr-5 faces only (controlled by BCMode).
+      //
+      // DG Dirichlet BC contribution:
+      //   b[k,i] += c0 * [σ(φ_k e_i)·n]_u * u_D_u * (1/detJ)
+      //           + penalty * φ_k * u_D_i
+
+      int dim = 3;
+
+      Array<int> dir_bdr_faces, dir_bdr_attrs;
+      CollectDirichletBoundaryFaces(dir_bdr_faces, dir_bdr_attrs);
+
+      for (int bi = 0; bi < dir_bdr_faces.Size(); bi++)
+      {
+         const int face_idx = dir_bdr_faces[bi];
+         const int attr = dir_bdr_attrs[bi];
 
          FaceElementTransformations *FTr =
             mesh_.GetFaceElementTransformations(face_idx);

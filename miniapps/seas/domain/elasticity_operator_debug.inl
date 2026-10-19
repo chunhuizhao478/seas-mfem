@@ -806,6 +806,19 @@
    void BuildSlipAtQuadPoints(int logical_fault_idx, const Vector &slip_bc,
                               Vector &delta_u_quad) const
    {
+      BuildSlipAtQuadPointsFace(
+         logical_fault_idx,
+         slip_bc.GetData() + 2 * logical_fault_idx * nbf_per_face_,
+         delta_u_quad);
+   }
+
+   /// Face-local form of BuildSlipAtQuadPoints: @a face_slip holds this
+   /// face's slip only, [dip, strike] per face DOF [2 * nbf].  The QD stage
+   /// operators (GPU plan G2) probe it with unit slip.
+   void BuildSlipAtQuadPointsFace(int logical_fault_idx,
+                                  const real_t *face_slip,
+                                  Vector &delta_u_quad) const
+   {
       const int dim = 3;
       const int nbf = nbf_per_face_;
       const auto &basis = fault_basis_.GetBasis(logical_fault_idx);
@@ -817,9 +830,8 @@
          Vector slip_tang(2 * nbf);
          for (int kk = 0; kk < nbf; kk++)
          {
-            int dof_idx = logical_fault_idx * nbf + kk;
-            slip_tang(0 * nbf + kk) = slip_bc(2 * dof_idx);
-            slip_tang(1 * nbf + kk) = slip_bc(2 * dof_idx + 1);
+            slip_tang(0 * nbf + kk) = face_slip[2 * kk];
+            slip_tang(1 * nbf + kk) = face_slip[2 * kk + 1];
          }
          Vector slip_tang_q;
          face_quad_->InterpolateToQuadPoints(2, slip_tang, slip_tang_q);
@@ -839,9 +851,8 @@
          Vector delta_u_nodal(dim * nbf);
          for (int kk = 0; kk < nbf; kk++)
          {
-            int dof_idx = logical_fault_idx * nbf + kk;
-            real_t slip_local[2] = {slip_bc(2 * dof_idx),
-                                    slip_bc(2 * dof_idx + 1)};
+            real_t slip_local[2] = {face_slip[2 * kk],
+                                    face_slip[2 * kk + 1]};
             real_t du[3];
             fault_basis_.EmbedSlip(logical_fault_idx, slip_local, du);
             for (int c = 0; c < dim; c++)
