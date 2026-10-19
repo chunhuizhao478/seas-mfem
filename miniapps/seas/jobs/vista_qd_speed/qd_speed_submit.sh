@@ -25,6 +25,21 @@
 #           script); g_n2_r288 and g_n4_r576 wait for it (afterok) and
 #           read it.  Each also runs the default solve at its layout.
 #           Not in the default STEPS; GREEN_LAYOUTS limits it
+#   events  the accuracy gate through earthquakes: the same script with
+#           RUN_STEPS=62000 (gold run 1074099's events 1 and 2 end at its
+#           accepted steps 10,538 and 57,742) and EVENT_REF set to gold
+#           1074099 (bp5/benchmark_data/golden_vista_144r_p1_1000m), so
+#           each run is compared with it by qd_event_compare.py.  One
+#           mode per job, so the four run side by side:
+#             e_n1_r144_loops    the old path: its difference to gold is
+#                                the run-to-run floor (gold is loops, 144)
+#             e_n1_r144_default  the new default (item 1)
+#             e_n1_r144_green    dense G (item 3), same ranks as gold
+#             e_n4_r576_green    dense G on 4 nodes (dip-0 stations
+#                                depend on the rank count)
+#           The green runs read GREEN_CACHE and must not build it (two
+#           builds of one file at once): the step stops unless the file
+#           exists.  Not in the default STEPS; EVENT_LAYOUTS limits it
 # Layouts (nodes x ranks, CPUs per rank):
 #   n1_r144  1 x 144, 1   loops and the new default, twice each
 #   n1_r72   1 x 72,  2   default
@@ -43,6 +58,7 @@ STEPS="${STEPS:-build gate timing}"
 BUILD_JOB="${BUILD_JOB:-}"
 LAYOUTS="${LAYOUTS:-n1_r144 n1_r72 n1_r36 n2_r288 n2_r144 n2_r72}"
 GREEN_LAYOUTS="${GREEN_LAYOUTS:-g_n1_r144 g_n2_r288 g_n4_r576}"
+EVENT_LAYOUTS="${EVENT_LAYOUTS:-e_n1_r144_loops e_n1_r144_default e_n1_r144_green e_n4_r576_green}"
 
 if [ ! -f jobs/vista_qd_speed/qd_speed_timing.sbatch ]; then
    echo "ERROR: run from miniapps/seas" >&2
@@ -120,5 +136,28 @@ if has green; then
       if [ "${name}" = g_n1_r144 ]; then
          GREEN_DEP=(--dependency="afterok:${JOB}" --kill-on-invalid-dep=yes)
       fi
+   done
+fi
+
+if has events; then
+   GREEN_CACHE_P1="${GREEN_CACHE:-${SCRATCH:-${WORK}}/seas-qd-green/bp5_prod_p1.bin}"
+   if [[ " ${EVENT_LAYOUTS} " == *"_green "* ]] && [ ! -f "${GREEN_CACHE_P1}" ]; then
+      echo "ERROR: events: no Green's cache ${GREEN_CACHE_P1}; the green event" \
+           "runs must read it, not build it." >&2
+      exit 1
+   fi
+   EVENT_REF_SPEC="bp5/benchmark_data/golden_vista_144r_p1_1000m bp5_cycle_p1"
+   # name:nodes:ranks:mode:walltime; estimates at 62,000 steps from the
+   # 1,000-step timings (0.38, 0.26, 0.26 and 0.076 s/step) plus G's read.
+   for spec in e_n1_r144_loops:1:144:loops:08:30:00 \
+               e_n1_r144_default:1:144:default:06:00:00 \
+               e_n1_r144_green:1:144:green:06:00:00 \
+               e_n4_r576_green:4:576:green:02:30:00; do
+      IFS=: read -r name nodes ranks mode hh mm ss <<< "${spec}"
+      [[ " ${EVENT_LAYOUTS} " == *" ${name} "* ]] || continue
+      sub "events ${name}" "${DEP[@]}" -J qd_event_gate \
+          --export="ALL,MODES=${mode},RUN_STEPS=62000,EVENT_REF=${EVENT_REF_SPEC},GREEN_CACHE=${GREEN_CACHE_P1}" \
+          -N "${nodes}" -n "${ranks}" --ntasks-per-node="$((ranks / nodes))" -c 1 \
+          -t "${hh}:${mm}:${ss}" jobs/vista_qd_speed/qd_speed_timing.sbatch
    done
 fi

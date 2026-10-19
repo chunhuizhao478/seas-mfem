@@ -41,6 +41,10 @@
 #      other parts) from the end-of-run [STAGE-TIMERS] table, then the
 #      [QD-GREEN] build or read lines.  In a green run "solve" is the
 #      G product.
+#   With EVENT_REF="DIR PREFIX" (the accuracy gate's event runs,
+#   qd_speed_submit.sh STEPS=events), each run is also compared with that
+#   reference run through its earthquakes by jobs/vista_qd_speed/
+#   qd_event_compare.py, into <run>/event_compare.txt.
 #
 # Ranks per node below 144 leave cores idle: the BLAS (NVPL *_seq) and
 # MUMPS of the G0 build are sequential, so threads per rank would not be
@@ -88,7 +92,16 @@ if [ -z "${MODES:-}" ]; then
    fi
 fi
 GREEN_CACHE="${GREEN_CACHE:-${SCRATCH:-${WORK}}/seas-qd-green/bp5_prod_p${ORDER}.bin}"
-GOLD_README_KNOBS+=(ORDER RUN_STEPS MODES GREEN_CACHE)
+EVENT_REF="${EVENT_REF:-}"
+if [ -n "${EVENT_REF}" ]; then
+   read -r EVENT_REF_DIR EVENT_REF_PFX <<< "${EVENT_REF}"
+   if [ ! -f "${SEAS_DIR}/${EVENT_REF_DIR}/${EVENT_REF_PFX}_global.txt" ]; then
+      echo "ERROR: EVENT_REF='${EVENT_REF}': no ${EVENT_REF_DIR}/${EVENT_REF_PFX}_global.txt" \
+           "under ${SEAS_DIR}." >&2
+      exit 1
+   fi
+fi
+GOLD_README_KNOBS+=(ORDER RUN_STEPS MODES GREEN_CACHE EVENT_REF)
 
 cd "${SEAS_DIR}"
 OUT_ROOT="bp5/results_qd_speed/timing_n${NNODES}_r${NRANKS}_c${CPT}_p${ORDER}_job${SLURM_JOB_ID}"
@@ -99,6 +112,7 @@ g0_provenance "${OUT_ROOT}"
         "SLURM_TASKS_PER_NODE=${SLURM_TASKS_PER_NODE:-?}"
    echo "modes: ${MODES}; order ${ORDER}; ${RUN_STEPS} steps"
    echo "green cache: ${GREEN_CACHE}"
+   echo "event reference: ${EVENT_REF:-none}"
 } >> "${OUT_ROOT}/provenance.txt"
 
 # ---- 1. Layout and bandwidth ----
@@ -148,6 +162,17 @@ for MODE in ${MODES}; do
       overall=1
    fi
    grep '\[QD-OPERATORS\]' "${OUT}/run.log" > "${OUT}/qd_operators.txt"
+   if [ -n "${EVENT_REF}" ]; then
+      if python3 jobs/vista_qd_speed/qd_event_compare.py \
+            --ref "${EVENT_REF_DIR}" "${EVENT_REF_PFX}" --test "${OUT}" "${PFX}" \
+            > "${OUT}/event_compare.txt" 2>&1; then
+         cat "${OUT}/event_compare.txt"
+      else
+         echo "ERROR: ${TAG}: qd_event_compare.py failed:" >&2
+         cat "${OUT}/event_compare.txt" >&2
+         overall=1
+      fi
+   fi
    if [ "${MODE}" = green ]; then
       grep '\[QD-GREEN\]' "${OUT}/run.log" > "${OUT}/qd_green.txt"
       if ! grep -q '\[QD-GREEN\] check against the solve path' "${OUT}/qd_green.txt"; then
