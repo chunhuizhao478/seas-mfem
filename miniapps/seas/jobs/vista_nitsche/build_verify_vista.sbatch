@@ -6,7 +6,7 @@
 #SBATCH -N 1
 #SBATCH -n 144
 #SBATCH -t 02:00:00
-#SBATCH -A EAR26024
+#SBATCH -A EAR24034
 # Vista build + verification for the Nitsche TPV205 / TPV104 benchmarks (Chunhui Zhao,
 # 2026-10-16).  Network work on the login node, compiling here:
 #   cd $WORK && git clone --recurse-submodules -b nitsche-benchmarks \
