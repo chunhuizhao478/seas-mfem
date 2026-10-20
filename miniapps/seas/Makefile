@@ -874,6 +874,7 @@ DOMAIN_HEADERS = common/seas_types.hpp \
                  domain/elasticity_operator_fault_ops.inl \
                  domain/fused_stiffness_pair.hpp \
                  domain/dense_block_stiffness.hpp \
+                 domain/nitsche_sipg_operator.hpp \
                  domain/elasticity_operator_qd.inl \
                  domain/qd_stage_operators.hpp \
                  domain/matrix_stats.hpp \
@@ -6802,3 +6803,27 @@ $(BENCH_NITSCHE_KERNELS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) 
 seas_bench_nitsche_kernels: $(BENCH_NITSCHE_KERNELS_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) $(LTS_PARTITION_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(BENCH_NITSCHE_KERNELS_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) $(LTS_PARTITION_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# GPU dynamic-rupture plan D2: the matrix-free SIPG product
+# (domain/nitsche_sipg_operator.hpp) against the assembled K u + K_eta v, and
+# its microbenchmark (--reps).  The test target runs the checks on the
+# cloud-sized TPV205 mesh, p = 1 and 2, 1 and 4 ranks, with heterogeneous
+# material and with a Dirichlet boundary.
+TEST_NITSCHE_SIPG_MF_SRC = tests/unit/test_nitsche_sipg_mf.cpp
+TEST_NITSCHE_SIPG_MF_OBJ = $(TEST_NITSCHE_SIPG_MF_SRC:.cpp=.o)
+$(TEST_NITSCHE_SIPG_MF_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_sipg_mf: $(TEST_NITSCHE_SIPG_MF_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_NITSCHE_SIPG_MF_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+SIPG_MF_MESH ?= tpv205/mesh/tpv2053d_1000m.msh
+test-nitsche-sipg-mf: seas_test_nitsche_sipg_mf
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_sipg_mf --mesh $(SIPG_MF_MESH) --order 1
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_nitsche_sipg_mf --mesh $(SIPG_MF_MESH) --order 1 --hetero 0.2
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_nitsche_sipg_mf --mesh $(SIPG_MF_MESH) --order 1 --hetero 0.2 --dirichlet 105
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_sipg_mf --mesh $(SIPG_MF_MESH) --order 2 --hetero 0.2
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_nitsche_sipg_mf --mesh $(SIPG_MF_MESH) --order 2 --hetero 0.2 --dirichlet 105
