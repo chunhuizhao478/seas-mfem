@@ -85,6 +85,18 @@
 //                              after the build or read (default 1e-8)
 //   --qd-green-check N         Every N stages also run the solve path and
 //                              report the difference (default 0 = off)
+//   --qd-green-compress EPS    Opt-in (QD speed item 4): store G as an
+//                              H-matrix, each far block cut by SVD to
+//                              relative Frobenius error EPS (0 < EPS < 1;
+//                              1e-10 is round-off for production G).  Needs
+//                              --qd-green and MFEM with LAPACK
+//   --qd-green-leaf N          Cluster tree leaf size in fault DOFs (64)
+//   --qd-green-eta X           Admissibility max(diam) <= X*dist (2)
+//   --qd-green-hcache FILE     Read the H-matrix from FILE if it fits this
+//                              mesh, EPS, leaf and eta, else compress (from
+//                              --qd-green-cache if given) and write FILE
+//   --qd-green-compress-mem G  GiB per node for blocks being compressed or
+//                              read at once (default 64)
 
 #include "mfem.hpp"
 #ifdef MFEM_USE_PETSC
@@ -1337,6 +1349,26 @@ int main(int argc, char *argv[])
       {
          qd_green_check = std::atoi(argv[++i]);
       }
+      if (arg == "--qd-green-compress" && i + 1 < argc)
+      {
+         qd_green_config.compress = std::atof(argv[++i]);
+      }
+      if (arg == "--qd-green-leaf" && i + 1 < argc)
+      {
+         qd_green_config.leaf = std::atoi(argv[++i]);
+      }
+      if (arg == "--qd-green-eta" && i + 1 < argc)
+      {
+         qd_green_config.eta = std::atof(argv[++i]);
+      }
+      if (arg == "--qd-green-hcache" && i + 1 < argc)
+      {
+         qd_green_config.hcache_path = argv[++i];
+      }
+      if (arg == "--qd-green-compress-mem" && i + 1 < argc)
+      {
+         qd_green_config.compress_mem_gib = std::atof(argv[++i]);
+      }
       if (arg == "--device-id" && i + 1 < argc)
       {
          device_id_override = std::atoi(argv[++i]);
@@ -1668,6 +1700,31 @@ int main(int argc, char *argv[])
       {
          qd_operators = "matrix";
          qd_operators_why = "default";
+      }
+   }
+   {
+      const seas::QDGreenConfig &c = qd_green_config;
+      const bool h_flags = c.compress != 0.0 || !c.hcache_path.empty();
+      std::string bad;
+      if (h_flags && !qd_green) { bad = "--qd-green-compress and "
+                                  "--qd-green-hcache need --qd-green"; }
+      else if (!c.hcache_path.empty() && c.compress == 0.0)
+      {
+         bad = "--qd-green-hcache needs --qd-green-compress";
+      }
+      else if (c.compress != 0.0 && !(c.compress > 0.0 && c.compress < 1.0))
+      {
+         bad = "--qd-green-compress: EPS must be in (0, 1)";
+      }
+      else if (c.leaf < 1 || !(c.eta > 0.0) || !(c.compress_mem_gib > 0.0))
+      {
+         bad = "--qd-green-leaf, --qd-green-eta and --qd-green-compress-mem "
+               "must be positive";
+      }
+      if (!bad.empty())
+      {
+         if (mpi.IsRoot()) { std::cerr << "ERROR: " << bad << ".\n"; }
+         return 2;
       }
    }
    if (qd_green && qd_operators != "matrix")
@@ -2263,6 +2320,12 @@ int main(int argc, char *argv[])
       {
          std::cout << ", check every " << qd_green_check << " stages"
                    << (qd_green_check > 0 ? "" : " (off)");
+         if (qd_green_config.compress > 0.0)
+         {
+            std::cout << ", H-matrix eps " << qd_green_config.compress
+                      << " leaf " << qd_green_config.leaf << " eta "
+                      << qd_green_config.eta;
+         }
       }
       std::cout << "\n";
    }

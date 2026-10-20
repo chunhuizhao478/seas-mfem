@@ -57,6 +57,12 @@ struct QDGreenConfig
    int block = 64;           ///< unit slips per blocked solve while building
    std::string cache_path;   ///< read G here if present, else build + write
    double tol = 1e-8;        ///< validation: max rel. difference to a solve
+   // QD speed item 4 (qd_hmatrix_operator.hpp): G as an H-matrix
+   double compress = 0.0;    ///< tolerance eps; 0 = dense G (item 3)
+   int leaf = 64;            ///< cluster tree leaf size, fault DOFs
+   double eta = 2.0;         ///< admissibility max(diam) <= eta·dist
+   std::string hcache_path;  ///< read the H-matrix here if it fits, else write
+   double compress_mem_gib = 64.0;  ///< per node, for gathered blocks + SVDs
 };
 
 } // namespace seas
@@ -65,11 +71,13 @@ struct QDGreenConfig
 #ifdef MFEM_USE_MPI
 
 #include "../common/stage_timers.hpp"
+#include "qd_hmatrix_operator.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <vector>
 
 namespace mfem
@@ -81,9 +89,12 @@ class QDGreenOperator
 {
 public:
    /// @a nf_glob fault DOFs in all; this rank owns @a nown of them, global
-   /// indices [fault_first, fault_first + nown).  Collective.
+   /// indices [fault_first, fault_first + nown).  With @a dense false the
+   /// dense rows are not allocated (G comes from an H-matrix file).
+   /// Collective.
    QDGreenOperator(MPI_Comm comm, HYPRE_BigInt nf_glob,
-                   HYPRE_BigInt fault_first, int nown, bool with_normal)
+                   HYPRE_BigInt fault_first, int nown, bool with_normal,
+                   bool dense = true)
       : comm_(comm), nf_(nf_glob), ncols_(2 * nf_glob),
         ncomp_(with_normal ? 3 : 2), nown_(nown)
    {
@@ -108,7 +119,7 @@ public:
          row_lo_[r] = (static_cast<long long>(nf_) * r) / nranks_;
       }
       nb_ = static_cast<int>(row_lo_[rank_ + 1] - row_lo_[rank_]);
-      G_.assign(static_cast<size_t>(nb_) * ncomp_ * ncols_, 0.0);
+      if (dense) { G_.assign(static_cast<size_t>(nb_) * ncomp_ * ncols_, 0.0); }
       TD_.assign(static_cast<size_t>(nb_) * ncomp_, 0.0);
       have_cols_.assign(static_cast<size_t>(ncols_), 0);
 
@@ -143,7 +154,52 @@ public:
    /// Rows (fault DOFs × ncomp) this rank holds.
    int NumLocalRows() const { return nb_ * ncomp_; }
    /// Bytes of G on this rank.
-   double LocalBytes() const { return double(G_.size()) * sizeof(real_t); }
+   double LocalBytes() const
+   {
+      return h_ ? h_->LocalBytes() : double(G_.size()) * sizeof(real_t);
+   }
+
+   // QD speed item 4: access for QDHMatrix, which keeps this row layout.
+   /// Fault DOFs whose rows rank r holds: [RowLo()[r], RowLo()[r + 1]).
+   const std::vector<long long> &RowLo() const { return row_lo_; }
+   /// This rank's dense rows (nb·ncomp × 2·N_f, row-major).
+   const real_t *DenseRows() const { return G_.data(); }
+   /// This rank's rows of T_D (nb·ncomp); LoadingRowsWrite marks T_D set.
+   const real_t *LoadingRows() const { return TD_.data(); }
+   real_t *LoadingRowsWrite() { have_loading_ = true; return TD_.data(); }
+   /// Position keys of all fault DOFs, in global order, on every rank
+   /// (needs SetKeys).  Collective.
+   void GatherKeysAll(std::vector<real_t> &all) const
+   {
+      MFEM_VERIFY(keys_.size() == static_cast<size_t>(kKey) * nown_,
+                  "QD Green: SetKeys() was not called");
+      std::vector<int> cnt(nranks_), dsp(nranks_);
+      for (int r = 0; r < nranks_; r++)
+      {
+         cnt[r] = static_cast<int>(kKey * own_n_[r]);
+         dsp[r] = static_cast<int>(kKey * own_lo_[r]);
+      }
+      all.assign(static_cast<size_t>(kKey) * nf_, 0.0);
+      MPI_Allgatherv(keys_.data(), cnt[rank_], MPITypeMap<real_t>::mpi_type,
+                     all.data(), cnt.data(), dsp.data(),
+                     MPITypeMap<real_t>::mpi_type, comm_);
+   }
+   /// From now on the stage product uses @a h; the dense rows are freed.
+   void SetCompressed(std::unique_ptr<QDHMatrix> h)
+   {
+      h_ = std::move(h);
+      G_.clear();
+      G_.shrink_to_fit();
+      std::fill(have_cols_.begin(), have_cols_.end(), 1);
+   }
+   bool Compressed() const { return h_ != nullptr; }
+   /// Allocate the dense rows (after a constructor call with dense false).
+   void AllocateDense()
+   {
+      MFEM_VERIFY(!h_, "QD Green: G is already compressed");
+      G_.assign(static_cast<size_t>(nb_) * ncomp_ * ncols_, 0.0);
+   }
+   const QDHMatrix *HMatrix() const { return h_.get(); }
 
    /// Position keys of the owned fault DOFs, 6 per DOF (node x, y, z, then
    /// the centroid x, y, z of its fault face), for WriteFile and ReadFile.
@@ -162,6 +218,8 @@ public:
    void SetColumns(HYPRE_BigInt j0, int m, const std::vector<Vector> &Ts,
                    const std::vector<Vector> &Tn)
    {
+      MFEM_VERIFY(G_.size() == static_cast<size_t>(nb_) * ncomp_ * ncols_,
+                  "QD Green: SetColumns needs the dense rows");
       MFEM_VERIFY(j0 >= 0 && j0 + m <= ncols_,
                   "QD Green: columns [" << j0 << ", " << j0 + m
                   << ") outside [0, " << ncols_ << ")");
@@ -248,8 +306,16 @@ public:
          y_.resize(static_cast<size_t>(nb_) * ncomp_);
          const real_t *d = delta_all_.HostRead();
          const size_t nrows = y_.size();
+         if (h_)
+         {
+            h_->Mult(d, y_.data());
+            for (size_t row = 0; row < nrows; row++)
+            {
+               y_[row] += t * TD_[row];
+            }
+         }
          const size_t n = static_cast<size_t>(ncols_);
-         for (size_t row = 0; row < nrows; row++)
+         for (size_t row = 0; !h_ && row < nrows; row++)
          {
             const real_t *a = G_.data() + row * n;
             // Four partial sums: independent chains, so the loop streams
@@ -288,6 +354,8 @@ public:
    /// deleted and the run stops.
    void WriteFile(const std::string &path, const std::string &info) const
    {
+      MFEM_VERIFY(!h_ && !G_.empty(), "QD Green: WriteFile needs the dense "
+                  "rows");
       MFEM_VERIFY(keys_.size() == static_cast<size_t>(kKey) * nown_,
                   "QD Green: SetKeys() was not called before WriteFile()");
       for (int o = 0; o < nown_; o++)
@@ -402,6 +470,8 @@ public:
    /// Collective.
    bool ReadFile(const std::string &path, std::string &info)
    {
+      MFEM_VERIFY(G_.size() == static_cast<size_t>(nb_) * ncomp_ * ncols_,
+                  "QD Green: ReadFile needs the dense rows");
       MPI_File fh;
       int err = MPI_File_open(comm_, path.c_str(), MPI_MODE_RDONLY,
                               MPI_INFO_NULL, &fh);
@@ -789,6 +859,7 @@ private:
    std::vector<char> have_cols_;
    bool have_loading_ = false;
    std::vector<real_t> keys_;   ///< 6 per owned fault DOF (SetKeys)
+   std::unique_ptr<QDHMatrix> h_;   ///< item 4: compressed G, or null
    mutable Vector delta_all_;
    mutable std::vector<real_t> y_, send_, recv_;
 };
