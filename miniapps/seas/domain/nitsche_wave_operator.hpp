@@ -832,6 +832,85 @@ public:
    const Vector &FaultSigmaFKV() const { return sigFkv_own_; }
    const Vector &FacePenaltyKV() const { return sigFkv_face_; }
 
+   // ------------------------------------------------------------------
+   // Local time stepping (profiling plan item 7, P3 and P4; solver/nitsche_lts_run.hpp).
+   // NitscheLtsRun drives the operator through these instead of
+   // ImplicitSolve; global stepping does not call them.
+   // ------------------------------------------------------------------
+   /// Boxes 3-11 at t with x = u(t) and v the fault cluster's velocity before
+   /// its end kicks (Kelvin-Voigt only), as ImplicitSolve does before A^{n+1};
+   /// dt = GetTimeStep(), the fault cluster's step.
+   void LtsAdvanceFault(const Vector &x, real_t t, const Vector *v)
+   {
+      MFEM_VERIFY(has_fault_, "LtsAdvanceFault: the operator has no fault");
+      AdvanceFault_(x, t, v);
+   }
+   /// F += G d (+ G_eta V with Kelvin-Voigt) at the stored fault state: the
+   /// fault terms of Acceleration_, through the same kernels.
+   void LtsAddFaultLoads(Vector &F) const
+   {
+      MFEM_VERIFY(has_fault_, "LtsAddFaultLoads: the operator has no fault");
+      const double tf0 = MPI_Wtime();
+      const bool fast = UseFastFault_();
+      if (fast)
+      {
+         ToKernelLocal_(d_, slip_k_);
+         elast_->AddSlipLoadFast(slip_k_, F);
+      }
+      else
+      {
+         SlipLoad(d_, Gd_);
+         F += Gd_;
+      }
+      if (kv_)
+      {
+         if (fast)
+         {
+            ToKernelLocal_(V_, slip_k_);
+            kv_->AddSlipLoadFast(slip_k_, F);
+         }
+         else
+         {
+            KVSlipLoad(V_, GvV_);
+            F += GvV_;
+         }
+      }
+      fault_sec_ += MPI_Wtime() - tf0;
+   }
+   const BoundaryConfig &Boundary() const { return bc_; }
+   /// Kelvin-Voigt moduli beta_e lambda_e, beta_e mu_e (null without the layer).
+   Coefficient *KelvinVoigtLambda() const { return kv_lam_coef_.get(); }
+   Coefficient *KelvinVoigtMu() const { return kv_mu_coef_.get(); }
+   bool KelvinVoigtScaleDt() const { return kv_ && kv_scale_ == KVScale::Dt; }
+   bool KelvinVoigtHasDirichletVelocity() const { return kv_vD_; }
+   /// P4: with on, a fault step keeps the record's extremes on this rank (no
+   /// collective per fault step; LastStep() then holds this rank's values)
+   /// and LtsReduceRecord() reduces them over the ranks and the fault steps
+   /// since its last call.  Off (the default) is the per-step Allreduce.
+   void LtsDeferRecordReduce(bool on)
+   {
+      lts_defer_red_ = on;
+      for (real_t &q : lts_pend_) { q = -std::numeric_limits<real_t>::infinity(); }
+   }
+   /// Collective: LastStep() = the extremes over all ranks and the fault
+   /// steps since the previous call.
+   void LtsReduceRecord()
+   {
+      MFEM_VERIFY(lts_defer_red_, "LtsReduceRecord: LtsDeferRecordReduce is off");
+      MPI_Allreduce(MPI_IN_PLACE, lts_pend_, pc_ ? 6 : 4, MPITypeMap<real_t>::mpi_type,
+                    MPI_MAX, mesh_.GetComm());
+      record_.min_sigma_eff = -lts_pend_[0];
+      record_.max_sigma_eff = lts_pend_[1];
+      record_.max_V = lts_pend_[2];
+      record_.max_V_dt_over_Dc = lts_pend_[3];
+      if (pc_)
+      {
+         record_.min_sigma_pc = -lts_pend_[4];
+         record_.max_sigma_pc = lts_pend_[5];
+      }
+      for (real_t &q : lts_pend_) { q = -std::numeric_limits<real_t>::infinity(); }
+   }
+
 private:
    /// Shared by Mult and ImplicitSolve so both give identical bits:
    /// a = Minv (F(t) - K x + G d - C v) with t = GetTime().  Without
@@ -1079,6 +1158,23 @@ private:
          max_ratio = std::max(max_ratio, ratio);
       }
       fault_sec_ += MPI_Wtime() - tf0;
+      if (lts_defer_red_)
+      {
+         const real_t r[6] = {-min_sig, max_sig, max_V, max_ratio, -min_pc, max_pc};
+         for (int i = 0; i < 6; i++) { lts_pend_[i] = std::max(lts_pend_[i], r[i]); }
+         record_.step = steps_;
+         record_.t = t;
+         record_.min_sigma_eff = min_sig;
+         record_.max_sigma_eff = max_sig;
+         record_.max_V = max_V;
+         record_.max_V_dt_over_Dc = max_ratio;
+         if (pc_)
+         {
+            record_.min_sigma_pc = min_pc;
+            record_.max_sigma_pc = max_pc;
+         }
+         return;
+      }
       real_t red[4] = {-min_sig, max_sig, max_V, max_ratio};
       MPI_Allreduce(MPI_IN_PLACE, red, 4, MPITypeMap<real_t>::mpi_type, MPI_MAX,
                     mesh_.GetComm());
@@ -1391,6 +1487,8 @@ private:
    Vector sigpc_;                          // sigma* per owned DOF
    long steps_ = 0;
    NitscheStepRecord record_;
+   bool lts_defer_red_ = false;   // LtsDeferRecordReduce
+   real_t lts_pend_[6] = {0, 0, 0, 0, 0, 0};
    std::unique_ptr<ParGridFunction> u_gf_;
    Vector dstar_, psistar_, r0_, Town_, S_, Xlast_, siglast_;
    Vector Tk_, Tks_, Tkc_, jr_k_, snk_, Tloc_;
