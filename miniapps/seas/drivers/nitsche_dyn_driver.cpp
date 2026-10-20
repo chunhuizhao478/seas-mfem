@@ -50,6 +50,27 @@
 // before.  The station files are unchanged (sigma_n there stays sigma_eff);
 // sigma* goes to the fault CSV dump and to fault.vtkhdf (normal_stress_pc).
 //
+// TPV26/27 fault and stress keys (rheology plan rev 1, sections 7-8; Chunhui
+// Zhao, 2026-10-20), all Nitsche-only and off when absent:
+//   [initial_stress]  depth-varying effective initial stress (rheology/
+//                     initial_stress.hpp), the fault prestress in place of
+//                     [stress]; every [stress] sigma_*_pa must then be 0 and
+//                     [[stress_region]] is refused, so nothing counts twice;
+//   [friction.forced_rupture]  hypocenter_x_m, hypocenter_y_m,
+//                     hypocenter_z_m, r_crit_m, vs_m_s, t0_s, all required:
+//                     per-DOF T(r) of friction/forced_rupture.hpp
+//                     (slip weakening only);
+//   [friction.slip_weakening] slip_measure = "magnitude" (default, |d^n|) |
+//                     "path" (the slip path), tension = "abort" (default) |
+//                     "zero_strength" (strength from max(0, sigma_n'));
+//   [rheology]        read and checked; an enabled model is refused until
+//                     the bulk coupling (plan phase R3) is in;
+//   [output.off_fault_stations] file = "..." (CSV name,x,y,z): displacement
+//                     and velocity time series at points in the volume
+//                     (io/off_fault_stations.hpp; SCEC TPV26/27 Part 9),
+//                     <prefix>_offfault_<name>.dat, at the fault-station
+//                     cadence (with LTS at sync points only).
+//
 // Scope (Chunhui Zhao, 2026-10-14): tetrahedral meshes; constant material
 // (the sidecar / depth-profile / halfspace selections are P8).
 //
@@ -112,10 +133,13 @@
 #include "../friction/rate_state_closure.hpp"
 #include "../friction/rate_state_srw_closure.hpp"
 #include "../friction/slip_weakening_closure.hpp"
+#include "../friction/forced_rupture.hpp"
+#include "../rheology/rheology_config.hpp"
 #include "../fault/fault_frame.hpp"
 #include "../spatial/code/spatial_friction.hpp"
 #include "../dynamic/spatial_nucleation.hpp"
 #include "../dynamic/fault_station_file.hpp"
+#include "../io/off_fault_stations.hpp"
 #include "../dynamic/lts_partition.hpp"   // METIS with element weights (plan item 6)
 #include "../solver/nitsche_lts_setup.hpp"   // --lts-report (plan item 7, P0)
 #include "../solver/nitsche_lts_run.hpp"     // --lts rate2 (plan item 7, P3/P4)
@@ -720,6 +744,8 @@ int main(int argc, char *argv[])
    const toml::value *t_out = DeckTable(root, "output");
    const toml::value *t_st = (t_out && t_out->contains("stations"))
                              ? &t_out->at("stations") : nullptr;
+   const toml::value *t_ofs = (t_out && t_out->contains("off_fault_stations"))
+                              ? &t_out->at("off_fault_stations") : nullptr;
 
    const std::string mesh_path = ArgStr(argc, argv, "--mesh", cfg.mesh.path);
    const int p = ArgInt(argc, argv, "--order", cfg.mesh.order);
@@ -1097,6 +1123,72 @@ int main(int argc, char *argv[])
                && cfg.stress.pore_pressure.P_p_grad_pa_per_m == 0.0,
                "Nitsche driver (P7): pore pressure is not wired (P_p must be 0)");
 
+   // slip measure and tension (header): Nitsche-only [friction.slip_weakening]
+   // keys, which the SAFS sub-block parser does not read
+   const toml::value *t_sw = (t_fric && t_fric->contains("slip_weakening"))
+                             ? &t_fric->at("slip_weakening") : nullptr;
+   const std::string slip_measure_s = TomlStr(t_sw, "slip_measure", "magnitude");
+   MFEM_VERIFY(slip_measure_s == "magnitude" || slip_measure_s == "path",
+               "[friction.slip_weakening] slip_measure = \"" << slip_measure_s
+               << "\"; use \"magnitude\" (|d^n|) or \"path\" (the slip path)");
+   const std::string tension_s = TomlStr(t_sw, "tension", "abort");
+   MFEM_VERIFY(tension_s == "abort" || tension_s == "zero_strength",
+               "[friction.slip_weakening] tension = \"" << tension_s
+               << "\"; use \"abort\" or \"zero_strength\"");
+
+   // forced rupture (header): per-DOF T(r), slip weakening only
+   const toml::value *t_fr = (t_fric && t_fric->contains("forced_rupture"))
+                             ? &t_fric->at("forced_rupture") : nullptr;
+   const bool forced_on = t_fr != nullptr;
+   ForcedRuptureSpec forced;
+   if (forced_on)
+   {
+      MFEM_VERIFY(law.kind == LawKind::SlipWeakening, "[friction.forced_rupture] needs "
+                  "[meta] law = \"slip_weakening\"");
+      MFEM_VERIFY(t_fr->is_table(), "[friction.forced_rupture] must be a table");
+      const char *fk[6] = {"hypocenter_x_m", "hypocenter_y_m", "hypocenter_z_m",
+                           "r_crit_m", "vs_m_s", "t0_s"};
+      for (const auto &kv : t_fr->as_table())
+      {
+         bool known = false;
+         for (const char *k : fk) { known = known || kv.first == k; }
+         MFEM_VERIFY(known, "[friction.forced_rupture] unknown key '" << kv.first
+                     << "' (hypocenter_x_m, hypocenter_y_m, hypocenter_z_m, r_crit_m, "
+                     "vs_m_s, t0_s)");
+      }
+      real_t v[6];
+      for (int k = 0; k < 6; k++)
+      {
+         MFEM_VERIFY(t_fr->contains(fk[k]), "[friction.forced_rupture] needs " << fk[k]
+                     << " (no default)");
+         v[k] = TomlReal(t_fr, fk[k], 0.0);
+      }
+      for (int i = 0; i < 3; i++) { forced.hypocenter[i] = v[i]; }
+      forced.r_crit = v[3];
+      forced.vs = v[4];
+      forced.t0 = v[5];
+      const std::string e = ForcedRupture::Validate(forced);
+      MFEM_VERIFY(e.empty(), "[friction.forced_rupture] " << e);
+   }
+
+   // [initial_stress] and [rheology] (rheology plan rev 1, section 7)
+   bool is_on = false;
+   InitialStressSpec is_spec;
+   {
+      const real_t up[3] = {cfg.fault_geometry.up[0], cfg.fault_geometry.up[1],
+                            cfg.fault_geometry.up[2]};
+      const std::string e = ParseInitialStressConfig(root, up, is_on, is_spec);
+      MFEM_VERIFY(e.empty(), e);
+   }
+   RheologyConfig rheo;
+   {
+      const std::string e = ParseRheologyConfig(root, rheo);
+      MFEM_VERIFY(e.empty(), e);
+   }
+   MFEM_VERIFY(!rheo.Any(), "[rheology] " << BuildRheologyStack(rheo)->Describe()
+               << " is enabled: the bulk coupling is rheology plan phase R3 and is not "
+               "in this build yet; set enabled = false");
+
    // ------------------------------------------------------------ prestress (I1)
    MFEM_VERIFY(cfg.stress.kind == spatial::StressSourceKind::ConstantTensor,
                "Nitsche driver: [stress] kind must be \"constant_tensor\" (the global "
@@ -1166,15 +1258,29 @@ int main(int argc, char *argv[])
          }
       }
    }
-   fs.prestress = [s0, regions](const real_t x[3], real_t s[9]) {
-      const real_t *src = s0;
-      for (const StressRegion &R : regions)
-      {
-         if (x[0] >= R.lo[0] && x[0] <= R.hi[0] && x[1] >= R.lo[1] && x[1] <= R.hi[1]
-             && x[2] >= R.lo[2] && x[2] <= R.hi[2]) { src = R.s; }
-      }
-      for (int i = 0; i < 9; i++) { s[i] = src[i]; }
-   };
+   if (is_on)
+   {
+      bool zero = true;
+      for (int i = 0; i < 9; i++) { zero = zero && s0[i] == 0.0; }
+      MFEM_VERIFY(zero, "[initial_stress] is the prestress: every [stress] sigma_*_pa "
+                  "must be 0 (otherwise the background would count twice)");
+      MFEM_VERIFY(regions.empty(), "[initial_stress] and [[stress_region]] cannot be "
+                  "combined");
+      auto is = std::make_shared<const InitialStress>(is_spec);
+      fs.prestress = [is](const real_t x[3], real_t s[9]) { is->EvalEffective(x, s); };
+   }
+   else
+   {
+      fs.prestress = [s0, regions](const real_t x[3], real_t s[9]) {
+         const real_t *src = s0;
+         for (const StressRegion &R : regions)
+         {
+            if (x[0] >= R.lo[0] && x[0] <= R.hi[0] && x[1] >= R.lo[1] && x[1] <= R.hi[1]
+                && x[2] >= R.lo[2] && x[2] <= R.hi[2]) { src = R.s; }
+         }
+         for (int i = 0; i < 9; i++) { s[i] = src[i]; }
+      };
+   }
 
    // pin frame (F1 with the reference normal): nhat, shat, dhat
    real_t pn[3], pu[3], ps[3], pd[3];
@@ -1263,6 +1369,11 @@ int main(int argc, char *argv[])
          st.mu_d = r.mu_d(0);
          st.Dc = r.d_c(0);
          st.cohesion = r.cohesion(0);
+         if (forced_on)
+         {
+            st.forced_time = ForcedRupture::Time(forced, x);
+            st.forced_t0 = forced.t0;
+         }
       };
    }
 
@@ -1270,6 +1381,11 @@ int main(int argc, char *argv[])
    DomainConfig dcfg;
    dcfg.penalty_factor = penalty_factor;
    NitscheWaveOperator op(pmesh, p, material, bc, dcfg, &fs);
+   op.SetSlipMeasure(slip_measure_s == "path" ? NitscheWaveOperator::SlipMeasure::Path
+                                              : NitscheWaveOperator::SlipMeasure::Magnitude);
+   op.SetTensionMode(tension_s == "zero_strength"
+                     ? NitscheWaveOperator::TensionMode::ZeroStrength
+                     : NitscheWaveOperator::TensionMode::Abort);
    MFEM_VERIFY(op.Orientation().GetReport().junction_edges == 0,
                "[fault_geometry] junction_policy = \"refuse\": the fault has "
                << op.Orientation().GetReport().junction_edges << " junction edges");
@@ -1699,6 +1815,28 @@ int main(int argc, char *argv[])
                    << lts_ticks_fault << " tick(s): " << nsteps << " fault steps to t = "
                    << cfg.time.t_initial + lts_nsync * lts_ticks_sync * lts_asg.dt0 << " s\n";
       }
+      if (t_sw)
+      {
+         std::cout << "  slip weakening: D = " << (slip_measure_s == "path" ? "slip path"
+                                                    : "|d^n|")
+                   << "; tension " << tension_s << "\n";
+      }
+      if (forced_on)
+      {
+         std::cout << "  forced rupture: hypocenter (" << forced.hypocenter[0] << ", "
+                   << forced.hypocenter[1] << ", " << forced.hypocenter[2] << ") m, r_crit "
+                   << forced.r_crit << " m, Vs " << forced.vs << " m/s, t0 " << forced.t0
+                   << " s\n";
+      }
+      if (is_on)
+      {
+         std::cout << "  initial stress: "
+                   << (is_spec.kind == InitialStressSpec::Kind::LithostaticRatio
+                       ? "lithostatic_ratio" : "constant_tensor")
+                   << " (effective; replaces [stress])\n";
+      }
+      std::cout << "  rheology: " << (rheo.present ? "table present, no model enabled"
+                                       : "linear elastic") << "\n";
       if (pc_on)
       {
          std::cout << "  Prakash-Clifton regularization of the law's normal stress: v_star = "
@@ -1754,6 +1892,25 @@ int main(int argc, char *argv[])
       }
       return 0;
    }
+   // off-fault stations (header): station frame shat, up, -nhat_ref
+   std::unique_ptr<OffFaultStationWriter> offst;
+   if (t_ofs)
+   {
+      MFEM_VERIFY(t_ofs->is_table() && t_ofs->contains("file") && t_ofs->as_table().size() == 1,
+                  "[output.off_fault_stations] takes one key, file (the station CSV)");
+      const std::string path = TomlStr(t_ofs, "file", "");
+      const std::vector<OffFaultStation> ofs = ReadOffFaultStations(path);
+      const real_t far[3] = {-pn[0], -pn[1], -pn[2]};
+      real_t upn[3] = {pu[0], pu[1], pu[2]};
+      Normalize(upn);
+      offst = std::make_unique<OffFaultStationWriter>(op.Elasticity().GetFESpace(), ofs, ps, upn, far);
+      offst->Open(out_dir, prefix, cfg.problem.tag);
+      if (g_rank == 0)
+      {
+         std::cout << "  off-fault stations from " << path << " (" << ofs.size()
+                   << "): <prefix>_offfault_<name>.dat, h along strike, v down, n toward -ref_normal\n";
+      }
+   }
    op.SetFastFaultKernels(fast_fault != 0);
    op.SetFusedStiffness(fused_spmv != 0);
    op.SetDenseBlocks(dense_blocks != 0);
@@ -1786,6 +1943,7 @@ int main(int argc, char *argv[])
       if (station_avg) { station_avg->Apply(t, dofdata); }
       stations->WriteStep(t, dofdata);
    }
+   if (offst) { offst->WriteStep(t, U, Ud); }
    real_t max_ratio_run = 0.0, max_V_run = 0.0, min_sig_run = 1e300, max_sig_run = -1e300;
    real_t min_pc_run = 1e300, max_pc_run = -1e300;
    // this rank's time inside ode.Step; step 1 is kept apart because it also
@@ -1843,6 +2001,7 @@ int main(int argc, char *argv[])
          if (station_avg) { station_avg->Apply(t, dofdata); }
          stations->WriteStep(t, dofdata);
       }
+      if (offst && sync && s % station_every == 0) { offst->WriteStep(t, U, Ud); }
       if (dump && s % dump_every == 0)
       {
          const Vector &d = op.Slip(), &psi = op.State();
@@ -1898,6 +2057,7 @@ int main(int argc, char *argv[])
       }
    }
    if (stations) { stations->Close(); }
+   if (offst) { offst->Close(); }
    if (mon && g_rank == 0)
    {
       std::cout << std::setprecision(6) << "  energy balance: sum rho = " << mon->SumRho()

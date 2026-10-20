@@ -5,7 +5,7 @@
 //
 // Linear slip weakening as the projection identity of IFaultClosure:
 //
-//    mu(D)  = mu_s - (mu_s - mu_d) min(D / Dc, 1),   D = |d^n| = st.slip_abs
+//    mu(D)  = mu_s - (mu_s - mu_d) min(D / Dc, 1),   D = st.slip_abs = |d^n|
 //    tau_s  = c + mu(D) sigma_n
 //    |X| <= tau_s:  V = 0                                   (stick)
 //    |X| >  tau_s:  V = -(|X| - tau_s) / gamma  X / |X|     (slip)
@@ -20,22 +20,30 @@
 // the same order as those two functions, so the two agree to round-off
 // with the sign mapped (test L-04).
 //
-// The state psi is the slip path int |V| dt (output only): StateRate = |V|,
-// and the operator's Heun update gives the trapezoid rule.  A large mu_s
-// (e.g. 10000) never yields, so no barrier sentinel is needed; the file
-// carries no benchmark constant.
+// The state psi is the slip path int |V| dt: StateRate = |V|, and the
+// operator's Heun update gives the trapezoid rule.  It is output only,
+// unless the operator's SlipMeasure::Path hands psi^n to the law as D (the
+// path-integrated D of TPV26/27).  A large mu_s (e.g. 10000) never yields,
+// so no barrier sentinel is needed; the file carries no benchmark constant.
+//
+// Forced rupture (TPV26/27, friction/forced_rupture.hpp): a point with
+// forced_t0 > 0 uses mu = mu_s + (mu_d - mu_s) max(f1, f2) at the step time
+// st.t; with forced_t0 = 0 (every deck without [friction.forced_rupture])
+// mu is the expression above, bit for bit.
 //
 // sigma_n is the compression-positive normal stress the operator hands the
 // law (the Prakash-Clifton value when that is on); the operator's range
-// check keeps it >= sigma_min >= 0.
+// check keeps it >= sigma_min >= 0, or with TensionMode::ZeroStrength the
+// operator hands max(0, sigma_n).
 //
-// Scope (Chunhui Zhao, 2026-10-16).
+// Scope (Chunhui Zhao, 2026-10-16; forced rupture 2026-10-20).
 
 #ifndef MFEM_SEAS_SLIP_WEAKENING_CLOSURE_HPP
 #define MFEM_SEAS_SLIP_WEAKENING_CLOSURE_HPP
 
 #include "mfem.hpp"
 #include "fault_closure.hpp"
+#include "forced_rupture.hpp"
 
 #include <cmath>
 
@@ -60,7 +68,10 @@ public:
    real_t SolveSlipRate(const real_t X_tan[2], real_t gamma, real_t sigma_n,
                         const FaultPointState &s, real_t V_tan[2]) const override
    {
-      const real_t mu = FrictionCoefficient(s.slip_abs, s.mu_s, s.mu_d, s.Dc);
+      const real_t mu = (s.forced_t0 > 0.0)
+                        ? ForcedRupture::FrictionCoefficient(s.slip_abs, s.mu_s, s.mu_d, s.Dc,
+                                                             s.t, s.forced_time, s.forced_t0)
+                        : FrictionCoefficient(s.slip_abs, s.mu_s, s.mu_d, s.Dc);
       const real_t tau_s = mu * sigma_n + s.cohesion;
       const real_t X_abs = std::sqrt(X_tan[0] * X_tan[0] + X_tan[1] * X_tan[1]);
       real_t V_abs = 0.0;
@@ -88,10 +99,11 @@ public:
       s.psi = 0.0;
    }
 
-   /// mu_s >= mu_d >= 0, Dc > 0, cohesion >= 0.
+   /// mu_s >= mu_d >= 0, Dc > 0, cohesion >= 0, forced_t0 >= 0.
    bool CheckParameters(const FaultPointState &s) const override
    {
-      return s.mu_s >= s.mu_d && s.mu_d >= 0.0 && s.Dc > 0.0 && s.cohesion >= 0.0;
+      return s.mu_s >= s.mu_d && s.mu_d >= 0.0 && s.Dc > 0.0 && s.cohesion >= 0.0
+             && s.forced_t0 >= 0.0;
    }
 };
 

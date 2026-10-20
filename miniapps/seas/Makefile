@@ -3135,6 +3135,37 @@ seas_test_nitsche_kv: $(TEST_NITSCHE_KV_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
 test-nitsche-kv: seas_test_nitsche_kv
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_kv
 
+# Rheology plan rev 1 (Chunhui Zhao, 2026-10-20): the pointwise models,
+# initial stress and deck tables of rheology/, unit tests U1-U10, and the
+# TPV26/27 forced rupture of friction/, U11 (no mesh, no MPI; the deck test
+# needs toml11).  Run from miniapps/seas.
+RHEOLOGY_HEADERS = rheology/rheology_model.hpp rheology/drucker_prager.hpp \
+                   rheology/viscoelastic.hpp rheology/damage_breakage.hpp \
+                   rheology/rheology_stack.hpp rheology/initial_stress.hpp \
+                   rheology/rheology_config.hpp \
+                   friction/forced_rupture.hpp friction/slip_weakening_closure.hpp
+TEST_RHEOLOGY_SRC = tests/unit/test_rheology_pointwise.cpp \
+                    tests/unit/test_rheology_initial_stress.cpp \
+                    tests/unit/test_rheology_config.cpp \
+                    tests/unit/test_rheology_forced_rupture.cpp
+TEST_RHEOLOGY_OBJ = $(TEST_RHEOLOGY_SRC:.cpp=.o)
+TEST_RHEOLOGY_BIN = seas_test_rheology_pointwise seas_test_rheology_initial_stress \
+                    seas_test_rheology_config seas_test_rheology_forced_rupture
+$(TEST_RHEOLOGY_OBJ): %.o: $(SRC)%.cpp $(RHEOLOGY_HEADERS) tests/unit/test_macros.hpp \
+                           $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(TOML_FLAGS) -c $< -o $@
+
+$(TEST_RHEOLOGY_BIN): seas_test_%: tests/unit/test_%.o
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $< $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-rheology: $(TEST_RHEOLOGY_BIN)
+	./seas_test_rheology_pointwise
+	./seas_test_rheology_initial_stress
+	./seas_test_rheology_config
+	./seas_test_rheology_forced_rupture
+
 test-nitsche-p3: seas_test_nitsche_p3
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_p3
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_p3 --np2
@@ -3415,6 +3446,8 @@ $(NITSCHE_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
                              friction/rate_state_closure.hpp \
                              friction/rate_state_srw_closure.hpp \
                              friction/slip_weakening_closure.hpp \
+                             io/off_fault_stations.hpp \
+                             $(RHEOLOGY_HEADERS) \
                              $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) $(TOML_FLAGS) -DSEAS_USE_MPI \

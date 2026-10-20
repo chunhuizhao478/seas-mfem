@@ -391,12 +391,14 @@ static void TestT11T12(ParMesh &pm)
    TEST_ASSERT(worst_inv < 1e-13, "T11(a) V, sigma_n, |V|, D unchanged under (d, s) -> (d, s) Q");
    TEST_ASSERT(worst_rot < 1e-13, "T11(a) (tau1, tau2) rotated by Q^T");
    // T12 (static): the per-point friction parameters are scalars only
-   // (psi, a, Dc, mu_s, mu_d, cohesion, V_w, slip_abs; hook H-B1).
-   static_assert(sizeof(FaultPointState) == 8 * sizeof(real_t),
-                 "FaultPointState must stay eight real_t scalars: T12");
+   // (psi, a, Dc, mu_s, mu_d, cohesion, V_w, forced_time, forced_t0,
+   // slip_abs, t; hook H-B1; the forced-rupture pair and t added by the
+   // rheology plan rev 1, phase R1).
+   static_assert(sizeof(FaultPointState) == 11 * sizeof(real_t),
+                 "FaultPointState must stay eleven real_t scalars: T12");
    static_assert(std::is_trivially_copyable<FaultPointState>::value,
                  "FaultPointState must stay trivially copyable: T12");
-   TEST_ASSERT(true, "T12 static: FaultPointState is eight real_t scalars, trivially "
+   TEST_ASSERT(true, "T12 static: FaultPointState is eleven real_t scalars, trivially "
                "copyable, no component index");
 }
 

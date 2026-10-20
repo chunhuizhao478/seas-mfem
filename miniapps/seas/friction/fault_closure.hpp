@@ -40,9 +40,17 @@ struct FaultPointState
    real_t mu_d = 0.0;      ///< dynamic friction coefficient (slip weakening) [-]
    real_t cohesion = 0.0;  ///< frictional cohesion (slip weakening) [Pa]
    real_t V_w = 0.0;       ///< weakening slip rate (strong rate weakening) [m/s]
-   /// Slip magnitude |d^n| at the start of the step.  Not a parameter: the
-   /// operator sets it on every box-9 call (CloseDOF); zero elsewhere.
+   /// Forced rupture (slip weakening, TPV26/27 description Part 4): the
+   /// weakening is forced from forced_time T(r) over forced_t0 [s].
+   /// forced_t0 = 0 is no forced rupture.
+   real_t forced_time = 0.0;
+   real_t forced_t0 = 0.0;
+   /// Slip measure D at the start of the step: |d^n| or, with the
+   /// operator's SlipMeasure::Path, the slip path psi^n.  Not a parameter:
+   /// the operator sets it on every box-9 call (CloseDOF); zero elsewhere.
    real_t slip_abs = 0.0;
+   /// Time of the step, t_{n+1} [s].  Set like slip_abs; zero elsewhere.
+   real_t t = 0.0;
 };
 
 class IFaultClosure
