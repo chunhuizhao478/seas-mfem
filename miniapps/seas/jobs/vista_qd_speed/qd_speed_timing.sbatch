@@ -36,11 +36,18 @@
 #                 there when the file does not exist.  Two jobs must not
 #                 build the same file at once: qd_speed_submit.sh makes the
 #                 other green jobs wait for the first (afterok);
+#        hgreen   G kept compressed (QD speed item 4): --qd-green
+#                 --qd-green-cache GREEN_CACHE --qd-green-compress HEPS
+#                 --qd-green-hcache HCACHE --qd-green-compress-mem HMEM.
+#                 Reads the H-matrix from HCACHE; when that file does not
+#                 exist, reads dense G from GREEN_CACHE, compresses it and
+#                 writes HCACHE.  Again only one job may write it: the
+#                 submit script makes the others wait (afterok);
 #      repeating a mode measures the run-to-run spread;
 #   3. timing_summary.txt: one line per run (s/step, solve ms/call and the
 #      other parts) from the end-of-run [STAGE-TIMERS] table, then the
-#      [QD-GREEN] build or read lines.  In a green run "solve" is the
-#      G product.
+#      [QD-GREEN] and [QD-HMAT] build or read lines.  In a green or hgreen
+#      run "solve" is the G product.
 #   With EVENT_REF="DIR PREFIX" (the accuracy gate's event runs,
 #   qd_speed_submit.sh STEPS=events), each run is also compared with that
 #   reference run through its earthquakes by jobs/vista_qd_speed/
@@ -92,6 +99,12 @@ if [ -z "${MODES:-}" ]; then
    fi
 fi
 GREEN_CACHE="${GREEN_CACHE:-${SCRATCH:-${WORK}}/seas-qd-green/bp5_prod_p${ORDER}.bin}"
+# hgreen: EPS 1e-10 is design rev2's choice (round-off-level product error,
+# production G 2.85x smaller); HMEM is the GiB per node the compression may
+# hold at once in gathered blocks (the driver's default, 64).
+HEPS="${HEPS:-1e-10}"
+HMEM="${HMEM:-64}"
+HCACHE="${HCACHE:-${SCRATCH:-${WORK}}/seas-qd-green/bp5_prod_p${ORDER}_h${HEPS}.bin}"
 EVENT_REF="${EVENT_REF:-}"
 if [ -n "${EVENT_REF}" ]; then
    read -r EVENT_REF_DIR EVENT_REF_PFX <<< "${EVENT_REF}"
@@ -101,7 +114,7 @@ if [ -n "${EVENT_REF}" ]; then
       exit 1
    fi
 fi
-GOLD_README_KNOBS+=(ORDER RUN_STEPS MODES GREEN_CACHE EVENT_REF)
+GOLD_README_KNOBS+=(ORDER RUN_STEPS MODES GREEN_CACHE HEPS HMEM HCACHE EVENT_REF)
 
 cd "${SEAS_DIR}"
 OUT_ROOT="bp5/results_qd_speed/timing_n${NNODES}_r${NRANKS}_c${CPT}_p${ORDER}_job${SLURM_JOB_ID}"
@@ -112,6 +125,7 @@ g0_provenance "${OUT_ROOT}"
         "SLURM_TASKS_PER_NODE=${SLURM_TASKS_PER_NODE:-?}"
    echo "modes: ${MODES}; order ${ORDER}; ${RUN_STEPS} steps"
    echo "green cache: ${GREEN_CACHE}"
+   echo "H-matrix cache: ${HCACHE} (eps ${HEPS}, ${HMEM} GiB per node while compressing)"
    echo "event reference: ${EVENT_REF:-none}"
 } >> "${OUT_ROOT}/provenance.txt"
 
@@ -139,6 +153,10 @@ for MODE in ${MODES}; do
       default)      OPS=() ;;
       green)        mkdir -p "$(dirname "${GREEN_CACHE}")"
                     OPS=(--qd-green --qd-green-cache "${GREEN_CACHE}") ;;
+      hgreen)       mkdir -p "$(dirname "${HCACHE}")"
+                    OPS=(--qd-green --qd-green-cache "${GREEN_CACHE}"
+                         --qd-green-compress "${HEPS}" --qd-green-hcache "${HCACHE}"
+                         --qd-green-compress-mem "${HMEM}") ;;
       *) echo "ERROR: unknown mode ${MODE}" >&2; overall=1; continue ;;
    esac
    echo "=== ${TAG}: start $(date -u +%T) ==="
@@ -173,10 +191,14 @@ for MODE in ${MODES}; do
          overall=1
       fi
    fi
-   if [ "${MODE}" = green ]; then
-      grep '\[QD-GREEN\]' "${OUT}/run.log" > "${OUT}/qd_green.txt"
+   if [ "${MODE}" = green ] || [ "${MODE}" = hgreen ]; then
+      grep -E '\[QD-(GREEN|HMAT)\]' "${OUT}/run.log" > "${OUT}/qd_green.txt"
       if ! grep -q '\[QD-GREEN\] check against the solve path' "${OUT}/qd_green.txt"; then
          echo "ERROR: ${TAG}: no '[QD-GREEN] check against the solve path' line." >&2
+         overall=1
+      fi
+      if [ "${MODE}" = hgreen ] && ! grep -q '\[QD-HMAT\] stored' "${OUT}/qd_green.txt"; then
+         echo "ERROR: ${TAG}: no '[QD-HMAT] stored' line: G was not compressed." >&2
          overall=1
       fi
    fi

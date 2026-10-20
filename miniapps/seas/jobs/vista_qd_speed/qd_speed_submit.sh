@@ -44,6 +44,20 @@
 #           p = 1 cache compresses at round-off-level product error (QD
 #           speed item 4, measurement only; 1 node, up to 3 h).  Reads
 #           GREEN_CACHE; stops if it is missing.  Not in the default STEPS
+#   hgreen  QD speed item 4, design rev2 T2: the timing script with
+#           MODES="hgreen green" (compressed G, then dense G at the same
+#           layout) on 1, 2 and 4 full nodes, 1,000 steps each.
+#           h_n1_r144 compresses GREEN_CACHE at HEPS (default 1e-10) and
+#           writes the H file (HCACHE in the timing script,
+#           <GREEN_CACHE dir>/bp5_prod_p1_h<HEPS>.bin); h_n2_r288 and
+#           h_n4_r576 wait for it (afterok) and read it.  Stops unless
+#           GREEN_CACHE exists (the dense G is read, never built here).
+#           Not in the default STEPS; HGREEN_LAYOUTS limits it
+#   hevents design rev2 T3: the events step with MODES=hgreen, on 1 node
+#           (gold's 144 ranks) and on 4 nodes, against gold 1074099.  Reads
+#           the H file: waits for h_n1_r144 when hgreen is in the same
+#           STEPS, else stops unless the file exists.  Not in the default
+#           STEPS; HEVENT_LAYOUTS limits it
 # Layouts (nodes x ranks, CPUs per rank):
 #   n1_r144  1 x 144, 1   loops and the new default, twice each
 #   n1_r72   1 x 72,  2   default
@@ -63,6 +77,8 @@ BUILD_JOB="${BUILD_JOB:-}"
 LAYOUTS="${LAYOUTS:-n1_r144 n1_r72 n1_r36 n2_r288 n2_r144 n2_r72}"
 GREEN_LAYOUTS="${GREEN_LAYOUTS:-g_n1_r144 g_n2_r288 g_n4_r576}"
 EVENT_LAYOUTS="${EVENT_LAYOUTS:-e_n1_r144_loops e_n1_r144_default e_n1_r144_green e_n4_r576_green}"
+HGREEN_LAYOUTS="${HGREEN_LAYOUTS:-h_n1_r144 h_n2_r288 h_n4_r576}"
+HEVENT_LAYOUTS="${HEVENT_LAYOUTS:-e_n1_r144_hgreen e_n4_r576_hgreen}"
 
 if [ ! -f jobs/vista_qd_speed/qd_speed_timing.sbatch ]; then
    echo "ERROR: run from miniapps/seas" >&2
@@ -174,4 +190,56 @@ if has compress; then
    fi
    sub "compress" --export="ALL,GREEN_CACHE=${GREEN_CACHE_P1}" \
        jobs/vista_qd_speed/qd_green_compress.sbatch
+fi
+
+# Item 4 (compressed G).  The H file's name follows the timing script's
+# default, so both read the same file.
+GREEN_CACHE_P1="${GREEN_CACHE:-${SCRATCH:-${WORK}}/seas-qd-green/bp5_prod_p1.bin}"
+HEPS="${HEPS:-1e-10}"
+HCACHE_P1="${HCACHE:-$(dirname "${GREEN_CACHE_P1}")/bp5_prod_p1_h${HEPS}.bin}"
+H_WRITE_JOB=""
+if has hgreen; then
+   if [ ! -f "${GREEN_CACHE_P1}" ]; then
+      echo "ERROR: hgreen: no Green's cache ${GREEN_CACHE_P1} to compress." >&2
+      exit 1
+   fi
+   # name:nodes:ranks:walltime; h_n1_r144 also compresses (estimate: the
+   # Python measurement took 2051 s on 36 processes) and writes the file.
+   H_DEP=("${DEP[@]}")
+   for spec in h_n1_r144:1:144:04:00:00 h_n2_r288:2:288:01:00:00 \
+               h_n4_r576:4:576:01:00:00; do
+      IFS=: read -r name nodes ranks hh mm ss <<< "${spec}"
+      [[ " ${HGREEN_LAYOUTS} " == *" ${name} "* ]] || continue
+      sub "hgreen ${name}" "${H_DEP[@]}" -J qd_hgreen_timing \
+          --export="ALL,MODES=hgreen green,GREEN_CACHE=${GREEN_CACHE_P1},HEPS=${HEPS},HCACHE=${HCACHE_P1}" \
+          -N "${nodes}" -n "${ranks}" --ntasks-per-node="$((ranks / nodes))" -c 1 \
+          -t "${hh}:${mm}:${ss}" jobs/vista_qd_speed/qd_speed_timing.sbatch
+      if [ "${name}" = h_n1_r144 ]; then
+         H_WRITE_JOB="${JOB}"
+         H_DEP=(--dependency="afterok:${JOB}" --kill-on-invalid-dep=yes)
+      fi
+   done
+fi
+
+if has hevents; then
+   if [ -n "${H_WRITE_JOB}" ]; then
+      HE_DEP=(--dependency="afterok:${H_WRITE_JOB}" --kill-on-invalid-dep=yes)
+   elif [ -f "${HCACHE_P1}" ]; then
+      HE_DEP=("${DEP[@]}")
+   else
+      echo "ERROR: hevents: no H file ${HCACHE_P1}, and no hgreen h_n1_r144" \
+           "in this submission to write it." >&2
+      exit 1
+   fi
+   EVENT_REF_SPEC="bp5/benchmark_data/golden_vista_144r_p1_1000m bp5_cycle_p1"
+   # name:nodes:ranks:walltime; estimates at 62,000 steps from dense G's
+   # event gate (0.293 s/step on 1 node, 0.076 on 4) plus the H read.
+   for spec in e_n1_r144_hgreen:1:144:06:30:00 e_n4_r576_hgreen:4:576:02:00:00; do
+      IFS=: read -r name nodes ranks hh mm ss <<< "${spec}"
+      [[ " ${HEVENT_LAYOUTS} " == *" ${name} "* ]] || continue
+      sub "hevents ${name}" "${HE_DEP[@]}" -J qd_hevent_gate \
+          --export="ALL,MODES=hgreen,RUN_STEPS=62000,EVENT_REF=${EVENT_REF_SPEC},GREEN_CACHE=${GREEN_CACHE_P1},HEPS=${HEPS},HCACHE=${HCACHE_P1}" \
+          -N "${nodes}" -n "${ranks}" --ntasks-per-node="$((ranks / nodes))" -c 1 \
+          -t "${hh}:${mm}:${ss}" jobs/vista_qd_speed/qd_speed_timing.sbatch
+   done
 fi
