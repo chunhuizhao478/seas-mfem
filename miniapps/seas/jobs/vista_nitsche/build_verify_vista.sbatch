@@ -34,11 +34,14 @@
 #      peak, tets, implied min 6V/A and dt, steps to 12 s.  Confirms the ranks per node of the runs.
 #      Then TPV31 200 m p = 2 on 144 ranks and TPV6 100 m p = 1 on 48 ranks, the ranks per node of the
 #      TPV6/TPV7 100 m jobs (every rank reads the whole serial mesh, 3.2-3.4 GB per rank at this
-#      size, so 144 per node would not fit).
+#      size, so 144 per node would not fit).  On one node these two check only the driver's setup
+#      (mesh read, partition, operator): after it the whole problem sits on this node, which the runs
+#      spread over 4 to 48 nodes, and both ran out of memory there in job 1083417.  Memory on the
+#      run layout: loadcheck_tpv6_100m_p1.sbatch and loadcheck_tpv31_200m_p1.sbatch.
 # Exit status: 3 when a mesh fails (nothing after it would mean anything), otherwise 1 when a gate
-# test, a smoke run or the TPV31/TPV6 load check fails (all are still run and printed), else 0.  The
-# TPV205 and TPV104 p = 2 load checks at 144 ranks run out of memory on one node (they did in every
-# build so far) and do not count.
+# test or a smoke run fails or the TPV31/TPV6 load check dies before the driver's setup has ended
+# (no dt line; all are still run and printed), else 0.  The TPV205 and TPV104 p = 2 load checks at
+# 144 ranks run out of memory on one node (they did in every build so far) and do not count.
 # Cost: 1 node x <= 3 h x 0.33 SU = <= 1 SU (the TPV6 100 m mesh took 306 s of gmsh in the cloud).
 export LC_ALL=C LANG=C
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
@@ -125,7 +128,9 @@ for case in "tpv205 tpv205/configs/tpv205_nitsche.toml tpv205/mesh/tpv2053d_200m
       --output-dir $OUT --log-every 1 > $OUT/driver.log 2>&1
    rc=$?; kill $MON 2>/dev/null; wait $MON 2>/dev/null
    echo "driver exit $rc in $(( $(date +%s) - s )) s"
-   [ $rc -eq 0 ] || [ $PROB = tpv205 ] || [ $PROB = tpv104 ] || FAIL=$((FAIL + 1))
+   # the driver prints its dt line once the setup has ended (drivers/nitsche_dyn_driver.cpp:1668)
+   [ $rc -eq 0 ] || [ $PROB = tpv205 ] || [ $PROB = tpv104 ] || grep -q -a "  dt = " $OUT/driver.log \
+      || FAIL=$((FAIL + 1))
    grep -a "tets;" $OUT/driver.log | head -1
    grep -a "  dt = " $OUT/driver.log | head -1
    grep -a "  dt = " $OUT/driver.log | head -1 | awk '{for(i=1;i<=NF;i++){if($i=="dt"&&$(i+1)=="=")dt=$(i+2); if($i=="C(p)")C=$(i+1)}} END{if(dt==""||C==""){print "no dt line in driver.log"; exit} r=dt*p*p/(0.5*C); printf "implied min h/c_p %.4e s (x 6000 m/s = %.2f m); steps to 12 s %d\n", r, r*6000, int(12/dt+0.999)}' p=$P
