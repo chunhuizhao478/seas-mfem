@@ -17,13 +17,14 @@
 # Steps:
 #   0. the repo CLAUDE.md guard (GitHub first), plus no untracked sources
 #   1. build_vista.sh: MFEM + seas_nitsche_dyn_driver + six gate tests (modules only)
-#   2. meshes from the committed .geo with TACC gmsh, msh 2.2, sha256 recorded:
+#   2. meshes from the committed .geo with TACC gmsh (no OpenCASCADE, so every .geo uses the built-in
+#      kernel), msh 2.2, sha256 recorded; the job stops if gmsh fails or a mesh has no elements:
 #      tpv205/mesh/tpv2053d_1000m.msh, tpv2053d_200m.msh, tpv104/mesh/tpv104_200m.msh
 #      (tpv104_200m.geo equals tpv102_200m.geo apart from comments), and
 #      tpv6/mesh/tpv6_nitsche_1000m.msh, tpv6_nitsche_100m.msh (TPV6 and TPV7 share it),
 #      tpv31/mesh/tpv31_nitsche_1000m.msh, tpv31_nitsche_200m.msh
 #   3. gate tests, as on the Mac at c906a8a: gates 74/0, pf 22/0, hook-spy 16/16 at np 1, 2, 4 + abort,
-#      lsw 13/13, srw 9/9, lsw-inline 14/14 at np 1, 2, 4; tpv-setup 29/29 at np 1 and 2 (cloud)
+#      lsw 13/13, srw 9/9, lsw-inline 14/14 at np 1, 2, 4; tpv-setup 30/30 at np 1 and 2 (cloud)
 #   4. driver smoke: TPV205 1000 m p=1 to 1.2 s on 8 ranks.  Mac reference (same deck, its own
 #      1000 m mesh): "816 steps, t = 1.20137 s; max|V| 1.52293 m/s; max|V|dt/Dc 0.0056054".  The
 #      Vista mesh can differ from the Mac one (gmsh output depends on platform), so compare the
@@ -34,7 +35,11 @@
 #      Then TPV31 200 m p = 2 on 144 ranks and TPV6 100 m p = 1 on 48 ranks, the ranks per node of the
 #      TPV6/TPV7 100 m jobs (every rank reads the whole serial mesh, 3.2-3.4 GB per rank at this
 #      size, so 144 per node would not fit).
-# Cost: 1 node x <= 3 h x 0.33 SU = <= 1 SU (the TPV6 100 m mesh took 400 s of gmsh in the cloud).
+# Exit status: 3 when a mesh fails (nothing after it would mean anything), otherwise 1 when a gate
+# test, a smoke run or the TPV31/TPV6 load check fails (all are still run and printed), else 0.  The
+# TPV205 and TPV104 p = 2 load checks at 144 ranks run out of memory on one node (they did in every
+# build so far) and do not count.
+# Cost: 1 node x <= 3 h x 0.33 SU = <= 1 SU (the TPV6 100 m mesh took 306 s of gmsh in the cloud).
 export LC_ALL=C LANG=C
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 ROOT=$(cd "$SLURM_SUBMIT_DIR/../../../.." && pwd)          # repository root
@@ -61,8 +66,12 @@ for g in tpv205/mesh/tpv2053d_1000m tpv205/mesh/tpv2053d_200m tpv104/mesh/tpv104
          tpv6/mesh/tpv6_nitsche_1000m tpv31/mesh/tpv31_nitsche_1000m tpv31/mesh/tpv31_nitsche_200m \
          tpv6/mesh/tpv6_nitsche_100m; do
    t=$(date +%s); gmsh -3 $g.geo -format msh22 -o $g.msh > $(basename $g)_gmsh_$SLURM_JOB_ID.log 2>&1
-   echo "$g.msh: gmsh exit $? in $(( $(date +%s) - t )) s"
+   rc=$?; ne=$(grep -a -A1 '^\$Elements' $g.msh 2>/dev/null | tail -1)
+   echo "$g.msh: gmsh exit $rc in $(( $(date +%s) - t )) s, ${ne:-0} elements"
+   [ $rc -eq 0 ] && [ "${ne:-0}" -gt 0 ] \
+      || { echo "ERROR: $g.msh not made; $(basename $g)_gmsh_$SLURM_JOB_ID.log:"; grep -a "Error" $(basename $g)_gmsh_$SLURM_JOB_ID.log | head -5; exit 3; }
 done
+FAIL=0
 sha256sum tpv205/mesh/tpv2053d_1000m.msh tpv205/mesh/tpv2053d_200m.msh tpv104/mesh/tpv104_200m.msh \
           tpv6/mesh/tpv6_nitsche_1000m.msh tpv31/mesh/tpv31_nitsche_1000m.msh tpv31/mesh/tpv31_nitsche_200m.msh \
           tpv6/mesh/tpv6_nitsche_100m.msh | tee MESH_SHA256_VISTA
@@ -70,7 +79,9 @@ echo "=== gate tests ==="
 for t in test-nitsche-gates test-nitsche-pf test-nitsche-hook-spy test-nitsche-lsw test-nitsche-srw test-nitsche-lsw-inline \
          test-nitsche-tpv-setup; do
    s=$(date +%s); make MFEM_DIR=../.. HDF5_DIR="$TACC_PHDF5_DIR" SEAS_FS_LIB= $t > ${t}_$SLURM_JOB_ID.log 2>&1; rc=$?
-   echo "$t exit $rc in $(( $(date +%s) - s )) s: PASSED $(grep -v echo ${t}_$SLURM_JOB_ID.log | grep -c PASSED), FAILED $(grep -v echo ${t}_$SLURM_JOB_ID.log | grep -c FAILED)"
+   nf=$(grep -v echo ${t}_$SLURM_JOB_ID.log | grep -c FAILED)
+   echo "$t exit $rc in $(( $(date +%s) - s )) s: PASSED $(grep -v echo ${t}_$SLURM_JOB_ID.log | grep -c PASSED), FAILED $nf"
+   [ $rc -eq 0 ] && [ $nf -eq 0 ] || FAIL=$((FAIL + 1))
 done
 echo "=== driver smoke: TPV205 1000 m p=1 1.2 s, 8 ranks ==="
 OUT=$SCRATCH/nitsche_benchmarks/verify_tpv205_1000m_p1_1p2s_$SLURM_JOB_ID; mkdir -p $OUT
@@ -78,7 +89,7 @@ s=$(date +%s)
 ibrun -n 8 -o 0 ./seas_nitsche_dyn_driver --config tpv205/configs/tpv205_nitsche.toml \
    --mesh tpv205/mesh/tpv2053d_1000m.msh --order 1 --tfinal 1.2 --output-dir $OUT --log-every 1000 \
    > $OUT/driver.log 2>&1
-echo "driver exit $? in $(( $(date +%s) - s )) s"; grep "=== done" $OUT/driver.log
+echo "driver exit $? in $(( $(date +%s) - s )) s"; grep "=== done" $OUT/driver.log || FAIL=$((FAIL + 1))
 echo "Mac reference: 816 steps, t = 1.20137 s; max|V| 1.52293 m/s; max|V|dt/Dc 0.0056054"
 for case in "tpv6 tpv6/configs/tpv6_nitsche.toml tpv6/mesh/tpv6_nitsche_1000m.msh 6.0" \
             "tpv31 tpv31/configs/tpv31_nitsche.toml tpv31/mesh/tpv31_nitsche_1000m.msh 5.0"; do
@@ -88,10 +99,10 @@ for case in "tpv6 tpv6/configs/tpv6_nitsche.toml tpv6/mesh/tpv6_nitsche_1000m.ms
    s=$(date +%s)
    ibrun -n 8 -o 0 ./seas_nitsche_dyn_driver --config $2 --mesh $3 --order 1 --tfinal $4 \
       --output-dir $OUT --log-every 1000 > $OUT/driver.log 2>&1
-   echo "driver exit $? in $(( $(date +%s) - s )) s"; grep "=== done" $OUT/driver.log
+   echo "driver exit $? in $(( $(date +%s) - s )) s"; grep "=== done" $OUT/driver.log || FAIL=$((FAIL + 1))
 done
-echo "cloud reference TPV6 (4 ranks): 3808 steps, t = 6.00046 s; max|V| 8.83777 m/s; max|V|dt/Dc 0.0348153"
-echo "cloud reference TPV31 (4 ranks): 3578 steps, t = 5.00031 s; max|V| 1.59263 m/s; max|V|dt/Dc 0.0123651"
+echo "cloud reference TPV6 (4 ranks, built-in kernel mesh): 4081 steps, t = 6.00044 s; max|V| 9.29284 m/s; max|V|dt/Dc 0.034159"
+echo "cloud reference TPV31 (4 ranks, built-in kernel mesh): 3375 steps, t = 5.00027 s; max|V| 1.5991 m/s; max|V|dt/Dc 0.0131621"
 # Load checks: every rank reads the whole serial mesh at startup
 # (drivers/nitsche_dyn_driver.cpp:829), so 144 ranks on one node may not fit in its memory.
 # tfinal 0.003 s (about 25 steps at p = 2).  Node memory in use (MemTotal - MemAvailable,
@@ -114,12 +125,15 @@ for case in "tpv205 tpv205/configs/tpv205_nitsche.toml tpv205/mesh/tpv2053d_200m
       --output-dir $OUT --log-every 1 > $OUT/driver.log 2>&1
    rc=$?; kill $MON 2>/dev/null; wait $MON 2>/dev/null
    echo "driver exit $rc in $(( $(date +%s) - s )) s"
+   [ $rc -eq 0 ] || [ $PROB = tpv205 ] || [ $PROB = tpv104 ] || FAIL=$((FAIL + 1))
    grep -a "tets;" $OUT/driver.log | head -1
    grep -a "  dt = " $OUT/driver.log | head -1
-   grep -a "  dt = " $OUT/driver.log | head -1 | awk '{for(i=1;i<=NF;i++){if($i=="dt"&&$(i+1)=="=")dt=$(i+2); if($i=="C(p)")C=$(i+1)}} END{r=dt*p*p/(0.5*C); printf "implied min h/c_p %.4e s (x 6000 m/s = %.2f m); steps to 12 s %d\n", r, r*6000, int(12/dt+0.999)}' p=$P
+   grep -a "  dt = " $OUT/driver.log | head -1 | awk '{for(i=1;i<=NF;i++){if($i=="dt"&&$(i+1)=="=")dt=$(i+2); if($i=="C(p)")C=$(i+1)}} END{if(dt==""||C==""){print "no dt line in driver.log"; exit} r=dt*p*p/(0.5*C); printf "implied min h/c_p %.4e s (x 6000 m/s = %.2f m); steps to 12 s %d\n", r, r*6000, int(12/dt+0.999)}' p=$P
    grep -a "=== done" $OUT/driver.log || tail -15 $OUT/driver.log
    awk '{u=($2-$3)/1048576; if(u>m)m=u; t=$2/1048576} END{printf "node memory: peak in use %.1f GB of %.1f GB (MemTotal - MemAvailable, 2 s samples)\n", m, t}' $OUT/meminfo_kB.log
 done
 sacct -j $SLURM_JOB_ID --format=JobID,JobName%20,Elapsed,MaxRSS,MaxVMSize,NTasks 2>&1 | head -20
 echo "(MaxRSS is per task and appears only for srun steps; ibrun with Open MPI may leave it empty, so the /proc/meminfo peak above is the number that decides the ranks per node)"
 echo "total $(( $(date +%s) - T0 )) s"
+echo "failed checks: $FAIL"
+[ $FAIL -eq 0 ] || exit 1

@@ -23,10 +23,12 @@
 //
 //   gmsh -3 tpv6_nitsche_1000m.geo -format msh22 -o tpv6_nitsche_1000m.msh
 //
+// Built with gmsh's built-in geometry kernel only (no OpenCASCADE: the Vista gmsh module has none):
+// the box is two volumes, Y < 0 and Y > 0, that share the Y = 0 plane, which is split into the fault
+// minus the patch, the patch, and the rest of the plane.
+//
 // The .msh is not committed (gmsh output depends on the platform; the Vista build job writes it and
 // checks its sha256).  Chunhui Zhao, TPV6/TPV7/TPV31 plan, 2026-10-19.
-
-SetFactory("OpenCASCADE");
 
 lc_fault = 1000;
 lc = 5e3;
@@ -35,29 +37,71 @@ Fault_length = 30e3;
 Fault_width = 15e3;
 Xmax = 60e3;
 Zmin = -60e3;
+xf = 0.5 * Fault_length;
 
-Box(1) = {-Xmax, -Xmax, Zmin, 2 * Xmax, 2 * Xmax, -Zmin};
+// The Y = 0 plane: its corners, the fault corners and the nucleation patch corners.
+Point(1) = {-Xmax, 0, 0, lc};
+Point(2) = {-xf, 0, 0, lc};
+Point(3) = {xf, 0, 0, lc};
+Point(4) = {Xmax, 0, 0, lc};
+Point(5) = {Xmax, 0, Zmin, lc};
+Point(6) = {-Xmax, 0, Zmin, lc};
+Point(7) = {-xf, 0, -Fault_width, lc};
+Point(8) = {xf, 0, -Fault_width, lc};
+Point(11) = {-1500, 0, -9000, lc};
+Point(12) = {1500, 0, -9000, lc};
+Point(13) = {1500, 0, -6000, lc};
+Point(14) = {-1500, 0, -6000, lc};
+Line(1) = {1, 2};
+Line(2) = {2, 3};
+Line(3) = {3, 4};
+Line(4) = {4, 5};
+Line(5) = {5, 6};
+Line(6) = {6, 1};
+Line(7) = {2, 7};
+Line(8) = {7, 8};
+Line(9) = {8, 3};
+Line(11) = {11, 12};
+Line(12) = {12, 13};
+Line(13) = {13, 14};
+Line(14) = {14, 11};
+Curve Loop(1) = {1, 7, 8, 9, 3, 4, 5, 6};
+Curve Loop(2) = {2, -9, -8, -7};
+Curve Loop(3) = {11, 12, 13, 14};
+Plane Surface(1) = {1};       // the Y = 0 plane outside the fault
+Plane Surface(2) = {2, 3};    // the fault outside the patch
+Plane Surface(3) = {3};       // the nucleation patch
 
-// The Y = 0 plane, the fault and the nucleation patch, drawn in the Z = 0 plane and turned a quarter
-// turn about the X axis, which takes (x, y, 0) to (x, 0, y).
-Rectangle(10) = {-Xmax, Zmin, 0, 2 * Xmax, -Zmin};
-Rectangle(11) = {-0.5 * Fault_length, -Fault_width, 0, Fault_length, Fault_width};
-Rectangle(12) = {-1500, -9000, 0, 3000, 3000};
-Rotate {{1, 0, 0}, {0, 0, 0}, Pi / 2} { Surface{10, 11, 12}; }
-
-BooleanFragments{ Volume{1}; Delete; }{ Surface{10, 11, 12}; Delete; }
-
-eps = 1.0;
-fault() = Surface In BoundingBox{-0.5 * Fault_length - eps, -eps, -Fault_width - eps,
-                                  0.5 * Fault_length + eps, eps, eps};
-plane() = Surface In BoundingBox{-Xmax - eps, -eps, Zmin - eps, Xmax + eps, eps, eps};
-top() = Surface In BoundingBox{-Xmax - eps, -Xmax - eps, -eps, Xmax + eps, Xmax + eps, eps};
-absorbing() = Surface{:};
-absorbing() -= plane();
-absorbing() -= top();
+// The two half-boxes, Y < 0 (i = 0, tags 1xx) and Y > 0 (i = 1, tags 2xx).
+For i In {0:1}
+  s = 2 * i - 1;
+  o = 100 * (i + 1);
+  Point(o + 1) = {-Xmax, s * Xmax, 0, lc};
+  Point(o + 4) = {Xmax, s * Xmax, 0, lc};
+  Point(o + 5) = {Xmax, s * Xmax, Zmin, lc};
+  Point(o + 6) = {-Xmax, s * Xmax, Zmin, lc};
+  Line(o + 1) = {1, o + 1};
+  Line(o + 4) = {4, o + 4};
+  Line(o + 5) = {5, o + 5};
+  Line(o + 6) = {6, o + 6};
+  Line(o + 11) = {o + 1, o + 4};
+  Line(o + 12) = {o + 4, o + 5};
+  Line(o + 13) = {o + 5, o + 6};
+  Line(o + 14) = {o + 6, o + 1};
+  Curve Loop(o + 1) = {o + 11, o + 12, o + 13, o + 14};      // the far side Y = s Xmax
+  Curve Loop(o + 2) = {1, 2, 3, o + 4, -(o + 11), -(o + 1)};  // the free surface Z = 0
+  Curve Loop(o + 3) = {-5, o + 5, o + 13, -(o + 6)};          // the bottom Z = Zmin
+  Curve Loop(o + 4) = {4, o + 5, -(o + 12), -(o + 4)};        // the side X = Xmax
+  Curve Loop(o + 5) = {6, o + 1, -(o + 14), -(o + 6)};        // the side X = -Xmax
+  For k In {1:5}
+    Plane Surface(o + k) = {o + k};
+  EndFor
+  Surface Loop(i + 1) = {1, 2, 3, o + 1, o + 2, o + 3, o + 4, o + 5};
+  Volume(i + 1) = {i + 1};
+EndFor
 
 Field[1] = Distance;
-Field[1].SurfacesList = {fault()};
+Field[1].SurfacesList = {2, 3};
 Field[1].Sampling = 301;
 
 Field[2] = MathEval;
@@ -78,9 +122,9 @@ Mesh.MeshSizeMax = lc;
 Mesh.MeshSizeFromPoints = 0;
 Mesh.MeshSizeExtendFromBoundary = 0;
 
-Physical Surface(101) = {top()};
-Physical Surface(103) = {fault()};
-Physical Surface(105) = {absorbing()};
-Physical Volume(1) = {Volume{:}};
+Physical Surface(101) = {102, 202};
+Physical Surface(103) = {2, 3};
+Physical Surface(105) = {101, 103, 104, 105, 201, 203, 204, 205};
+Physical Volume(1) = {1, 2};
 
 Mesh.MshFileVersion = 2.2;

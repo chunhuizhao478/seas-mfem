@@ -20,10 +20,11 @@
 //
 //   gmsh -3 tpv31_nitsche_200m.geo -format msh22 -o tpv31_nitsche_200m.msh
 //
+// Built with gmsh's built-in geometry kernel only (no OpenCASCADE: the Vista gmsh module has none),
+// as tpv31_nitsche_1000m.geo.
+//
 // The .msh is not committed (gmsh output depends on the platform; the Vista build job writes it and
 // checks its sha256).  Chunhui Zhao, TPV6/TPV7/TPV31 plan, 2026-10-19.
-
-SetFactory("OpenCASCADE");
 
 lc_fault = 200;
 lc = 5e3;
@@ -32,35 +33,60 @@ Fault_length = 30e3;
 Fault_width = 15e3;
 Xmax = 60e3;
 Zmin = -60e3;
+xf = 0.5 * Fault_length;
 
-Box(1) = {-Xmax, -Xmax, Zmin, 2 * Xmax, 2 * Xmax, -Zmin};
+// Depths of the free surface, the three layer interfaces and the bottom (zi), and of the fault's
+// pieces: its top, the interfaces it crosses and its bottom (zf).
+zi[] = {0, -2400, -5000, -10000, Zmin};
+zf[] = {0, -2400, -5000, -10000, -Fault_width};
 
-// The fault, drawn in the Z = 0 plane and turned a quarter turn about the X axis, which takes
-// (x, y, 0) to (x, 0, y).
-Rectangle(11) = {-0.5 * Fault_length, -Fault_width, 0, Fault_length, Fault_width};
-Rotate {{1, 0, 0}, {0, 0, 0}, Pi / 2} { Surface{11}; }
+// The horizontal surface at depth zi[k] (tag 100 k + 1): the free surface, an interface, the bottom.
+For k In {0:4}
+  Point(100 * k + 1) = {-Xmax, -Xmax, zi[k], lc};
+  Point(100 * k + 2) = {Xmax, -Xmax, zi[k], lc};
+  Point(100 * k + 3) = {Xmax, Xmax, zi[k], lc};
+  Point(100 * k + 4) = {-Xmax, Xmax, zi[k], lc};
+  For j In {1:4}
+    Line(100 * k + j) = {100 * k + j, 100 * k + Modulo(j, 4) + 1};
+  EndFor
+  Curve Loop(100 * k + 1) = {100 * k + 1, 100 * k + 2, 100 * k + 3, 100 * k + 4};
+  Plane Surface(100 * k + 1) = {100 * k + 1};
+EndFor
 
-// Layer interfaces.
-Rectangle(20) = {-Xmax, -Xmax, -2400, 2 * Xmax, 2 * Xmax};
-Rectangle(21) = {-Xmax, -Xmax, -5000, 2 * Xmax, 2 * Xmax};
-Rectangle(22) = {-Xmax, -Xmax, -10000, 2 * Xmax, 2 * Xmax};
+// Layer k (volume k + 1) between zi[k] and zi[k + 1]: four vertical edges and four sides.
+For k In {0:3}
+  For j In {1:4}
+    Line(1000 + 10 * k + j) = {100 * k + j, 100 * (k + 1) + j};
+  EndFor
+  For j In {1:4}
+    jn = Modulo(j, 4) + 1;
+    Curve Loop(1000 + 10 * k + j) = {100 * k + j, 1000 + 10 * k + jn,
+                                     -(100 * (k + 1) + j), -(1000 + 10 * k + j)};
+    Plane Surface(1000 + 10 * k + j) = {1000 + 10 * k + j};
+  EndFor
+  Surface Loop(k + 1) = {100 * k + 1, 100 * (k + 1) + 1, 1000 + 10 * k + 1, 1000 + 10 * k + 2,
+                         1000 + 10 * k + 3, 1000 + 10 * k + 4};
+  Volume(k + 1) = {k + 1};
+EndFor
 
-BooleanFragments{ Volume{1}; Delete; }{ Surface{11, 20, 21, 22}; Delete; }
-
-eps = 1.0;
-fault() = Surface In BoundingBox{-0.5 * Fault_length - eps, -eps, -Fault_width - eps,
-                                  0.5 * Fault_length + eps, eps, eps};
-top() = Surface In BoundingBox{-Xmax - eps, -Xmax - eps, -eps, Xmax + eps, Xmax + eps, eps};
-layers() = Surface In BoundingBox{-Xmax - eps, -Xmax - eps, -2400 - eps, Xmax + eps, Xmax + eps, -2400 + eps};
-layers() += Surface In BoundingBox{-Xmax - eps, -Xmax - eps, -5000 - eps, Xmax + eps, Xmax + eps, -5000 + eps};
-layers() += Surface In BoundingBox{-Xmax - eps, -Xmax - eps, -10000 - eps, Xmax + eps, Xmax + eps, -10000 + eps};
-absorbing() = Surface{:};
-absorbing() -= fault();
-absorbing() -= top();
-absorbing() -= layers();
+// The fault, Y = 0, in four pieces split at the interfaces; piece k (tag 2000 + k) lies in layer k
+// and is embedded in it.  Its top edge lies in the free surface or an interface and is embedded there.
+For k In {0:4}
+  Point(2000 + 10 * k + 1) = {-xf, 0, zf[k], lc};
+  Point(2000 + 10 * k + 2) = {xf, 0, zf[k], lc};
+  Line(2000 + 10 * k) = {2000 + 10 * k + 1, 2000 + 10 * k + 2};
+EndFor
+For k In {0:3}
+  Line(2000 + 10 * k + 1) = {2000 + 10 * k + 1, 2000 + 10 * (k + 1) + 1};
+  Line(2000 + 10 * k + 2) = {2000 + 10 * k + 2, 2000 + 10 * (k + 1) + 2};
+  Curve Loop(2000 + k) = {2000 + 10 * k, 2000 + 10 * k + 2, -(2000 + 10 * (k + 1)), -(2000 + 10 * k + 1)};
+  Plane Surface(2000 + k) = {2000 + k};
+  Curve{2000 + 10 * k} In Surface{100 * k + 1};
+  Surface{2000 + k} In Volume{k + 1};
+EndFor
 
 Field[1] = Distance;
-Field[1].SurfacesList = {fault()};
+Field[1].SurfacesList = {2000:2003};
 Field[1].Sampling = 301;
 
 Field[2] = MathEval;
@@ -77,13 +103,21 @@ Field[7] = Min;
 Field[7].FieldsList = {2, 6};
 Background Field = 7;
 
+// Away from the fault the free surface, the interfaces and the bottom are identical squares with the
+// same size field, so the same 2D algorithm gives them stacked copies of one triangulation, and the
+// 2400 m and 2600 m layers between two copies fill with flat slivers (one 34 m thick in a first try)
+// that set the time step.  Alternate the 2D algorithm from one horizontal surface to the next:
+// Delaunay (5) on the -2400 m and -10000 m interfaces, the default Frontal-Delaunay (6) on the rest.
+MeshAlgorithm Surface{101, 301} = 5;
+
 Mesh.MeshSizeMax = lc;
 Mesh.MeshSizeFromPoints = 0;
 Mesh.MeshSizeExtendFromBoundary = 0;
 
-Physical Surface(101) = {top()};
-Physical Surface(103) = {fault()};
-Physical Surface(105) = {absorbing()};
-Physical Volume(1) = {Volume{:}};
+// The interfaces (101, 201, 301) carry no physical tag.
+Physical Surface(101) = {1};
+Physical Surface(103) = {2000:2003};
+Physical Surface(105) = {401, 1001:1004, 1011:1014, 1021:1024, 1031:1034};
+Physical Volume(1) = {1:4};
 
 Mesh.MshFileVersion = 2.2;

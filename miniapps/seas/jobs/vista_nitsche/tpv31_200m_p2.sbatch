@@ -15,6 +15,8 @@
 # step cost from the TPV205 p = 2 rerun with the speedups (Vista 1079640, 9.36 ms per step in
 # ode.Step, about 10.7 ms of driver wall) scaled by the tet count, plus 2 min of setup; about 0.4 h =
 # 2.2 SU.
+# The built-in kernel mesh (cloud: 2,031,963 tets) has dt 0.883 x TPV205's against 0.926 for the
+# first (OpenCASCADE) mesh this estimate used: about 5 % more steps, inside the time limit.
 # Requested: 16 nodes x 1 h x 0.33 SU = 5.3 SU at most.
 PROB=tpv31
 DECK=tpv31/configs/tpv31_nitsche.toml

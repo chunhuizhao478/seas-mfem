@@ -12,8 +12,10 @@
 # plan rev 1.1, 2026-10-19: 100 m, the node spacing the description asks for).
 # Submit from miniapps/seas/jobs/vista_nitsche/ AFTER build_verify_vista.sbatch passed at this commit.
 # Mesh: tpv6/mesh/tpv6_nitsche_100m.msh, made on Vista by build_verify_vista.sbatch (TPV6 and TPV7
-# share it).  The cloud gmsh 4.15.2 mesh of the same .geo: 6,037,351 tets, min 6V/A 12.5 m on the
-# near (6000 m/s) side, so dt is 0.411 x the TPV205 200 m dt at every p.
+# share it).  The cloud gmsh 4.15.2 mesh of the same .geo (built-in kernel): 6,043,707 tets, min
+# 6V/A 14.4 m on the near (6000 m/s) side, so dt is 0.469 x the TPV205 200 m dt at every p.  The
+# steps and times below were estimated on the first (OpenCASCADE) mesh, dt 0.411 x: this mesh
+# needs about 12 % fewer steps, and the time limit stands.
 # 48 ranks per node: every rank reads the whole serial mesh at startup (drivers/nitsche_dyn_driver.cpp:829),
 # and the first-node peaks of the p = 3 golds (145.1 GB at 144 ranks per node for TPV205's 1.89 M tets,
 # Vista 1080361; 177.7 GB at 128 per node for TPV104's 2.47 M tets, 1080362) come to 0.53-0.56 GB per
