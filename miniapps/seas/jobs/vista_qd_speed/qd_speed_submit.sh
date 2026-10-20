@@ -58,6 +58,18 @@
 #           the H file: waits for h_n1_r144 when hgreen is in the same
 #           STEPS, else stops unless the file exists.  Not in the default
 #           STEPS; HEVENT_LAYOUTS limits it
+#   integrator  QD speed-up plan v2, item A: jobs/vista_qd_speed/
+#           qd_integrator.sbatch once per run below (1 node, 144 ranks,
+#           compressed G read from the H file, t = 0 to 7.2e9 s), then
+#           qd_integrator_compare.sbatch after all of them (afterany).
+#           Reads the H file and stops unless it exists.  Not in the
+#           default STEPS; INTEGRATOR_RUNS limits it (ref always runs).
+#             ref  5dp, atol 1e-10        the reference
+#             a0   5dp, atol 1e-7         today's setting
+#             a1   5bs, atol 1e-7
+#             a2   6vr, atol 1e-7
+#             a3   5dp, atol 1e-8         with a0, today's cost-accuracy line
+#             a4   5dp + DSP PI42, 1e-7
 # Layouts (nodes x ranks, CPUs per rank):
 #   n1_r144  1 x 144, 1   loops and the new default, twice each
 #   n1_r72   1 x 72,  2   default
@@ -67,7 +79,10 @@
 #   n2_r72   2 x 36,  4   default
 # LAYOUTS limits the timing jobs to those names.  Every job after the build
 # waits for it (afterok) unless BUILD_JOB=none (build done) or
-# BUILD_JOB=<jobid>.  Wall times are estimates from G0's 0.366 s/step at
+# BUILD_JOB=<jobid>.  AFTER="id:id..." holds the build job, and with it
+# every job that waits for the build, until those jobs have started (Slurm
+# after:), so a new study does not take queue priority from jobs already
+# waiting.  Wall times are estimates from G0's 0.366 s/step at
 # 144 ranks; fewer ranks per node are expected to be slower per step.
 
 set -euo pipefail
@@ -79,6 +94,7 @@ GREEN_LAYOUTS="${GREEN_LAYOUTS:-g_n1_r144 g_n2_r288 g_n4_r576}"
 EVENT_LAYOUTS="${EVENT_LAYOUTS:-e_n1_r144_loops e_n1_r144_default e_n1_r144_green e_n4_r576_green}"
 HGREEN_LAYOUTS="${HGREEN_LAYOUTS:-h_n1_r144 h_n2_r288 h_n4_r576}"
 HEVENT_LAYOUTS="${HEVENT_LAYOUTS:-e_n1_r144_hgreen e_n4_r576_hgreen}"
+INTEGRATOR_RUNS="${INTEGRATOR_RUNS:-a0 a1 a2 a3 a4}"
 
 if [ ! -f jobs/vista_qd_speed/qd_speed_timing.sbatch ]; then
    echo "ERROR: run from miniapps/seas" >&2
@@ -116,8 +132,13 @@ sub() {
 has() { [[ " ${STEPS} " == *" $1 "* ]]; }
 has_layout() { [[ " ${LAYOUTS} " == *" $1 "* ]]; }
 
+AFTER="${AFTER:-}"
 if has build; then
-   sub build jobs/vista/cpu_clone_build.sbatch
+   if [ -n "${AFTER}" ]; then
+      sub build --dependency="after:${AFTER}" jobs/vista/cpu_clone_build.sbatch
+   else
+      sub build jobs/vista/cpu_clone_build.sbatch
+   fi
    BUILD_JOB="${JOB}"
 fi
 DEP=()
@@ -242,4 +263,33 @@ if has hevents; then
           -N "${nodes}" -n "${ranks}" --ntasks-per-node="$((ranks / nodes))" -c 1 \
           -t "${hh}:${mm}:${ss}" jobs/vista_qd_speed/qd_speed_timing.sbatch
    done
+fi
+
+if has integrator; then
+   if [ ! -f "${HCACHE_P1}" ]; then
+      echo "ERROR: integrator: no H file ${HCACHE_P1}; the runs only read it." >&2
+      exit 1
+   fi
+   # tag:options file:walltime.  Wall times from compressed G's 0.116
+   # s/step at 6.2 stages per step (job 1084131) and gold 1074099's 63,557
+   # steps to 7.2e9 s; ref takes about 4x the steps of a0 (atol^(1/5)).
+   RUNS_DONE=""
+   for spec in ref:tests/verification/petsc_ts_rk5dp_atol1e-10.cfg:12:00:00 \
+               a0:tests/verification/petsc_ts_rk45_tandem.cfg:04:00:00 \
+               a1:tests/verification/petsc_ts_rk5bs.cfg:05:00:00 \
+               a2:tests/verification/petsc_ts_rk6vr.cfg:05:00:00 \
+               a3:tests/verification/petsc_ts_rk5dp_atol1e-8.cfg:06:00:00 \
+               a4:tests/verification/petsc_ts_rk5dp_dsp_pi42.cfg:04:00:00; do
+      IFS=: read -r tag cfg hh mm ss <<< "${spec}"
+      [ "${tag}" = ref ] || [[ " ${INTEGRATOR_RUNS} " == *" ${tag} "* ]] || continue
+      sub "integrator ${tag}" "${DEP[@]}" -J "qd_int_${tag}" \
+          --export="ALL,TSCFG=${cfg},TAG=${tag},HEPS=${HEPS},HCACHE=${HCACHE_P1}" \
+          -N 1 -n 144 --ntasks-per-node=144 -c 1 \
+          -t "${hh}:${mm}:${ss}" jobs/vista_qd_speed/qd_integrator.sbatch
+      RUNS_DONE="${RUNS_DONE} ${tag}:${JOB}"
+   done
+   ids="$(for x in ${RUNS_DONE}; do printf ':%s' "${x##*:}"; done)"
+   sub "integrator compare" --dependency="afterany${ids}" \
+       --export="ALL,RUNS=${RUNS_DONE# },LINE=a0 a3" \
+       jobs/vista_qd_speed/qd_integrator_compare.sbatch
 fi

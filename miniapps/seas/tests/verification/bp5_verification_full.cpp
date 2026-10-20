@@ -3207,6 +3207,54 @@ int main(int argc, char *argv[])
       PetscErrorCode ierr = TSSetFromOptions(ts);
       MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSSetFromOptions failed");
 
+      // QD speed-up plan v2, item A: the options file may pick another RK
+      // tableau or step controller.  The monitor reads V_max, traction and
+      // slip rate from the operator's caches, which the last stage
+      // evaluation of the step left.  That stage is at the accepted state
+      // only for an RK tableau with the FSAL property (3bs, 5dp, 5bs, 6vr);
+      // with any other (7vr, 8vr, another TS type) event detection and
+      // output would read an inner stage, so the run stops.
+      {
+         TSType ts_type = nullptr;
+         ierr = TSGetType(ts, &ts_type);
+         MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSGetType failed");
+         PetscBool is_rk = PETSC_FALSE;
+         ierr = PetscStrcmp(ts_type, TSRK, &is_rk);
+         MFEM_VERIFY(ierr == PETSC_SUCCESS, "PetscStrcmp failed");
+         TSRKType rk_type = nullptr;
+         PetscBool fsal = PETSC_FALSE;
+         if (is_rk)
+         {
+            ierr = TSRKGetType(ts, &rk_type);
+            MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSRKGetType failed");
+            ierr = TSRKGetTableau(ts, nullptr, nullptr, nullptr, nullptr,
+                                  nullptr, nullptr, nullptr, &fsal);
+            MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSRKGetTableau failed");
+         }
+         MFEM_VERIFY(is_rk && fsal,
+                     "PETSc TS " << ts_type << (is_rk ? " " : "")
+                     << (is_rk ? rk_type : "") << ": the monitor needs an "
+                     "RK tableau with the FSAL property (3bs, 5dp, 5bs, "
+                     "6vr), because it reads the operator's caches from the "
+                     "last stage of each step");
+         TSAdapt tsad;
+         ierr = TSGetAdapt(ts, &tsad);
+         MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSGetAdapt failed");
+         TSAdaptType adapt_type = nullptr;
+         ierr = TSAdaptGetType(tsad, &adapt_type);
+         MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSAdaptGetType failed");
+         PetscReal atol = 0.0, rtol = 0.0;
+         ierr = TSGetTolerances(ts, &atol, nullptr, &rtol, nullptr);
+         MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSGetTolerances failed");
+         if (mpi.IsRoot())
+         {
+            std::cout << "  [TS] rk " << rk_type << " (FSAL), adapt "
+                      << adapt_type << ", atol " << std::scientific
+                      << std::setprecision(3) << atol << ", rtol " << rtol
+                      << std::defaultfloat << "\n";
+         }
+      }
+
       // Set initial dt once — MFEM's Run() will pass this to TSSolve.
       // Matches Tandem: set dt once, then TSSolve handles everything.
       ierr = TSSetTimeStep(ts, dt_init);
