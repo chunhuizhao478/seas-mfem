@@ -18,6 +18,14 @@ are in `miniapps/seas/document/nitsche_profiling_dev/`.
 | `compare_stations.py` | Station comparison used by the speed jobs (standard library only). `--time-tol` and `--groups` for the LTS jobs. |
 | `judge_lts_gold.py` | Item 7 (2026-10-20), run off Vista from `miniapps/seas`: checks an LTS run against the global-stepping gold it sits beside over 12 s with the criteria of the LTS buffer-fix review (SCEC pass and fail as the gold; arrival within 5 ms, peak slip rate within 1 %, final slip within 0.5 %; noise RMS within 10 %; period-2 part within 2x the gold's or below 10 Pa in every 1 s window). Output `plots/lts_vs_gts_gold.txt` of each LTS gold folder. |
 | `plot_lts_gold.py` | Item 7 (2026-10-20): station plots of an LTS run against its global-stepping gold and DRDG3D (one PDF and its page PNGs in each LTS gold folder's `plots/`). |
+| `m0_lts_tpv205_200m_p2.sbatch` | M0 of the speed-next plan (rev 1.1, §6; 2026-10-20): 16 x 144 ranks as LTS gold 1082384. TPV205, 200 m gold mesh, p = 2, `--lts rate2`, 0 to 1.0 s, four variants with existing flags only: `base` (the defaults), `every10` (`--station-every 10`), `first` (`--station-copies first`) and `deflate0` (deck `tpv205/configs/tpv205_nitsche_m0_deflate0.toml`, fault deflate level 0). Measures where the time outside the step goes (stations or not) and the frame cost; `base` and `deflate0` stations are compared with the first 1.0 s of 1082384 (meant to be bitwise equal). |
+| `m0_lts_tpv205_200m_p1.sbatch` | M0, 4 x 144 ranks as LTS gold 1082586: TPV205, 200 m, p = 1, `--lts rate2`, 0 to 12.0 s with the deflate-level-0 deck copy: the whole-run frame cost; stations compared with 1082586 (meant to be bitwise equal). |
+| `run_m0_vista.sh` | Shared body of the two M0 jobs. |
+| `build_map_vista.sbatch` | Profiling (2026-10-20): builds `seas_nitsche_dyn_driver_g` (the driver with `-g`, Makefile target of the same name) after `build_lts_vista.sbatch`, and checks that its object without the debug sections is byte-identical to the production driver's. |
+| `map_lts_tpv205_200m_p1.sbatch` | Profiling: TPV205, 200 m gold mesh, p = 1, `--lts rate2`, 0 to 3.0 s, 4 x 144 ranks as LTS gold 1082586, under Linaro MAP (`map --profile`): time per function and part of the code over the whole run, setup included. |
+| `map_lts_tpv205_200m_p2.sbatch` | Profiling: the same at p = 2, 0 to 2.0 s, 16 x 144 ranks as LTS gold 1082384. |
+| `run_map_vista.sh` | Shared body of the two profiling jobs: the guard, the MAP run (`.map` file, `map_functions.csv`, `profile.json`), the station check against the gold, and a perf fallback on four ranks if MAP fails. |
+| `perf_wrap.sh` | The perf fallback's per-rank wrapper. |
 | `meshes.sha256` | sha256 of the TPV205 and TPV104 200 m gold meshes. |
 | `results/` | Job stdout of the runs below, as relayed from Vista. |
 
@@ -36,6 +44,14 @@ sbatch build_lts_vista.sbatch
 # after it prints "all checks passed", at the same commit:
 sbatch lts_tpv205_200m_p2.sbatch; sbatch lts_tpv104_200m_p2.sbatch
 sbatch lts_tpv205_200m_p1.sbatch; sbatch lts_tpv104_200m_p1.sbatch
+# M0 of the speed-next plan, at the M0 commit: the build, then both runs after it
+B=$(sbatch --parsable build_lts_vista.sbatch)
+sbatch --dependency=afterok:$B m0_lts_tpv205_200m_p2.sbatch
+sbatch --dependency=afterok:$B m0_lts_tpv205_200m_p1.sbatch
+# profiling, at the same commit: the -g driver after the build, then both MAP runs after it
+G=$(sbatch --parsable --dependency=afterok:$B build_map_vista.sbatch)
+sbatch --dependency=afterok:$G map_lts_tpv205_200m_p1.sbatch
+sbatch --dependency=afterok:$G map_lts_tpv205_200m_p2.sbatch
 ```
 
 Each speed and LTS job stops if the driver was built at another commit (`BUILD_COMMIT_VISTA`)

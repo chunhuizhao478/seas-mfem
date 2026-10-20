@@ -3428,6 +3428,24 @@ seas_nitsche_dyn_driver: $(NITSCHE_DYN_DRIVER_OBJ) $(SPATIAL_FRICTION_OBJ) \
 	    $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
+# Speed-next profiling (Chunhui Zhao, 2026-10-20): the same driver with debug
+# information (-g) for a sampling profiler (Linaro MAP, perf).  -g does not
+# change the generated code: jobs/vista_profiling/build_map_vista.sbatch
+# checks that its object without the debug sections is byte-identical to
+# drivers/nitsche_dyn_driver.o.
+NITSCHE_DYN_DRIVER_G_OBJ = drivers/nitsche_dyn_driver_g.o
+$(NITSCHE_DYN_DRIVER_G_OBJ): $(SRC)$(NITSCHE_DYN_DRIVER_SRC) $(NITSCHE_DYN_DRIVER_OBJ)
+	$(MFEM_CXX) $(MFEM_FLAGS) -g $(SEAS_INCLUDES) $(HDF5_INCFLAGS) $(TOML_FLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_nitsche_dyn_driver_g: $(NITSCHE_DYN_DRIVER_G_OBJ) $(SPATIAL_FRICTION_OBJ) \
+                           $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+                           $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(NITSCHE_DYN_DRIVER_G_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
 # P6 long checks (minutes each; np=8 unless noted): T-15 energy balance and
 # its NIPG control, T-20 coupled dt refinement (dt0/4..dt0/16 vs dt0/64),
 # T-21(c) hand loop (np 1, 2), and the L2 gate on the widened graded box
