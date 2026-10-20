@@ -94,6 +94,12 @@ public:
       lambda_gf_.ExchangeFaceNbrData();
       mu_gf_.ExchangeFaceNbrData();
       rho_gf_.ExchangeFaceNbrData();
+      // Plan D1: the exchange reads the GFs on the device, and callers index
+      // them on the host (operator()), so take a host read (no copy: the
+      // host values are still valid).
+      lambda_gf_.HostRead();
+      mu_gf_.HostRead();
+      rho_gf_.HostRead();
    }
 
    Coefficient &Lambda() { return lambda_coef_; }

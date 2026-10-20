@@ -41,6 +41,22 @@
 //                      before the initial fault state is seeded, for the
 //                      round-off floor of a golden.  -1 = off.
 //
+// Device (GPU dynamic-rupture plan D1):
+//   --device STR       mfem::Device string: cpu (default), cuda, debug, or
+//                      any other the build supports, made right after MPI
+//                      starts.  U, Udot and the acceleration live on the
+//                      device, so the central-difference updates run there;
+//                      everything else still runs on the host and syncs
+//                      through HostRead/HostWrite.  debug keeps a separate
+//                      "device" copy on the CPU and traps a host access
+//                      that misses a sync; it gives the cpu bits.  It maps
+//                      every allocation on its own, and a rank peaks at about
+//                      one Linux memory map per tet it holds, so run it on
+//                      enough ranks: past vm.max_map_count (65530 by default)
+//                      the exit fails with "Dealloc error!".
+//   --device-id N      GPU for this rank (default: node-local rank modulo
+//                      the number of visible GPUs; common/seas_device.hpp).
+//
 // Station copies (Chunhui Zhao, 2026-10-14): a station sits on a fault point
 // that carries one DOF per adjacent fault face (DG copies).  With
 // --station-copies average (default) the station files hold the face-area-
@@ -102,6 +118,7 @@
 #include "../dynamic/spatial_nucleation.hpp"
 #include "../dynamic/fault_station_file.hpp"
 #include "../dynamic/lts_partition.hpp"   // METIS with element weights (plan item 6)
+#include "../common/seas_device.hpp"
 #ifdef MFEM_USE_HDF5
 #include "../io/fault_vtkhdf_writer.hpp"
 #include "../io/paraview_output.hpp"   // ParaViewOutput::ProbeH5ZZfpPluginOrAbort
@@ -754,6 +771,22 @@ int main(int argc, char *argv[])
    g_rank = Mpi::WorldRank();
    const int nranks = Mpi::WorldSize();
    auto wall0 = std::chrono::steady_clock::now();
+   // MFEM device (plan D1), before any mesh, space or vector; it lives to
+   // the end of main
+   const std::string device_str = ArgStr(argc, argv, "--device", "cpu");
+   const int device_id_override = ArgInt(argc, argv, "--device-id", -1);
+   MFEM_VERIFY(device_id_override >= -1, "--device-id N needs N >= 0");
+   Device device(device_str, SelectDeviceId(device_str, device_id_override, MPI_COMM_WORLD));
+#if defined(HYPRE_USING_GPU) && (MFEM_HYPRE_VERSION >= 23100)
+   // Plan D1: hypre stays on the host (the Device put it on the GPU).  The
+   // host code reads K's CSR (dense blocks) and writes the vectors it hands
+   // to hypre, so a device copy of either would go stale.
+   HYPRE_SetMemoryLocation(HYPRE_MEMORY_HOST);
+   HYPRE_SetExecutionPolicy(HYPRE_EXEC_HOST);
+#endif
+   MFEM_VERIFY(!HypreUsingGPU(), "plan D1 keeps hypre on the host, which this "
+               "GPU hypre cannot (it needs hypre >= 2.31)");
+   if (g_rank == 0) { device.Print(); }
 
    const std::string cfg_path = ArgStr(argc, argv, "--config", "");
    if (cfg_path.empty())
@@ -766,7 +799,8 @@ int main(int argc, char *argv[])
                       " [--station-copies average|first] [--fast-fault 0|1]"
                       " [--fused-spmv 0|1] [--dense-blocks 0|1] [--fault-weight w]"
                       " [--fast-fault-output 0|1] [--stage-timers n] [--max-steps n]"
-                      " [--perturb-initial-state seed]\n";
+                      " [--perturb-initial-state seed] [--device cpu|cuda|debug]"
+                      " [--device-id n]\n";
       }
       return 1;
    }
@@ -819,6 +853,10 @@ int main(int argc, char *argv[])
    const real_t cfl = cfg.numerics.cfl;
    const real_t penalty_factor = TomlReal(t_num, "penalty_factor", 1.0);
    const bool energy_on = TomlBool(t_diag, "energy_balance", false);
+   // The energy monitor runs MFEM kernels (the mass SpMV) on the state, which
+   // with a device would run there on host aliases: not part of plan D1.
+   MFEM_VERIFY(!energy_on || !Device::IsEnabled(),
+               "[diagnostics] energy_balance needs --device cpu (plan D1)");
    const bool pc_on = t_pc != nullptr;
    real_t pc_vstar = 0.0, pc_len = 0.0;
    if (pc_on)
@@ -1581,7 +1619,11 @@ int main(int argc, char *argv[])
 
    // ------------------------------------------------------------ loop
    const int n = op.Height();
+   // on the device (plan D1): the solver's updates of U, Udot and the
+   // acceleration run there; everything that reads them on the host syncs
    Vector U(n), Ud(n);
+   U.UseDevice(true);
+   Ud.UseDevice(true);
    U = 0.0;
    Ud = 0.0;
    real_t t = cfg.time.t_initial;

@@ -106,6 +106,7 @@
 #include "fused_stiffness_pair.hpp"
 #include "dense_block_stiffness.hpp"
 #include "../common/stage_timers.hpp"
+#include "../common/seas_device.hpp"
 #include "../integrator/dg_absorbing_bc_integrator.hpp"
 #include "../fault/fault_orientation.hpp"
 #include "../fault/fault_frame.hpp"
@@ -256,6 +257,10 @@ public:
    }
    real_t GetTimeStep() const { return dt_; }
 
+   /// Plan D1: the ODE solver allocates its acceleration on the device, as
+   /// U and Udot are (the driver); HOST without a device.
+   MemoryClass GetMemoryClass() const override { return Device::GetDeviceMemoryClass(); }
+
    /// First-order form (Operator::Mult) is not used: second-order solvers
    /// call the three-argument Mult and ImplicitSolve below.
    void Mult(const Vector &, Vector &) const override
@@ -267,10 +272,14 @@ public:
 
    /// y = M^{-1}(F(t) - K x + G d - C dxdt) at the STORED fault state and
    /// t = GetTime().  Called once by NewmarkSolver for the initial
-   /// acceleration A^0; advances nothing (T-21(a)).
+   /// acceleration A^0; advances nothing (T-21(a)).  x, dxdt and y may live
+   /// on the device (plan D1): the work below is on host views of them.
    void Mult(const Vector &x, const Vector &dxdt, Vector &y) const override
    {
-      Acceleration_(x, &dxdt, has_fault_ ? &d_ : nullptr, *mass_, y);
+      y.SetSize(height);
+      const Vector xh = HostReadView(x), vh = HostReadView(dxdt);
+      Vector yh = HostWriteView(y);
+      Acceleration_(xh, &vh, has_fault_ ? &d_ : nullptr, *mass_, yh);
    }
 
    /// Central difference (beta = 0, gamma = 1/2): fac0 = beta dt^2 = 0 and
@@ -294,13 +303,19 @@ public:
                   "NitscheWaveOperator::ImplicitSolve called twice at t = "
                   << t << "; exactly one call per time step is allowed.");
       last_solve_time_ = t;
-      if (has_fault_) { AdvanceFault_(x, t, &dxdt); }
+      // x, dxdt and k may live on the device (plan D1): host views of them
+      // for the fault and the acceleration below; k's device copy is
+      // refreshed from the host view at the solver's next read
+      k.SetSize(height);
+      const Vector xh = HostReadView(x), vh = HostReadView(dxdt);
+      Vector kh = HostWriteView(k);
+      if (has_fault_) { AdvanceFault_(xh, t, &vh); }
       if (damping_blocks_.empty())
       {
          // the Kelvin-Voigt layer needs Udot* (at t_{n+1/2}); without it
          // the call is P6's
          kv_tv_shift_ = 0.5 * dt_;
-         Acceleration_(x, kv_ ? &dxdt : nullptr, has_fault_ ? &d_ : nullptr, *mass_, k);
+         Acceleration_(xh, kv_ ? &vh : nullptr, has_fault_ ? &d_ : nullptr, *mass_, kh);
          kv_tv_shift_ = 0.0;
       }
       else
@@ -311,10 +326,10 @@ public:
                      << (mass_damped_ ? mass_damped_->HalfDt() : 0.0)
                      << " but fac1 = " << fac1 << "; call SetTimeStep(dt).");
          kv_tv_shift_ = 0.5 * dt_;
-         Acceleration_(x, &dxdt, has_fault_ ? &d_ : nullptr, *mass_damped_, k);
+         Acceleration_(xh, &vh, has_fault_ ? &d_ : nullptr, *mass_damped_, kh);
          kv_tv_shift_ = 0.0;
       }
-      if (has_fault_) { last_accel_ = k; }
+      if (has_fault_) { last_accel_ = kh; }
    }
 
    const NitscheMaterialSample &Sample() const { return *sample_; }

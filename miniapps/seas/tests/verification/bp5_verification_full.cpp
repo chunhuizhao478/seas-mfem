@@ -92,6 +92,7 @@
 #include "../../io/paraview_output.hpp"
 #include "../../io/hdf5_error_filter.hpp"   // Suppress dual-HDF5 noise on Frontera
 #include "../../common/mpi_context.hpp"
+#include "../../common/seas_device.hpp"
 #include "../../trace/face_trace_logger.hpp"
 #include "../../config/bp5_mesh_utils.hpp"
 
@@ -1517,31 +1518,9 @@ int main(int argc, char *argv[])
    // MFEM device (GPU plan G1).  Configured before PETSc is initialized,
    // because MFEMInitializePetsc picks PETSc's GPU from it, and before any
    // mesh, space or vector.  It lives to the end of main: its destructor
-   // finalizes hypre.
-   int device_id = device_id_override;
-   if (device_id < 0)
-   {
-      device_id = 0;
-#if defined(MFEM_USE_CUDA) || defined(MFEM_USE_HIP)
-      // One GPU per rank on a node: node-local rank modulo the visible GPUs.
-      // Counted only for a GPU backend: a GPU build may run --device cpu on
-      // a node without a GPU, where the count aborts.
-      const bool gpu_backend = device_str.find("cuda") != std::string::npos ||
-                               device_str.find("hip") != std::string::npos;
-      const int num_gpu = gpu_backend ? Device::GetDeviceCount() : 0;
-      if (num_gpu > 1)
-      {
-         MPI_Comm node_comm;
-         MPI_Comm_split_type(mpi.GetComm(), MPI_COMM_TYPE_SHARED, 0,
-                             MPI_INFO_NULL, &node_comm);
-         int node_rank = 0;
-         MPI_Comm_rank(node_comm, &node_rank);
-         MPI_Comm_free(&node_comm);
-         device_id = node_rank % num_gpu;
-      }
-#endif
-   }
-   Device device(device_str, device_id);
+   // finalizes hypre.  The GPU of each rank: common/seas_device.hpp.
+   Device device(device_str,
+                 SelectDeviceId(device_str, device_id_override, mpi.GetComm()));
    if (mpi.IsRoot()) { device.Print(); }
    // GPU plan G4: on a device the fault RHS writes its rate there, and only
    // PETSc TS keeps the time-stepping vectors there too; the in-house RK45
