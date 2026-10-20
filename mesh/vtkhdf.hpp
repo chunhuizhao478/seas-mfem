@@ -73,6 +73,9 @@ private:
    /// Compression level (-1 means disabled, 0 through 9 enabled). Default is 6.
    int compression_level = 6;
 
+   /// See SetChunkToFirstAppend().
+   bool chunk_to_first_append = false;
+
 public:
    /// @brief Selector for the HDF5 chunk filter applied to floating-point
    /// datasets in this VTKHDF file.
@@ -377,6 +380,18 @@ public:
    /// ZfpAccuracy).
    double GetZfpAccuracy() const { return zfp_accuracy_tol; }
 
+   /// @brief Size the chunks of newly created datasets to their first append.
+   ///
+   /// By default every dataset has 0.5 MB chunks.  A time series that appends
+   /// less than that per step rewrites its last, partly filled chunk at every
+   /// step, and with a filter (deflate, ZFP) that means reading,
+   /// decompressing and compressing 0.5 MB per dataset per step.  When
+   /// enabled, a new dataset's chunk is no longer than its first append (but
+   /// at least 1024 rows), so equal-sized appends fill whole chunks.  The
+   /// stored values are the same; only the chunk layout differs.  (SEAS
+   /// profiling plan item 1, Chunhui Zhao 2026-10-17.)
+   void SetChunkToFirstAppend(bool on) { chunk_to_first_append = on; }
+
    /// @brief Save the mesh, appending as a new time step.
    ///
    /// If @a high_order is true, @a ref determines the polynomial degree of the
@@ -388,6 +403,16 @@ public:
    /// Save the grid function with the given name, appending as a new time step.
    template <typename FP_T = real_t>
    void SaveGridFunction(const GridFunction &gf, const std::string &name);
+
+   /// @brief Save point data given directly, appending as a new time step.
+   ///
+   /// @a values holds @a vdim components per point (interleaved) at the
+   /// points of the most recently saved mesh, in the order SaveMesh wrote
+   /// them; it is what SaveGridFunction writes for a grid function with those
+   /// point values, without evaluating the grid function element by element.
+   template <typename FP_T = real_t>
+   void SavePointData(const std::string &name, const std::vector<FP_T> &values,
+                      int vdim = 1);
 
    /// Flush the file.
    void Flush();

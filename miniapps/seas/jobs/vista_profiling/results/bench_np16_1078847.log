@@ -1,0 +1,43 @@
+(as relayed from Vista: repeated libcuda "(ignored)" lines and the duplicated audit / [K-DIAG] blocks collapsed)
+=== bench_nitsche_kernels: tpv205/mesh/tpv2053d_1000m.msh, 187606 tets, p = 1, 16 rank(s), reps 20 ===
+
+[S] triad a = b + 3c, 3 x 200 MB per rank: 21.68 GB/s per rank (16 ranks running at once; checksum 3.5)
+
+  Owned fault layout: global_shared_faces=10, global_owned_dofs=3402, global_local_dofs=3417, faces_with_nontrivial_perm=970
+  AUDIT: shared-face agreement OK (5 paired, 0 single-rank)
+  PASSED: rebuilt K equals ElasticityDomainOperator::ApplyStiffness (rel diff 0.000000)
+  PASSED: rebuilt K_eta equals the Kelvin-Voigt operator's ApplyStiffness (rel diff 0.000000)
+
+[K] stiffness products (production ApplyStiffness)
+  rows 2251272, nnz 133577856 (59.33 per row, 712 per tet); one matrix 1.612 GB, 8.592 kB per tet
+  operator construction (both) 0.0437 s; first ApplyStiffness (assembly + unused AMG) K 0.6943 s, K_eta 0.7406 s
+  rank-0 RSS: 0.2042 GB after the mesh, 0.6449 GB after both operators are assembled (4.375 x the bytes of one CSR matrix)
+  K u     10.67 ms  = 910.4 ns per tet-core, 9.754 GB/s per rank (45% of triad)
+  K_eta v 8.184 ms
+  PASSED: FusedStiffnessPair::Init accepts the production K and K_eta
+  PASSED: FusedStiffnessPair K u + K_eta v equals the two ApplyStiffness calls (rel diff 0.000000)
+
+[F2] FusedStiffnessPair on the production K, K_eta
+  union pattern adds 2361103 of 132042195 entries (1.788%)
+  timed in alternation, 60 pairs: two ApplyStiffness min 14.54 ms, median 17.92 ms; fused min 14.21 ms, median 14.61 ms; speedup 1.024x (min), 1.227x (median)
+  PASSED: ComputeTraction (no diagnostics) gives the Nitsche path's shear and normal traction
+
+[T] fault traction (1139 fault faces, 3 DOFs per face)
+  ComputeTractionDiagnostics (as the Nitsche step calls it) 1.607 ms = 22.57 us per face
+  ComputeTraction (shear + normal only)                    1.296 ms (1.24x)
+  of which the whole-space ParGridFunction alloc + copy    0.05478 ms; per-face marginal cost of the Nitsche call 21.8 us
+  AssembleSlipOnlyRHS (G d)                               0.8537 ms
+  PASSED: ComputeTractionFast equals ComputeTractionDiagnostics (shear rel diff 5.21009e-16, normal 6.79849e-16)
+  PASSED: AddSlipLoadFast equals AssembleSlipOnlyRHS (rel diff 3.29954e-16)
+
+[T2] production per-face fault operators (plan item 3)
+  build 0.03463 s; ComputeTractionFast 0.04173 ms (38.51x vs ComputeTractionDiagnostics); AddSlipLoadFast 0.01817 ms (46.98x vs AssembleSlipOnlyRHS)
+  PASSED: volume part: MFEM partial assembly equals full assembly (rel diff 0.000000)
+  PASSED: volume part: dense element blocks equal full assembly (rel diff 0.000000)
+
+[V] volume term only (ElasticityIntegrator)
+  nnz 27015264 (20.22% of K)
+  full assembly (CSR) 1.505 ms; partial assembly 1.388 ms (1.084x); dense element blocks 1.475 ms (1.021x)
+  so the face part of K u is about 9.169 ms of the 10.67 ms
+
+=== 9 of 9 checks passed ===

@@ -464,6 +464,8 @@ void ElasticityDomainOperator<MeshType>::Solve(
    X_ = 0.0;
    B_ = rhs;
 
+   MFEM_VERIFY(solver_, "ElasticityDomainOperator::Solve: built with "
+               "SolverType::OperatorOnly (no solver)");
    solver_->Mult(B_, X_);
 
    // Post-solve residual check: ||K*x - b|| / ||b|| (global norms)

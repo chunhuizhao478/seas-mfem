@@ -1,0 +1,182 @@
+# =====================================================================
+#  SCEC TPV104 — rate and state, slip law with strong rate weakening, run
+#  through the Nitsche dynamic-rupture driver (seas_nitsche_dyn_driver;
+#  benchmark plan rev 1.3, phase B6).
+#
+#  Built from tpv102/configs/tpv102_nitsche_pc_p1_kv0p1.toml (the validated
+#  damped TPV102 deck) with the TPV104 values of the benchmark description
+#  (tpv104/benchmark_document/SCEC_validation_slip_law.pdf):
+#
+#   - [friction.rate_state] state_evolution = "slip_law_strong_rate_weakening":
+#     RateStateSRWClosure (friction eq. 2 solved by DieterichRuinaFriction,
+#     state eqs. 3-6 by SlipLawSRWPsi::Rate_SRW, psi_ini from eq. 11).
+#     f_w_default MUST be typed here: the parser fills 0.2 when it is absent
+#     and the driver refuses an SRW deck without the key.
+#   - a and V_w: a_in = 0.01, V_w_in = 0.1 m/s in the velocity-weakening
+#     core, a_out = 0.02, V_w_out = 1.0 m/s outside, blended over the 3 km
+#     transition by the SCEC smooth boxcar (eqs. 8-10, the boxcar_taper rule).
+#   - Prestress: global tensor sigma_XY = +40 MPa, sigma_YY = -120 MPa
+#     (tension positive; with nhat = (0,-1,0) the SCEC along-strike shear is
+#     +40 MPa and sigma_n = 120 MPa).
+#   - Nucleation: compact bell, delta_tau_0 = 45 MPa, R = 3 km, T = 1 s, at
+#     the hypocentre (0, -7.5 km).
+#   - Stations: tpv104/stations/tpv104_fault_stations.csv (9 points).
+#
+#  Regularization: Kelvin-Voigt (eta_bar 0.1) and Prakash-Clifton
+#  (v* = 1 m/s, L = 0.01 m) are switched on as in the validated TPV102 deck;
+#  remove [friction.prakash_clifton] or set kv_eta = 0 to switch either off
+#  for a given run.
+#
+#  The TPV104 .geo files are copies of TPV102's (comments differ), so the
+#  meshes are generated the same way (from miniapps/seas, pythonenv):
+#    gmsh -3 tpv104/mesh/tpv104_1000m.geo -format msh22 -o tpv104/mesh/tpv104_1000m.msh
+#  The 1000 m mesh is for smoke runs; production uses --mesh (200 m, 100 m).
+#
+#  Scope: Chunhui Zhao, 2026-10-16.
+# =====================================================================
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "SCEC TPV104 (RS slip law, strong rate weakening) via the Nitsche dynamic-rupture driver — global prestress tensor."
+
+[problem]
+tag = "tpv104"   # output file prefix; the stations come from [output.stations]
+
+# Material: homogeneous, rho = 2670, cs = 3464, cp = 6000.
+[material_constant_fallback]
+lambda = 32043759360.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0     # sigma_min of the Nitsche sigma_n_eff range check
+
+[mesh]
+# 1000 m smoke mesh; production overrides with --mesh (200 m, 100 m).
+path  = "tpv104/mesh/tpv104_1000m.msh"
+order = 1
+
+[velocity]
+use_sidecar = false
+
+[stress]
+kind        = "constant_tensor"
+sigma_xx_pa = 0.0
+sigma_yy_pa = -120.0e6
+sigma_zz_pa = 0.0
+sigma_xy_pa = 40.0e6
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+[numerics]
+cfl            = 0.5        # fraction of C(p) (P3)
+penalty_factor = 1.0        # IP penalty scale (Nitsche driver only)
+# Kelvin-Voigt damping (Day et al. 2005 A8): beta_e = kv_eta (1/3) (h_e/p) / c_s,e, h_e = 6V/A
+kv_eta    = 0.1
+kv_scale  = "node"
+kv_length = "inscribed"
+
+[time]
+tfinal     = "12s"
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.05s"
+
+[output]
+output_dir     = "output_tpv104_nitsche"
+restart_prefix = "cp"
+# Fault ParaView output: ONE <output_dir>/fault.vtkhdf per run.
+paraview_enabled       = true
+paraview_fault         = "hdf5"
+paraview_fault_dt      = "0.02s"
+paraview_fault_zfp_tol = 0.0
+paraview_fault_deflate_level = 1
+paraview_free_surface  = "off"   # the Nitsche driver writes no free-surface slice
+
+# On-fault stations: the committed station file (scripts/make_fault_stations.py),
+# each station snapped to the nearest fault node in 3-D; the run aborts if that
+# node is farther than snap_tolerance_m.  700 m covers the 1000 m mesh at
+# p = 1; finer meshes snap closer (<prefix>_station_snap.txt lists them).
+[output.stations]
+file             = "tpv104/stations/tpv104_fault_stations.csv"
+snap_tolerance_m = 700.0
+
+# Rate and state, slip law with strong rate weakening (TPV104):
+#   b = 0.014, L (Dc) = 0.4 m, f_0 = 0.6, V_0 = 1e-6 m/s, V_ini = 1e-16 m/s,
+#   f_w = 0.2; a and V_w per node from the boxcar_taper rule below.
+# eta is the quasi-dynamic radiation damping of the SAFS path; the Nitsche
+# closure uses gamma = 1/2 sigma_F dt instead and ignores it.
+[friction.rate_state]
+a_default       = 0.01
+b_default       = 0.014
+Dc_default      = 0.4
+V_0_default     = 1.0e-6
+f_0_default     = 0.6
+V_init_default  = 1.0e-16
+sigma_n_default = 120.0e6
+state_evolution = "slip_law_strong_rate_weakening"
+f_w_default     = 0.2       # required by the Nitsche driver (see the header)
+V_w_default     = 0.1
+eta             = "auto"
+
+# Velocity-strengthening border: the SCEC smooth boxcar (eqs. 8-10) blends
+# a_inner / V_w_inner (core) into a_outer / V_w_outer over 3 km.
+[[friction.rate_state.spatial]]
+kind              = "boxcar_taper"
+a_inner           = 0.01      # a_in  (VW core)
+a_outer           = 0.02      # a_out (VS border)
+V_w_inner         = 0.1       # V_w_in  [m/s]
+V_w_outer         = 1.0       # V_w_out [m/s]
+boxcar_center_x_m = 0.0
+boxcar_half_x_m   = 15000.0   # Ls (along-strike half-width)
+boxcar_trans_x_m  = 3000.0    # ws (along-strike transition)
+boxcar_center_z_m = -7500.0   # hypocentre depth
+boxcar_half_z_m   = 7500.0    # W/2 (down-dip half-width)
+boxcar_trans_z_m  = 3000.0    # w  (down-dip transition)
+
+# Nucleation: SCEC compact bell, strike overstress delta_tau F(r) G(t),
+# delta_tau_0 = 45 MPa.  The driver turns it into the global tensor
+#   dsigma = -delta_tau F(r) G(t) (shat (x) nhat + nhat (x) shat).
+[nucleation]
+kind = "gradual_overstress_compact_circular"
+
+[nucleation.gradual_overstress_compact_circular]
+center_x_m   = 0.0
+center_y_m   = 0.0
+center_z_m   = -7500.0
+radius_m     = 3000.0
+delta_tau_pa = 45.0e6
+T_nuc_s      = "1.0s"
+
+[boundary]
+fault_attr      = 3
+natural_attrs   = [1]
+absorbing_attrs = [5]
+
+[fault_geometry]
+ref_normal        = [0.0, -1.0, 0.0]
+up                = [0.0,  0.0, 1.0]
+kind              = "vertical_strike_slip"
+orientation       = "propagated"
+pin_by            = "reference"
+tangent           = "pointwise"
+junction_policy   = "refuse"
+pin_min_margin    = 0.1
+
+[hypocenter]
+x_m                 = 0.0
+y_m                 = 0.0
+z_m                 = -7500.0
+nucleation_radius_m = 3000.0
+
+[diagnostics]
+energy_balance = false
+
+# Prakash-Clifton regularization of the normal stress the law sees
+# (SeisSol TPV6/7 values, as the validated TPV102 deck).
+[friction.prakash_clifton]
+v_star = 1.0      # m/s
+length = 0.01     # m

@@ -1,0 +1,148 @@
+TACC:  Starting up job 7995488 
+TACC:  Starting parallel tasks... 
+=== seas_nitsche_dyn_driver (plan N-07) on 2240 rank(s) ===
+  deck /work2/10024/zhaochun/frontera/seas-mfem-nitsche-damp/damp_jobs/tpv102_nitsche_pc_p2_kv0p1.toml
+  SCEC TPV102 (RS aging) via the Nitsche dynamic-rupture driver — global prestress tensor.
+
+=== Y=0 Face Classification Audit ===
+  Fault (attr=3):      37487
+  Dirichlet (attr=5):  0
+  NONE (interior):     318
+  NONE (shared):       80
+  *** WARNING: 398 y=0 faces have NO BC! These enforce zero jump via DG penalty, conflicting with fault slip.
+=====================================
+
+  Tag validation: 37930 fault keys (exact), 0 Dirichlet keys (exact, 0 recoverable) (OK)
+  Fault faces: 0 interior + 0 shared (this rank)
+  Dirichlet faces: 0 interior + 0 shared (this rank)
+  Owned fault layout: global_shared_faces=886, global_owned_dofs=227580, global_local_dofs=230238, faces_with_nontrivial_perm=31984
+  AUDIT: shared-face agreement OK (443 paired, 0 single-rank)
+
+=== Y=0 Face Classification Audit ===
+  Fault (attr=3):      37487
+  Dirichlet (attr=5):  0
+  NONE (interior):     318
+  NONE (shared):       80
+  *** WARNING: 398 y=0 faces have NO BC! These enforce zero jump via DG penalty, conflicting with fault slip.
+=====================================
+
+  Tag validation: 37930 fault keys (exact), 0 Dirichlet keys (exact, 0 recoverable) (OK)
+  Fault faces: 0 interior + 0 shared (this rank)
+  Dirichlet faces: 0 interior + 0 shared (this rank)
+  Owned fault layout: global_shared_faces=886, global_owned_dofs=227580, global_local_dofs=230238, faces_with_nontrivial_perm=31984
+  AUDIT: shared-face agreement OK (443 paired, 0 single-rank)
+  Kelvin-Voigt: eta_bar = 0.1, scale node (h_e inscribed), beta 0.000129001 .. 0.0144153 s (dt = 0.000118418 s), whole domain, 2466377 of 2466377 elements
+  nucleation check at the fault DOF nearest the hypocentre (-55.513627, 4.5924255e-13, -7500), 55.513627 m away, r = 55.513627 m, F(r) = 0.99965752:
+     t [s]   projected -T.shat [MPa]   analytic tau_0 + dtau F G [MPa]   difference [Pa]
+         0                     75                           75   0
+       0.2              79.223885                    79.223886   -1.1524286
+       0.4              89.239688                    89.239692   -3.8851024
+       0.6              95.657053                    95.657059   -5.6359918
+       0.8              98.971517                    98.971524   -6.5402976
+         1              99.991431                    99.991438   -6.818567
+       1.5              99.991431                    99.991438   -6.818567
+  fault ParaView output: /scratch2/10024/zhaochun/nitsche_tpv102/tpv102_nitsche_200m_p2_pc_kv0p1_7995488/fault.vtkhdf, 37930 fault faces x 4 sub-triangles (18746 faces re-wound to nhat); face map vs DOF positions max error 0 m
+  fault ParaView output every 844 steps (0.0999444 s), deflate level 1, at most 5000 snapshots
+  mesh /work2/10024/zhaochun/frontera/seas-mfem-nitsche-meshes/tpv102_200m.msh: 2466377 tets; p = 2; law rate_state (aging law); fault faces 37930, shared fault faces 443
+  dt = 0.000118418 s (CFL walk: cfl 0.5 x C(p) 0.212 -> 0.000118418; dt_max 0.05), 76003 steps to t = 9 s; penalty_factor 1; energy balance off
+  Prakash-Clifton regularization of the law's normal stress: v_star = 1 m/s, length = 0.01 m (L/v_star = 0.01 s); sigma*^0 = initial sigma_n
+  [K-DIAG] Volume elements:            2466377
+  [K-DIAG] Interior faces (K):         4485273
+  [K-DIAG] Shared faces (K):           861814 (each face counted by both ranks)
+  [K-DIAG] Bdr faces w/ K (Dirichlet): 0 (true one-sided, attr 5)
+  [K-DIAG] Bdr faces (all attrs):      33591 (true one-sided, any attr)
+  [K-DIAG] Bdr elements total:         126 (local rank, includes interior)
+  [K-DIAG]   attr 1: 25142 bdr faces (NO K integrator)
+  [K-DIAG]   attr 3: 443 bdr faces (NO K integrator)
+  [K-DIAG]   attr 5: 8006 bdr faces (NO K integrator)
+  [K-DIAG] Total K contributions:  7813464 (vol + interior + shared + bdr_dir)
+  [K-DIAG] Volume elements:            2466377
+  [K-DIAG] Interior faces (K):         4485273
+  [K-DIAG] Shared faces (K):           861814 (each face counted by both ranks)
+  [K-DIAG] Bdr faces w/ K (Dirichlet): 0 (true one-sided, attr 5)
+  [K-DIAG] Bdr faces (all attrs):      33591 (true one-sided, any attr)
+  [K-DIAG] Bdr elements total:         126 (local rank, includes interior)
+  [K-DIAG]   attr 1: 25142 bdr faces (NO K integrator)
+  [K-DIAG]   attr 3: 443 bdr faces (NO K integrator)
+  [K-DIAG]   attr 5: 8006 bdr faces (NO K integrator)
+  [K-DIAG] Total K contributions:  7813464 (vol + interior + shared + bdr_dir)
+  step 1000 t = 0.118418  max|V| = 2.21565e-12  max|V|dt/Dc = 1.31186e-14  sigma_n_eff in [1.2e+08, 1.2e+08]  sigma_pc in [1.2e+08, 1.2e+08]  wall 211.783 s
+  step 2000 t = 0.236835  max|V| = 6.34833e-10  max|V|dt/Dc = 3.75877e-12  sigma_n_eff in [1.2e+08, 1.2e+08]  sigma_pc in [1.2e+08, 1.2e+08]  wall 313.409 s
+  step 3000 t = 0.355253  max|V| = 3.55167e-07  max|V|dt/Dc = 2.1029e-09  sigma_n_eff in [1.2e+08, 1.2e+08]  sigma_pc in [1.2e+08, 1.2e+08]  wall 385.141 s
+  step 4000 t = 0.47367  max|V| = 5.09454e-05  max|V|dt/Dc = 3.01641e-07  sigma_n_eff in [1.2e+08, 1.2e+08]  sigma_pc in [1.2e+08, 1.2e+08]  wall 457.051 s
+  step 5000 t = 0.592088  max|V| = 0.00181093  max|V|dt/Dc = 1.07223e-05  sigma_n_eff in [1.19999e+08, 1.20001e+08]  sigma_pc in [1.2e+08, 1.20001e+08]  wall 548.563 s
+  step 6000 t = 0.710505  max|V| = 0.0200213  max|V|dt/Dc = 0.000118544  sigma_n_eff in [1.19993e+08, 1.20008e+08]  sigma_pc in [1.19994e+08, 1.20007e+08]  wall 651.916 s
+  step 7000 t = 0.828923  max|V| = 0.0866939  max|V|dt/Dc = 0.000513304  sigma_n_eff in [1.19962e+08, 1.20041e+08]  sigma_pc in [1.19966e+08, 1.20037e+08]  wall 723.777 s
+  step 8000 t = 0.947341  max|V| = 0.208252  max|V|dt/Dc = 0.00123304  sigma_n_eff in [1.19876e+08, 1.20134e+08]  sigma_pc in [1.19885e+08, 1.20124e+08]  wall 813.618 s
+  step 9000 t = 1.06576  max|V| = 0.380099  max|V|dt/Dc = 0.00225052  sigma_n_eff in [1.19699e+08, 1.20322e+08]  sigma_pc in [1.19716e+08, 1.20303e+08]  wall 944.836 s
+  step 10000 t = 1.18418  max|V| = 0.760127  max|V|dt/Dc = 0.00450062  sigma_n_eff in [1.19351e+08, 1.20668e+08]  sigma_pc in [1.19379e+08, 1.20637e+08]  wall 1070 s
+  step 11000 t = 1.30259  max|V| = 1.89171  max|V|dt/Dc = 0.0112006  sigma_n_eff in [1.18626e+08, 1.21327e+08]  sigma_pc in [1.18668e+08, 1.2128e+08]  wall 1167.73 s
+  step 12000 t = 1.42101  max|V| = 4.71284  max|V|dt/Dc = 0.0279041  sigma_n_eff in [1.16938e+08, 1.2299e+08]  sigma_pc in [1.16986e+08, 1.22945e+08]  wall 1240.49 s
+  step 13000 t = 1.53943  max|V| = 6.44539  max|V|dt/Dc = 0.0381624  sigma_n_eff in [1.13654e+08, 1.25887e+08]  sigma_pc in [1.13714e+08, 1.25957e+08]  wall 1337.75 s
+  step 14000 t = 1.65785  max|V| = 7.94461  max|V|dt/Dc = 0.0470391  sigma_n_eff in [1.1035e+08, 1.27536e+08]  sigma_pc in [1.10385e+08, 1.27533e+08]  wall 1430.32 s
+  step 15000 t = 1.77626  max|V| = 9.63709  max|V|dt/Dc = 0.05706  sigma_n_eff in [1.0665e+08, 1.32559e+08]  sigma_pc in [1.07339e+08, 1.30455e+08]  wall 1507.19 s
+  step 16000 t = 1.89468  max|V| = 9.55537  max|V|dt/Dc = 0.0565762  sigma_n_eff in [1.02521e+08, 1.41126e+08]  sigma_pc in [1.0242e+08, 1.3746e+08]  wall 1613.24 s
+  step 17000 t = 2.0131  max|V| = 8.71392  max|V|dt/Dc = 0.0515941  sigma_n_eff in [9.33418e+07, 1.35332e+08]  sigma_pc in [1.00895e+08, 1.35476e+08]  wall 1694.02 s
+  step 18000 t = 2.13152  max|V| = 7.15636  max|V|dt/Dc = 0.042372  sigma_n_eff in [9.68316e+07, 1.40801e+08]  sigma_pc in [9.52113e+07, 1.44483e+08]  wall 1765.89 s
+  step 19000 t = 2.24993  max|V| = 5.93682  max|V|dt/Dc = 0.0351512  sigma_n_eff in [1.05396e+08, 1.32429e+08]  sigma_pc in [1.05332e+08, 1.33002e+08]  wall 1840.68 s
+  step 20000 t = 2.36835  max|V| = 4.95124  max|V|dt/Dc = 0.0293157  sigma_n_eff in [1.08507e+08, 1.33866e+08]  sigma_pc in [1.08174e+08, 1.32665e+08]  wall 1938.42 s
+  step 21000 t = 2.48677  max|V| = 4.69392  max|V|dt/Dc = 0.0277921  sigma_n_eff in [1.00825e+08, 1.3165e+08]  sigma_pc in [1.03331e+08, 1.31497e+08]  wall 2045.45 s
+  step 22000 t = 2.60519  max|V| = 4.4925  max|V|dt/Dc = 0.0265995  sigma_n_eff in [9.8642e+07, 1.33693e+08]  sigma_pc in [9.98036e+07, 1.33553e+08]  wall 2131.88 s
+  step 23000 t = 2.7236  max|V| = 4.52254  max|V|dt/Dc = 0.0267774  sigma_n_eff in [1.0516e+08, 1.3186e+08]  sigma_pc in [1.05332e+08, 1.31956e+08]  wall 2203.75 s
+  step 24000 t = 2.84202  max|V| = 4.46544  max|V|dt/Dc = 0.0264393  sigma_n_eff in [1.07655e+08, 1.32003e+08]  sigma_pc in [1.07907e+08, 1.31975e+08]  wall 2275.87 s
+  step 25000 t = 2.96044  max|V| = 4.23908  max|V|dt/Dc = 0.0250991  sigma_n_eff in [1.07041e+08, 1.31938e+08]  sigma_pc in [1.08255e+08, 1.3167e+08]  wall 2370.34 s
+  step 26000 t = 3.07886  max|V| = 4.33209  max|V|dt/Dc = 0.0256498  sigma_n_eff in [1.05527e+08, 1.35224e+08]  sigma_pc in [1.06207e+08, 1.33093e+08]  wall 2444.09 s
+  step 27000 t = 3.19727  max|V| = 4.17681  max|V|dt/Dc = 0.0247304  sigma_n_eff in [1.09142e+08, 1.29694e+08]  sigma_pc in [1.09299e+08, 1.30314e+08]  wall 2516.2 s
+  step 28000 t = 3.31569  max|V| = 4.13099  max|V|dt/Dc = 0.0244591  sigma_n_eff in [1.08257e+08, 1.30801e+08]  sigma_pc in [1.09479e+08, 1.31683e+08]  wall 2635.05 s
+  step 29000 t = 3.43411  max|V| = 4.08132  max|V|dt/Dc = 0.024165  sigma_n_eff in [1.06634e+08, 1.31014e+08]  sigma_pc in [1.06236e+08, 1.31078e+08]  wall 2730.53 s
+  step 30000 t = 3.55253  max|V| = 4.25593  max|V|dt/Dc = 0.0251989  sigma_n_eff in [1.03451e+08, 1.30117e+08]  sigma_pc in [1.03747e+08, 1.29949e+08]  wall 2807.87 s
+  step 31000 t = 3.67094  max|V| = 4.22492  max|V|dt/Dc = 0.0250152  sigma_n_eff in [1.07252e+08, 1.31831e+08]  sigma_pc in [1.06957e+08, 1.32168e+08]  wall 2908.98 s
+  step 32000 t = 3.78936  max|V| = 4.49268  max|V|dt/Dc = 0.0266006  sigma_n_eff in [1.05978e+08, 1.31711e+08]  sigma_pc in [1.06706e+08, 1.31288e+08]  wall 2980.83 s
+  step 33000 t = 3.90778  max|V| = 4.53586  max|V|dt/Dc = 0.0268563  sigma_n_eff in [1.05216e+08, 1.31494e+08]  sigma_pc in [1.04286e+08, 1.31697e+08]  wall 3093.81 s
+  step 34000 t = 4.0262  max|V| = 4.77523  max|V|dt/Dc = 0.0282735  sigma_n_eff in [1.03308e+08, 1.32259e+08]  sigma_pc in [1.04843e+08, 1.31986e+08]  wall 3167.18 s
+  step 35000 t = 4.14462  max|V| = 4.92373  max|V|dt/Dc = 0.0291528  sigma_n_eff in [1.0125e+08, 1.30557e+08]  sigma_pc in [1.01452e+08, 1.30475e+08]  wall 3239.17 s
+  step 36000 t = 4.26303  max|V| = 5.2915  max|V|dt/Dc = 0.0313303  sigma_n_eff in [1.02085e+08, 1.36877e+08]  sigma_pc in [1.02548e+08, 1.36084e+08]  wall 3311.26 s
+  step 37000 t = 4.38145  max|V| = 5.4663  max|V|dt/Dc = 0.0323653  sigma_n_eff in [1.00149e+08, 1.34342e+08]  sigma_pc in [1.00119e+08, 1.3222e+08]  wall 3385 s
+  step 38000 t = 4.49987  max|V| = 5.81758  max|V|dt/Dc = 0.0344452  sigma_n_eff in [1.04236e+08, 1.33389e+08]  sigma_pc in [1.03778e+08, 1.31604e+08]  wall 3460.35 s
+  step 39000 t = 4.61829  max|V| = 6.56568  max|V|dt/Dc = 0.0388746  sigma_n_eff in [1.07553e+08, 1.32774e+08]  sigma_pc in [1.07761e+08, 1.33182e+08]  wall 3558.06 s
+  step 40000 t = 4.7367  max|V| = 14.083  max|V|dt/Dc = 0.0833836  sigma_n_eff in [1.0451e+08, 1.35668e+08]  sigma_pc in [1.04546e+08, 1.35557e+08]  wall 3631.29 s
+  step 41000 t = 4.85512  max|V| = 17.9364  max|V|dt/Dc = 0.1062  sigma_n_eff in [9.99303e+07, 1.36081e+08]  sigma_pc in [9.95897e+07, 1.35106e+08]  wall 3703.52 s
+  step 42000 t = 4.97354  max|V| = 18.6938  max|V|dt/Dc = 0.110684  sigma_n_eff in [1.06832e+08, 1.35206e+08]  sigma_pc in [1.05658e+08, 1.35191e+08]  wall 3775.68 s
+  step 43000 t = 5.09196  max|V| = 18.1573  max|V|dt/Dc = 0.107507  sigma_n_eff in [9.93188e+07, 1.33637e+08]  sigma_pc in [9.91104e+07, 1.33753e+08]  wall 4017.8 s
+  step 44000 t = 5.21037  max|V| = 18.3928  max|V|dt/Dc = 0.108902  sigma_n_eff in [1.03352e+08, 1.37723e+08]  sigma_pc in [1.04406e+08, 1.37896e+08]  wall 4102.08 s
+  step 45000 t = 5.32879  max|V| = 18.7198  max|V|dt/Dc = 0.110838  sigma_n_eff in [1.02569e+08, 1.36863e+08]  sigma_pc in [1.02927e+08, 1.36915e+08]  wall 4174.24 s
+  step 46000 t = 5.44721  max|V| = 16.1962  max|V|dt/Dc = 0.0958959  sigma_n_eff in [9.27464e+07, 1.36695e+08]  sigma_pc in [9.27167e+07, 1.36626e+08]  wall 4246.98 s
+  step 47000 t = 5.56563  max|V| = 15.0594  max|V|dt/Dc = 0.0891648  sigma_n_eff in [9.78547e+07, 1.36638e+08]  sigma_pc in [1.00688e+08, 1.3653e+08]  wall 4319.23 s
+  step 48000 t = 5.68404  max|V| = 13.5491  max|V|dt/Dc = 0.0802227  sigma_n_eff in [9.96639e+07, 1.39929e+08]  sigma_pc in [1.00338e+08, 1.3992e+08]  wall 4392.64 s
+  step 49000 t = 5.80246  max|V| = 12.1868  max|V|dt/Dc = 0.0721567  sigma_n_eff in [9.80047e+07, 1.39231e+08]  sigma_pc in [1.01912e+08, 1.39501e+08]  wall 4471.09 s
+  step 50000 t = 5.92088  max|V| = 11.1304  max|V|dt/Dc = 0.0659017  sigma_n_eff in [9.36501e+07, 1.4145e+08]  sigma_pc in [9.40902e+07, 1.41647e+08]  wall 4543.31 s
+  step 51000 t = 6.0393  max|V| = 11.2332  max|V|dt/Dc = 0.0665102  sigma_n_eff in [9.68933e+07, 1.38689e+08]  sigma_pc in [9.75281e+07, 1.4265e+08]  wall 4618.14 s
+  step 52000 t = 6.15771  max|V| = 10.5585  max|V|dt/Dc = 0.0625158  sigma_n_eff in [9.44631e+07, 1.41727e+08]  sigma_pc in [9.71151e+07, 1.43442e+08]  wall 4691.57 s
+  step 53000 t = 6.27613  max|V| = 10.03  max|V|dt/Dc = 0.0593865  sigma_n_eff in [9.18897e+07, 1.46102e+08]  sigma_pc in [9.05274e+07, 1.46598e+08]  wall 4764.44 s
+  step 54000 t = 6.39455  max|V| = 9.68651  max|V|dt/Dc = 0.0573527  sigma_n_eff in [9.59773e+07, 1.51687e+08]  sigma_pc in [9.63942e+07, 1.51987e+08]  wall 4838.38 s
+  step 55000 t = 6.51297  max|V| = 9.53573  max|V|dt/Dc = 0.0564599  sigma_n_eff in [9.59116e+07, 1.44879e+08]  sigma_pc in [9.5865e+07, 1.45093e+08]  wall 4912.74 s
+  step 56000 t = 6.63138  max|V| = 9.19569  max|V|dt/Dc = 0.0544466  sigma_n_eff in [9.26668e+07, 1.42403e+08]  sigma_pc in [9.64114e+07, 1.42471e+08]  wall 4988.9 s
+  step 57000 t = 6.7498  max|V| = 9.64418  max|V|dt/Dc = 0.057102  sigma_n_eff in [8.4859e+07, 1.46376e+08]  sigma_pc in [8.27355e+07, 1.45746e+08]  wall 5061.14 s
+  step 58000 t = 6.86822  max|V| = 10.7079  max|V|dt/Dc = 0.0634003  sigma_n_eff in [8.75881e+07, 1.50416e+08]  sigma_pc in [8.73754e+07, 1.51774e+08]  wall 5134.44 s
+  step 59000 t = 6.98664  max|V| = 10.8851  max|V|dt/Dc = 0.0644493  sigma_n_eff in [8.46317e+07, 1.47873e+08]  sigma_pc in [8.50548e+07, 1.45903e+08]  wall 5206.7 s
+  step 60000 t = 7.10505  max|V| = 11.6085  max|V|dt/Dc = 0.0687328  sigma_n_eff in [7.31209e+07, 1.47904e+08]  sigma_pc in [7.38335e+07, 1.44285e+08]  wall 5280.76 s
+  step 61000 t = 7.22347  max|V| = 12.0999  max|V|dt/Dc = 0.0716423  sigma_n_eff in [9.18846e+07, 1.51246e+08]  sigma_pc in [9.03097e+07, 1.52305e+08]  wall 5356.65 s
+  step 62000 t = 7.34189  max|V| = 11.4207  max|V|dt/Dc = 0.0676204  sigma_n_eff in [8.01595e+07, 1.5008e+08]  sigma_pc in [8.14439e+07, 1.49493e+08]  wall 5429.42 s
+  step 63000 t = 7.46031  max|V| = 10.6437  max|V|dt/Dc = 0.0630198  sigma_n_eff in [7.93673e+07, 1.48715e+08]  sigma_pc in [7.96272e+07, 1.4544e+08]  wall 5505.03 s
+  step 64000 t = 7.57872  max|V| = 11.5076  max|V|dt/Dc = 0.0681351  sigma_n_eff in [8.27834e+07, 1.64873e+08]  sigma_pc in [8.27244e+07, 1.708e+08]  wall 5577.33 s
+  step 65000 t = 7.69714  max|V| = 11.644  max|V|dt/Dc = 0.0689428  sigma_n_eff in [5.36825e+07, 1.53488e+08]  sigma_pc in [4.93248e+07, 1.54815e+08]  wall 5651.39 s
+  step 66000 t = 7.81556  max|V| = 11.1624  max|V|dt/Dc = 0.0660913  sigma_n_eff in [9.18486e+07, 1.42516e+08]  sigma_pc in [9.18438e+07, 1.40606e+08]  wall 5731.32 s
+  step 67000 t = 7.93398  max|V| = 10.2924  max|V|dt/Dc = 0.0609403  sigma_n_eff in [9.39953e+07, 1.39448e+08]  sigma_pc in [9.32144e+07, 1.39891e+08]  wall 5806.68 s
+  step 68000 t = 8.0524  max|V| = 10.2628  max|V|dt/Dc = 0.0607646  sigma_n_eff in [9.85303e+07, 1.45124e+08]  sigma_pc in [9.84083e+07, 1.43246e+08]  wall 5880.21 s
+  step 69000 t = 8.17081  max|V| = 11.5296  max|V|dt/Dc = 0.0682655  sigma_n_eff in [1.02896e+08, 1.41097e+08]  sigma_pc in [1.03809e+08, 1.41153e+08]  wall 5953.3 s
+  step 70000 t = 8.28923  max|V| = 10.2484  max|V|dt/Dc = 0.0606793  sigma_n_eff in [9.71934e+07, 1.45048e+08]  sigma_pc in [9.69786e+07, 1.44374e+08]  wall 6026.18 s
+  step 71000 t = 8.40765  max|V| = 9.05324  max|V|dt/Dc = 0.0536031  sigma_n_eff in [8.06046e+07, 1.51501e+08]  sigma_pc in [7.89121e+07, 1.46504e+08]  wall 6102.3 s
+  step 72000 t = 8.52607  max|V| = 7.82638  max|V|dt/Dc = 0.046339  sigma_n_eff in [9.64745e+07, 1.47656e+08]  sigma_pc in [9.75305e+07, 1.47595e+08]  wall 6174.7 s
+  step 73000 t = 8.64448  max|V| = 6.16671  max|V|dt/Dc = 0.0365124  sigma_n_eff in [9.47115e+07, 1.44068e+08]  sigma_pc in [9.47915e+07, 1.40914e+08]  wall 6247.23 s
+  step 74000 t = 8.7629  max|V| = 5.49347  max|V|dt/Dc = 0.0325262  sigma_n_eff in [8.10307e+07, 1.74193e+08]  sigma_pc in [8.10322e+07, 1.71506e+08]  wall 6320.56 s
+  step 75000 t = 8.88132  max|V| = 4.62285  max|V|dt/Dc = 0.0273713  sigma_n_eff in [7.70307e+07, 1.83161e+08]  sigma_pc in [7.71479e+07, 1.82988e+08]  wall 6392.82 s
+  step 76000 t = 8.99974  max|V| = 3.47309  max|V|dt/Dc = 0.0205638  sigma_n_eff in [7.65751e+07, 1.83635e+08]  sigma_pc in [7.66049e+07, 1.8361e+08]  wall 6469.4 s
+  step 76003 t = 9.00009  max|V| = 3.46901  max|V|dt/Dc = 0.0205396  sigma_n_eff in [7.6573e+07, 1.83639e+08]  sigma_pc in [7.66038e+07, 1.83611e+08]  wall 6469.62 s
+  fault ParaView output: 90 frames in /scratch2/10024/zhaochun/nitsche_tpv102/tpv102_nitsche_200m_p2_pc_kv0p1_7995488/fault.vtkhdf; on rank 0 150.057 s (1.6673 s/frame: pack 1.48386e-06, gather + HDF write 1.6673)
+=== done: 76003 steps, t = 9.00009 s; max|V| 20.0876 m/s; max|V|dt/Dc 0.118936; sigma_n_eff in [1.22687e+07, 1.8364e+08] Pa; sigma_pc in [2.1325e+07, 1.8363e+08] Pa; wall 6469.63 s ===
+TACC:  Shutdown complete. Exiting. 
