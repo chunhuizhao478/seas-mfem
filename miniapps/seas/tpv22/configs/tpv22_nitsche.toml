@@ -35,6 +35,10 @@
 #     nucleates (29.38 MPa < 0.548 x 60 MPa).
 #   - Weakening distance: [slip_weakening_distance] (option O3) "slip_path",
 #     the spec's total slip path distance.
+#   - Tension: [fault_tension] (option O2) "zero_strength_floor", as the
+#     spec defines it (tension -> sigma_n = 0, no opening).  The 1000 m smoke
+#     never turned tensile, so there it changes nothing; the stepover at
+#     200 m may.
 #
 #  Meshes are generated, not committed (from miniapps/seas, pythonenv):
 #    gmsh -3 tpv22/mesh/tpv22_1000m.geo -format msh22 -o tpv22/mesh/tpv22_1000m.msh
@@ -98,6 +102,10 @@ sigma_xz_pa    = [0.0, 0.0, 0.0]
 # Option O5: lock both fault borders except the traces (natural attrs).
 [fault_tip_lock]
 enabled = true
+
+# Option O2: zero strength in tension (the law sees max(sigma_n, 0)).
+[fault_tension]
+mode = "zero_strength_floor"
 
 # Option O3: mu from the slip path int |V| dt, not |slip|.
 [slip_weakening_distance]

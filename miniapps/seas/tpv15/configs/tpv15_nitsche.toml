@@ -35,6 +35,11 @@
 #
 #   - Weakening distance: [slip_weakening_distance] (option O3) "slip_path",
 #     the spec's total slip path distance.
+#   - Tension: [fault_tension] (option O2) "zero_strength_floor": where the
+#     normal stress turns tensile the strength is the cohesion (0), as the
+#     spec defines it (tension -> sigma_n = 0, no opening).  Without it the
+#     1000 m smoke aborted at t = 5.45 s, on the main fault next to the
+#     branch start (X = 78 m, 8.5 km deep).
 #
 #  Meshes are generated, not committed (from miniapps/seas, pythonenv):
 #    gmsh -3 tpv15/mesh/tpv15_1000m.geo -format msh22 -o tpv15/mesh/tpv15_1000m.msh
@@ -114,6 +119,10 @@ sigma_zz_pa = 0.0
 sigma_xy_pa = -81.6e6
 sigma_yz_pa = 0.0
 sigma_xz_pa = 0.0
+
+# Option O2: zero strength in tension (the law sees max(sigma_n, 0)).
+[fault_tension]
+mode = "zero_strength_floor"
 
 # Option O3: mu from the slip path int |V| dt, not |slip|.
 [slip_weakening_distance]
