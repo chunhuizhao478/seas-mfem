@@ -91,6 +91,16 @@
 // the elastic energy has for (u, d)), so it does not resist slip itself.
 // eta_bar = 0 (never calling SetKelvinVoigt) leaves every bit unchanged.
 //
+// Complex fault geometries (plan rev 2, Chunhui Zhao 2026-10-20): an
+// opt-in fault option, set by its own setter before the first step
+// and read in boxes 9-10 (AdvanceFault_, so GTS and LTS alike); the closure,
+// FaultPointState and the CloseDOF signature are unchanged.  Never set,
+// every bit is unchanged.
+//   SetTensionFloor (O2)      the law sees max(sigma, 0) after Prakash-Clifton
+//                             instead of the range check aborting on
+//                             sigma_eff < 0 (shear strength = cohesion in
+//                             tension); NaN still aborts.
+//
 // NitscheMaterialSample lives in nitsche_material_sample.hpp (moved there in
 // P3 to break an include cycle with nitsche_mass.hpp); it is re-exported here.
 //
@@ -416,6 +426,19 @@ public:
    real_t PrakashCliftonLength() const { return pc_len_; }
    /// sigma* per owned fault DOF (no), after the last advance.
    const Vector &PrakashCliftonSigma() const { return sigpc_; }
+
+   /// Complex geometries O2 (header): floor the law's normal stress at 0
+   /// instead of aborting when sigma_eff < 0.  Needs sigma_min = 0.
+   void SetTensionFloor(bool on)
+   {
+      MFEM_VERIFY(has_fault_, "SetTensionFloor: the operator has no fault");
+      MFEM_VERIFY(!on || sigma_min_ == 0.0, "SetTensionFloor: sigma_min = "
+                  << sigma_min_ << "; the floor needs sigma_min = 0");
+      tension_floor_ = on;
+   }
+   bool HasTensionFloor() const { return tension_floor_; }
+   /// DOF-steps (owned, this rank) whose law normal stress was floored.
+   long long TensionFloorCount() const { return floored_; }
    /// Projected prestress (3 no) and nucleation spatial traction (3 no);
    /// the nucleation enters as NucleationFactor(t) * NucleationTraction().
    const Vector &PrestressTraction() const { return S0_own_; }
@@ -492,7 +515,7 @@ public:
       const real_t *n = &frame_own_(9 * j), *dv = &frame_own_(9 * j + 3),
                     *sv = &frame_own_(9 * j + 6);
       fault_frame::ToLocal(TS, 0.0, n, dv, sv, X[0], X[1], sigma_eff);
-      if (!(sigma_eff >= sigma_min_))
+      if (!(sigma_eff >= sigma_min_) && !(tension_floor_ && std::isfinite(sigma_eff)))
       {
          MFEM_ABORT("NitscheWaveOperator: sigma_n_eff left its range on rank "
                     << Mpi::WorldRank() << ", owned fault DOF " << j
@@ -509,6 +532,12 @@ public:
       {
          *sigma_pc = E * (*sigma_pc) + omE * sigma_eff;
          sig_law = *sigma_pc;
+      }
+      if (tension_floor_ && sig_law < 0.0)
+      {
+         // complex geometries O2: zero strength from the normal stress in tension
+         sig_law = 0.0;
+         ++floored_;
       }
       real_t Vl[2];
       const real_t gamma = ClosureGamma(j);
@@ -1485,6 +1514,8 @@ private:
    bool pc_ = false, pc_seeded_ = false;   // Prakash-Clifton (header)
    real_t pc_vstar_ = 0.0, pc_len_ = 0.0;
    Vector sigpc_;                          // sigma* per owned DOF
+   bool tension_floor_ = false;            // complex geometries O2
+   mutable long long floored_ = 0;
    long steps_ = 0;
    NitscheStepRecord record_;
    bool lts_defer_red_ = false;   // LtsDeferRecordReduce

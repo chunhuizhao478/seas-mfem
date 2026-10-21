@@ -11,11 +11,21 @@
 //       _below list; CountFaultFacesAcrossDepths finds faces across a depth
 //       that is not a mesh line and none across one that is.
 //   I1  O1 inactive: a constant table returns the constant tensor bit for bit.
+//   U2  O2 SetTensionFloor: at a DOF in tension (sigma_eff = -1 MPa) the law
+//       sees 0, so the strength is the cohesion: stick below it, slip at
+//       (|X| - c) / gamma above it; the returned sigma_eff and sigma* keep
+//       the true value; the floored count grows.  I2: in compression one
+//       fault advance with the floor on equals the advance without it, bit
+//       for bit.  (The normal-jump scaling sigma / sigma_F of plan U2 needs
+//       a time-stepped run and is left to the smoke runs.)
 //
 // Usage: mpirun -np 1 ./seas_test_nitsche_options
 
 #include "mfem.hpp"
 #include "../../dynamic/nitsche_opt_depth_prestress.hpp"
+#include "../../dynamic/nitsche_opt_tension.hpp"
+#include "../../domain/nitsche_wave_operator.hpp"
+#include "../../friction/slip_weakening_closure.hpp"
 
 #include <array>
 #include <cmath>
@@ -237,6 +247,143 @@ static void TestU1Mesh()
    TEST_ASSERT(n_mid == 8, "8 faces cross a mid-layer depth");
 }
 
+// ---------------------------------------------------------------- operator
+
+// TPV205 values (prestress 70 / 120 MPa; mu_s 0.677, mu_d 0.525, Dc 0.4 m)
+static const real_t kTau0 = 70.0e6, kSig0 = 120.0e6, kMuS = 0.677, kMuD = 0.525, kDc = 0.40;
+
+/// Operator on the box with the fault on the whole plane Y = 0, linear slip
+/// weakening, uniform prestress (sigma_xy, sigma_yy), at rest, dt = 1 ms.
+struct OpFixture
+{
+   std::unique_ptr<ParMesh> pm;
+   SlipWeakeningClosure cl;
+   std::unique_ptr<NitscheWaveOperator> op;
+   Vector u;
+   OpFixture(real_t sxy, real_t syy, real_t cohesion)
+   {
+      std::unique_ptr<Mesh> m(Box(4, 4, 2, kL, kL));
+      pm.reset(new ParMesh(MPI_COMM_WORLD, *m));
+      NitscheFaultSetup fs;
+      fs.closure = &cl;
+      fs.prestress = [sxy, syy](const real_t[3], real_t s[9]) {
+         for (int i = 0; i < 9; i++) { s[i] = 0.0; }
+         s[1] = s[3] = sxy;
+         s[4] = syy;
+      };
+      fs.parameters = [cohesion](const real_t[3], FaultPointState &st) {
+         st.mu_s = kMuS; st.mu_d = kMuD; st.Dc = kDc; st.cohesion = cohesion;
+      };
+      fs.sigma_min = 0.0;
+      BoundaryConfig bc;
+      bc.fault_attr = 3;
+      bc.natural_attrs = {1};
+      bc.absorbing_attrs = {5};
+      op.reset(new NitscheWaveOperator(*pm, 1, MaterialField::MakeConstant(32043759360.0,
+                                       32038120320.0, 2670.0), bc, {}, &fs));
+      op->SetTimeStep(1e-3);
+      u.SetSize(op->Height());
+      u = 0.0;
+   }
+   int No() const { return op->NumOwnedFaultDOFs(); }
+   /// d = 0, V = 0, psi as given.
+   void State(real_t psi0)
+   {
+      const int no = No();
+      Vector d(3 * no), V(3 * no), psi(no);
+      d = 0.0; V = 0.0; psi = psi0;
+      op->SetFaultState(d, V, psi);
+   }
+   real_t MaxV() const
+   {
+      real_t m = 0.0;
+      for (int i = 0; i < op->SlipRate().Size(); i++) { m = std::max(m, std::abs(op->SlipRate()(i))); }
+      MPI_Allreduce(MPI_IN_PLACE, &m, 1, MPITypeMap<real_t>::mpi_type, MPI_MAX, MPI_COMM_WORLD);
+      return m;
+   }
+   real_t MinV() const   ///< min over DOFs of |V|
+   {
+      real_t m = 1e300;
+      for (int j = 0; j < No(); j++)
+      {
+         const real_t *V = &op->SlipRate()(3 * j);
+         m = std::min(m, std::sqrt(V[0] * V[0] + V[1] * V[1] + V[2] * V[2]));
+      }
+      MPI_Allreduce(MPI_IN_PLACE, &m, 1, MPITypeMap<real_t>::mpi_type, MPI_MIN, MPI_COMM_WORLD);
+      return m;
+   }
+};
+
+static bool SameVec(const Vector &a, const Vector &b)
+{
+   int same = (a.Size() == b.Size()) && (a.Size() == 0 ||
+              std::memcmp(a.GetData(), b.GetData(), sizeof(real_t) * a.Size()) == 0);
+   MPI_Allreduce(MPI_IN_PLACE, &same, 1, MPI_INT, MPI_LAND, MPI_COMM_WORLD);
+   return same != 0;
+}
+
+static void TestU2()
+{
+   std::cout << "U2: O2 tension floor\n";
+   const real_t c0 = 1.0e6;
+   OpFixture F(kTau0, -kSig0, c0);
+   NitscheWaveOperator &op = *F.op;
+   F.State(0.0);
+   op.SetTensionFloor(true);
+   TEST_ASSERT(op.HasTensionFloor() && op.TensionFloorCount() == 0, "SetTensionFloor(true)");
+   bool stick_ok = true, slip_ok = true, sig_ok = true, pc_ok = true;
+   for (int j = 0; j < F.No(); j++)
+   {
+      const real_t *n = &op.FaultFrames()(9 * j), *dd = n + 3, *ss = n + 6;
+      for (real_t Xs : {0.5e6, 2.0e6})
+      {
+         // T = -sigma n + X_s s with sigma = -1 MPa (tension)
+         real_t TS[3], V[3], X[2], sig, sigpc = 3.0e6;
+         for (int c = 0; c < 3; c++) { TS[c] = 1.0e6 * n[c] + Xs * ss[c]; }
+         op.CloseDOF(j, TS, 0.0, V, sig, X, &sigpc, 0.5, 0.5, 0.0);
+         const real_t Vabs = std::sqrt(V[0] * V[0] + V[1] * V[1] + V[2] * V[2]);
+         sig_ok = sig_ok && RelClose(sig, -1.0e6, 1e-12);
+         pc_ok = pc_ok && RelClose(sigpc, 0.5 * 3.0e6 + 0.5 * (-1.0e6), 1e-12);
+         // with sigma* = 1 MPa > 0 the law sees 1 MPa: strength c0 + mu_s 1 MPa
+         const real_t tau_s = kMuS * sigpc + c0;
+         if (Xs < tau_s) { stick_ok = stick_ok && Vabs == 0.0; }
+         else { slip_ok = slip_ok && RelClose(Vabs, (std::abs(X[1]) - tau_s) / op.ClosureGamma(j), 1e-12); }
+         (void)dd;
+      }
+      // sigma* also negative: the law sees 0, strength = c0
+      real_t TS[3], V[3], X[2], sig, sigpc = -2.0e6;
+      for (int c = 0; c < 3; c++) { TS[c] = 1.0e6 * n[c] + 2.0e6 * ss[c]; }
+      op.CloseDOF(j, TS, 0.0, V, sig, X, &sigpc, 0.5, 0.5, 0.0);
+      const real_t Vabs = std::sqrt(V[0] * V[0] + V[1] * V[1] + V[2] * V[2]);
+      slip_ok = slip_ok && RelClose(Vabs, (2.0e6 - c0) / op.ClosureGamma(j), 1e-12);
+      pc_ok = pc_ok && sigpc == -1.5e6;
+      // no Prakash-Clifton, sigma = -1 MPa: strength c0, stick at 0.5 MPa
+      for (int c = 0; c < 3; c++) { TS[c] = 1.0e6 * n[c] + 0.5e6 * ss[c]; }
+      op.CloseDOF(j, TS, 0.0, V, sig, X, nullptr, 0.0, 1.0, 0.0);
+      stick_ok = stick_ok && V[0] == 0.0 && V[1] == 0.0 && V[2] == 0.0;
+   }
+   TEST_ASSERT(sig_ok, "the returned sigma_eff keeps the true -1 MPa");
+   TEST_ASSERT(pc_ok, "sigma* follows the true sigma_eff (may go negative)");
+   TEST_ASSERT(stick_ok, "stick below the strength (cohesion + mu_s max(sigma*, 0))");
+   TEST_ASSERT(slip_ok, "slip rate (|X| - c0) / gamma when the law sees 0");
+   long long nfl = op.TensionFloorCount();
+   MPI_Allreduce(MPI_IN_PLACE, &nfl, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+   long long no = F.No();
+   MPI_Allreduce(MPI_IN_PLACE, &no, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+   TEST_ASSERT(nfl == 2 * no, "floored count: the two calls per DOF whose law sigma was < 0");
+
+   // I2: compression, floor on vs off, one advance, bit for bit
+   OpFixture A(kTau0, -kSig0, 0.0), B(kTau0, -kSig0, 0.0);
+   A.State(0.0); B.State(0.0);
+   B.op->SetTensionFloor(true);
+   A.op->LtsAdvanceFault(A.u, 0.0, nullptr);
+   B.op->LtsAdvanceFault(B.u, 0.0, nullptr);
+   TEST_ASSERT(SameVec(A.op->SlipRate(), B.op->SlipRate()) && SameVec(A.op->Slip(), B.op->Slip())
+               && SameVec(A.op->State(), B.op->State())
+               && SameVec(A.op->LastSigmaEff(), B.op->LastSigmaEff()),
+               "I2: in compression the floor changes no bit");
+}
+
 int main(int argc, char *argv[])
 {
    Mpi::Init(argc, argv);
@@ -244,6 +391,7 @@ int main(int argc, char *argv[])
    TestU1();
    TestI1();
    TestU1Mesh();
+   TestU2();
    std::cout << "\n" << num_passed << " / " << num_tests << " passed, " << num_failed
              << " failed\n";
    return num_failed == 0 ? 0 : 1;

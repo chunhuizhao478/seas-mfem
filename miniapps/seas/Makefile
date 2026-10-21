@@ -3395,9 +3395,10 @@ test-nitsche-srw: seas_test_nitsche_srw
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_srw
 
 # Nitsche standalone options for complex fault geometries (complex-geometries
-# plan rev 2, gates G-unit and G-inactive): depth prestress table (U1, I1).
-# Pointwise, serial-mesh and one fault advance.
+# plan rev 2, gates G-unit and G-inactive): depth prestress table (U1, I1) and
+# tension floor (U2, I2).  Pointwise, serial-mesh and one fault advance.
 NITSCHE_OPT_HEADERS = dynamic/nitsche_opt_common.hpp \
+                      dynamic/nitsche_opt_tension.hpp \
                       dynamic/nitsche_opt_depth_prestress.hpp
 TEST_NITSCHE_OPTIONS_SRC = tests/verification/test_nitsche_options.cpp
 TEST_NITSCHE_OPTIONS_OBJ = $(TEST_NITSCHE_OPTIONS_SRC:.cpp=.o)
