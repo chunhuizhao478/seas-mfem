@@ -1,5 +1,9 @@
-// Poroelastic plan rev 3, phase P0 (step P0.1): the option.
+// Poroelastic plan rev 3, phase P0 (steps P0.1-P0.2): the option and the
+// hooks in the elastic operator.
 //
+//   U0-3  Hook H1: Force(x, v, d) followed by the mass inverse gives the
+//         acceleration of Mult and AccelerationWithSlip bit for bit, p = 1-3,
+//         with and without absorbing faces and the Kelvin-Voigt layer.
 //   U0-4  ParsePoroConfig: a valid table reads back exactly; every required
 //         key missing, misspelt or of the wrong type, unknown keys, the
 //         source and starting-pressure tables, --poroelastic 1 without the
@@ -7,18 +11,28 @@
 //         density check.  The plan's [multiphysics] poroelastic = true next
 //         to a [multiphysics.poroelastic] table is not valid TOML (checked).
 //
-// The driver-level checks of the abort texts arrive with the driver parse in
-// step P0.2 (Makefile recipe test-poro-p0).
+// The driver-level checks (U0-4 abort text, U0-6 refusals) and U0-1/U0-2 (the
+// off path, every existing test) are Makefile recipes; see test-poro-p0.
 //
-// Usage: mpirun -np 1|2 ./seas_test_poro_p0
+// Usage: mpirun -np 1|2 ./seas_test_poro_p0 [--u03] [--u04]
+//        (no flag = all)
 
 #include "mfem.hpp"
+#include "../../../domain/nitsche_wave_operator.hpp"
+#include "../../../solver/nitsche_cfl.hpp"
+#include "../../../friction/rate_state_closure.hpp"
+#include "../../../config/tpv102_params.hpp"
 #include "../poro_config.hpp"
 
+#include <array>
 #include <cmath>
+#include <cstring>
+#include <iomanip>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <string>
+#include <vector>
 
 using namespace mfem;
 using namespace mfem::seas;
@@ -31,6 +45,207 @@ static int g_rank = 0;
    if (cond) { num_passed++; if (g_rank == 0) std::cout << "  PASSED: " << msg << "\n"; } \
    else { num_failed++; if (g_rank == 0) std::cout << "  FAILED [" << __LINE__ << "]: " << msg << "\n"; } \
 } while(0)
+
+static const real_t kL = 30.0e3;
+static const real_t kCuse[4] = {0.0, 0.057, 0.11, 0.14};   // 0.5 C_eig (P3)
+
+static real_t RMax(real_t v, MPI_Comm c) { MPI_Allreduce(MPI_IN_PLACE, &v, 1, MPI_DOUBLE, MPI_MAX, c); return v; }
+static long LSum(long v, MPI_Comm c) { MPI_Allreduce(MPI_IN_PLACE, &v, 1, MPI_LONG, MPI_SUM, c); return v; }
+
+static long BitDiff(const Vector &a, const Vector &b)
+{
+   if (a.Size() != b.Size()) { return -1; }
+   long n = 0;
+   for (int i = 0; i < a.Size(); i++)
+   {
+      if (std::memcmp(&a(i), &b(i), sizeof(real_t)) != 0) { n++; }
+   }
+   return n;
+}
+
+/// max_i |a_i - b_i| / max_i |b_i| over all ranks.
+static real_t RelDiff(const Vector &a, const Vector &b, MPI_Comm c)
+{
+   real_t num = 0.0, den = 0.0;
+   for (int i = 0; i < a.Size(); i++)
+   {
+      num = std::max(num, std::abs(a(i) - b(i)));
+      den = std::max(den, std::abs(b(i)));
+   }
+   num = RMax(num, c);
+   den = RMax(den, c);
+   return den > 0.0 ? num / den : num;
+}
+
+// ---------------------------------------------------------------- fixture
+// F-B of plan rev 3, section 6.1: the TPV102 inline box of
+// test_nitsche_hook_spy.cpp (24 tets per hex, fault on Y = 0).
+
+static Mesh *TPV102Box(int nx, int ny, int nz)
+{
+   Mesh *mesh = new Mesh(Mesh::MakeCartesian3DWith24TetsPerHex(
+      nx, ny, nz, 2 * kL, 2 * kL, kL));
+   for (int v = 0; v < mesh->GetNV(); v++)
+   {
+      real_t *c = mesh->GetVertex(v);
+      c[0] -= kL; c[1] -= kL; c[2] -= kL;
+   }
+   const real_t tol = kL / nz * 0.1;
+   for (int b = 0; b < mesh->GetNBE(); b++)
+   {
+      Array<int> verts;
+      mesh->GetBdrElementVertices(b, verts);
+      real_t zc = 0.0;
+      for (int i = 0; i < verts.Size(); i++) { zc += mesh->GetVertex(verts[i])[2]; }
+      zc /= verts.Size();
+      mesh->SetBdrAttribute(b, (std::abs(zc) < tol) ? 1 : 5);
+   }
+   const real_t ytol = 1e-6 * kL;
+   std::vector<std::array<int, 3>> tris;
+   for (int f = 0; f < mesh->GetNumFaces(); f++)
+   {
+      if (mesh->GetFaceInformation(f).IsBoundary()) { continue; }
+      Array<int> fv;
+      mesh->GetFaceVertices(f, fv);
+      bool on_plane = true;
+      for (int i = 0; i < fv.Size(); i++)
+      {
+         if (std::abs(mesh->GetVertex(fv[i])[1]) > ytol) { on_plane = false; }
+      }
+      if (on_plane) { tris.push_back({fv[0], fv[1], fv[2]}); }
+   }
+   for (const auto &t : tris) { mesh->AddBdrTriangle(t[0], t[1], t[2], 3); }
+   mesh->FinalizeTopology();
+   mesh->Finalize();
+   mesh->SetAttributes();
+   return mesh;
+}
+
+static BoundaryConfig TPV102BC(bool absorbing)
+{
+   BoundaryConfig bc;
+   bc.fault_attr = 3;
+   bc.natural_attrs = {1};
+   if (absorbing) { bc.absorbing_attrs = {5}; }
+   else
+   {
+      // a time-dependent far field, so Force exercises the Dirichlet load
+      bc.dirichlet_attrs = {5};
+      bc.default_dirichlet_func = [](const Vector &x, real_t t, Vector &u) {
+         u.SetSize(3);
+         u(0) = 1e-6 * t * x(1) / kL;
+         u(1) = 0.0;
+         u(2) = 2e-7 * t;
+      };
+   }
+   return bc;
+}
+
+static MaterialField TPV102Material()
+{
+   return MaterialField::MakeConstant(TPV102Params::lambda, TPV102Params::mu,
+                                      TPV102Params::rho);
+}
+
+/// TPV102 fault setup with sigma_yy = -sigma_yy_pa.  The TPV102 nucleation
+/// (3 km) is not resolved on this 15 km box; a broad gentle one (12 MPa,
+/// e-fold radius 20 km, TPV102's G(t)) stands in for it.
+static NitscheFaultSetup TPV102Setup(const IFaultClosure &cl, real_t sigma_yy_pa)
+{
+   NitscheFaultSetup fs;
+   fs.closure = &cl;
+   fs.prestress = [sigma_yy_pa](const real_t[3], real_t s[9]) {
+      for (int i = 0; i < 9; i++) { s[i] = 0.0; }
+      s[1] = s[3] = TPV102Params::tau_ini;
+      s[4] = -sigma_yy_pa;
+   };
+   fs.nucleation_spatial = [](const real_t x[3], real_t s[9]) {
+      for (int i = 0; i < 9; i++) { s[i] = 0.0; }
+      const real_t dx = x[0] - TPV102Params::hypo_along_strike;
+      const real_t dz = -x[2] - TPV102Params::hypo_down_dip;
+      const real_t r2 = (dx * dx + dz * dz) / (20.0e3 * 20.0e3);
+      s[1] = s[3] = 12.0e6 * std::exp(-r2);
+   };
+   fs.nucleation_temporal = [](real_t t) { return NucleationTemporal(t); };
+   fs.parameters = [](const real_t x[3], FaultPointState &st) {
+      st.a = ComputeA(x[0], -x[2]);
+      st.Dc = TPV102Params::Dc;
+   };
+   fs.sigma_min = 0.0;
+   return fs;
+}
+
+/// d = 0, V = V_ini along strike, psi in equilibrium with the projected
+/// prestress (as the driver seeds it).
+static void SeedState(NitscheWaveOperator &op, const IFaultClosure &cl)
+{
+   const int no = op.NumOwnedFaultDOFs();
+   Vector d(3 * no), V(3 * no), psi(no), S;
+   d = 0.0;
+   op.BackgroundTraction(0.0, S);
+   for (int j = 0; j < no; j++)
+   {
+      const real_t *f = &op.FaultFrames()(9 * j);
+      real_t X[2], sig;
+      fault_frame::ToLocal(&S(3 * j), 0.0, f, f + 3, f + 6, X[0], X[1], sig);
+      FaultPointState st = op.FaultParams(j);
+      cl.SeedEquilibrium(std::hypot(X[0], X[1]), TPV102Params::V_ini, sig, st);
+      psi(j) = st.psi;
+      for (int c = 0; c < 3; c++) { V(3 * j + c) = TPV102Params::V_ini * f[6 + c]; }
+   }
+   op.SetFaultState(d, V, psi);
+}
+
+// ------------------------------------------------------------------- U0-3
+static void TestU03(ParMesh &pm)
+{
+   if (g_rank == 0) { std::cout << "--- U0-3: hook H1, Force then the mass inverse\n"; }
+   DieterichRuinaFriction fr{{TPV102Params::V0, TPV102Params::f0, TPV102Params::b,
+                              TPV102Params::Dc}};
+   RateStateClosure aging(fr, RateStateClosure::StateLaw::Aging);
+   for (int p = 1; p <= 3; p++)
+   {
+      for (int absorb = 0; absorb <= 1; absorb++)
+      {
+         for (int kv = 0; kv <= 1; kv++)
+         {
+            NitscheFaultSetup fs = TPV102Setup(aging, TPV102Params::sigma_n);
+            NitscheWaveOperator op(pm, p, TPV102Material(), TPV102BC(absorb), {}, &fs);
+            const real_t dt = ComputeMaxDt(op.Sample(), pm, p, kCuse[p]);
+            op.SetTimeStep(dt);
+            if (kv) { op.SetKelvinVoigt(0.1, NitscheWaveOperator::KVScale::Node, -1.0); }
+            SeedState(op, aging);
+            op.SetTime(0.3);
+            const int n = op.Height(), no = op.NumOwnedFaultDOFs();
+            Vector x(n), v(n), d(3 * no);
+            x.Randomize(11 + g_rank);
+            v.Randomize(23 + g_rank);
+            d.Randomize(37 + g_rank);
+            x *= 1e-3;
+            v *= 1e-2;
+            Vector a_ref(n), a_new(n), F;
+            // Mult: the stored slip
+            op.Mult(x, v, a_ref);
+            op.Force(x, &v, &op.Slip(), F);
+            op.Mass().Apply(F, a_new);
+            const long b1 = LSum(BitDiff(a_ref, a_new), pm.GetComm());
+            // AccelerationWithSlip: a given slip, the damped mass with absorbing faces
+            op.AccelerationWithSlip(x, v, d, a_ref);
+            const Vector *vp = (op.HasDamping() || kv) ? &v : nullptr;
+            op.Force(x, vp, &d, F);
+            if (op.HasDamping()) { op.DampedMass()->Apply(F, a_new); }
+            else { op.Mass().Apply(F, a_new); }
+            const long b2 = LSum(BitDiff(a_ref, a_new), pm.GetComm());
+            std::ostringstream tag;
+            tag << "U0-3 p = " << p << (absorb ? ", absorbing" : ", no absorbing")
+                << (kv ? ", Kelvin-Voigt" : "");
+            TEST_ASSERT(b1 == 0, tag.str() << ": Mult == Force + Mass().Apply bit for bit");
+            TEST_ASSERT(b2 == 0, tag.str() << ": AccelerationWithSlip == Force + "
+                        << (op.HasDamping() ? "DampedMass" : "Mass") << "().Apply bit for bit");
+         }
+      }
+   }
+}
 
 // ------------------------------------------------------------------- U0-4
 static const char *kValid =
@@ -214,11 +429,22 @@ int main(int argc, char *argv[])
    Mpi::Init(argc, argv);
    Hypre::Init();
    g_rank = Mpi::WorldRank();
+   bool u03 = false, u04 = false;
+   for (int i = 1; i < argc; i++)
+   {
+      const std::string a = argv[i];
+      if (a == "--u03") { u03 = true; }
+      else if (a == "--u04") { u04 = true; }
+   }
+   if (!u03 && !u04) { u03 = u04 = true; }
    if (g_rank == 0)
    {
       std::cout << "=== Poroelastic P0 (plan rev 3) on " << Mpi::WorldSize() << " rank(s) ===\n";
    }
-   if (g_rank == 0) { TestU04(); }   // pure parsing, rank 0
+   if (u04 && g_rank == 0) { TestU04(); }   // pure parsing, rank 0
+   std::unique_ptr<Mesh> m(TPV102Box(4, 4, 2));
+   ParMesh pm(MPI_COMM_WORLD, *m);
+   if (u03) { TestU03(pm); }
    int nf = num_failed;
    MPI_Allreduce(MPI_IN_PLACE, &nf, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
    if (g_rank == 0)

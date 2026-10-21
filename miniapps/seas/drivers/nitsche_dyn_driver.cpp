@@ -119,6 +119,7 @@
 #include "../dynamic/lts_partition.hpp"   // METIS with element weights (plan item 6)
 #include "../solver/nitsche_lts_setup.hpp"   // --lts-report (plan item 7, P0)
 #include "../solver/nitsche_lts_run.hpp"     // --lts rate2 (plan item 7, P3/P4)
+#include "../multiphysics/poroelastic/poro_config.hpp"   // poroelastic plan rev 3, P0
 #ifdef MFEM_USE_HDF5
 #include "../io/fault_vtkhdf_writer.hpp"
 #include "../io/paraview_output.hpp"   // ParaViewOutput::ProbeH5ZZfpPluginOrAbort
@@ -701,7 +702,7 @@ int main(int argc, char *argv[])
                       " [--fast-fault-output 0|1] [--lts-report 0|1]"
                       " [--lts-report-cap n] [--lts-report-ranks a,b,...]"
                       " [--lts off|rate2] [--lts-cap n] [--lts-fault-buffer n]"
-                      " [--lts-same-step 0|1]\n";
+                      " [--lts-same-step 0|1] [--poroelastic 0|1]\n";
       }
       return 1;
    }
@@ -720,6 +721,16 @@ int main(int argc, char *argv[])
    const toml::value *t_out = DeckTable(root, "output");
    const toml::value *t_st = (t_out && t_out->contains("stations"))
                              ? &t_out->at("stations") : nullptr;
+   // Poroelastic option (poroelastic plan rev 3, section 4.2, step P0.1): off
+   // unless [multiphysics.poroelastic] enabled = true or --poroelastic 1.
+   const poro::PoroParseResult poro_parse =
+      poro::ParsePoroConfig(root, ArgInt(argc, argv, "--poroelastic", -1));
+   if (!poro_parse.error.empty()) { MFEM_ABORT(poro_parse.error); }
+   const poro::PoroConfig &poro_cfg = poro_parse.cfg;
+   if (g_rank == 0 && !poro_cfg.warning.empty())
+   {
+      std::cout << "  warning: " << poro_cfg.warning << "\n";
+   }
 
    const std::string mesh_path = ArgStr(argc, argv, "--mesh", cfg.mesh.path);
    const int p = ArgInt(argc, argv, "--order", cfg.mesh.order);
@@ -789,6 +800,16 @@ int main(int argc, char *argv[])
    MFEM_VERIFY(!lts_on || cfl <= 0.6, "[numerics] cfl = " << cfl << ": local time stepping "
                "needs cfl <= 0.6 (the accepted multirate step limit; undamped resonance bands "
                "start near 0.65)");
+   if (poro_cfg.enabled)
+   {
+      // refusals with the option on (plan rev 3, section 4.3, test U0-6)
+      MFEM_VERIFY(!lts_on, "poroelastic: local time stepping (--lts rate2) is refused with "
+                  "the option on; the Biot bulk is stepped globally (plan rev 3, section 4.3)");
+      const std::string rho_err = poro::CheckBulkDensity(poro_cfg, cfg.material_fallback.rho);
+      if (!rho_err.empty()) { MFEM_ABORT("poroelastic: " << rho_err); }
+      MFEM_ABORT("poroelastic: the option is parsed and checked, but the Biot (u, w) bulk "
+                 "arrives in step P2.2 of plan rev 3; nothing runs with it on yet");
+   }
    MakeDirs(out_dir);
 
    // [output] ParaView keys, SAFS semantics (spatial_dyn_driver): the master

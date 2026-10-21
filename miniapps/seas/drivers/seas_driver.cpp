@@ -227,6 +227,24 @@ int main(int argc, char *argv[])
    SEASConfig config = SEASConfigParser::ParseFile(config_file);
    SEASConfigParser::ApplyCLIOverrides(config, overrides);
    SEASConfigParser::Validate(config);
+#ifdef SEAS_USE_TOML
+   {
+      // Poroelastic plan rev 3 (section 4.3, test U0-6): the quasi-dynamic
+      // solver gets the option in step P7 (hooks H5, H6, with its own
+      // refusals of the PETSc TS path and the dense Green's function).
+      // Until then a deck that switches it on is refused, not run elastic.
+      const auto deck = toml::parse(config_file);
+      if (deck.contains("multiphysics") && deck.at("multiphysics").is_table()
+          && deck.at("multiphysics").contains("poroelastic"))
+      {
+         const auto &pt = deck.at("multiphysics").at("poroelastic");
+         MFEM_VERIFY(!(pt.is_table() && pt.contains("enabled") && pt.at("enabled").is_boolean()
+                       && pt.at("enabled").as_boolean()),
+                     "seas_driver: [multiphysics.poroelastic] enabled = true is refused; the "
+                     "quasi-dynamic solver gets the poroelastic option in step P7 of plan rev 3");
+      }
+   }
+#endif
 
    // PETSc initialization (must happen before any PETSc calls)
    bool petsc_initialized = false;

@@ -3418,6 +3418,7 @@ $(NITSCHE_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
                              friction/rate_state_closure.hpp \
                              friction/rate_state_srw_closure.hpp \
                              friction/slip_weakening_closure.hpp \
+                             multiphysics/poroelastic/poro_config.hpp \
                              $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) $(TOML_FLAGS) -DSEAS_USE_MPI \
@@ -3425,15 +3426,18 @@ $(NITSCHE_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
 
 seas_nitsche_dyn_driver: $(NITSCHE_DYN_DRIVER_OBJ) $(SPATIAL_FRICTION_OBJ) \
                          $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
-                         $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ)
+                         $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ) $(PORO_CONFIG_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(NITSCHE_DYN_DRIVER_OBJ) \
 	    $(SPATIAL_FRICTION_OBJ) $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
-	    $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ) $(MFEM_LIBS)
+	    $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ) $(PORO_CONFIG_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Poroelastic plan rev 3 (multiphysics/poroelastic/, hook H4): the option
-# (P0.1) and its phase tests.  test-poro-p0 = U0-4 (the parser) in
-# seas_test_poro_p0 on 1 and 2 ranks.
+# (P0.1) and its phase tests.  test-poro-p0 = U0-3, U0-4 in
+# seas_test_poro_p0 (1 and 2 ranks), then the driver checks: the abort texts
+# of U0-4 and the refusals of U0-6.  U0-1 and U0-2 (the off path is
+# byte-identical; every test-nitsche-* target passes as at the base commit)
+# need a base build beside this one and are run as the review records them.
 $(PORO_CONFIG_OBJ): %.o: $(SRC)%.cpp multiphysics/poroelastic/poro_config.hpp \
                          $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
@@ -3441,17 +3445,48 @@ $(PORO_CONFIG_OBJ): %.o: $(SRC)%.cpp multiphysics/poroelastic/poro_config.hpp \
 
 TEST_PORO_P0_SRC = multiphysics/poroelastic/tests/test_poro_p0.cpp
 TEST_PORO_P0_OBJ = $(TEST_PORO_P0_SRC:.cpp=.o)
-$(TEST_PORO_P0_OBJ): %.o: $(SRC)%.cpp multiphysics/poroelastic/poro_config.hpp \
+$(TEST_PORO_P0_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                          domain/nitsche_wave_operator.hpp \
+                          multiphysics/poroelastic/poro_config.hpp \
                           $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
-	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(TOML_FLAGS) -c $< -o $@
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) $(TOML_FLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
 
-seas_test_poro_p0: $(TEST_PORO_P0_OBJ) $(PORO_CONFIG_OBJ)
-	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PORO_P0_OBJ) $(PORO_CONFIG_OBJ) $(MFEM_LIBS)
+seas_test_poro_p0: $(TEST_PORO_P0_OBJ) $(PORO_CONFIG_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PORO_P0_OBJ) $(PORO_CONFIG_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
-test-poro-p0: seas_test_poro_p0
+# Decks for the driver checks: the TPV205 Nitsche deck plus a poroelastic
+# table (TPV205-equivalent density 2670 kg/m^3, or a mismatching one).
+PORO_P0_DECK = tpv205/configs/tpv205_nitsche.toml
+PORO_P0_TABLE = [multiphysics.poroelastic]\nenabled = true\nporosity = 0.1\n\
+permeability_m2 = 1.0e-15\nviscosity_pa_s = 1.0e-3\ntortuosity = 2.0\nrho_fluid = 1000.0\n\
+bulk_fluid_pa = 2.2e9\nbulk_solid_pa = 1.0e11\nfault_hydraulics = "permeable"\n\
+background_p_pa = 0.0\nfluid_penalty = 1.0\ndrag_gamma = "fitted"\nvelocity_coupling = "momentum"\n
+define PORO_P0_EXPECT_ABORT
+	if $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 $(1) > poro_p0_abort.log 2>&1; \
+	then echo "FAILED: $(2): did not abort"; exit 1; fi; \
+	if grep -qF -- '$(3)' poro_p0_abort.log; then echo "  PASSED: $(2): aborted with '$(3)'"; \
+	else echo "FAILED: $(2): aborted without '$(3)'"; cat poro_p0_abort.log; exit 1; fi; \
+	rm -f poro_p0_abort.log
+endef
+
+test-poro-p0: seas_test_poro_p0 seas_nitsche_dyn_driver seas_driver
 	for np in 1 2; do $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_poro_p0 || exit 1; done
+	@mkdir -p poro_p0_decks
+	@{ cat $(PORO_P0_DECK); printf '\n$(PORO_P0_TABLE)rho_solid = 2855.5555555555557\n'; } > poro_p0_decks/ok.toml
+	@{ cat $(PORO_P0_DECK); printf '\n$(PORO_P0_TABLE)rho_solid = 2600.0\n'; } > poro_p0_decks/rho.toml
+	@{ cat $(PORO_P0_DECK); printf '\n$(PORO_P0_TABLE)rho_solid = 2855.5555555555557\nporosty = 0.1\n'; } > poro_p0_decks/typo.toml
+	@{ cat config/bp5_example.toml; printf '\n$(PORO_P0_TABLE)rho_solid = 2855.5555555555557\n'; } > poro_p0_decks/qd.toml
+	@$(call PORO_P0_EXPECT_ABORT,./seas_nitsche_dyn_driver --config poro_p0_decks/ok.toml,U0-4 option on,arrives in step P2.2)
+	@$(call PORO_P0_EXPECT_ABORT,./seas_nitsche_dyn_driver --config poro_p0_decks/rho.toml,U0-4 density mismatch,differs from the poroelastic bulk density)
+	@$(call PORO_P0_EXPECT_ABORT,./seas_nitsche_dyn_driver --config poro_p0_decks/typo.toml,U0-4 misspelt key,porosty: unknown key)
+	@$(call PORO_P0_EXPECT_ABORT,./seas_nitsche_dyn_driver --config $(PORO_P0_DECK) --poroelastic 1,U0-4 --poroelastic 1 without the table,--poroelastic 1 needs the [multiphysics.poroelastic] table)
+	@$(call PORO_P0_EXPECT_ABORT,./seas_nitsche_dyn_driver --config poro_p0_decks/ok.toml --lts rate2,U0-6 local time stepping,local time stepping (--lts rate2) is refused)
+	@$(call PORO_P0_EXPECT_ABORT,./seas_driver poro_p0_decks/qd.toml,U0-6 quasi-dynamic solver,gets the poroelastic option in step P7)
+	@rm -rf poro_p0_decks
 
 # P6 long checks (minutes each; np=8 unless noted): T-15 energy balance and
 # its NIPG control, T-20 coupled dt refinement (dt0/4..dt0/16 vs dt0/64),

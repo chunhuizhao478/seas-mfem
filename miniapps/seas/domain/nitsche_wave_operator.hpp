@@ -149,6 +149,21 @@ struct NitscheFaultSetup
    real_t sigma_min = 0.0;
 };
 
+/// Poroelastic fault coupling (poroelastic plan rev 3, hook H2; derivation
+/// rev 1.2, (7.3)-(7.4)).  Null for every elastic run.  Both calls act on
+/// owned fault DOFs at t = t_{n+1}, inside box 8 of the advance.
+class FaultPressureHook
+{
+public:
+   virtual ~FaultPressureHook() = default;
+   /// T += {alpha M (div w - V)} n: the coupling part of the total traction
+   /// (global three-vectors per owned DOF), added to the trial traction.
+   virtual void AddCouplingTraction(real_t t, Vector &T) = 0;
+   /// p += p_0 + p_hat: the fluid pressure friction sees (one scalar per
+   /// owned DOF).
+   virtual void AddFaultPressure(real_t t, Vector &p) = 0;
+};
+
 /// Per-step fault diagnostics (global over ranks).
 struct NitscheStepRecord
 {
@@ -492,6 +507,8 @@ public:
       const real_t *n = &frame_own_(9 * j), *dv = &frame_own_(9 * j + 3),
                     *sv = &frame_own_(9 * j + 6);
       fault_frame::ToLocal(TS, 0.0, n, dv, sv, X[0], X[1], sigma_eff);
+      // the hook's p_0 + p_hat (H2): sigma_n' = sigma_n - p
+      if (pf_own_.Size() > 0) { sigma_eff -= pf_own_(j); }
       if (!(sigma_eff >= sigma_min_))
       {
          MFEM_ABORT("NitscheWaveOperator: sigma_n_eff left its range on rank "
@@ -532,6 +549,39 @@ public:
       if (damping_blocks_.empty()) { Acceleration_(x, kv_ ? &v : nullptr, &d, *mass_, k); }
       else { Acceleration_(x, &v, &d, *mass_damped_, k); }
    }
+
+   /// Hook H1 (poroelastic plan rev 3, step P0.2): the right-hand side that
+   /// Acceleration_ hands to the mass inverse, F = F(t) - K x + G d - C v
+   /// (+ the Kelvin-Voigt terms), t = GetTime(), so a coupled operator can
+   /// apply its own mass.  Mult(x, v, a) is Force(x, &v, d, F) followed by
+   /// Mass().Apply(F, a), bit for bit (test U0-3).  d on owned fault DOFs or
+   /// null; v null skips the velocity terms, as in Acceleration_.
+   void Force(const Vector &x, const Vector *v, const Vector *d, Vector &F) const
+   {
+      Force_(x, v, d);
+      F = F_;
+   }
+
+   /// Hook H2 (poroelastic plan rev 3): the poroelastic fault coupling, null
+   /// by default.  Must outlive the operator.  Call before the first step.
+   void SetFaultPressureHook(FaultPressureHook *hook)
+   {
+      MFEM_VERIFY(has_fault_, "SetFaultPressureHook: the operator has no fault");
+      MFEM_VERIFY(steps_ == 0, "SetFaultPressureHook: call before the first step");
+      hook_ = hook;
+      if (hook_ && pf_static_.Size() == 0)
+      {
+         pf_static_.SetSize(no_);
+         pf_static_ = 0.0;
+      }
+      if (hook_) { pf_own_ = pf_static_; }
+   }
+   FaultPressureHook *GetFaultPressureHook() const { return hook_; }
+   /// True with a hook: box 9 then subtracts FaultPressure() from sigma_n.
+   bool HasFaultPressure() const { return pf_own_.Size() > 0; }
+   /// The pressure box 9 subtracted at the last advance, per owned fault
+   /// DOF; empty when off.
+   const Vector &FaultPressure() const { return pf_own_; }
 
    // ------------------------------------------------------------------
    // Kelvin-Voigt damping.  eta_bar dimensionless; width in metres
@@ -919,6 +969,15 @@ private:
    void Acceleration_(const Vector &x, const Vector *v, const Vector *d,
                       const NitscheMass &Minv, Vector &a) const
    {
+      Force_(x, v, d);
+      Minv.Apply(F_, a);
+   }
+
+   /// F_ = F(t) - K x + G d - C v (+ the Kelvin-Voigt terms): the right-hand
+   /// side of Acceleration_ (hook H1; the operations and their order are
+   /// those of the single function it was split from).
+   void Force_(const Vector &x, const Vector *v, const Vector *d) const
+   {
       const bool dense = UseDense_();
       const bool fuse = !dense && kv_ && v && UseFused_();
       if (dense)
@@ -984,7 +1043,6 @@ private:
             fault_sec_ += MPI_Wtime() - tf0;
          }
       }
-      Minv.Apply(F_, a);
    }
 
    /// Collective on the first call: build the per-face fault operators of K
@@ -1099,6 +1157,13 @@ private:
          kv_zero_ = 0.0;
          KVTrialTraction(*v, kv_zero_, kvT_);
          Town_ += kvT_;
+      }
+      if (hook_)
+      {
+         // H2: the coupling traction, and the pressure box 9 subtracts
+         hook_->AddCouplingTraction(t, Town_);
+         pf_own_ = pf_static_;
+         hook_->AddFaultPressure(t, pf_own_);
       }
       BackgroundTraction(t, S_);
       // 9-11
@@ -1472,6 +1537,11 @@ private:
    bool has_fault_ = false;
    const IFaultClosure *closure_ = nullptr;
    real_t sigma_min_ = 0.0;
+   // H2 (poroelastic plan rev 3): the pressure box 9 subtracts from sigma_n;
+   // both vectors are empty for every run without a hook
+   FaultPressureHook *hook_ = nullptr;
+   Vector pf_static_;   ///< the hook's starting pressure, zero
+   Vector pf_own_;      ///< the pressure subtracted at the last advance
    std::function<real_t(real_t)> nuc_temporal_;
    std::unique_ptr<FaultOrientation> orient_;
    int nd_ = 0, no_ = 0, nbf_ = 1, nloc_faces_ = 0, n_shared_global_ = 0;
