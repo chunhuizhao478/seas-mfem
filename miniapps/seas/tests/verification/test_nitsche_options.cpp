@@ -33,7 +33,12 @@
 //       (|X| <= a, Z >= -b; free surface Z = 0), the tip edges are the two
 //       side tips and the bottom, the trace is not a tip, the corner where a
 //       side tip meets the trace is locked, and WrapTipLock locks exactly
-//       the points on tips.
+//       the points on tips; the free surface shares the 4 trace edges with
+//       the fault and the walls none (SharedEdges, the exclude_attrs check).
+//   U6  OptNearMissTable: a top-level table within edit distance 2 of an
+//       option name (fault_tip_locks, Forced-Rupture, slip_weakening_distances)
+//       is reported with the name it is close to; the exact names and the
+//       existing tables of the decks are not.
 //
 // Usage: mpirun -np 1 ./seas_test_nitsche_options
 
@@ -316,6 +321,45 @@ static void TestU5()
    // without the exclusion the trace is a tip too
    const TipEdges all(*m, 3, std::set<int>{});
    TEST_ASSERT(all.NumEdges() == 8 + 4 && all.OnTip(p_trace), "no exclusion: the trace is a tip");
+
+   // edges an excluded attribute shares with the fault (the driver refuses 0
+   // for an attribute listed in exclude_attrs)
+   const TipEdges ex(*m, 3, std::set<int>{1, 5});
+   TEST_ASSERT(ex.SharedEdges(1) == 4 && ex.SharedEdges(5) == 0 && ex.SharedEdges(7) == 0
+               && ex.NumEdges() == 8, "free surface shares the 4 trace edges, the walls none");
+}
+
+// ---------------------------------------------------------------- U6
+
+static void TestU6()
+{
+   std::cout << "U6: misspelt option tables\n";
+   const auto names = {"prestress_depth_table", "fault_tension", "slip_weakening_distance",
+                       "forced_rupture", "fault_tip_lock"};
+   auto miss = [&names](const std::string &deck) {
+      std::istringstream is(deck);
+      return OptNearMissTable(toml::parse(is, "<u6>"), names);
+   };
+   const std::string ok = "[meta]\nlaw = \"slip_weakening\"\n[stress]\nkind = \"x\"\n"
+                          "[[stress_region]]\nx_min_m = 0.0\n[friction.slip_weakening]\n"
+                          "mu_s_default = 0.6\n[fault_geometry]\nup = [0.0, 0.0, 1.0]\n"
+                          "[boundary]\nfault_attr = 3\n[hypocenter]\nx_m = 0.0\n"
+                          "[fault_tension]\nmode = \"abort\"\n[fault_tip_lock]\nenabled = false\n"
+                          "[forced_rupture]\nt0_s = 1.0\n[prestress_depth_table]\nstress_measure = \"total\"\n"
+                          "[slip_weakening_distance]\nmeasure = \"slip_norm\"\n";
+   TEST_ASSERT(miss(ok).empty(), "exact option names and the usual deck tables pass");
+   const std::string m1 = miss("[fault_tip_locks]\nenabled = true\n");
+   TEST_ASSERT(m1.find("[fault_tip_lock]") != std::string::npos, "fault_tip_locks: " + m1);
+   const std::string m2 = miss("[Forced-Rupture]\nt0_s = 1.0\n");
+   TEST_ASSERT(m2.find("[forced_rupture]") != std::string::npos, "Forced-Rupture: " + m2);
+   const std::string m3 = miss("[slip_weakening_distances]\nmeasure = \"slip_path\"\n");
+   TEST_ASSERT(m3.find("[slip_weakening_distance]") != std::string::npos,
+               "slip_weakening_distances: " + m3);
+   TEST_ASSERT(miss("[tip_lock]\nenabled = true\n").empty(),
+               "a name far from every option is left to the deck (distance > 2)");
+   TEST_ASSERT(OptEditDistance("fault_tension", "fault_tensoin") == 2
+               && OptEditDistance("", "abc") == 3 && OptEditDistance("abc", "abc") == 0,
+               "edit distance");
 }
 
 // ---------------------------------------------------------------- operator
@@ -544,6 +588,7 @@ int main(int argc, char *argv[])
    TestI1();
    TestU1Mesh();
    TestU5();
+   TestU6();
    TestU2();
    TestU3();
    TestU4();

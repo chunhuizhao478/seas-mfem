@@ -27,7 +27,9 @@
 // closure has no barrier sentinel; a large mu_s never yields).  The face
 // still transmits traction like a welded interface; sigma_n and the step
 // size are untouched.  Linear slip weakening only: the driver refuses the
-// option with rate and state.
+// option with rate and state.  The driver also refuses an attribute listed in
+// exclude_attrs that shares no edge with the fault (a misspelt attribute would
+// lock the trace it was meant to free) and a lock that locks no DOF.
 
 #ifndef MFEM_SEAS_NITSCHE_OPT_TIP_LOCK_HPP
 #define MFEM_SEAS_NITSCHE_OPT_TIP_LOCK_HPP
@@ -94,6 +96,7 @@ public:
    {
       std::map<std::pair<int, int>, int> count;
       std::set<std::pair<int, int>> excl;
+      std::set<std::pair<std::pair<int, int>, int>> excl_by_attr;   // (edge, attribute)
       std::set<std::array<int, 3>> faces;
       Array<int> v;
       auto edge = [](int a, int b) { return std::make_pair(std::min(a, b), std::max(a, b)); };
@@ -118,8 +121,12 @@ public:
          {
             const auto e = edge(v[k], v[(k + 1) % 3]);
             if (is_fault) { count[e]++; }
-            if (is_excl) { excl.insert(e); }
+            if (is_excl) { excl.insert(e); excl_by_attr.insert({e, attr}); }
          }
+      }
+      for (const auto &ea : excl_by_attr)
+      {
+         if (count.count(ea.first)) { shared_[ea.second]++; }
       }
       for (const auto &kv : count)
       {
@@ -132,6 +139,14 @@ public:
 
    int NumFaultFaces() const { return nfaces_; }
    int NumEdges() const { return static_cast<int>(seg_.size()); }
+   /// Fault-face edges that are also edges of boundary elements with the
+   /// excluded attribute `attr` (0 when they share none, e.g. a misspelt
+   /// attribute: then the trace it was meant to free is a tip).
+   int SharedEdges(int attr) const
+   {
+      const auto it = shared_.find(attr);
+      return it == shared_.end() ? 0 : it->second;
+   }
    const std::vector<std::array<real_t, 6>> &Segments() const { return seg_; }
 
    /// Distance from x to segment i.
@@ -170,6 +185,7 @@ public:
 private:
    std::vector<std::array<real_t, 6>> seg_;
    std::vector<real_t> len_;
+   std::map<int, int> shared_;   // excluded attribute -> edges shared with the fault
    int nfaces_ = 0;
    real_t cell_ = 1.0;
    std::unordered_map<std::int64_t, std::vector<int>> grid_;

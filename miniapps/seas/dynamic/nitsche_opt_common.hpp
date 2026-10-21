@@ -8,8 +8,10 @@
 // Nitsche driver (the SAFS parser never sees it).  A table refuses every key
 // it does not know, names the key and lists the known ones: the shared SAFS
 // sub-parsers skip unknown keys, so an option key misspelt inside them
-// would be ignored silently.  The names carry the Opt prefix so they never
-// collide with the driver's own helpers.
+// would be ignored silently.  A misspelt table name would be ignored the same
+// way, so the driver also refuses a top-level table within edit distance 2 of
+// an option name (OptNearMissTable).  The names carry the Opt prefix so they
+// never collide with the driver's own helpers.
 
 #ifndef MFEM_SEAS_NITSCHE_OPT_COMMON_HPP
 #define MFEM_SEAS_NITSCHE_OPT_COMMON_HPP
@@ -18,6 +20,8 @@
 
 #include <toml.hpp>
 
+#include <algorithm>
+#include <cctype>
 #include <initializer_list>
 #include <sstream>
 #include <string>
@@ -106,6 +110,54 @@ inline std::vector<int> OptIntArray(const toml::value &t, const char *table, con
       out.push_back(static_cast<int>(v.as_integer()));
    }
    return out;
+}
+
+/// Levenshtein distance between `a` and `b`.
+inline int OptEditDistance(const std::string &a, const std::string &b)
+{
+   std::vector<int> prev(b.size() + 1), cur(b.size() + 1);
+   for (size_t j = 0; j <= b.size(); j++) { prev[j] = static_cast<int>(j); }
+   for (size_t i = 1; i <= a.size(); i++)
+   {
+      cur[0] = static_cast<int>(i);
+      for (size_t j = 1; j <= b.size(); j++)
+      {
+         cur[j] = std::min({prev[j] + 1, cur[j - 1] + 1,
+                            prev[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1)});
+      }
+      std::swap(prev, cur);
+   }
+   return prev[b.size()];
+}
+
+/// A top-level key of `root` that is not one of `names` but, lowercased and
+/// with '-' read as '_', lies within edit distance 2 of one of them: a
+/// misspelt option table, which would otherwise leave its option off without
+/// a word (the driver ignores top-level tables it does not read).  Returns
+/// "'key' (did you mean [name]?)", or "" when there is none.
+inline std::string OptNearMissTable(const toml::value &root,
+                                    std::initializer_list<const char *> names)
+{
+   if (!root.is_table()) { return ""; }
+   for (const auto &kv : root.as_table())
+   {
+      bool exact = false;
+      for (const char *n : names) { exact = exact || kv.first == n; }
+      if (exact) { continue; }
+      std::string k = kv.first;
+      for (char &c : k)
+      {
+         c = (c == '-') ? '_' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      }
+      for (const char *n : names)
+      {
+         if (OptEditDistance(k, n) <= 2)
+         {
+            return "'" + kv.first + "' (did you mean [" + n + "]?)";
+         }
+      }
+   }
+   return "";
 }
 
 } // namespace nitsche_opt

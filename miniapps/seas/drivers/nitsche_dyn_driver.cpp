@@ -848,6 +848,15 @@ int main(int argc, char *argv[])
    {
       tip_cfg = nitsche_opt::ParseTipLock(root.at(nitsche_opt::TipLockConfig::kTable));
    }
+   {
+      // complex geometries O1-O5: a misspelt option table would leave its option off
+      const std::string miss = nitsche_opt::OptNearMissTable(root,
+         {nitsche_opt::DepthPrestressTable::kTable, nitsche_opt::TensionConfig::kTable,
+          nitsche_opt::SlipPathConfig::kTable, nitsche_opt::ForcedRuptureConfig::kTable,
+          nitsche_opt::TipLockConfig::kTable});
+      MFEM_VERIFY(miss.empty(), "deck table " << miss << ": a misspelt option table would "
+                  "leave the option off; fix the name");
+   }
    MFEM_VERIFY(p >= 1 && p <= 4, "order p must be in 1..4 (P3 constants); got " << p);
    MFEM_VERIFY(cfl > 0.0 && cfl <= 1.0, "[numerics] cfl (fraction of C(p)) must be in (0,1]");
    MFEM_VERIFY(!lts_on || cfl <= 0.6, "[numerics] cfl = " << cfl << ": local time stepping "
@@ -958,11 +967,20 @@ int main(int argc, char *argv[])
       MFEM_VERIFY(tip_edges->NumEdges() > 0, "[fault_tip_lock]: the fault (attr "
                   << cfg.boundary.fault_attr << ", " << tip_edges->NumFaultFaces()
                   << " faces) has no tip edge outside the excluded attributes");
+      for (int a : excl)
+      {
+         // a listed attribute that touches no fault edge frees nothing (a typo
+         // would lock the trace it was meant to free); the default list may
+         // name surfaces a buried fault never reaches
+         MFEM_VERIFY(!tip_cfg.has_exclude || tip_edges->SharedEdges(a) > 0,
+                     "[fault_tip_lock] exclude_attrs: attribute " << a << " shares no edge "
+                     "with the fault (attr " << cfg.boundary.fault_attr << ")");
+      }
       if (g_rank == 0)
       {
          std::cout << "  fault tips: " << tip_edges->NumEdges() << " tip edges on "
                    << tip_edges->NumFaultFaces() << " fault faces; edges on attributes";
-         for (int a : excl) { std::cout << " " << a; }
+         for (int a : excl) { std::cout << " " << a << " (" << tip_edges->SharedEdges(a) << " fault edges)"; }
          std::cout << " stay free\n";
       }
    }
@@ -1404,6 +1422,8 @@ int main(int argc, char *argv[])
          if (tip_edges->OnTip(&op.FaultPositions()(3 * j))) { nl[0]++; }
       }
       MPI_Allreduce(MPI_IN_PLACE, nl, 2, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+      MFEM_VERIFY(nl[0] > 0, "[fault_tip_lock]: " << tip_edges->NumEdges() << " tip edges "
+                  "but no fault DOF lies on one");
       if (g_rank == 0)
       {
          std::cout << "  fault tips: " << nl[0] << " of " << nl[1] << " fault DOFs locked (mu_s "
