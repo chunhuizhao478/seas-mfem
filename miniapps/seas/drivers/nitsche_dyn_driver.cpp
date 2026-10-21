@@ -56,6 +56,10 @@
 // rank 0, a larger file).  Deflate is lossless, so the values are the same
 // either way.  Not with [output] paraview_fault_zfp_tol.  Absent = the deck.
 //
+// Setup phases (speed-next S1, Chunhui Zhao 2026-10-20): before step 1 the
+// log prints the wall time of each setup phase, max and mean over the ranks
+// (SetupTimer; one reduction, no barrier).
+//
 // Station columns (SCEC map, plan "The SCEC conventions, mapped"):
 //   slip1 = delta.dhat (v-slip), slip2 = delta.shat (h-slip),
 //   V1 = V.dhat, V2 = V.shat,
@@ -316,6 +320,49 @@ void MakeDirs(const std::string &d)
    MPI_Barrier(MPI_COMM_WORLD);
 }
 
+/// Wall time of each setup phase on this rank (header, "Setup phases").
+class SetupTimer
+{
+public:
+   explicit SetupTimer(std::chrono::steady_clock::time_point start) : t0_(start) {}
+   /// The phase that ends now.
+   void Mark(const char *name)
+   {
+      const auto t1 = std::chrono::steady_clock::now();
+      names_.push_back(name);
+      sec_.push_back(std::chrono::duration<double>(t1 - t0_).count());
+      t0_ = t1;
+   }
+   /// Collective: rank 0 prints each phase's max and mean over the ranks.
+   void Print() const
+   {
+      const int n = static_cast<int>(sec_.size());
+      std::vector<double> mx(sec_), sm(sec_);
+      MPI_Allreduce(MPI_IN_PLACE, mx.data(), n, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+      MPI_Allreduce(MPI_IN_PLACE, sm.data(), n, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+      if (g_rank != 0) { return; }
+      const int nr = Mpi::WorldSize();
+      double tmx = 0.0, tsm = 0.0;
+      const std::ios::fmtflags fl = std::cout.flags();
+      const std::streamsize pr = std::cout.precision();
+      std::cout << std::fixed << std::setprecision(2) << "  setup (wall s, max/mean over ranks):";
+      for (int i = 0; i < n; i++)
+      {
+         std::cout << (i ? ", " : " ") << names_[i] << " " << mx[i] << "/" << sm[i] / nr;
+         tmx += mx[i];
+         tsm += sm[i];
+      }
+      std::cout << "; sum " << tmx << "/" << tsm / nr << "\n";
+      std::cout.flags(fl);
+      std::cout.precision(pr);
+   }
+
+private:
+   std::chrono::steady_clock::time_point t0_;
+   std::vector<std::string> names_;
+   std::vector<double> sec_;
+};
+
 #ifdef MFEM_USE_HDF5
 /// Fault ParaView output, [output] paraview_fault = "hdf5": ONE
 /// <output_dir>/fault.vtkhdf per run through the SAFS writer's generic
@@ -566,6 +613,7 @@ int main(int argc, char *argv[])
    g_rank = Mpi::WorldRank();
    const int nranks = Mpi::WorldSize();
    auto wall0 = std::chrono::steady_clock::now();
+   SetupTimer setup_timer(wall0);
 
    const std::string cfg_path = ArgStr(argc, argv, "--config", "");
    if (cfg_path.empty())
@@ -735,6 +783,8 @@ int main(int argc, char *argv[])
       if (!ign.empty()) { std::cout << "  ignored [numerics] keys (velocity-stress path):" << ign << "\n"; }
    }
 
+   setup_timer.Mark("deck");
+
    // ------------------------------------------------------------ material
    MFEM_VERIFY(cfg.material.kind == spatial::MaterialKind::Constant && !cfg.velocity.use_sidecar,
                "Nitsche driver (P7): only the constant material "
@@ -752,6 +802,7 @@ int main(int argc, char *argv[])
                   "Nitsche driver: tetrahedral meshes only; element " << e << " is "
                   << Geometry::Name[smesh->GetElementBaseGeometry(e)]);
    }
+   setup_timer.Mark("mesh read");
    const long long ne_global = smesh->GetNE();
    if (lts_report)
    {
@@ -809,6 +860,7 @@ int main(int argc, char *argv[])
       MFEM_VERIFY(hdr[3] > 0, "--lts rate2: the mesh has no fault faces (attr "
                   << cfg.boundary.fault_attr << ")");
    }
+   setup_timer.Mark("LTS clusters");
    // Plan item 6: METIS weight per element 1 + w (number of its fault faces),
    // so ranks that own fault faces get fewer tets (w = 0: MFEM's default cut).
    // With LTS (plan item 7) the same weight goes to the multi-constraint cut.
@@ -889,7 +941,9 @@ int main(int argc, char *argv[])
                    << nface << " fault faces); weighted max/mean " << imb.overall << "\n";
       }
    }
+   setup_timer.Mark("partition");
    ParMesh pmesh(MPI_COMM_WORLD, *smesh, part.empty() ? nullptr : part.data());
+   setup_timer.Mark("ParMesh");
    // LTS: the clusters of the local elements (the serial elements of this
    // rank, in serial order, as ParMesh builds them; checked by centroid) and
    // of the face-neighbour elements
@@ -944,6 +998,7 @@ int main(int argc, char *argv[])
       lts_asg.cluster.shrink_to_fit();
    }
    smesh.reset();
+   setup_timer.Mark("LTS cluster map");
 
    // ------------------------------------------------------------ boundary
    MFEM_VERIFY(cfg.boundary.fault_attr > 0, "[boundary] fault_attr is required");
@@ -1159,6 +1214,8 @@ int main(int argc, char *argv[])
       };
    }
 
+   setup_timer.Mark("fault setup");
+
    // ------------------------------------------------------------ operator
    DomainConfig dcfg;
    dcfg.penalty_factor = penalty_factor;
@@ -1221,6 +1278,8 @@ int main(int argc, char *argv[])
          }
       }
    }
+
+   setup_timer.Mark("operator");
 
    // initial fault state: d = 0, psi from the continuous friction condition
    // at the projected prestress, V = V_init along -X_tan (C-07)
@@ -1374,6 +1433,8 @@ int main(int argc, char *argv[])
       }
       MPI_Barrier(MPI_COMM_WORLD);
    }
+
+   setup_timer.Mark("initial state");
 
    // ------------------------------------------------------------ outputs
    // stations from the station file the deck names (header, "Stations")
@@ -1688,6 +1749,7 @@ int main(int argc, char *argv[])
       }
       return 0;
    }
+   setup_timer.Mark("outputs");
    op.SetFastFaultKernels(fast_fault != 0);
    op.SetFusedStiffness(fused_spmv != 0);
    op.SetDenseBlocks(dense_blocks != 0);
@@ -1712,6 +1774,8 @@ int main(int argc, char *argv[])
       }
    }
    else { ode.Init(op); }
+   setup_timer.Mark(lts_on ? "LTS blocks" : "solver init");
+   setup_timer.Print();
    Vector lts_zero_acc;
    if (lts_on && mon) { lts_zero_acc.SetSize(n); lts_zero_acc = 0.0; }
    if (stations)
