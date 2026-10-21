@@ -1147,7 +1147,7 @@ MFEM_TESTS = MINIAPPS
         test-ghost-exchange-bynodes-vs-scalar \
         test-per-qp-vs-centroid-basis-planar-1el \
         test-v92-regression-gates \
-        test-poro-p0 test-poro-p1 check-poro-refs \
+        test-poro-p0 test-poro-p1 test-poro-p2 check-poro-refs \
         regression-check quick-check
 
 all: $(MINIAPPS)
@@ -3530,6 +3530,28 @@ test-poro-p1: seas_test_poro_p1
 
 check-poro-refs:
 	$(PYTHON) multiphysics/poroelastic/tests/refs/poro_test_refs.py --check multiphysics/poroelastic/tests
+
+# P2.1: DGPoroDivIntegrator, the divergence form B_c with its penalty, boundary
+# rows and source loads.  test-poro-p2 = U2-1, U2-2 and the extras X2-1 to X2-4
+# in seas_test_poro_p2 (1 and 2 ranks: F-A has two elements), then the two
+# aborts of X2-5.
+PORO_P2_HEADERS = multiphysics/poroelastic/dg_poro_div_integrator.hpp \
+                  multiphysics/poroelastic/tests/poro_fixtures.hpp \
+                  multiphysics/poroelastic/tests/poro_test_refs.hpp
+TEST_PORO_P2_SRC = multiphysics/poroelastic/tests/test_poro_p2.cpp
+TEST_PORO_P2_OBJ = $(TEST_PORO_P2_SRC:.cpp=.o)
+$(TEST_PORO_P2_OBJ): %.o: $(SRC)%.cpp $(PORO_P2_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+seas_test_poro_p2: $(TEST_PORO_P2_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PORO_P2_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-poro-p2: seas_test_poro_p2
+	for np in 1 2; do $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_poro_p2 || exit 1; done
+	@$(call PORO_P0_EXPECT_ABORT,./seas_test_poro_p2 --abort interior-only,X2-5 boundary face without boundary terms,a boundary face reached an integrator built without boundary terms)
+	@$(call PORO_P0_EXPECT_ABORT,./seas_test_poro_p2 --abort penalty-one-sided,X2-5 penalty with one normal term,the fluid penalty on a boundary face belongs to the no-flow rows)
 
 # P6 long checks (minutes each; np=8 unless noted): T-15 energy balance and
 # its NIPG control, T-20 coupled dt refinement (dt0/4..dt0/16 vs dt0/64),
@@ -6131,7 +6153,7 @@ clean: clean-build clean-exec
 clean-build:
 	rm -f *.o *~ $(SEQ_MINIAPPS) $(PAR_MINIAPPS) $(PAR_LONG)
 	rm -f drivers/*.o tests/unit/*.o tests/verification/*.o tests/parallel/*.o
-	rm -f multiphysics/poroelastic/*.o multiphysics/poroelastic/tests/*.o seas_test_poro_p0 seas_test_poro_p1
+	rm -f multiphysics/poroelastic/*.o multiphysics/poroelastic/tests/*.o seas_test_poro_p0 seas_test_poro_p1 seas_test_poro_p2
 	rm -rf *.dSYM *.TVD.*breakpoints
 
 clean-exec:

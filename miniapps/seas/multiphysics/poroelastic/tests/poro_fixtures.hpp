@@ -9,6 +9,7 @@
 //   F-C  MarkSidesFC(mesh): F-B with element attribute 1 for x < 0 (medium A)
 //        and 2 for x > 0 (medium B).  With nx even, x = 0 is a plane of faces,
 //        so the material jump lies on interior faces.
+//   F-A  TwoTets(swap): two tetrahedra sharing one face (added in P2.1).
 //
 // Moved from test_poro_p0.cpp in step P1.1 (unchanged), so every phase test
 // uses one copy.
@@ -121,6 +122,39 @@ static void MarkSidesFC(Mesh &mesh)
       mesh.SetAttribute(e, x(0) < 0.0 ? 1 : 2);
    }
    mesh.SetAttributes();
+}
+
+// ---------------------------------------------------------------- fixture
+// F-A of plan rev 3, section 6.1 (added in step P2.1): two tetrahedra sharing
+// one face, with fixed non-symmetric vertex coordinates (kFA times kFAL m).
+// Element A (attribute 1) has vertices 0-3 and element B (attribute 2) has
+// vertices 4, 1, 2, 3, so the shared face is (1, 2, 3) and vertices 0 and 4
+// lie on opposite sides of it.  The six outer faces have boundary attribute
+// 1.  swap = true lists B before A, which swaps MFEM's two sides of the
+// shared face; each element keeps its vertex list, so its DOFs do not move.
+
+static const real_t kFAL = 237.0;
+static const real_t kFA[5][3] = {{0.00, 0.00, 0.00},
+                                 {1.00, 0.13, 0.07},
+                                 {0.21, 0.94, 0.11},
+                                 {0.17, 0.26, 0.83},
+                                 {0.88, 0.79, 0.64}};
+
+static Mesh *TwoTets(bool swap = false)
+{
+   Mesh *mesh = new Mesh(3, 5, 2, 6, 3);
+   for (int v = 0; v < 5; v++)
+   {
+      mesh->AddVertex(kFAL * kFA[v][0], kFAL * kFA[v][1], kFAL * kFA[v][2]);
+   }
+   const int A[4] = {0, 1, 2, 3}, B[4] = {4, 1, 2, 3};
+   if (!swap) { mesh->AddTet(A, 1); mesh->AddTet(B, 2); }
+   else       { mesh->AddTet(B, 2); mesh->AddTet(A, 1); }
+   const int bt[6][3] = {{0, 1, 2}, {0, 1, 3}, {0, 2, 3},
+                         {4, 1, 2}, {4, 1, 3}, {4, 2, 3}};
+   for (int i = 0; i < 6; i++) { mesh->AddBdrTriangle(bt[i], 1); }
+   mesh->FinalizeTetMesh(1, 0, true);
+   return mesh;
 }
 
 #endif // MFEM_SEAS_PORO_FIXTURES_HPP
