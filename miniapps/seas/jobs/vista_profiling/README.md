@@ -61,12 +61,17 @@ sbatch --dependency=afterok:$G map_lts_tpv205_200m_p2.sbatch
 V=$(sbatch --parsable build_speed_next_vista.sbatch | tail -n 1)
 sbatch --dependency=afterok:$V v1_lts_tpv205_200m_p1.sbatch
 sbatch --dependency=afterok:$V v1_lts_tpv205_200m_p2.sbatch
+# profiling again at the MAP route commit (MAP starts the job itself, through ibrun or else srun;
+# run_map_vista.sh), after the speed-next build V above at the same commit: the -g driver, then both runs
+G=$(sbatch --parsable --dependency=afterok:$V build_map_vista.sbatch | tail -n 1)
+sbatch --dependency=afterok:$G map_lts_tpv205_200m_p1.sbatch
+sbatch --dependency=afterok:$G map_lts_tpv205_200m_p2.sbatch
 ```
 
 Each speed and LTS job stops if the driver was built at another commit (`BUILD_COMMIT_VISTA`)
 or if the mesh sha256 differs from `meshes.sha256`.
 
-## Results (18 to 20 Oct 2026)
+## Results (18 to 21 Oct 2026)
 
 Clone `$WORK/seas-mfem-profiling`, modules gcc/14.2.0, cuda/12.6, openmpi/5.0.5,
 hypre/2.31.0, metis/5.1.0.3, phdf5/1.14.6.
@@ -92,6 +97,11 @@ hypre/2.31.0, metis/5.1.0.3, phdf5/1.14.6.
 | 1085934 | f81f374 | `build_lts_vista.sbatch` | Build, the six gate test sets (74, 22, 49, 13, 9, 42 passed) and the LTS suite (24 of 24) pass; both 200 m meshes match `meshes.sha256`. |
 | 1085935 | f81f374 | `build_map_vista.sbatch` | `seas_nitsche_dyn_driver_g` built. Without its debug sections the -g object differs in bytes from the production object, with every section the same size and the same disassembly. |
 | 1085936 | f81f374 | `map_lts_tpv205_200m_p1.sbatch` | The driver now loads gcc 14's libstdc++, but MAP exited 8 s after "Waiting for licence" without a profile, and its message was lost (both addressed at the next commit). The perf fallback ran 0 to 3.0 s (wall 138.2 s; `ode.Step` at most 56.2 s), with stations bitwise equal to the first 3.0 s of 1082586 and perf profiles of ranks 0, 1, 288 and 575 (`perf/`, on Vista). The job exited 1. |
+| 1085937 | f81f374 | `map_lts_tpv205_200m_p2.sbatch` | As 1085936 at p = 2 (16 x 144 ranks, 0 to 2.0 s): MAP exited 9 s after "Waiting for licence". The perf fallback ran (wall 219.3 s, 14,792 ticks; `ode.Step` at most 79.5 s), with stations bitwise equal to the first 2.0 s of 1082384 (16 of 16) and perf profiles of ranks 0, 1, 1152 and 2303. The job exited 1. |
+| 1086943 | 488052f | `build_lts_vista.sbatch` | Build and all gate tests pass (0 failed); both 200 m meshes match `meshes.sha256`. 7:28 on 1 node. |
+| 1086944 | 488052f | `build_map_vista.sbatch` | `seas_nitsche_dyn_driver_g` built, 8 debug sections; without them every section has the size and the disassembly of the production object. |
+| 1086945 | 488052f | `map_lts_tpv205_200m_p1.sbatch` | MAP checked out its licence and started its express launch with `--mpi=openmpi`, then stopped: "pindirect exited before reaching MPIR_Breakpoint" (express launch waits for mpirun's MPIR interface, which Open MPI 5's mpirun no longer has; addressed at the next commit). The perf fallback ran 0 to 3.0 s (wall 144.5 s; `ode.Step` at most 51.9 s), with stations bitwise equal to the first 3.0 s of 1082586 (16 of 16). The job exited 1. |
+| 1086946 | 488052f | `map_lts_tpv205_200m_p2.sbatch` | As 1086945 at p = 2: MAP stopped after 9 s with the same "pindirect exited before reaching MPIR_Breakpoint". The perf fallback ran 0 to 2.0 s (wall 223.9 s; `ode.Step` at most 87.7 s), with stations bitwise equal to the first 2.0 s of 1082384 (16 of 16) and perf profiles of ranks 0, 1, 1152 and 2303. The job exited 1. |
 
 The run outputs (fault files, stations, driver logs) stayed on Vista in
 `$SCRATCH/nitsche_profiling/tpv205_200m_p2_speed_1078825/{off,on,weighted}` and
