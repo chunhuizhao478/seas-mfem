@@ -100,6 +100,17 @@
 // the elastic energy has for (u, d)), so it does not resist slip itself.
 // eta_bar = 0 (never calling SetKelvinVoigt) leaves every bit unchanged.
 //
+// Off-fault rheology (SetRheology; rheology plan rev 1, sections 5 and 6.6;
+// Chunhui Zhao, 2026-10-20): the stress is sigma_0' + C_0 : eps + dsig with
+// dsig from a RheologyCoupler (rheology/rheology_coupler.hpp).  ImplicitSolve
+// runs box R, the coupler's Advance(U^{n+1}), before the fault; once any
+// element has a nonzero dsig the fault traction gains Q dsig (box 8, the
+// average {dsig n} projected like the prestress) and the force P dsig
+// (box 13).  While nothing has yielded the coupler reports no active element
+// and both loads are skipped, so every bit is that of the elastic run; null
+// (never calling SetRheology) is the elastic operator.  Local time stepping
+// refuses a coupler.
+//
 // NitscheMaterialSample lives in nitsche_material_sample.hpp (moved there in
 // P3 to break an include cycle with nitsche_mass.hpp); it is re-exported here.
 //
@@ -118,6 +129,7 @@
 #include "../fault/fault_orientation.hpp"
 #include "../fault/fault_frame.hpp"
 #include "../friction/fault_closure.hpp"
+#include "../rheology/rheology_coupler.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -301,6 +313,7 @@ public:
                   "NitscheWaveOperator::ImplicitSolve called twice at t = "
                   << t << "; exactly one call per time step is allowed.");
       last_solve_time_ = t;
+      if (rc_) { rc_->Advance(x, t, dt_); }   // box R
       if (has_fault_) { AdvanceFault_(x, t, &dxdt); }
       if (damping_blocks_.empty())
       {
@@ -506,7 +519,8 @@ public:
    /// slip_abs = the slip measure D of DOF j (|d^n|, or psi^n with
    /// SlipMeasure::Path), passed to the closure as st.slip_abs; t = t_{n+1}
    /// as st.t (NaN: GetTime()).  With TensionMode::ZeroStrength there is
-   /// no range check and the law sees max(0, sigma).
+   /// no range check and the law sees max(0, sigma); a sigma_eff that is
+   /// not finite aborts in both modes.
    void CloseDOF(int j, const real_t TS[3], real_t psi, real_t V[3],
                  real_t &sigma_eff, real_t X[2], real_t *sigma_pc = nullptr,
                  real_t E = 0.0, real_t omE = 1.0, real_t slip_abs = 0.0,
@@ -516,7 +530,8 @@ public:
                     *sv = &frame_own_(9 * j + 6);
       fault_frame::ToLocal(TS, 0.0, n, dv, sv, X[0], X[1], sigma_eff);
       const bool zero_strength = tension_ == TensionMode::ZeroStrength;
-      if (!zero_strength && !(sigma_eff >= sigma_min_))
+      if (!std::isfinite(sigma_eff) ||
+          (!zero_strength && !(sigma_eff >= sigma_min_)))
       {
          MFEM_ABORT("NitscheWaveOperator: sigma_n_eff left its range on rank "
                     << Mpi::WorldRank() << ", owned fault DOF " << j
@@ -735,6 +750,27 @@ public:
       }
    }
    bool HasKelvinVoigt() const { return static_cast<bool>(kv_); }
+
+   /// Off-fault rheology (header).  The coupler must be built on this
+   /// operator's displacement space and outlive the operator's use; null
+   /// switches it off.  Local time stepping refuses it.
+   void SetRheology(RheologyCoupler *rc)
+   {
+      MFEM_VERIFY(!rc || rc->Field().NumElements() == mesh_.GetNE(),
+                  "NitscheWaveOperator::SetRheology: the coupler has "
+                  << rc->Field().NumElements() << " elements, the mesh " << mesh_.GetNE());
+      rc_ = rc;
+   }
+   const RheologyCoupler *Rheology() const { return rc_; }
+   /// Q dsig on the owned fault DOFs, global three-vectors in the layout of
+   /// PrestressTraction(): {dsig_h} n at the fault quadrature points,
+   /// projected exactly like the prestress.
+   void RheologyTraction(Vector &T_own) const
+   {
+      MFEM_VERIFY(rc_ && has_fault_, "RheologyTraction: no coupler or no fault");
+      ProjectFaceStress_([this](FaceElementTransformations &Tr, const real_t *, real_t s[9])
+      { rc_->FaultStress(Tr, s); }, T_own);
+   }
    /// Profiling plan item 4: compute K x + K_eta v in one sweep over the
    /// union of the two patterns (default on).  Call before the first step.
    void SetFusedStiffness(bool on) { fused_enabled_ = on; fused_state_ = 0; }
@@ -869,6 +905,8 @@ public:
    void LtsAdvanceFault(const Vector &x, real_t t, const Vector *v)
    {
       MFEM_VERIFY(has_fault_, "LtsAdvanceFault: the operator has no fault");
+      MFEM_VERIFY(!rc_, "LtsAdvanceFault: off-fault rheology needs global stepping "
+                  "(rheology plan phase R6)");
       AdvanceFault_(x, t, v);
    }
    /// F += G d (+ G_eta V with Kelvin-Voigt) at the stored fault state: the
@@ -876,6 +914,8 @@ public:
    void LtsAddFaultLoads(Vector &F) const
    {
       MFEM_VERIFY(has_fault_, "LtsAddFaultLoads: the operator has no fault");
+      MFEM_VERIFY(!rc_, "LtsAddFaultLoads: off-fault rheology needs global stepping "
+                  "(rheology plan phase R6)");
       const double tf0 = MPI_Wtime();
       const bool fast = UseFastFault_();
       if (fast)
@@ -975,6 +1015,7 @@ private:
          }
          fault_sec_ += MPI_Wtime() - tf0;
       }
+      if (rc_ && rc_->AnyActive()) { rc_->AddLoad(F_); }   // rheology: P dsig
       if (!damping_blocks_.empty() && v)
       {
          ApplyDamping(*v, Cv_);
@@ -1126,6 +1167,12 @@ private:
          KVTrialTraction(*v, kv_zero_, kvT_);
          Town_ += kvT_;
       }
+      if (rc_ && rc_->AnyActive())
+      {
+         // rheology: Q dsig^{n+1} (box R ran before the fault)
+         RheologyTraction(rcT_);
+         Town_ += rcT_;
+      }
       BackgroundTraction(t, S_);
       // 9-11
       real_t min_sig = std::numeric_limits<real_t>::infinity();
@@ -1272,6 +1319,17 @@ private:
    void ProjectStress_(const std::function<void(const real_t[3], real_t[9])> &sig,
                        Vector &S_own) const
    {
+      ProjectFaceStress_([&sig](FaceElementTransformations &, const real_t *x, real_t s[9])
+      { sig(x, s); }, S_own);
+   }
+
+   /// ProjectStress_ with a stress that may depend on the face and its two
+   /// elements (the rheology's {dsig_h}): sig(Tr, x_q, s) with the
+   /// integration points of Tr set to the quadrature point.
+   void ProjectFaceStress_(const std::function<void(FaceElementTransformations &,
+                                                    const real_t *, real_t[9])> &sig,
+                           Vector &S_own) const
+   {
       const FaceQuadrature *fq = elast_->GetFaceQuadrature();
       const DenseMatrix &e_q = fq->BasisAtQuadPoints();
       const FaultBasis *fb = elast_->GetFaultBasis();
@@ -1300,7 +1358,7 @@ private:
             const real_t nq3[3] = {nor(0) / nl, nor(1) / nl, nor(2) / nl};
             Tr->Transform(ip, xq);
             real_t s[9];
-            sig(xq.GetData(), s);
+            sig(*Tr, xq.GetData(), s);
             for (int a = 0; a < 3; a++)
             {
                Tq(a * nq + q) = s[3 * a] * nq3[0] + s[3 * a + 1] * nq3[1]
@@ -1550,6 +1608,8 @@ private:
    mutable DenseBlockStiffness dense_;
    mutable long long dense_bytes_ = 0;
    mutable double fault_sec_ = 0.0;
+   RheologyCoupler *rc_ = nullptr;   ///< off-fault rheology (null: elastic)
+   Vector rcT_;                      ///< Q dsig on owned fault DOFs
 };
 
 #endif // MFEM_USE_MPI

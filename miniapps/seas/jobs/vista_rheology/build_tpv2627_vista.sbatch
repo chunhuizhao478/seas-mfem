@@ -7,8 +7,8 @@
 #SBATCH -n 144
 #SBATCH -t 02:00:00
 #SBATCH -A EAR26024
-# Vista build + checks for TPV26/27, rheology plan rev 1, phase R1 (Chunhui Zhao, 2026-10-20), before
-# the B0 jobs (b0_*.sbatch) and the TPV26 run (tpv26_200m_p2.sbatch).  Network work on the login node,
+# Vista build + checks for TPV26/27, rheology plan rev 1, phases R1 and R3 (Chunhui Zhao, 2026-10-20),
+# before the B0 jobs (b0_*.sbatch) and the TPV26 run (tpv26_200m_p2.sbatch).  Network work on the login node,
 # compiling here:
 #   cd $WORK && git clone --recurse-submodules -b nitsche-dynamic-rupture-nonlinearity \
 #       https://github.com/chunhuizhao478/seas-mfem.git seas-mfem-nonlinearity
@@ -17,10 +17,11 @@
 # Steps:
 #   0. the repo CLAUDE.md guard (GitHub first), plus no untracked sources
 #   1. build_vista.sh (MFEM + seas_nitsche_dyn_driver + six gate tests; writes BUILD_COMMIT_VISTA), then
-#      seas_test_nitsche_lts and the rheology unit tests
+#      seas_test_nitsche_lts, the rheology unit tests and the operator tests O1-O7
 #   2. tests: rheology U1-U11 (make test-rheology: 24, 13, 36 and 25 checks in the cloud), the six
-#      Nitsche gate test sets as build_verify_vista.sbatch runs them, and the LTS suite (about 13 min;
-#      the fault closure it calls changed in R1)
+#      Nitsche gate test sets as build_verify_vista.sbatch runs them, the LTS suite (about 13 min;
+#      the fault closure it calls changed in R1) and O1-O7 (make test-nitsche-rheology: 34 checks per
+#      rank count, 1, 2 and 4 ranks; the operator changed in R3)
 #   3. meshes: TPV26/27 1000 m and 200 m from tpv26/mesh/tpv2627_half.geo with TACC gmsh, sha256 to
 #      miniapps/seas/MESH_SHA256_TPV2627_VISTA (run_nitsche_vista.sh accepts it); the TPV205 and TPV104
 #      200 m gold meshes for the B0 jobs, copied from $WORK/seas-mfem-benchmarks and checked against
@@ -31,6 +32,9 @@
 #      abort; all 59 nodes inside r_crit ruptured, and outside it 1 node by 1.5 s (the plan's B1 time, too
 #      close to call), 88 by 2.5 s and 170 by 3.0 s, the farthest 9.1 km away.  The off-fault station
 #      files (tpv26_offfault_*.dat) are listed.
+#   4b. R3 output check: TPV27 deck as committed, 1000 m p=1, 0 -> 1.0 s, 8 ranks.  Pass: no abort and
+#      <output_dir>/rheology.vtkhdf holds 3 snapshots (output_dt_s = 0.5: t = 0, 0.5, 1.0 s).  The
+#      writer needs parallel HDF5, which the cloud does not have, so this is its first run.
 #   5. 200 m load check: TPV26 200 m, p = 2, all 144 ranks, tfinal 0.003 s; node memory peak, tets,
 #      implied min 6V/A and dt, steps to 13 s, as build_verify_vista.sbatch does for TPV205/TPV104.  It
 #      decides the ranks per node of tpv26_200m_p2.sbatch.
@@ -57,7 +61,8 @@ module load cuda/12.6 openmpi/5.0.5 hypre/2.31.0 metis/5.1.0.3 phdf5/1.14.6 gmsh
 cd miniapps/seas
 MK="make MFEM_DIR=../.. HDF5_DIR=$TACC_PHDF5_DIR SEAS_FS_LIB="
 $MK -j64 seas_test_nitsche_lts seas_test_rheology_pointwise seas_test_rheology_initial_stress \
-   seas_test_rheology_config seas_test_rheology_forced_rupture > tests_build_$SLURM_JOB_ID.log 2>&1
+   seas_test_rheology_config seas_test_rheology_forced_rupture seas_test_nitsche_rheology \
+   > tests_build_$SLURM_JOB_ID.log 2>&1
 rc=$?; echo "test build exit $rc"; [ $rc -eq 0 ] || { tail -20 tests_build_$SLURM_JOB_ID.log; exit $rc; }
 fail=0
 echo "=== rheology unit tests U1-U11 ==="
@@ -67,7 +72,7 @@ nf=$(grep -a "passed, " test-rheology_$SLURM_JOB_ID.log | awk '{s += $5} END {pr
 echo "test-rheology exit $rc, failed $nf"
 [ $rc -eq 0 ] && [ $nf -eq 0 ] || fail=1
 echo "=== Nitsche gate tests and LTS suite ==="
-for t in test-nitsche-gates test-nitsche-pf test-nitsche-hook-spy test-nitsche-lsw test-nitsche-srw test-nitsche-lsw-inline test-nitsche-lts; do
+for t in test-nitsche-gates test-nitsche-pf test-nitsche-hook-spy test-nitsche-lsw test-nitsche-srw test-nitsche-lsw-inline test-nitsche-lts test-nitsche-rheology; do
    s=$(date +%s); $MK $t > ${t}_$SLURM_JOB_ID.log 2>&1; rc=$?
    nf=$(grep -v echo ${t}_$SLURM_JOB_ID.log | grep -c FAILED)
    echo "$t exit $rc in $(( $(date +%s) - s )) s: PASSED $(grep -v echo ${t}_$SLURM_JOB_ID.log | grep -c PASSED), FAILED $nf"
@@ -107,6 +112,17 @@ print(f"B1: {sum(t < 1e9 for t in inside)} of {len(inside)} nodes inside r_crit 
 sys.exit(0 if hit else 1)
 EOF
 ls $OUT/tpv26_offfault_*.dat 2>/dev/null | sed 's/^/  /'
+echo "=== R3 output check: TPV27 1000 m p=1, 0 -> 1.0 s, 8 ranks ==="
+OUT=$SCRATCH/rheology/r3out_tpv27_1000m_p1_$SLURM_JOB_ID; mkdir -p $OUT
+s=$(date +%s)
+ibrun -n 8 -o 0 ./seas_nitsche_dyn_driver --config tpv27/configs/tpv27_nitsche_kv0p1.toml \
+   --order 1 --tfinal 1.0 --output-dir $OUT --log-every 200 > $OUT/driver.log 2>&1
+rc=$?; echo "driver exit $rc in $(( $(date +%s) - s )) s"; grep -a "=== done" $OUT/driver.log || { tail -15 $OUT/driver.log; fail=1; }
+grep -a "rheology" $OUT/driver.log | head -3
+command -v h5dump >/dev/null || echo "ERROR: h5dump (phdf5 module) not on PATH"
+ns=$(h5dump -a /VTKHDF/Steps/NSteps $OUT/rheology.vtkhdf 2>/dev/null | awk '/\(0\)/{print $2}')
+echo "rheology.vtkhdf: NSteps ${ns:-missing}"
+[ "$ns" = "3" ] || { echo "ERROR: rheology.vtkhdf should hold 3 snapshots"; fail=1; }
 echo "=== 200 m load check: TPV26 p=2, 144 ranks, tfinal 0.003 s ==="
 OUT=$SCRATCH/rheology/loadcheck_tpv26_200m_p2_$SLURM_JOB_ID; mkdir -p $OUT
 ( while :; do echo "$(date +%s) $(awk '/^MemTotal|^MemAvailable/{print $2}' /proc/meminfo | tr '\n' ' ')"; sleep 2; done ) > $OUT/meminfo_kB.log &

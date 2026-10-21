@@ -6,6 +6,9 @@
 //
 //    [rheology]                       # absent = linear elastic, as before
 //    representation = "nodal_pm1"     # the only option (plan 4.3)
+//    output_dt_s    = 0.5             # optional: diagnostics (plastic strain,
+//                                     # eta) to <output_dir>/rheology.vtkhdf
+//                                     # every output_dt_s; 0 or absent = none
 //    [rheology.drucker_prager]
 //    enabled           = true
 //    cohesion_pa       = 1.36e6
@@ -25,6 +28,8 @@
 // no defaults, as the [[stress_region]] keys.  Unknown keys, missing or
 // mistyped values and refused combinations return a message naming the key;
 // the driver stops with it.  The parsers return "" on success.
+// CheckRheologyRun and CheckInitialStressRun hold the run-level refusals
+// (plan sections 6.7 and 9; test O7).
 //
 // Scope (Chunhui Zhao, 2026-10-20).
 
@@ -57,6 +62,7 @@ struct RheologyConfig
 {
    bool present = false;                     ///< the deck has [rheology]
    std::string representation = "nodal_pm1";
+   real_t output_dt = 0.0;                   ///< [s]; 0 = no diagnostics file
    bool drucker_prager = false;
    DruckerPragerParams dp;
 
@@ -142,10 +148,15 @@ inline std::string ParseRheologyConfig(const toml::value &root, RheologyConfig &
    const std::string name = "[rheology]";
    if (!t.is_table()) { return name + " must be a table"; }
    cfg.present = true;
-   std::string e = CheckKeys(t, name, {"representation", "drucker_prager", "viscoelastic",
-                                       "damage_breakage"
+   std::string e = CheckKeys(t, name, {"representation", "output_dt_s", "drucker_prager",
+                                       "viscoelastic", "damage_breakage"
                                       });
    if (!e.empty()) { return e; }
+   if (t.contains("output_dt_s"))
+   {
+      if (!(e = GetReal(t, name, "output_dt_s", cfg.output_dt)).empty()) { return e; }
+      if (cfg.output_dt < 0.0) { return name + " output_dt_s must be >= 0"; }
+   }
    if (t.contains("representation"))
    {
       const toml::value &v = t.at("representation");
@@ -191,6 +202,55 @@ inline std::string ParseRheologyConfig(const toml::value &root, RheologyConfig &
    std::vector<RheologyKind> kinds;
    if (cfg.drucker_prager) { kinds.push_back(RheologyKind::DruckerPrager); }
    return RheologyStack::CheckCombination(kinds);
+}
+
+/// Run-level refusals of a deck with an enabled model: local time stepping
+/// (until plan phase R6), the energy-balance diagnostic (until the plastic
+/// work is in it, R5), and the diagnostics file without parallel HDF5.
+/// "" when the run may proceed (also whenever no model is enabled).
+inline std::string CheckRheologyRun(const RheologyConfig &cfg, bool lts_on, bool energy_balance,
+                                    bool parallel_hdf5)
+{
+   if (!cfg.Any()) { return ""; }
+   if (lts_on)
+   {
+      return "[rheology] with --lts rate2: local time stepping with off-fault rheology "
+             "is rheology plan phase R6; run with --lts off";
+   }
+   if (energy_balance)
+   {
+      return "[rheology] with [diagnostics] energy_balance = true: the balance does not "
+             "count the plastic work yet (rheology plan phase R5); set it to false";
+   }
+   if (cfg.output_dt > 0.0 && !parallel_hdf5)
+   {
+      return "[rheology] output_dt_s > 0 writes rheology.vtkhdf and needs MFEM built "
+             "with parallel HDF5 (MFEM_USE_HDF5, MFEM_PARALLEL_HDF5); set output_dt_s = 0";
+   }
+   return "";
+}
+
+/// Refusals of [initial_stress] next to the other stress sources: the
+/// [stress] tensor must be all 0, no [[stress_region]], and no
+/// [pore_pressure] P_p (the fluid pressure enters only through sigma_0'),
+/// so nothing counts twice.  "" when [initial_stress] is absent.
+inline std::string CheckInitialStressRun(bool initial_stress, bool stress_all_zero,
+                                         bool stress_regions, bool pore_pressure_zero)
+{
+   if (!initial_stress) { return ""; }
+   if (!stress_all_zero)
+   {
+      return "[initial_stress] is the prestress: every [stress] sigma_*_pa must be 0 "
+             "(otherwise the background would count twice)";
+   }
+   if (stress_regions) { return "[initial_stress] and [[stress_region]] cannot be combined"; }
+   if (!pore_pressure_zero)
+   {
+      return "[initial_stress] with [pore_pressure] P_p != 0: the fluid pressure enters "
+             "only through the effective initial stress; set P_p_pa and "
+             "P_p_grad_pa_per_m to 0";
+   }
+   return "";
 }
 
 /// The stack of the enabled models, in stack order (empty when none).

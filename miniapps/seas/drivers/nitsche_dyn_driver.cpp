@@ -63,8 +63,13 @@
 //   [friction.slip_weakening] slip_measure = "magnitude" (default, |d^n|) |
 //                     "path" (the slip path), tension = "abort" (default) |
 //                     "zero_strength" (strength from max(0, sigma_n'));
-//   [rheology]        read and checked; an enabled model is refused until
-//                     the bulk coupling (plan phase R3) is in;
+//   [rheology]        off-fault rheology (plan phase R3): the enabled
+//                     models (rheology/rheology_stack.hpp) through a
+//                     RheologyCoupler on the operator, with sigma_0' the
+//                     function of the fault prestress; refused with
+//                     --lts rate2 and energy_balance; per log line the
+//                     yielding nodes, active elements and max eta;
+//                     output_dt_s > 0: <output_dir>/rheology.vtkhdf;
 //   [output.off_fault_stations] file = "..." (CSV name,x,y,z): displacement
 //                     and velocity time series at points in the volume
 //                     (io/off_fault_stations.hpp; SCEC TPV26/27 Part 9),
@@ -135,6 +140,7 @@
 #include "../friction/slip_weakening_closure.hpp"
 #include "../friction/forced_rupture.hpp"
 #include "../rheology/rheology_config.hpp"
+#include "../rheology/rheology_coupler.hpp"
 #include "../fault/fault_frame.hpp"
 #include "../spatial/code/spatial_friction.hpp"
 #include "../dynamic/spatial_nucleation.hpp"
@@ -1185,9 +1191,15 @@ int main(int argc, char *argv[])
       const std::string e = ParseRheologyConfig(root, rheo);
       MFEM_VERIFY(e.empty(), e);
    }
-   MFEM_VERIFY(!rheo.Any(), "[rheology] " << BuildRheologyStack(rheo)->Describe()
-               << " is enabled: the bulk coupling is rheology plan phase R3 and is not "
-               "in this build yet; set enabled = false");
+   {
+#if defined(MFEM_USE_HDF5) && defined(MFEM_PARALLEL_HDF5)
+      const bool phdf5 = true;
+#else
+      const bool phdf5 = false;
+#endif
+      const std::string e = CheckRheologyRun(rheo, lts_on, energy_on, phdf5);
+      MFEM_VERIFY(e.empty(), e);
+   }
 
    // ------------------------------------------------------------ prestress (I1)
    MFEM_VERIFY(cfg.stress.kind == spatial::StressSourceKind::ConstantTensor,
@@ -1262,10 +1274,10 @@ int main(int argc, char *argv[])
    {
       bool zero = true;
       for (int i = 0; i < 9; i++) { zero = zero && s0[i] == 0.0; }
-      MFEM_VERIFY(zero, "[initial_stress] is the prestress: every [stress] sigma_*_pa "
-                  "must be 0 (otherwise the background would count twice)");
-      MFEM_VERIFY(regions.empty(), "[initial_stress] and [[stress_region]] cannot be "
-                  "combined");
+      const std::string e = CheckInitialStressRun(
+         is_on, zero, !regions.empty(), cfg.stress.pore_pressure.P_p_pa == 0.0
+         && cfg.stress.pore_pressure.P_p_grad_pa_per_m == 0.0);
+      MFEM_VERIFY(e.empty(), e);
       auto is = std::make_shared<const InitialStress>(is_spec);
       fs.prestress = [is](const real_t x[3], real_t s[9]) { is->EvalEffective(x, s); };
    }
@@ -1442,6 +1454,30 @@ int main(int argc, char *argv[])
                       << (has_w ? "width " + std::to_string(width) + " m, " : std::string("whole domain, "))
                       << op.KelvinVoigtLayerElements() << " of " << ne_global << " elements\n";
          }
+      }
+   }
+
+   // off-fault rheology (rheology plan rev 1, sections 5, 6.6, 6.7): box R
+   // and the loads P dsig, Q dsig through the coupler, sigma_0' = the
+   // prestress function (one field for the bulk and the fault)
+   std::unique_ptr<RheologyCoupler> rheo_c;
+   if (rheo.Any())
+   {
+      rheo_c = std::make_unique<RheologyCoupler>(op.Elasticity().GetFESpace(), op.Sample(),
+                                                 op.Boundary().dirichlet_attrs,
+                                                 BuildRheologyStack(rheo), fs.prestress);
+      op.SetRheology(rheo_c.get());
+      if (g_rank == 0)
+      {
+         std::cout << "  rheology: " << rheo_c->Stack().Describe() << ", "
+                   << rheo_c->Field().NodesPerElement() << " node(s) per element (degree "
+                   << p - 1 << "), " << rheo_c->Stack().NumStateVars() << " state values per node";
+         if (rheo.drucker_prager)
+         {
+            std::cout << "; Drucker-Prager cohesion " << rheo.dp.cohesion << " Pa, bulk friction "
+                      << rheo.dp.bulk_friction << ", Tv " << rheo.dp.relaxation_time << " s";
+         }
+         std::cout << "\n";
       }
    }
 
@@ -1835,8 +1871,11 @@ int main(int argc, char *argv[])
                        ? "lithostatic_ratio" : "constant_tensor")
                    << " (effective; replaces [stress])\n";
       }
-      std::cout << "  rheology: " << (rheo.present ? "table present, no model enabled"
-                                       : "linear elastic") << "\n";
+      if (!rheo.Any())
+      {
+         std::cout << "  rheology: " << (rheo.present ? "table present, no model enabled"
+                                          : "linear elastic") << "\n";
+      }
       if (pc_on)
       {
          std::cout << "  Prakash-Clifton regularization of the law's normal stress: v_star = "
@@ -1944,6 +1983,54 @@ int main(int argc, char *argv[])
       stations->WriteStep(t, dofdata);
    }
    if (offst) { offst->WriteStep(t, U, Ud); }
+#if defined(MFEM_USE_HDF5) && defined(MFEM_PARALLEL_HDF5)
+   // [rheology] output_dt_s: every diagnostic of the stack (Drucker-Prager:
+   // plastic strain and eta) as one scalar field on the rheology nodes, all
+   // snapshots in <output_dir>/rheology.vtkhdf
+   std::unique_ptr<L2_FECollection> rheo_fec;
+   std::unique_ptr<ParFiniteElementSpace> rheo_fes;
+   std::vector<std::unique_ptr<ParGridFunction>> rheo_gf;
+   std::unique_ptr<ParaViewHDFDataCollection> rheo_pv;
+   real_t rheo_next = 0.0;
+   auto rheo_write = [&](long step, real_t time)
+   {
+      std::vector<real_t> diag;
+      rheo_c->Diagnostics(diag);
+      const std::size_t N = rheo_gf.size();
+      for (std::size_t a = 0; a < N; a++)
+      {
+         ParGridFunction &g = *rheo_gf[a];
+         for (int k = 0; k < g.Size(); k++) { g(k) = diag[static_cast<std::size_t>(k) * N + a]; }
+      }
+      rheo_pv->SetCycle(static_cast<int>(step));
+      rheo_pv->SetTime(time);
+      rheo_pv->Save();
+      rheo_next += rheo.output_dt;
+   };
+   if (rheo_c && rheo.output_dt > 0.0)
+   {
+      // the scalar space of the rheology nodes: DOF e nr + i is node (e, i)
+      rheo_fec = std::make_unique<L2_FECollection>(p - 1, 3, BasisType::GaussLegendre);
+      rheo_fes = std::make_unique<ParFiniteElementSpace>(&pmesh, rheo_fec.get());
+      MFEM_VERIFY(rheo_fes->GetVSize() == rheo_c->Field().NumElements()
+                  * rheo_c->Field().NodesPerElement(), "rheology output: node count");
+      rheo_pv = std::make_unique<ParaViewHDFDataCollection>("rheology", &pmesh);
+      rheo_pv->SetPrefixPath(out_dir + "/");
+      rheo_pv->SetLevelsOfDetail(std::max(1, p - 1));
+      for (const std::string &nm : rheo_c->DiagnosticNames())
+      {
+         rheo_gf.push_back(std::make_unique<ParGridFunction>(rheo_fes.get()));
+         rheo_pv->RegisterField(nm, rheo_gf.back().get());
+      }
+      rheo_next = t;
+      rheo_write(0, t);
+      if (g_rank == 0)
+      {
+         std::cout << "  rheology output: " << out_dir << "/rheology.vtkhdf every "
+                   << rheo.output_dt << " s (" << rheo_gf.size() << " fields)\n";
+      }
+   }
+#endif
    real_t max_ratio_run = 0.0, max_V_run = 0.0, min_sig_run = 1e300, max_sig_run = -1e300;
    real_t min_pc_run = 1e300, max_pc_run = -1e300;
    // this rank's time inside ode.Step; step 1 is kept apart because it also
@@ -2002,6 +2089,9 @@ int main(int argc, char *argv[])
          stations->WriteStep(t, dofdata);
       }
       if (offst && sync && s % station_every == 0) { offst->WriteStep(t, U, Ud); }
+#if defined(MFEM_USE_HDF5) && defined(MFEM_PARALLEL_HDF5)
+      if (rheo_pv && t >= rheo_next - 1e-9 * dt) { rheo_write(s, t); }
+#endif
       if (dump && s % dump_every == 0)
       {
          const Vector &d = op.Slip(), &psi = op.State();
@@ -2037,6 +2127,8 @@ int main(int argc, char *argv[])
       const bool log_now = lts_run ? (sync && (s >= lts_next_log || s == nsteps))
                                    : (s % log_every == 0 || s == nsteps);
       if (lts_run && log_now) { lts_next_log = (s / log_every + 1) * log_every; }
+      // collective: every rank reaches it with the same log_now
+      const real_t rheo_eta = (rheo_c && log_now) ? rheo_c->MaxDiagnostic("eta") : 0.0;
       if (g_rank == 0 && log_now)
       {
          const real_t wall = std::chrono::duration<real_t>(std::chrono::steady_clock::now() - wall0).count();
@@ -2051,6 +2143,12 @@ int main(int argc, char *argv[])
          {
             std::cout << "  E_h = " << er.E_h << "  sum rho = " << mon->SumRho()
                       << "  W_fric = " << W_fric;
+         }
+         if (rheo_c)
+         {
+            std::cout << "  rheology: " << rheo_c->YieldingNodes() << " yielding nodes, "
+                      << rheo_c->ActiveElements() << " active elements, max eta "
+                      << rheo_eta;
          }
          std::cout << "  wall " << wall << " s\n" << std::flush;
          (void)rho;

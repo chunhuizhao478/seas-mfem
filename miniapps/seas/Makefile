@@ -924,7 +924,7 @@ SPATIAL_HEADERS = spatial/code/spatial_friction.hpp \
                   spatial/code/spatial_velocity.hpp
 
 # All headers
-SEAS_HEADERS = $(FRICTION_HEADERS) $(DOMAIN_HEADERS) $(FAULT_HEADERS) $(SOLVER_HEADERS) $(IO_HEADERS) $(CHECKPOINT_HEADERS) $(CONSTITUTIVE_HEADERS) $(CONFIG_HEADERS) $(DYNAMIC_HEADERS) $(SPATIAL_HEADERS)
+SEAS_HEADERS = $(FRICTION_HEADERS) $(DOMAIN_HEADERS) $(FAULT_HEADERS) $(SOLVER_HEADERS) $(IO_HEADERS) $(CHECKPOINT_HEADERS) $(CONSTITUTIVE_HEADERS) $(CONFIG_HEADERS) $(DYNAMIC_HEADERS) $(SPATIAL_HEADERS) $(RHEOLOGY_HEADERS)
 
 # Mesh generation tool
 GENERATE_MESH_SRC = tools/generate_bp2_mesh.cpp
@@ -3143,7 +3143,9 @@ RHEOLOGY_HEADERS = rheology/rheology_model.hpp rheology/drucker_prager.hpp \
                    rheology/viscoelastic.hpp rheology/damage_breakage.hpp \
                    rheology/rheology_stack.hpp rheology/initial_stress.hpp \
                    rheology/rheology_config.hpp \
-                   friction/forced_rupture.hpp friction/slip_weakening_closure.hpp
+                   friction/forced_rupture.hpp friction/slip_weakening_closure.hpp \
+                   rheology/rheology_field.hpp rheology/dg_rheology_operators.hpp \
+                   rheology/rheology_coupler.hpp
 TEST_RHEOLOGY_SRC = tests/unit/test_rheology_pointwise.cpp \
                     tests/unit/test_rheology_initial_stress.cpp \
                     tests/unit/test_rheology_config.cpp \
@@ -3165,6 +3167,29 @@ test-rheology: $(TEST_RHEOLOGY_BIN)
 	./seas_test_rheology_initial_stress
 	./seas_test_rheology_config
 	./seas_test_rheology_forced_rupture
+
+# Rheology plan rev 1, phase R3 (Chunhui Zhao, 2026-10-20): the bulk coupling
+# (RheologyField, S, P, Q, RheologyCoupler, the operator hooks), operator
+# tests O1-O7 on 1, 2 and 4 ranks.
+TEST_NITSCHE_RHEOLOGY_SRC = tests/verification/test_nitsche_rheology.cpp
+TEST_NITSCHE_RHEOLOGY_OBJ = $(TEST_NITSCHE_RHEOLOGY_SRC:.cpp=.o)
+$(TEST_NITSCHE_RHEOLOGY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             domain/nitsche_wave_operator.hpp \
+                             friction/fault_closure.hpp \
+                             solver/nitsche_cfl.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) $(TOML_FLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_rheology: $(TEST_NITSCHE_RHEOLOGY_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_RHEOLOGY_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-rheology: seas_test_nitsche_rheology
+	for np in 1 2 4; do $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_nitsche_rheology || exit 1; done
 
 test-nitsche-p3: seas_test_nitsche_p3
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_p3
