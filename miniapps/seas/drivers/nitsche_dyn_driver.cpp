@@ -49,6 +49,13 @@
 // 1 keeps them.  Only the DOFs the stations read get their station data
 // each station step.
 //
+// Fault frame filter (speed-next O1, Chunhui Zhao 2026-10-20):
+// --paraview-fault-deflate-level n (0..9) sets the deflate level of
+// fault.vtkhdf in place of the deck's [output] paraview_fault_deflate_level;
+// none writes its datasets with no filter at all (no compression work on
+// rank 0, a larger file).  Deflate is lossless, so the values are the same
+// either way.  Not with [output] paraview_fault_zfp_tol.  Absent = the deck.
+//
 // Station columns (SCEC map, plan "The SCEC conventions, mapped"):
 //   slip1 = delta.dhat (v-slip), slip2 = delta.shat (h-slip),
 //   V1 = V.dhat, V2 = V.shat,
@@ -571,7 +578,8 @@ int main(int argc, char *argv[])
                       " [--station-copies average|first] [--station-comm sub|world]"
                       " [--station-flush-every n] [--fast-fault 0|1]"
                       " [--fused-spmv 0|1] [--dense-blocks 0|1] [--fault-weight w]"
-                      " [--fast-fault-output 0|1] [--lts-report 0|1]"
+                      " [--fast-fault-output 0|1] [--paraview-fault-deflate-level n|none]"
+                      " [--lts-report 0|1]"
                       " [--lts-report-cap n] [--lts-report-ranks a,b,...]"
                       " [--lts off|rate2] [--lts-cap n] [--lts-fault-buffer n]"
                       " [--lts-same-step 0|1]\n";
@@ -615,6 +623,11 @@ int main(int argc, char *argv[])
    // blocks; takes precedence over --fused-spmv, which applies when it is 0
    const int dense_blocks = ArgInt(argc, argv, "--dense-blocks", 1);
    const int fast_fault_output = ArgInt(argc, argv, "--fast-fault-output", 1);
+   // speed-next O1 (header, "Fault frame filter"): "" = the deck
+   const std::string fault_deflate = ArgStr(argc, argv, "--paraview-fault-deflate-level", "");
+   MFEM_VERIFY(fault_deflate.empty() || fault_deflate == "none"
+               || (fault_deflate.size() == 1 && fault_deflate[0] >= '0' && fault_deflate[0] <= '9'),
+               "--paraview-fault-deflate-level " << fault_deflate << ": expected 0..9 or none");
    const real_t fault_weight = ArgReal(argc, argv, "--fault-weight", kDefaultFaultWeight);
    const int lts_report = ArgInt(argc, argv, "--lts-report", 0);
    const int lts_report_cap = ArgInt(argc, argv, "--lts-report-cap", 4);
@@ -1557,12 +1570,17 @@ int main(int argc, char *argv[])
                  : std::max(1, static_cast<int>(std::lround(ocfg.paraview_fault_dt / dt)));
       auto alg = ParaViewHDFDataCollection::HDFCompression::Deflate;
       double param = 6.0;   // the writer's default (lossless deflate level 6)
+      MFEM_VERIFY(fault_deflate.empty() || ocfg.paraview_fault_zfp_tol <= 0.0,
+                  "--paraview-fault-deflate-level " << fault_deflate << " with [output] "
+                  "paraview_fault_zfp_tol = " << ocfg.paraview_fault_zfp_tol << ": choose one filter");
       if (ocfg.paraview_fault_zfp_tol > 0.0)
       {
          ParaViewOutput<ParMesh>::ProbeH5ZZfpPluginOrAbort();
          alg = ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy;
          param = ocfg.paraview_fault_zfp_tol;
       }
+      else if (fault_deflate == "none") { param = -1.0; }   // no filter (both writers)
+      else if (!fault_deflate.empty()) { param = fault_deflate[0] - '0'; }
       else if (ocfg.paraview_fault_deflate_level >= 0)
       {
          param = ocfg.paraview_fault_deflate_level;
@@ -1572,9 +1590,14 @@ int main(int argc, char *argv[])
       if (g_rank == 0)
       {
          std::cout << "  fault ParaView output every " << pv_every << " steps (" << pv_every * dt
-                   << " s), " << (alg == ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy
-                                  ? "ZFP accuracy " : "deflate level ") << param
-                   << ", at most " << ocfg.max_snapshots << " snapshots\n";
+                   << " s), ";
+         if (param < 0.0) { std::cout << "no filter"; }
+         else
+         {
+            std::cout << (alg == ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy
+                          ? "ZFP accuracy " : "deflate level ") << param;
+         }
+         std::cout << ", at most " << ocfg.max_snapshots << " snapshots\n";
       }
 #endif
    }
