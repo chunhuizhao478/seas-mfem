@@ -104,6 +104,12 @@
 // (checked at the end).  LTS needs cfl <= 0.6 (the accepted multirate
 // limit, Chunhui Zhao 2026-10-19) and kv_scale = "node".  --lts-same-step 1
 // (test only): the same clusters, every one at dt0.
+//
+// Complex fault geometries (plan rev 2, Chunhui Zhao 2026-10-20): standalone
+// options, each its own top-level table read only here and its own header
+// dynamic/nitsche_opt_*.hpp; an absent table leaves every bit as before.
+//   O1 [prestress_depth_table]  prestress tensor piecewise linear in depth,
+//                               with explicit jumps (TPV12, TPV22)
 
 #include "mfem.hpp"
 #include "../domain/nitsche_wave_operator.hpp"
@@ -116,6 +122,7 @@
 #include "../spatial/code/spatial_friction.hpp"
 #include "../dynamic/spatial_nucleation.hpp"
 #include "../dynamic/fault_station_file.hpp"
+#include "../dynamic/nitsche_opt_depth_prestress.hpp"   // complex geometries O1
 #include "../dynamic/lts_partition.hpp"   // METIS with element weights (plan item 6)
 #include "../solver/nitsche_lts_setup.hpp"   // --lts-report (plan item 7, P0)
 #include "../solver/nitsche_lts_run.hpp"     // --lts rate2 (plan item 7, P3/P4)
@@ -784,6 +791,24 @@ int main(int argc, char *argv[])
       MFEM_VERIFY(pc_vstar > 0.0 && pc_len > 0.0, "[friction.prakash_clifton] v_star = "
                   << pc_vstar << ", length = " << pc_len << "; both must be > 0");
    }
+   // complex geometries O1 (header): [prestress_depth_table]
+   std::shared_ptr<const nitsche_opt::DepthPrestressTable> depth_ps;
+   if (root.contains(nitsche_opt::DepthPrestressTable::kTable))
+   {
+      const real_t up[3] = {cfg.fault_geometry.up[0], cfg.fault_geometry.up[1],
+                            cfg.fault_geometry.up[2]};
+      depth_ps = std::make_shared<const nitsche_opt::DepthPrestressTable>(
+         nitsche_opt::ParseDepthPrestress(root.at(nitsche_opt::DepthPrestressTable::kTable), up));
+      MFEM_VERIFY(cfg.stress.sigma_xx_pa == 0.0 && cfg.stress.sigma_yy_pa == 0.0
+                  && cfg.stress.sigma_zz_pa == 0.0 && cfg.stress.sigma_xy_pa == 0.0
+                  && cfg.stress.sigma_yz_pa == 0.0 && cfg.stress.sigma_xz_pa == 0.0,
+                  "[prestress_depth_table] replaces the [stress] background: set every "
+                  "[stress] sigma_*_pa to 0 (kind = \"constant_tensor\")");
+      MFEM_VERIFY(depth_ps->measure != nitsche_opt::DepthPrestressTable::Measure::Effective
+                  || !root.contains("rheology"),
+                  "[prestress_depth_table] stress_measure = \"effective\" (sigma - P_f I) is "
+                  "exact only for a linear elastic bulk; it is refused with a [rheology] table");
+   }
    MFEM_VERIFY(p >= 1 && p <= 4, "order p must be in 1..4 (P3 constants); got " << p);
    MFEM_VERIFY(cfl > 0.0 && cfl <= 1.0, "[numerics] cfl (fraction of C(p)) must be in (0,1]");
    MFEM_VERIFY(!lts_on || cfl <= 0.6, "[numerics] cfl = " << cfl << ": local time stepping "
@@ -860,6 +885,26 @@ int main(int argc, char *argv[])
                   << Geometry::Name[smesh->GetElementBaseGeometry(e)]);
    }
    const long long ne_global = smesh->GetNE();
+   if (depth_ps)
+   {
+      // complex geometries O1: every jump depth must be a mesh line on the fault
+      MFEM_VERIFY(cfg.boundary.fault_attr > 0, "[boundary] fault_attr is required");
+      const real_t tol = 1e-6 * (1.0 + depth_ps->depth.back());
+      std::string first;
+      const long long nx = nitsche_opt::CountFaultFacesAcrossDepths(
+         *smesh, cfg.boundary.fault_attr, depth_ps->jump, depth_ps->up, tol, &first);
+      MFEM_VERIFY(nx == 0, "[prestress_depth_table]: " << nx << " fault faces cross a "
+                  "jump depth (" << first << "); the per-face projection would overshoot. "
+                  "Embed each jump_depths_m line in the fault surface of the mesh.");
+      if (g_rank == 0)
+      {
+         std::cout << "  prestress: [prestress_depth_table] (" << (depth_ps->measure ==
+                   nitsche_opt::DepthPrestressTable::Measure::Effective ? "effective" : "total")
+                   << " stress), " << depth_ps->depth.size() << " nodes over depth ["
+                   << depth_ps->depth.front() << ", " << depth_ps->depth.back() << "] m, "
+                   << depth_ps->jump.size() << " jump(s); no fault face crosses a jump\n";
+      }
+   }
    if (lts_report)
    {
       MFEM_VERIFY(cfg.boundary.fault_attr > 0, "[boundary] fault_attr is required");
@@ -1166,13 +1211,15 @@ int main(int argc, char *argv[])
          }
       }
    }
-   fs.prestress = [s0, regions](const real_t x[3], real_t s[9]) {
+   fs.prestress = [s0, regions, depth_ps](const real_t x[3], real_t s[9]) {
       const real_t *src = s0;
       for (const StressRegion &R : regions)
       {
          if (x[0] >= R.lo[0] && x[0] <= R.hi[0] && x[1] >= R.lo[1] && x[1] <= R.hi[1]
              && x[2] >= R.lo[2] && x[2] <= R.hi[2]) { src = R.s; }
       }
+      // complex geometries O1: the depth table is the background
+      if (src == s0 && depth_ps) { depth_ps->Eval(x, s); return; }
       for (int i = 0; i < 9; i++) { s[i] = src[i]; }
    };
 

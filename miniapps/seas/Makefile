@@ -3394,6 +3394,31 @@ seas_test_nitsche_srw: $(TEST_NITSCHE_SRW_OBJ)
 test-nitsche-srw: seas_test_nitsche_srw
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_srw
 
+# Nitsche standalone options for complex fault geometries (complex-geometries
+# plan rev 2, gates G-unit and G-inactive): depth prestress table (U1, I1).
+# Pointwise, serial-mesh and one fault advance.
+NITSCHE_OPT_HEADERS = dynamic/nitsche_opt_common.hpp \
+                      dynamic/nitsche_opt_depth_prestress.hpp
+TEST_NITSCHE_OPTIONS_SRC = tests/verification/test_nitsche_options.cpp
+TEST_NITSCHE_OPTIONS_OBJ = $(TEST_NITSCHE_OPTIONS_SRC:.cpp=.o)
+$(TEST_NITSCHE_OPTIONS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(NITSCHE_OPT_HEADERS) \
+                             domain/nitsche_wave_operator.hpp \
+                             friction/fault_closure.hpp \
+                             friction/slip_weakening_closure.hpp \
+                             spatial/code/spatial_friction.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) $(TOML_FLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_options: $(TEST_NITSCHE_OPTIONS_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_NITSCHE_OPTIONS_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-options: seas_test_nitsche_options
+	for np in 1 2; do $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_nitsche_options || exit 1; done
+
 # Nitsche dynamic rupture P7: the driver (plan N-07).  Reads the SAFS deck
 # through spatial::LoadSpatialFrictionConfig (toml11) and the constant
 # material; links the friction parser, the material and the nucleation
@@ -3412,6 +3437,7 @@ $(NITSCHE_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
                              domain/nitsche_energy.hpp \
                              spatial/code/spatial_friction.hpp \
                              dynamic/fault_station_file.hpp \
+                             $(NITSCHE_OPT_HEADERS) \
                              friction/rate_state_closure.hpp \
                              friction/rate_state_srw_closure.hpp \
                              friction/slip_weakening_closure.hpp \
