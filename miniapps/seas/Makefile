@@ -131,6 +131,8 @@ TEST_PHASEH_GODUNOV_FLUX_POOL_OBJ = $(TEST_PHASEH_GODUNOV_FLUX_POOL_SRC:.cpp=.o)
 # 5a / 5b header additions are re-applied (see CODEBASE_GUIDE TBD).
 SPATIAL_FRICTION_SRC                 = spatial/code/spatial_friction.cpp
 SPATIAL_FRICTION_OBJ                 = $(SPATIAL_FRICTION_SRC:.cpp=.o)
+PORO_CONFIG_SRC                      = multiphysics/poroelastic/poro_config.cpp
+PORO_CONFIG_OBJ                      = $(PORO_CONFIG_SRC:.cpp=.o)
 SPATIAL_VELOCITY_SRC                 = spatial/code/spatial_velocity.cpp
 SPATIAL_VELOCITY_OBJ                 = $(SPATIAL_VELOCITY_SRC:.cpp=.o)
 SPATIAL_STRESS_SRC                   = spatial/code/spatial_stress.cpp
@@ -1145,6 +1147,7 @@ MFEM_TESTS = MINIAPPS
         test-ghost-exchange-bynodes-vs-scalar \
         test-per-qp-vs-centroid-basis-planar-1el \
         test-v92-regression-gates \
+        test-poro-p0 \
         regression-check quick-check
 
 all: $(MINIAPPS)
@@ -3427,6 +3430,28 @@ seas_nitsche_dyn_driver: $(NITSCHE_DYN_DRIVER_OBJ) $(SPATIAL_FRICTION_OBJ) \
 	    $(SPATIAL_FRICTION_OBJ) $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
 	    $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Poroelastic plan rev 3 (multiphysics/poroelastic/, hook H4): the option
+# (P0.1) and its phase tests.  test-poro-p0 = U0-4 (the parser) in
+# seas_test_poro_p0 on 1 and 2 ranks.
+$(PORO_CONFIG_OBJ): %.o: $(SRC)%.cpp multiphysics/poroelastic/poro_config.hpp \
+                         $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(TOML_FLAGS) -c $< -o $@
+
+TEST_PORO_P0_SRC = multiphysics/poroelastic/tests/test_poro_p0.cpp
+TEST_PORO_P0_OBJ = $(TEST_PORO_P0_SRC:.cpp=.o)
+$(TEST_PORO_P0_OBJ): %.o: $(SRC)%.cpp multiphysics/poroelastic/poro_config.hpp \
+                          $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(TOML_FLAGS) -c $< -o $@
+
+seas_test_poro_p0: $(TEST_PORO_P0_OBJ) $(PORO_CONFIG_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PORO_P0_OBJ) $(PORO_CONFIG_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-poro-p0: seas_test_poro_p0
+	for np in 1 2; do $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_poro_p0 || exit 1; done
 
 # P6 long checks (minutes each; np=8 unless noted): T-15 energy balance and
 # its NIPG control, T-20 coupled dt refinement (dt0/4..dt0/16 vs dt0/64),
@@ -6028,6 +6053,7 @@ clean: clean-build clean-exec
 clean-build:
 	rm -f *.o *~ $(SEQ_MINIAPPS) $(PAR_MINIAPPS) $(PAR_LONG)
 	rm -f drivers/*.o tests/unit/*.o tests/verification/*.o tests/parallel/*.o
+	rm -f multiphysics/poroelastic/*.o multiphysics/poroelastic/tests/*.o seas_test_poro_p0
 	rm -rf *.dSYM *.TVD.*breakpoints
 
 clean-exec:
