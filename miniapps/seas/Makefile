@@ -3412,6 +3412,7 @@ $(NITSCHE_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
                              domain/nitsche_energy.hpp \
                              spatial/code/spatial_friction.hpp \
                              dynamic/fault_station_file.hpp \
+                             dynamic/station_copy_average.hpp \
                              friction/rate_state_closure.hpp \
                              friction/rate_state_srw_closure.hpp \
                              friction/slip_weakening_closure.hpp \
