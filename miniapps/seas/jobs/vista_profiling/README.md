@@ -20,12 +20,15 @@ are in `miniapps/seas/document/nitsche_profiling_dev/`.
 | `plot_lts_gold.py` | Item 7 (2026-10-20): station plots of an LTS run against its global-stepping gold and DRDG3D (one PDF and its page PNGs in each LTS gold folder's `plots/`). |
 | `m0_lts_tpv205_200m_p2.sbatch` | M0 of the speed-next plan (rev 1.1, §6; 2026-10-20): 16 x 144 ranks as LTS gold 1082384. TPV205, 200 m gold mesh, p = 2, `--lts rate2`, 0 to 1.0 s, four variants with existing flags only: `base` (the defaults), `every10` (`--station-every 10`), `first` (`--station-copies first`) and `deflate0` (deck `tpv205/configs/tpv205_nitsche_m0_deflate0.toml`, fault deflate level 0). Measures where the time outside the step goes (stations or not) and the frame cost; `base` and `deflate0` stations are compared with the first 1.0 s of 1082384 (meant to be bitwise equal). |
 | `m0_lts_tpv205_200m_p1.sbatch` | M0, 4 x 144 ranks as LTS gold 1082586: TPV205, 200 m, p = 1, `--lts rate2`, 0 to 12.0 s with the deflate-level-0 deck copy: the whole-run frame cost; stations compared with 1082586 (meant to be bitwise equal). |
-| `run_m0_vista.sh` | Shared body of the two M0 jobs. |
+| `run_m0_vista.sh` | Shared body of the two M0 jobs and the two V1 jobs (`TAG` names the output folder). |
 | `build_map_vista.sbatch` | Profiling (2026-10-20): builds `seas_nitsche_dyn_driver_g` (the driver with `-g`, Makefile target of the same name) after `build_lts_vista.sbatch`, and checks that its object without the debug sections is byte-identical to the production driver's. |
 | `map_lts_tpv205_200m_p1.sbatch` | Profiling: TPV205, 200 m gold mesh, p = 1, `--lts rate2`, 0 to 3.0 s, 4 x 144 ranks as LTS gold 1082586, under Linaro MAP (`map --profile`): time per function and part of the code over the whole run, setup included. |
 | `map_lts_tpv205_200m_p2.sbatch` | Profiling: the same at p = 2, 0 to 2.0 s, 16 x 144 ranks as LTS gold 1082384. |
 | `run_map_vista.sh` | Shared body of the two profiling jobs: the guard, the MAP run (`.map` file, `map_functions.csv`, `profile.json`), the station check against the gold, and a perf fallback on four ranks if MAP fails. |
 | `perf_wrap.sh` | The perf fallback's per-rank wrapper. |
+| `build_speed_next_vista.sbatch` | Speed-next O1, O2 and the setup timers (2026-10-20), 1 node: `build_lts_vista.sbatch` plus `seas_test_station_output` and its test (O2-1 to O2-4 on 1, 2, 3 and 4 ranks). |
+| `v1_lts_tpv205_200m_p1.sbatch` | Speed-next V1: TPV205, 200 m gold mesh, p = 1, `--lts rate2`, 0 to 12.0 s, 4 x 144 ranks as LTS gold 1082586. Variants `o2` (the defaults: copy average over the ranks holding copies, rows flushed every 100) and `o1o2` (the same with `--paraview-fault-deflate-level none`); stations compared with 1082586 over the 12 s (meant to be bitwise equal); wall times against its 359 s. |
+| `v1_lts_tpv205_200m_p2.sbatch` | V1 at p = 2: 16 x 144 ranks as LTS gold 1082384, against its 739 s. |
 | `meshes.sha256` | sha256 of the TPV205 and TPV104 200 m gold meshes. |
 | `results/` | Job stdout of the runs below, as relayed from Vista. |
 
@@ -44,14 +47,20 @@ sbatch build_lts_vista.sbatch
 # after it prints "all checks passed", at the same commit:
 sbatch lts_tpv205_200m_p2.sbatch; sbatch lts_tpv104_200m_p2.sbatch
 sbatch lts_tpv205_200m_p1.sbatch; sbatch lts_tpv104_200m_p1.sbatch
+# (Vista's sbatch prints its banner on stdout before the job id, hence the tail -n 1)
 # M0 of the speed-next plan, at the M0 commit: the build, then both runs after it
-B=$(sbatch --parsable build_lts_vista.sbatch)
+B=$(sbatch --parsable build_lts_vista.sbatch | tail -n 1)
 sbatch --dependency=afterok:$B m0_lts_tpv205_200m_p2.sbatch
 sbatch --dependency=afterok:$B m0_lts_tpv205_200m_p1.sbatch
 # profiling, at the same commit: the -g driver after the build, then both MAP runs after it
-G=$(sbatch --parsable --dependency=afterok:$B build_map_vista.sbatch)
+G=$(sbatch --parsable --dependency=afterok:$B build_map_vista.sbatch | tail -n 1)
 sbatch --dependency=afterok:$G map_lts_tpv205_200m_p1.sbatch
 sbatch --dependency=afterok:$G map_lts_tpv205_200m_p2.sbatch
+# speed-next V1, at the implementation commit, once the M0 and profiling jobs have finished
+# (one clone, so one commit at a time): the build and tests, then both runs after it
+V=$(sbatch --parsable build_speed_next_vista.sbatch | tail -n 1)
+sbatch --dependency=afterok:$V v1_lts_tpv205_200m_p1.sbatch
+sbatch --dependency=afterok:$V v1_lts_tpv205_200m_p2.sbatch
 ```
 
 Each speed and LTS job stops if the driver was built at another commit (`BUILD_COMMIT_VISTA`)

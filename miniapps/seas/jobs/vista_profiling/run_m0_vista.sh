@@ -1,14 +1,16 @@
 #!/bin/bash
-# Shared body of the M0 measurement jobs (speed-next plan rev 1.1, §6; Chunhui Zhao, 2026-10-20).
-# Sourced by m0_lts_tpv205_200m_p{1,2}.sbatch, which set PROB, MESH, ORDER, TFINAL, GOLD (the LTS
-# gold of the same mesh, order and rank layout) and VARIANTS, one "name|deck|flags" per variant.
-# Every variant runs local time stepping (--lts rate2), today's fastest setup, with no code change:
-# only existing flags and a deck copy differ.  One allocation runs the variants in turn, then
-# compares each variant's stations with the first TFINAL s of GOLD (variants whose stations are
+# Shared body of the M0 measurement jobs (speed-next plan rev 1.1, §6; Chunhui Zhao, 2026-10-20) and of
+# the V1 verification jobs (v1_*.sbatch, TAG=v1; the output folder starts with TAG, m0 by default).
+# Sourced by m0_lts_tpv205_200m_p{1,2}.sbatch and v1_lts_tpv205_200m_p{1,2}.sbatch, which set PROB,
+# MESH, ORDER, TFINAL, GOLD (the LTS gold of the same mesh, order and rank layout) and VARIANTS, one
+# "name|deck|flags" per variant.  Every variant runs local time stepping (--lts rate2), today's fastest
+# setup; the M0 variants use existing flags and a deck copy only.  One allocation runs the variants in
+# turn, then compares each variant's stations with the first TFINAL s of GOLD (variants whose stations are
 # meant to be identical) and prints the timing lines the plan needs: wall time at each log line,
 # time in ode.Step per rank, halo waits, the fault-frame time and the fault file size.
 # Runs only from a clean pushed checkout (repo CLAUDE.md guard) whose driver was built at the same
-# commit (build_lts_vista.sbatch writes miniapps/seas/BUILD_COMMIT_VISTA) and whose mesh sha256 is in
+# commit (build_lts_vista.sbatch or build_speed_next_vista.sbatch, through build_vista.sh, writes
+# miniapps/seas/BUILD_COMMIT_VISTA) and whose mesh sha256 is in
 # jobs/vista_profiling/meshes.sha256.
 export LC_ALL=C LANG=C
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1      # one thread per MPI rank
@@ -44,7 +46,7 @@ module purge; module load TACC
 module swap nvidia gcc/14.2.0 2>/dev/null || module load gcc/14.2.0
 module load cuda/12.6 openmpi/5.0.5 hypre/2.31.0 metis/5.1.0.3 phdf5/1.14.6
 echo "modules: $(module -t list 2>&1 | tr '\n' ' ')"
-BASE=$SCRATCH/nitsche_profiling/m0_${PROB}_200m_p${ORDER}_$SLURM_JOB_ID
+BASE=$SCRATCH/nitsche_profiling/${TAG:-m0}_${PROB}_200m_p${ORDER}_$SLURM_JOB_ID
 mkdir -p $BASE
 { echo "commit $HEAD"; echo "mesh $MESH $SHA"; echo "job $SLURM_JOB_ID nodes $SLURM_JOB_NUM_NODES ranks $SLURM_NTASKS"; } > $BASE/RUN_INFO.txt
 T0=$(date +%s)
@@ -62,7 +64,7 @@ for spec in "${VARIANTS[@]}"; do
    rc=$?; kill $MON 2>/dev/null; wait $MON 2>/dev/null
    [ $rc -eq 0 ] || rc_all=$rc
    echo "=== $v: deck $DECK, flags [--lts rate2 $FLAGS], 0 -> $TFINAL s: driver exit $rc, $(( $(date +%s) - s )) s in the job"
-   grep -a "partition:\|LTS\|fault ParaView output:\|time in ode.Step per rank\|fault work:\|halo\|=== done" $OUT/driver.log || tail -20 $OUT/driver.log
+   grep -a "partition:\|LTS\|fault ParaView output:\|time in ode.Step per rank\|fault work:\|halo\|setup (wall\|station output:\|=== done" $OUT/driver.log || tail -20 $OUT/driver.log
    grep -a "^ *step [0-9]* t = " $OUT/driver.log | awk '{print "   " $0}'
    awk '{u=($2-$3)/1048576; if(u>m)m=u; t=$2/1048576} END{printf "first node memory: peak in use %.1f GB of %.1f GB (2 s samples)\n", m, t}' $OUT/meminfo_kB.log
    ls -l $OUT/fault.vtkhdf 2>/dev/null | awk '{printf "fault.vtkhdf %.1f MB\n", $5/1e6}'
