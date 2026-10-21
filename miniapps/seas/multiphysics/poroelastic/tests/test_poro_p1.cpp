@@ -1,4 +1,5 @@
-// Poroelastic plan rev 3, phase P1 (step P1.1): the Biot material sample.
+// Poroelastic plan rev 3, phase P1 (steps P1.1 and P1.2): the Biot material
+// sample, the closed-form wave speeds and the time-step bound.
 //
 //   U1-1  DeriveBiotConstants (derivation (4.4), (8.4)) for tpv5-poro, the
 //         TPV205-equivalent set and the V-F3 contrast set, against
@@ -16,17 +17,28 @@
 //         constants bit for bit; the undrained sample's (lambda, mu, rho) are
 //         the sample's (lambda_u, mu, rho) bit for bit; the deck path
 //         (PoroConfig) on F-B gives the same constants as DeriveBiotConstants.
+//   U1-5  ComputeBiotSpeeds (derivation (4.6)): fast and slow P, S at high
+//         and low frequency, undrained and drained P against
+//         poro_test_refs.hpp, 1e-13 relative.
+//   U1-6  PoroMaxDt (derivation (9.6)) on F-B, F-C and, with --mesh1000, the
+//         gmsh 1000 m TPV205 mesh, p = 1-3, against (9.6) evaluated here on
+//         the serial mesh: bit for bit on every rank count.
 //
-// Usage: mpirun -np 1|2|4 ./seas_test_poro_p1
+// Usage: mpirun -np 1|2|4 ./seas_test_poro_p1 [--mesh1000 <tpv2053d_1000m.msh>]
 
 #include "mfem.hpp"
 #include "../poro_material.hpp"
+#include "../poro_dispersion.hpp"
+#include "../poro_cfl.hpp"
 #include "poro_fixtures.hpp"
 #include "poro_test_refs.hpp"
 
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -277,11 +289,121 @@ static void TestU14()
                "gives DeriveBiotConstants bit for bit");
 }
 
+// ------------------------------------------------------------------- U1-5
+static void TestU15()
+{
+   for (const Ref &r : Refs())
+   {
+      const BiotSpeeds s = ComputeBiotSpeeds(Derive(r));
+      std::string which;
+      const real_t worst = Worst("U1-5 " + r.name,
+         {{"fast P", s.c_fast, r.c_fast}, {"slow P", s.c_slow, r.c_slow},
+          {"S hf", s.c_s_hf, r.c_s_hf}, {"S lf", s.c_s_lf, r.c_s_lf},
+          {"undrained P", s.c_p_undrained, r.c_p_undrained},
+          {"drained P", s.c_p_drained, r.c_p_drained}}, which);
+      TEST_ASSERT(worst <= 1e-13, "U1-5 " << r.name << ": the six speeds match the reference "
+                  "to 1e-13 (worst " << which << " " << worst << ")");
+   }
+}
+
+// ------------------------------------------------------------------- U1-6
+/// PoroMaxDt on pm against (9.6) evaluated on the serial mesh, p = 1-3.
+static void CheckMaxDt(const std::string &label, Mesh &serial, ParMesh &pm,
+                       const MaterialField &mf, const PoroMaterialSample::FluidField &fluid,
+                       const std::function<BiotConstants(const Vector &)> &constants_at)
+{
+   const real_t cfl = 0.5;
+   PoroMaterialSample s(pm, mf, fluid);
+   Vector x(3);
+   for (int p = 1; p <= 3; p++)
+   {
+      const real_t dt = PoroMaxDt(s, pm, p, cfl);
+      const real_t p2 = real_t(p) * real_t(p);
+      real_t dt_ref = std::numeric_limits<real_t>::infinity();
+      for (int e = 0; e < serial.GetNE(); e++)
+      {
+         serial.GetElementTransformation(e)->Transform(
+            Geometries.GetCenter(serial.GetElementBaseGeometry(e)), x);
+         const real_t c_e = ComputeBiotSpeeds(constants_at(x)).c_fast;
+         const real_t h_e = NitscheElementLength(serial, e);
+         dt_ref = std::min(dt_ref, cfl * h_e / (p2 * c_e));
+      }
+      char hex[64];
+      std::snprintf(hex, sizeof(hex), "%a", dt);
+      if (g_rank == 0)
+      {
+         std::cout.precision(17);
+         std::cout << "  U1-6 " << label << " p = " << p << ": dt = " << dt << " (" << hex
+                   << ")\n";
+      }
+      TEST_ASSERT(SameBits(dt, dt_ref), "U1-6 " << label << " p = " << p
+                  << ": PoroMaxDt equals eq. (9.6) on the serial mesh bit for bit");
+   }
+}
+
+static void TestU16(const std::string &mesh1000)
+{
+   const std::vector<Ref> R = Refs();
+   const Ref &A = R[0], &B = R[1];
+   const BiotConstants cA = Derive(A), cB = Derive(B);
+
+   std::unique_ptr<Mesh> fb(TPV102Box(4, 4, 2));
+   {
+      ParMesh pm(MPI_COMM_WORLD, *fb);
+      CheckMaxDt("F-B tpv5-poro", *fb, pm,
+                 MaterialField::MakeConstant(A.lam, A.mu, BulkDensity(A.f)),
+                 PoroMaterialSample::UniformField(A.f),
+                 [&](const Vector &) { return cA; });
+   }
+   std::unique_ptr<Mesh> fc(TPV102Box(4, 4, 2));
+   MarkSidesFC(*fc);
+   {
+      ParMesh pm(MPI_COMM_WORLD, *fc);
+      Vector lv(2), mv(2), rv(2);
+      lv(0) = A.lam; lv(1) = B.lam;
+      mv(0) = A.mu;  mv(1) = B.mu;
+      rv(0) = BulkDensity(A.f); rv(1) = BulkDensity(B.f);
+      PWConstCoefficient lamc(lv), muc(mv), rhoc(rv);
+      MaterialField mf;
+      mf.mode = MaterialField::Mode::Coefficient;
+      mf.lambda_coef = &lamc;
+      mf.mu_coef = &muc;
+      mf.rho_coef = &rhoc;
+      CheckMaxDt("F-C", *fc, pm, mf,
+                 [&](int, const Vector &x) { return x(0) < 0.0 ? A.f : B.f; },
+                 [&](const Vector &x) { return x(0) < 0.0 ? cA : cB; });
+   }
+   if (mesh1000.empty())
+   {
+      if (g_rank == 0)
+      {
+         std::cout << "  U1-6 gmsh 1000 m TPV205 mesh: not run (no --mesh1000)\n";
+      }
+      return;
+   }
+   Mesh m1(mesh1000.c_str(), 1, 1);
+   if (g_rank == 0)
+   {
+      std::cout << "  U1-6 " << mesh1000 << ": " << m1.GetNE() << " tets\n";
+   }
+   ParMesh pm(MPI_COMM_WORLD, m1);
+   CheckMaxDt("gmsh 1000 m TPV205-equivalent", m1, pm,
+              MaterialField::MakeConstant(B.lam, B.mu, BulkDensity(B.f)),
+              PoroMaterialSample::UniformField(B.f),
+              [&](const Vector &) { return cB; });
+}
+
 int main(int argc, char *argv[])
 {
    Mpi::Init(argc, argv);
    Hypre::Init();
    g_rank = Mpi::WorldRank();
+   std::string mesh1000;
+   for (int i = 1; i < argc; i++)
+   {
+      const std::string a = argv[i];
+      if (a == "--mesh1000" && i + 1 < argc) { mesh1000 = argv[++i]; }
+   }
    if (g_rank == 0)
    {
       std::cout << "=== Poroelastic P1 (plan rev 3) on " << Mpi::WorldSize() << " rank(s) ===\n";
@@ -290,6 +412,8 @@ int main(int argc, char *argv[])
    TestU12();
    TestU13();
    TestU14();
+   TestU15();
+   TestU16(mesh1000);
    int nf = num_failed;
    MPI_Allreduce(MPI_IN_PLACE, &nf, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
    if (g_rank == 0)

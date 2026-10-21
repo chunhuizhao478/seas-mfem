@@ -3489,13 +3489,17 @@ test-poro-p0: seas_test_poro_p0 seas_nitsche_dyn_driver seas_driver
 	@$(call PORO_P0_EXPECT_ABORT,./seas_driver poro_p0_decks/qd.toml,U0-6 quasi-dynamic solver,gets the poroelastic option in step P7)
 	@rm -rf poro_p0_decks
 
-# P1.1: the Biot material sample.  test-poro-p1 = U1-1 to U1-4 in
-# seas_test_poro_p1 (1, 2 and 4 ranks).  check-poro-refs regenerates
-# refs.json and poro_test_refs.hpp from tests/refs/poro_test_refs.py and
-# fails on any byte that differs.
+# P1.1 and P1.2: the Biot material sample, the closed-form speeds and the time
+# step.  test-poro-p1 = U1-1 to U1-6 in seas_test_poro_p1 (1, 2 and 4 ranks);
+# U1-6 adds the gmsh 1000 m TPV205 mesh when it has been generated.
+# check-poro-refs regenerates refs.json and poro_test_refs.hpp from
+# tests/refs/poro_test_refs.py and fails on any byte that differs.
 PYTHON ?= python3
+PORO_P1_MESH1000 = tpv205/mesh/tpv2053d_1000m.msh
 PORO_P1_HEADERS = multiphysics/poroelastic/poro_config.hpp \
                   multiphysics/poroelastic/poro_material.hpp \
+                  multiphysics/poroelastic/poro_dispersion.hpp \
+                  multiphysics/poroelastic/poro_cfl.hpp \
                   multiphysics/poroelastic/tests/poro_fixtures.hpp \
                   multiphysics/poroelastic/tests/poro_test_refs.hpp
 TEST_PORO_P1_SRC = multiphysics/poroelastic/tests/test_poro_p1.cpp
@@ -3512,7 +3516,17 @@ seas_test_poro_p1: $(TEST_PORO_P1_OBJ) $(PORO_CONFIG_OBJ) $(HETEROGENEOUS_MATERI
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 test-poro-p1: seas_test_poro_p1
-	for np in 1 2 4; do $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_poro_p1 || exit 1; done
+	@if [ -f $(PORO_P1_MESH1000) ]; then m1000="--mesh1000 $(PORO_P1_MESH1000)"; \
+	else m1000=""; echo "  SKIPPED: U1-6 on the 1000 m mesh ($(PORO_P1_MESH1000) not generated)"; fi; \
+	for np in 1 2 4; do \
+	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_poro_p1 $$m1000 > poro_p1_np$$np.log 2>&1; \
+	   rc=$$?; cat poro_p1_np$$np.log; [ $$rc -eq 0 ] || exit 1; \
+	   grep 'U1-6 .* dt = ' poro_p1_np$$np.log > poro_p1_dt_np$$np.txt; done; \
+	if cmp -s poro_p1_dt_np1.txt poro_p1_dt_np2.txt && cmp -s poro_p1_dt_np1.txt poro_p1_dt_np4.txt; \
+	then echo "  PASSED: U1-6 PoroMaxDt is the same on 1, 2 and 4 ranks ($$(wc -l < poro_p1_dt_np1.txt) values)"; \
+	else echo "FAILED: U1-6 PoroMaxDt differs between rank counts"; \
+	   diff poro_p1_dt_np1.txt poro_p1_dt_np2.txt; diff poro_p1_dt_np1.txt poro_p1_dt_np4.txt; exit 1; fi; \
+	rm -f poro_p1_np1.log poro_p1_np2.log poro_p1_np4.log poro_p1_dt_np1.txt poro_p1_dt_np2.txt poro_p1_dt_np4.txt
 
 check-poro-refs:
 	$(PYTHON) multiphysics/poroelastic/tests/refs/poro_test_refs.py --check multiphysics/poroelastic/tests
