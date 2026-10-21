@@ -1,0 +1,210 @@
+# =====================================================================
+#  SCEC TPV31 — layered (1D) medium, depth-proportional prestress,
+#  linear slip weakening with shallow cohesion, run through the Nitsche
+#  dynamic-rupture driver (seas_nitsche_dyn_driver; TPV6/TPV7/TPV31 plan
+#  rev 1).
+#
+#  Values from tpv31/benchmark_document/TPV31_32_Description_v03.pdf, in
+#  the code frame of the other Nitsche benchmarks (X along strike, Y fault
+#  normal, Z up; the description's fault plane z = 0 with y = depth is
+#  turned as in tpv31/mesh/tpv31_50m.geo):
+#
+#   - Material: [material] depth_profile_1d, the description's velocity
+#     table (the same layers as tpv31/configs/tpv31.toml).  Jumps at 2400,
+#     5000 and 10000 m depth; linear between 2400 and 5000 m.  The layer
+#     depths are mesh surfaces of tpv31/mesh/tpv31_nitsche_*.geo, and the
+#     driver samples the material once per element at its centroid, so the
+#     2400-5000 m gradient becomes one value per element (at most 0.7 % off
+#     inside a 200 m element).
+#   - Prestress: sigma = (mu(x) / mu_0) S with mu_0 = 32.03812032 GPa and S
+#     the global tensor below, tension positive: sigma_XX = sigma_YY =
+#     -60 MPa, sigma_XY = +30 MPa ([stress_scale_by_mu]).  With nhat =
+#     (0, -1, 0) the SCEC along-strike shear is +30 MPa mu/mu_0 and
+#     sigma_n = 60 MPa mu/mu_0 (the SeisSol reference starts at 12.23 and
+#     24.46 MPa at the surface station).
+#   - Nucleation: instantaneous circular overstress, 4.95 MPa mu/mu_0 inside
+#     1400 m of (0, 0, -7500), cosine taper to zero at 2000 m, present from
+#     t = 0.
+#   - Friction: mu_s 0.58, mu_d 0.45, d_0 0.18 m; cohesion 0.000425 MPa/m x
+#     (2400 m - depth) above 2400 m depth (1.02 MPa at the surface).
+#   - The fault ends at the 30 x 15 km area (welded outside), so slip is
+#     zero on its border; no barrier rules.
+#   - Stations: tpv31/stations/tpv31_fault_stations.csv (30 points: strike
+#     0, 6, 12 km x 10 depths), named like the SCEC reference files.
+#
+#  Regularization: Kelvin-Voigt (eta_bar 0.1) and Prakash-Clifton
+#  (v* = 1 m/s, L = 0.01 m) as in the TPV205 gold deck.
+#
+#  Meshes are generated, not committed (from miniapps/seas):
+#    gmsh -3 tpv31/mesh/tpv31_nitsche_1000m.geo -format msh22 -o tpv31/mesh/tpv31_nitsche_1000m.msh
+#    gmsh -3 tpv31/mesh/tpv31_nitsche_200m.geo  -format msh22 -o tpv31/mesh/tpv31_nitsche_200m.msh
+#
+#  Scope: Chunhui Zhao, 2026-10-19.
+# =====================================================================
+
+[meta]
+schema_version = 1
+law            = "slip_weakening"
+description    = "SCEC TPV31 (1D layered medium, linear slip weakening) via the Nitsche dynamic-rupture driver."
+
+[problem]
+tag = "tpv31"
+
+[material]
+kind       = "depth_profile_1d"
+depth_axis = "z"
+
+[[material_profile.layer]]
+depth_top_m = 0.0
+depth_bot_m = 2400.0
+vp_ms       = 4050.0
+vs_ms       = 2250.0
+rho_kgm3    = 2580.0
+interp      = "constant"
+
+[[material_profile.layer]]  # linear from the 2400 m values to the 5000 m- values
+depth_top_m = 2400.0
+depth_bot_m = 5000.0
+vp_ms       = 4450.0
+vs_ms       = 2550.0
+rho_kgm3    = 2600.0
+interp      = "linear"
+
+[[material_profile.layer]]  # zero-thickness layer: the 5000 m- end point of the gradient
+depth_top_m = 5000.0
+depth_bot_m = 5000.0
+vp_ms       = 5200.0
+vs_ms       = 3050.0
+rho_kgm3    = 2620.0
+interp      = "constant"
+
+[[material_profile.layer]]
+depth_top_m = 5000.0
+depth_bot_m = 10000.0
+vp_ms       = 5750.0
+vs_ms       = 3450.0
+rho_kgm3    = 2720.0
+interp      = "constant"
+
+[[material_profile.layer]]  # the description's half-space below 10 km (box bottom 60 km)
+depth_top_m = 10000.0
+depth_bot_m = 60000.0
+vp_ms       = 6500.0
+vs_ms       = 3800.0
+rho_kgm3    = 3000.0
+interp      = "constant"
+
+# Not used by the layered material; kept because the loader requires it.
+[material_constant_fallback]
+lambda = 32043759360.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+[mesh]
+# 1000 m smoke mesh; production overrides with --mesh (200 m).
+path  = "tpv31/mesh/tpv31_nitsche_1000m.msh"
+order = 1
+
+[velocity]
+use_sidecar = false
+
+# Global Cauchy tensor at mu = mu_0, TENSION POSITIVE; [stress_scale_by_mu]
+# multiplies it by mu(x) / mu_0 at every fault point.
+[stress]
+kind        = "constant_tensor"
+sigma_xx_pa = -60.0e6
+sigma_yy_pa = -60.0e6
+sigma_zz_pa = 0.0
+sigma_xy_pa = 30.0e6
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+[stress_scale_by_mu]
+mu_ref_pa = 32.03812032e9   # mu_0 of the description
+
+[nucleation]
+kind = "instantaneous_overstress_circular"
+
+[nucleation.instantaneous_overstress_circular]
+center_x_m   = 0.0
+center_y_m   = 0.0
+center_z_m   = -7500.0
+radius_m     = 1400.0
+taper_m      = 600.0
+delta_tau_pa = 4.95e6
+mu_ref_pa    = 32.03812032e9
+
+[numerics]
+cfl            = 0.5
+penalty_factor = 1.0
+kv_eta    = 0.1
+kv_scale  = "node"
+kv_length = "inscribed"
+
+[time]
+tfinal     = "15s"
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.05s"
+
+[output]
+output_dir     = "output_tpv31_nitsche"
+restart_prefix = "cp"
+paraview_enabled       = true
+paraview_fault         = "hdf5"
+paraview_fault_dt      = "0.05s"
+paraview_fault_zfp_tol = 0.0
+paraview_fault_deflate_level = 1
+paraview_free_surface  = "off"
+
+[output.stations]
+file             = "tpv31/stations/tpv31_fault_stations.csv"
+snap_tolerance_m = 700.0
+
+[friction.slip_weakening]
+mu_s_default     = 0.58
+mu_d_default     = 0.45
+d_c_default      = 0.18
+cohesion_default = 0.0
+
+[[friction.slip_weakening.spatial]]
+kind                   = "depth"
+z_min_m                = -2400.0
+z_max_m                =     0.0
+cohesion_taper_axis    = "z"
+cohesion_ref_depth_m   = 2400.0
+cohesion_grad_pa_per_m = 425.0    # 0.000425 MPa/m
+cohesion_floor_pa      = 0.0
+
+[boundary]
+fault_attr      = 103
+natural_attrs   = [101]
+absorbing_attrs = [105]
+
+[fault_geometry]
+ref_normal        = [0.0, -1.0, 0.0]
+up                = [0.0,  0.0, 1.0]
+kind              = "vertical_strike_slip"
+orientation       = "propagated"
+pin_by            = "reference"
+tangent           = "pointwise"
+junction_policy   = "refuse"
+pin_min_margin    = 0.1
+
+[hypocenter]
+x_m                 = 0.0
+y_m                 = 0.0
+z_m                 = -7500.0
+nucleation_radius_m = 2000.0
+
+[diagnostics]
+energy_balance = false
+
+[friction.prakash_clifton]
+v_star = 1.0      # m/s
+length = 0.01     # m
