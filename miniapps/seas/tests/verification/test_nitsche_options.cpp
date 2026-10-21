@@ -18,12 +18,17 @@
 //       fault advance with the floor on equals the advance without it, bit
 //       for bit.  (The normal-jump scaling sigma / sigma_F of plan U2 needs
 //       a time-stepped run and is left to the smoke runs.)
+//   U3  O3 SetSlipPathWeakening: one fault advance from d = 0 with a slip
+//       path psi = Dc (slip that went out and came back): without the
+//       option the law sees |d| = 0 and every DOF sticks (70 < 81.24 MPa);
+//       with it the law sees psi, mu = mu_d and every DOF slips.
 //
 // Usage: mpirun -np 1 ./seas_test_nitsche_options
 
 #include "mfem.hpp"
 #include "../../dynamic/nitsche_opt_depth_prestress.hpp"
 #include "../../dynamic/nitsche_opt_tension.hpp"
+#include "../../dynamic/nitsche_opt_slip_path.hpp"
 #include "../../domain/nitsche_wave_operator.hpp"
 #include "../../friction/slip_weakening_closure.hpp"
 
@@ -384,6 +389,36 @@ static void TestU2()
                "I2: in compression the floor changes no bit");
 }
 
+static void TestU3()
+{
+   std::cout << "U3: O3 slip-path weakening\n";
+   OpFixture A(kTau0, -kSig0, 0.0), B(kTau0, -kSig0, 0.0);
+   A.State(kDc); B.State(kDc);   // d = 0 but a slip path of Dc
+   B.op->SetSlipPathWeakening(true);
+   A.op->LtsAdvanceFault(A.u, 0.0, nullptr);
+   B.op->LtsAdvanceFault(B.u, 0.0, nullptr);
+   std::cout << "    max |V| without " << A.MaxV() << ", min |V| with " << B.MinV() << " m/s\n";
+   TEST_ASSERT(A.MaxV() == 0.0, "|d| = 0: mu_s, every DOF sticks (70 < 81.24 MPa)");
+   TEST_ASSERT(B.MinV() > 0.0, "slip path Dc: mu_d, every DOF slips (70 > 63 MPa)");
+   // the slip rate where it slips: (|X| - mu_d sigma) / gamma
+   const NitscheWaveOperator &op = *B.op;
+   bool rate_ok = true;
+   for (int j = 0; j < B.No(); j++)
+   {
+      const real_t *V = &op.SlipRate()(3 * j);
+      const real_t Vabs = std::sqrt(V[0] * V[0] + V[1] * V[1] + V[2] * V[2]);
+      const real_t Xabs = std::hypot(op.LastShear()(2 * j), op.LastShear()(2 * j + 1));
+      rate_ok = rate_ok && RelClose(Vabs, (Xabs - kMuD * op.LastSigmaEff()(j)) / op.ClosureGamma(j), 1e-10);
+   }
+   TEST_ASSERT(rate_ok, "|V| = (|X| - mu_d sigma) / gamma at every DOF");
+   OpFixture C(kTau0, -kSig0, 0.0);
+   C.State(kDc);
+   C.op->SetSlipPathWeakening(false);
+   C.op->LtsAdvanceFault(C.u, 0.0, nullptr);
+   TEST_ASSERT(SameVec(A.op->SlipRate(), C.op->SlipRate()) && SameVec(A.op->State(), C.op->State()),
+               "I3: SetSlipPathWeakening(false) changes no bit");
+}
+
 int main(int argc, char *argv[])
 {
    Mpi::Init(argc, argv);
@@ -392,6 +427,7 @@ int main(int argc, char *argv[])
    TestI1();
    TestU1Mesh();
    TestU2();
+   TestU3();
    std::cout << "\n" << num_passed << " / " << num_tests << " passed, " << num_failed
              << " failed\n";
    return num_failed == 0 ? 0 : 1;

@@ -91,8 +91,8 @@
 // the elastic energy has for (u, d)), so it does not resist slip itself.
 // eta_bar = 0 (never calling SetKelvinVoigt) leaves every bit unchanged.
 //
-// Complex fault geometries (plan rev 2, Chunhui Zhao 2026-10-20): an
-// opt-in fault option, set by its own setter before the first step
+// Complex fault geometries (plan rev 2, Chunhui Zhao 2026-10-20): opt-in
+// fault options, each set by its own setter before the first step
 // and read in boxes 9-10 (AdvanceFault_, so GTS and LTS alike); the closure,
 // FaultPointState and the CloseDOF signature are unchanged.  Never set,
 // every bit is unchanged.
@@ -100,6 +100,9 @@
 //                             instead of the range check aborting on
 //                             sigma_eff < 0 (shear strength = cohesion in
 //                             tension); NaN still aborts.
+//   SetSlipPathWeakening (O3) slip weakening from the slip path at step start
+//                             psi^n (int |V| dt) instead of |d^n|.
+// O3 enters through the slip_abs argument of CloseDOF.
 //
 // NitscheMaterialSample lives in nitsche_material_sample.hpp (moved there in
 // P3 to break an include cycle with nitsche_mass.hpp); it is re-exported here.
@@ -439,6 +442,13 @@ public:
    bool HasTensionFloor() const { return tension_floor_; }
    /// DOF-steps (owned, this rank) whose law normal stress was floored.
    long long TensionFloorCount() const { return floored_; }
+   /// Complex geometries O3 (header): slip weakening from psi^n.
+   void SetSlipPathWeakening(bool on)
+   {
+      MFEM_VERIFY(has_fault_, "SetSlipPathWeakening: the operator has no fault");
+      slip_path_ = on;
+   }
+   bool HasSlipPathWeakening() const { return slip_path_; }
    /// Projected prestress (3 no) and nucleation spatial traction (3 no);
    /// the nucleation enters as NucleationFactor(t) * NucleationTraction().
    const Vector &PrestressTraction() const { return S0_own_; }
@@ -507,7 +517,8 @@ public:
    /// global slip rate in V[3], sigma_eff and X_tan in the frame.  With
    /// sigma_pc (Prakash-Clifton) *sigma_pc = E *sigma_pc + omE sigma_eff on
    /// return and the closure sees that value instead of sigma_eff.
-   /// slip_abs = |d^n| of DOF j, passed to the closure as st.slip_abs.
+   /// slip_abs = |d^n| of DOF j, passed to the closure as st.slip_abs
+   /// (psi^n with O3; header).
    void CloseDOF(int j, const real_t TS[3], real_t psi, real_t V[3],
                  real_t &sigma_eff, real_t X[2], real_t *sigma_pc = nullptr,
                  real_t E = 0.0, real_t omE = 1.0, real_t slip_abs = 0.0) const
@@ -1144,7 +1155,9 @@ private:
          for (int c = 0; c < 3; c++) { TS[c] = Town_(3 * j + c) + S_(3 * j + c); }
          // |d^n|: d_ still holds d^n here (box 11 writes d^{n+1} below)
          const real_t *dn = &d_(3 * j);
-         const real_t dn_abs = std::sqrt(dn[0] * dn[0] + dn[1] * dn[1] + dn[2] * dn[2]);
+         real_t dn_abs = std::sqrt(dn[0] * dn[0] + dn[1] * dn[1] + dn[2] * dn[2]);
+         // complex geometries O3 (header): the slip measure the law sees
+         if (slip_path_) { dn_abs = psi_(j); }
          if (pc_)
          {
             // previous step's slip rate (SeisSol: slipRateMagnitude before the solve)
@@ -1516,6 +1529,7 @@ private:
    Vector sigpc_;                          // sigma* per owned DOF
    bool tension_floor_ = false;            // complex geometries O2
    mutable long long floored_ = 0;
+   bool slip_path_ = false;                // complex geometries O3
    long steps_ = 0;
    NitscheStepRecord record_;
    bool lts_defer_red_ = false;   // LtsDeferRecordReduce

@@ -112,6 +112,8 @@
 //                               with explicit jumps (TPV12, TPV22)
 //   O2 [fault_tension]          the law's normal stress floored at 0 instead
 //                               of aborting in tension (TPV12)
+//   O3 [slip_weakening_distance]  slip weakening from the slip path (TPV12,
+//                               TPV15, TPV22)
 
 #include "mfem.hpp"
 #include "../domain/nitsche_wave_operator.hpp"
@@ -126,6 +128,7 @@
 #include "../dynamic/fault_station_file.hpp"
 #include "../dynamic/nitsche_opt_depth_prestress.hpp"   // complex geometries O1
 #include "../dynamic/nitsche_opt_tension.hpp"            // complex geometries O2
+#include "../dynamic/nitsche_opt_slip_path.hpp"          // complex geometries O3
 #include "../dynamic/lts_partition.hpp"   // METIS with element weights (plan item 6)
 #include "../solver/nitsche_lts_setup.hpp"   // --lts-report (plan item 7, P0)
 #include "../solver/nitsche_lts_run.hpp"     // --lts rate2 (plan item 7, P3/P4)
@@ -812,8 +815,8 @@ int main(int argc, char *argv[])
                   "[prestress_depth_table] stress_measure = \"effective\" (sigma - P_f I) is "
                   "exact only for a linear elastic bulk; it is refused with a [rheology] table");
    }
-   // complex geometries O2 (header): [fault_tension]; the law is checked where
-   // the closure is known
+   // complex geometries O2-O3 (headers): [fault_tension],
+   // [slip_weakening_distance]; the laws are checked where the closure is known
    nitsche_opt::TensionConfig tension_cfg;
    if (root.contains(nitsche_opt::TensionConfig::kTable))
    {
@@ -822,6 +825,11 @@ int main(int argc, char *argv[])
                   "[fault_tension] mode = \"zero_strength_floor\" replaces the sigma_n >= 0 "
                   "range check; it is refused with [pore_pressure] min_sigma_n_pa = "
                   << cfg.stress.pore_pressure.min_sigma_n_pa << " (set it to 0)");
+   }
+   nitsche_opt::SlipPathConfig slip_path_cfg;
+   if (root.contains(nitsche_opt::SlipPathConfig::kTable))
+   {
+      slip_path_cfg = nitsche_opt::ParseSlipPath(root.at(nitsche_opt::SlipPathConfig::kTable));
    }
    MFEM_VERIFY(p >= 1 && p <= 4, "order p must be in 1..4 (P3 constants); got " << p);
    MFEM_VERIFY(cfl > 0.0 && cfl <= 1.0, "[numerics] cfl (fraction of C(p)) must be in (0,1]");
@@ -1329,6 +1337,9 @@ int main(int argc, char *argv[])
 
    MFEM_VERIFY(!tension_cfg.floor || law.kind == LawKind::SlipWeakening, "[fault_tension] "
                "mode = \"zero_strength_floor\" needs [meta] law = \"slip_weakening\"");
+   MFEM_VERIFY(!slip_path_cfg.path || law.kind == LawKind::SlipWeakening,
+               "[slip_weakening_distance] measure = \"slip_path\" needs [meta] law = "
+               "\"slip_weakening\" (for rate and state psi is the state, not a slip path)");
 
    // ------------------------------------------------------------ operator
    DomainConfig dcfg;
@@ -1434,11 +1445,14 @@ int main(int argc, char *argv[])
          op.SetPrakashClifton(pc_vstar, pc_len);
          op.SetPrakashCliftonState(sig0);
       }
-      // complex geometries O2 (header)
+      // complex geometries O2-O3 (headers)
       if (tension_cfg.floor) { op.SetTensionFloor(true); }
-      if (g_rank == 0 && tension_cfg.floor)
+      if (slip_path_cfg.path) { op.SetSlipPathWeakening(true); }
+      if (g_rank == 0 && (tension_cfg.floor || slip_path_cfg.path))
       {
-         std::cout << "  fault options: tension floor (the law sees max(sigma_n, 0))\n";
+         std::cout << "  fault options:" << (tension_cfg.floor ? " tension floor (the law sees "
+                   "max(sigma_n, 0))" : "") << (slip_path_cfg.path ? " slip-path weakening"
+                   : "") << "\n";
       }
       // initial fault state per owned DOF (generic; e.g. to check psi^0
       // against a benchmark's closed form outside the driver)
