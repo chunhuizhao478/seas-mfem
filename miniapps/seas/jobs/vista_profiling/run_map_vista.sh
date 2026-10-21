@@ -82,7 +82,9 @@ if command -v map >/dev/null; then
    #          /usr/local/bin/ibrun, override mpirun = yes), the launcher of the gold runs; ibrun still
    #          starts Open MPI 5's mpirun, so this may fail the same way
    #   srun   MPI type slurm, srun --mpi=pmix (Vista's Slurm has pmix_v3), no mpirun at all
-   # --profile implies --no-queue.  A failed start costs about a minute; a try that hangs is stopped after
+   # --profile implies --no-queue, and MAP refuses --nodes without --queue ("--nodes can only be specified
+   # with --queue", job 1087796), so only -n is given; the job's allocation sets the nodes and ibrun and
+   # srun place the ranks in it.  A failed start costs about a minute; a try that hangs is stopped after
    # MAP_TRY_S seconds (set by the job script, twice its estimate), so the next try and perf still fit.
    for route in ibrun srun; do
       case $route in
@@ -91,8 +93,8 @@ if command -v map >/dev/null; then
       esac
       rm -rf $OUT/run; mkdir -p $OUT/run
       s=$(date +%s)
-      echo "=== MAP ($route): map --profile ${MAP_MPI[*]} -n $N --nodes $SLURM_JOB_NUM_NODES --procs-per-node $((N / SLURM_JOB_NUM_NODES)) --log=$OUT/map_$route.log --output=$OUT/profile_$route.map --export-functions=$OUT/map_functions.csv ./seas_nitsche_dyn_driver_g $ARGS --output-dir $OUT/run"
-      timeout --kill-after=30 ${MAP_TRY_S:-1200} map --profile "${MAP_MPI[@]}" -n $N --nodes $SLURM_JOB_NUM_NODES --procs-per-node $((N / SLURM_JOB_NUM_NODES)) \
+      echo "=== MAP ($route): map --profile ${MAP_MPI[*]} -n $N --log=$OUT/map_$route.log --output=$OUT/profile_$route.map --export-functions=$OUT/map_functions.csv ./seas_nitsche_dyn_driver_g $ARGS --output-dir $OUT/run"
+      timeout --kill-after=30 ${MAP_TRY_S:-1200} map --profile "${MAP_MPI[@]}" -n $N \
           --log=$OUT/map_$route.log --output=$OUT/profile_$route.map --export-functions=$OUT/map_functions.csv \
           ./seas_nitsche_dyn_driver_g $ARGS --output-dir $OUT/run > $OUT/driver_$route.log 2>&1
       map_rc=$?
