@@ -585,6 +585,7 @@ public:
          {
             fault_frame::ToLocal(&S(3 * j), 0.0, &Fr(9 * j), &Fr(9 * j + 3), &Fr(9 * j + 6),
                                  Xs(2 * j), Xs(2 * j + 1), sg(j));
+            if (op_.HasFaultPressure()) { sg(j) -= op_.FaultPressure()(j); }   // sigma_n' (P0.3)
          }
       }
       const int nc = nc_;   // sd ss vd vs td ts psi sn a Dc [sigma*]
@@ -1114,9 +1115,25 @@ int main(int argc, char *argv[])
    ClosureBundle law = MakeClosure(cfg, t_rs);
    fs.closure = law.closure.get();
    fs.sigma_min = cfg.stress.pore_pressure.min_sigma_n_pa;
-   MFEM_VERIFY(cfg.stress.pore_pressure.P_p_pa == 0.0
-               && cfg.stress.pore_pressure.P_p_grad_pa_per_m == 0.0,
-               "Nitsche driver (P7): pore pressure is not wired (P_p must be 0)");
+   // Static pore pressure (poroelastic plan rev 3, step P0.3): [pore_pressure]
+   // P_p(z) = P_p_pa + P_p_grad_pa_per_m max(0, -z) (fault/fault_geometry.hpp:
+   // 605-608) lowers the normal stress friction sees, sigma_n' = sigma_n - P_p;
+   // the bulk never sees it.  Decks with P_p = 0 keep every bit.
+   {
+      const real_t pp0 = cfg.stress.pore_pressure.P_p_pa;
+      const real_t ppg = cfg.stress.pore_pressure.P_p_grad_pa_per_m;
+      if (pp0 != 0.0 || ppg != 0.0)
+      {
+         fs.pore_pressure = [pp0, ppg](const real_t x[3]) {
+            return pp0 + ppg * std::max<real_t>(0.0, -x[2]);
+         };
+         if (g_rank == 0)
+         {
+            std::cout << "  static pore pressure: P_p = " << pp0 << " Pa + " << ppg
+                      << " Pa/m x depth; friction sees sigma_n - P_p\n";
+         }
+      }
+   }
 
    // ------------------------------------------------------------ prestress (I1)
    MFEM_VERIFY(cfg.stress.kind == spatial::StressSourceKind::ConstantTensor,
@@ -1366,6 +1383,7 @@ int main(int argc, char *argv[])
                        *ss = &op.FaultFrames()(9 * j + 6);
          real_t X[2], sig;
          ff::ToLocal(&S0(3 * j), 0.0, n, dd, ss, X[0], X[1], sig);
+         if (op.HasFaultPressure()) { sig -= op.FaultPressure()(j); }   // sigma_n' (P0.3)
          const real_t xm = std::hypot(X[0], X[1]);
          for (int c = 0; c < 3; c++) { xc(c) = op.FaultPositions()(3 * j + c); }
          real_t Vi = 0.0;   // slip weakening starts at rest
@@ -1408,6 +1426,7 @@ int main(int argc, char *argv[])
                        *ss = &op.FaultFrames()(9 * j + 6);
          real_t X[2], sig;
          ff::ToLocal(&S0(3 * j), 0.0, n, dd, ss, X[0], X[1], sig);
+         if (op.HasFaultPressure()) { sig -= op.FaultPressure()(j); }   // sigma_n' (P0.3)
          const real_t *x = &op.FaultPositions()(3 * j);
          ini << x[0] << " " << x[1] << " " << x[2] << " " << op.FaultA()(j) << " "
              << op.FaultDc()(j) << " " << psi(j) << " " << -X[1] << " " << sig << " "
@@ -1609,6 +1628,7 @@ int main(int argc, char *argv[])
             const real_t *n = &op.FaultFrames()(9 * j), *dd = &op.FaultFrames()(9 * j + 3),
                           *ss = &op.FaultFrames()(9 * j + 6);
             ff::ToLocal(&S(3 * j), 0.0, n, dd, ss, Xs(2 * j), Xs(2 * j + 1), sg(j));
+            if (op.HasFaultPressure()) { sg(j) -= op.FaultPressure()(j); }   // sigma_n' (P0.3)
          }
       }
       for (int j = 0; j < no; j++)

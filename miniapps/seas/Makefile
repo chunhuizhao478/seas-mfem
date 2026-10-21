@@ -3433,7 +3433,7 @@ seas_nitsche_dyn_driver: $(NITSCHE_DYN_DRIVER_OBJ) $(SPATIAL_FRICTION_OBJ) \
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Poroelastic plan rev 3 (multiphysics/poroelastic/, hook H4): the option
-# (P0.1) and its phase tests.  test-poro-p0 = U0-3, U0-4 in
+# (P0.1) and its phase tests.  test-poro-p0 = U0-3, U0-4, U0-5 in
 # seas_test_poro_p0 (1 and 2 ranks), then the driver checks: the abort texts
 # of U0-4 and the refusals of U0-6.  U0-1 and U0-2 (the off path is
 # byte-identical; every test-nitsche-* target passes as at the base commit)

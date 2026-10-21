@@ -147,6 +147,11 @@ struct NitscheFaultSetup
    /// Permitted range sigma_n_eff >= sigma_min ([pore_pressure]
    /// min_sigma_n_pa, default 0; spatial/code/spatial_friction.cpp:957-960).
    real_t sigma_min = 0.0;
+   /// Static pore pressure P_p(x) [Pa] at a fault DOF position ([pore_pressure]
+   /// P_p_pa + P_p_grad_pa_per_m max(0, -z)).  Box 9 sees sigma_n' = sigma_n -
+   /// P_p (Terzaghi), before the range check; the bulk never sees it
+   /// (poroelastic plan rev 3, step P0.3).  Empty = none: every bit as before.
+   std::function<real_t(const real_t x[3])> pore_pressure;
 };
 
 /// Poroelastic fault coupling (poroelastic plan rev 3, hook H2; derivation
@@ -159,8 +164,8 @@ public:
    /// T += {alpha M (div w - V)} n: the coupling part of the total traction
    /// (global three-vectors per owned DOF), added to the trial traction.
    virtual void AddCouplingTraction(real_t t, Vector &T) = 0;
-   /// p += p_0 + p_hat: the fluid pressure friction sees (one scalar per
-   /// owned DOF).
+   /// p += p_0 + p_hat: the fluid pressure friction sees, on top of the
+   /// static P_p (one scalar per owned DOF).
    virtual void AddFaultPressure(real_t t, Vector &p) = 0;
 };
 
@@ -507,7 +512,7 @@ public:
       const real_t *n = &frame_own_(9 * j), *dv = &frame_own_(9 * j + 3),
                     *sv = &frame_own_(9 * j + 6);
       fault_frame::ToLocal(TS, 0.0, n, dv, sv, X[0], X[1], sigma_eff);
-      // the hook's p_0 + p_hat (H2): sigma_n' = sigma_n - p
+      // static P_p and the hook's p_0 + p_hat (P0.3, H2): sigma_n' = sigma_n - p
       if (pf_own_.Size() > 0) { sigma_eff -= pf_own_(j); }
       if (!(sigma_eff >= sigma_min_))
       {
@@ -577,10 +582,11 @@ public:
       if (hook_) { pf_own_ = pf_static_; }
    }
    FaultPressureHook *GetFaultPressureHook() const { return hook_; }
-   /// True with a hook: box 9 then subtracts FaultPressure() from sigma_n.
+   /// True with a static pore pressure or a hook: box 9 then subtracts
+   /// FaultPressure() from sigma_n.
    bool HasFaultPressure() const { return pf_own_.Size() > 0; }
-   /// The pressure box 9 subtracted at the last advance, per owned fault
-   /// DOF; empty when off.
+   /// The pressure box 9 subtracted at the last advance (before the first
+   /// step, the static P_p), per owned fault DOF; empty when off.
    const Vector &FaultPressure() const { return pf_own_; }
 
    // ------------------------------------------------------------------
@@ -1472,6 +1478,12 @@ private:
          a_own_(j) = st.a;
          Dc_own_(j) = st.Dc;
       }
+      if (fs.pore_pressure)
+      {
+         pf_static_.SetSize(no_);
+         for (int j = 0; j < no_; j++) { pf_static_(j) = fs.pore_pressure(&x_own_(3 * j)); }
+         pf_own_ = pf_static_;
+      }
 
       // Projected prestress and nucleation (box 8).
       ProjectStress_(fs.prestress, S0_own_);
@@ -1537,10 +1549,10 @@ private:
    bool has_fault_ = false;
    const IFaultClosure *closure_ = nullptr;
    real_t sigma_min_ = 0.0;
-   // H2 (poroelastic plan rev 3): the pressure box 9 subtracts from sigma_n;
-   // both vectors are empty for every run without a hook
+   // H2 and P0.3 (poroelastic plan rev 3): the pressure box 9 subtracts from
+   // sigma_n; both vectors are empty for every run without them
    FaultPressureHook *hook_ = nullptr;
-   Vector pf_static_;   ///< the hook's starting pressure, zero
+   Vector pf_static_;   ///< static P_p per owned fault DOF
    Vector pf_own_;      ///< the pressure subtracted at the last advance
    std::function<real_t(real_t)> nuc_temporal_;
    std::unique_ptr<FaultOrientation> orient_;

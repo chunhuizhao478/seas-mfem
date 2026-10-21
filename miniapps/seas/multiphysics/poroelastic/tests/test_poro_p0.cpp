@@ -1,5 +1,5 @@
-// Poroelastic plan rev 3, phase P0 (steps P0.1-P0.2): the option and the
-// hooks in the elastic operator.
+// Poroelastic plan rev 3, phase P0 (steps P0.1-P0.3): the option, the hooks
+// in the elastic operator, and the static pore pressure.
 //
 //   U0-3  Hook H1: Force(x, v, d) followed by the mass inverse gives the
 //         acceleration of Mult and AccelerationWithSlip bit for bit, p = 1-3,
@@ -10,11 +10,19 @@
 //         table, the option off with a table present (warning), and the bulk
 //         density check.  The plan's [multiphysics] poroelastic = true next
 //         to a [multiphysics.poroelastic] table is not valid TOML (checked).
+//   U0-5  Static P_p: the TPV102 box with sigma_yy = -120 MPa and P_p = 10 MPa
+//         against sigma_yy = -110 MPa and P_p = 0, 500 steps: slip, slip rate,
+//         state and displacement agree to 1e-10 relative (class R); without
+//         P_p the two differ (control).  P_p = 0 set through the pressure path
+//         is bit-identical to no P_p.  The plan asked the bulk to be bitwise;
+//         it cannot be, because sigma_n' is (T + S).n - P_p in one case and
+//         (T + S').n in the other, which differ by round-off, and the slip
+//         rate feeds the bulk through G d.
 //
 // The driver-level checks (U0-4 abort text, U0-6 refusals) and U0-1/U0-2 (the
 // off path, every existing test) are Makefile recipes; see test-poro-p0.
 //
-// Usage: mpirun -np 1|2 ./seas_test_poro_p0 [--u03] [--u04]
+// Usage: mpirun -np 1|2 ./seas_test_poro_p0 [--u03] [--u04] [--u05]
 //        (no flag = all)
 
 #include "mfem.hpp"
@@ -147,10 +155,13 @@ static MaterialField TPV102Material()
                                       TPV102Params::rho);
 }
 
-/// TPV102 fault setup with sigma_yy = -sigma_yy_pa.  The TPV102 nucleation
-/// (3 km) is not resolved on this 15 km box; a broad gentle one (12 MPa,
-/// e-fold radius 20 km, TPV102's G(t)) stands in for it.
-static NitscheFaultSetup TPV102Setup(const IFaultClosure &cl, real_t sigma_yy_pa)
+/// TPV102 fault setup with sigma_yy = -sigma_yy_pa and an optional P_p.  The
+/// TPV102 nucleation (3 km) is not resolved on this 15 km box, so a broad
+/// gentle one (12 MPa, e-fold radius 20 km, TPV102's G(t)) makes the fault
+/// slip at up to ~1e-6 m/s in the test window, where the slip rate depends
+/// on sigma_n' through the rate-and-state law, without dynamic runaway.
+static NitscheFaultSetup TPV102Setup(const IFaultClosure &cl, real_t sigma_yy_pa,
+                                     bool with_pp, real_t pp)
 {
    NitscheFaultSetup fs;
    fs.closure = &cl;
@@ -172,11 +183,12 @@ static NitscheFaultSetup TPV102Setup(const IFaultClosure &cl, real_t sigma_yy_pa
       st.Dc = TPV102Params::Dc;
    };
    fs.sigma_min = 0.0;
+   if (with_pp) { fs.pore_pressure = [pp](const real_t[3]) { return pp; }; }
    return fs;
 }
 
 /// d = 0, V = V_ini along strike, psi in equilibrium with the projected
-/// prestress (as the driver seeds it).
+/// prestress and sigma_n' (as the driver seeds it).
 static void SeedState(NitscheWaveOperator &op, const IFaultClosure &cl)
 {
    const int no = op.NumOwnedFaultDOFs();
@@ -188,6 +200,7 @@ static void SeedState(NitscheWaveOperator &op, const IFaultClosure &cl)
       const real_t *f = &op.FaultFrames()(9 * j);
       real_t X[2], sig;
       fault_frame::ToLocal(&S(3 * j), 0.0, f, f + 3, f + 6, X[0], X[1], sig);
+      if (op.HasFaultPressure()) { sig -= op.FaultPressure()(j); }
       FaultPointState st = op.FaultParams(j);
       cl.SeedEquilibrium(std::hypot(X[0], X[1]), TPV102Params::V_ini, sig, st);
       psi(j) = st.psi;
@@ -209,7 +222,7 @@ static void TestU03(ParMesh &pm)
       {
          for (int kv = 0; kv <= 1; kv++)
          {
-            NitscheFaultSetup fs = TPV102Setup(aging, TPV102Params::sigma_n);
+            NitscheFaultSetup fs = TPV102Setup(aging, TPV102Params::sigma_n, false, 0.0);
             NitscheWaveOperator op(pm, p, TPV102Material(), TPV102BC(absorb), {}, &fs);
             const real_t dt = ComputeMaxDt(op.Sample(), pm, p, kCuse[p]);
             op.SetTimeStep(dt);
@@ -424,19 +437,104 @@ static void TestU04()
    }
 }
 
+// ------------------------------------------------------------------- U0-5
+struct RunState { Vector U, d, V, psi, sig; };
+
+static RunState RunTPV102(ParMesh &pm, int p, real_t sigma_yy, bool with_pp, real_t pp,
+                          int nsteps)
+{
+   DieterichRuinaFriction fr{{TPV102Params::V0, TPV102Params::f0, TPV102Params::b,
+                              TPV102Params::Dc}};
+   RateStateClosure aging(fr, RateStateClosure::StateLaw::Aging);
+   NitscheFaultSetup fs = TPV102Setup(aging, sigma_yy, with_pp, pp);
+   NitscheWaveOperator op(pm, p, TPV102Material(), TPV102BC(true), {}, &fs);
+   const real_t dt = ComputeMaxDt(op.Sample(), pm, p, kCuse[p]);
+   op.SetTimeStep(dt);
+   SeedState(op, aging);
+   const int n = op.Height();
+   Vector U(n), Ud(n);
+   U = 0.0;
+   Ud = 0.0;
+   real_t t = 0.0;
+   op.SetTime(t);
+   CentralDifferenceSolver ode;
+   ode.Init(op);
+   for (int s = 0; s < nsteps; s++)
+   {
+      real_t h = dt;
+      ode.Step(U, Ud, t, h);
+   }
+   RunState r;
+   r.U = U;
+   r.d = op.Slip();
+   r.V = op.SlipRate();
+   r.psi = op.State();
+   r.sig = op.LastSigmaEff();
+   if (g_rank == 0)
+   {
+      std::cout << std::setprecision(6) << "    sigma_yy = -" << sigma_yy / 1e6 << " MPa, P_p "
+                << (with_pp ? std::to_string(pp / 1e6) + " MPa" : std::string("unset"))
+                << ": " << nsteps << " steps of " << dt << " s, max V " << op.LastStep().max_V
+                << " m/s, sigma_n' in [" << op.LastStep().min_sigma_eff / 1e6 << ", "
+                << op.LastStep().max_sigma_eff / 1e6 << "] MPa\n";
+   }
+   return r;
+}
+
+static void TestU05(ParMesh &pm, int nsteps)
+{
+   if (g_rank == 0) { std::cout << "--- U0-5: static pore pressure\n"; }
+   const MPI_Comm c = pm.GetComm();
+   for (int p = 1; p <= 2; p++)
+   {
+      const RunState A = RunTPV102(pm, p, 120e6, true, 10e6, nsteps);
+      const RunState B = RunTPV102(pm, p, 110e6, false, 0.0, nsteps);
+      const RunState Z = RunTPV102(pm, p, 110e6, true, 0.0, nsteps);
+      const RunState N = RunTPV102(pm, p, 120e6, false, 0.0, nsteps);   // control
+      const real_t ed = RelDiff(A.d, B.d, c), eV = RelDiff(A.V, B.V, c);
+      const real_t ep = RelDiff(A.psi, B.psi, c), es = RelDiff(A.sig, B.sig, c);
+      const real_t eU = RelDiff(A.U, B.U, c);
+      if (g_rank == 0)
+      {
+         std::cout << std::setprecision(3) << "    p = " << p << ": relative differences slip "
+                   << ed << ", slip rate " << eV << ", state " << ep << ", sigma_n' " << es
+                   << ", displacement " << eU << "\n";
+      }
+      const real_t vmax = RMax(B.V.Normlinf(), c);
+      TEST_ASSERT(vmax > 1e-8, "U0-5 p = " << p << ": the fault slips in the test window, so "
+                  "the law sees sigma_n' (max |V| = " << vmax << " m/s)");
+      TEST_ASSERT(ed <= 1e-10 && eV <= 1e-10 && ep <= 1e-10 && es <= 1e-10,
+                  "U0-5 p = " << p << ": P_p = 10 MPa with sigma_yy = -120 MPa matches "
+                  "sigma_yy = -110 MPa on the fault to 1e-10");
+      TEST_ASSERT(eU <= 1e-10, "U0-5 p = " << p << ": the displacement matches to 1e-10 "
+                  "(it sees the stress only through the slip)");
+      const real_t eN = RelDiff(N.V, B.V, c);
+      TEST_ASSERT(eN > 1e-3, "U0-5 p = " << p << ": control: without P_p, sigma_yy = -120 MPa "
+                  "differs from -110 MPa (slip rate " << eN << " relative), so the match above "
+                  "is the subtraction's doing");
+      const long bz = LSum(BitDiff(Z.U, B.U) + BitDiff(Z.d, B.d) + BitDiff(Z.V, B.V)
+                           + BitDiff(Z.psi, B.psi), c);
+      TEST_ASSERT(bz == 0, "U0-5 p = " << p << ": P_p = 0 through the pressure path is "
+                  "bit-identical to no P_p");
+   }
+}
+
 int main(int argc, char *argv[])
 {
    Mpi::Init(argc, argv);
    Hypre::Init();
    g_rank = Mpi::WorldRank();
-   bool u03 = false, u04 = false;
+   bool u03 = false, u04 = false, u05 = false;
+   int nsteps = 500;
    for (int i = 1; i < argc; i++)
    {
       const std::string a = argv[i];
       if (a == "--u03") { u03 = true; }
       else if (a == "--u04") { u04 = true; }
+      else if (a == "--u05") { u05 = true; }
+      else if (a == "--steps" && i + 1 < argc) { nsteps = std::atoi(argv[++i]); }
    }
-   if (!u03 && !u04) { u03 = u04 = true; }
+   if (!u03 && !u04 && !u05) { u03 = u04 = u05 = true; }
    if (g_rank == 0)
    {
       std::cout << "=== Poroelastic P0 (plan rev 3) on " << Mpi::WorldSize() << " rank(s) ===\n";
@@ -445,6 +543,7 @@ int main(int argc, char *argv[])
    std::unique_ptr<Mesh> m(TPV102Box(4, 4, 2));
    ParMesh pm(MPI_COMM_WORLD, *m);
    if (u03) { TestU03(pm); }
+   if (u05) { TestU05(pm, nsteps); }
    int nf = num_failed;
    MPI_Allreduce(MPI_IN_PLACE, &nf, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
    if (g_rank == 0)
