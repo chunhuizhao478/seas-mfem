@@ -1,0 +1,22 @@
+BP5 full cycle: p=1, t_final 1500 yr (4.733640e+10 s), 144 ranks -> bp5/results_vista_cycle/p1_1500yr_r144_job1074099
+seas_bp5_full exit 0
+--------------------------------------------------------------------------------
+  Stations compared: 0 / 10
+  Max relative L2 error: 0.000000e+00
+================================================================================
+WARNING! There are options you set that were not used!
+WARNING! could be spelling mistake, etc!
+There are 12 unused database options. They are:
+Option left: name:--checkpoint-interval value: 5000 source: command line
+Option left: name:--dg-method value: IP source: command line
+Option left: name:--mesh value: bp5/mesh/reference/bp5_tandem_exact.msh source: command line
+Option left: name:--mesh-scale value: 1000 source: command line
+Option left: name:--order value: 1 source: command line
+Option left: name:--output-dir value: bp5/results_vista_cycle/p1_1500yr_r144_job1074099 source: command line
+Option left: name:--output-prefix value: bp5_cycle_p1 source: command line
+Option left: name:--petsc-ts (no value) source: command line
+Option left: name:--petsc-ts-options value: tests/verification/petsc_ts_rk45_tandem.cfg source: command line
+Option left: name:--solver value: mumps source: command line
+Option left: name:--tandem-time-stepping (no value) source: command line
+Option left: name:--tfinal value: 4.733640e+10 source: command line
+TACC:  Shutdown complete. Exiting. 
