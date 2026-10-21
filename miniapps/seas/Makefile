@@ -1147,7 +1147,7 @@ MFEM_TESTS = MINIAPPS
         test-ghost-exchange-bynodes-vs-scalar \
         test-per-qp-vs-centroid-basis-planar-1el \
         test-v92-regression-gates \
-        test-poro-p0 \
+        test-poro-p0 test-poro-p1 check-poro-refs \
         regression-check quick-check
 
 all: $(MINIAPPS)
@@ -3448,6 +3448,7 @@ TEST_PORO_P0_OBJ = $(TEST_PORO_P0_SRC:.cpp=.o)
 $(TEST_PORO_P0_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
                           domain/nitsche_wave_operator.hpp \
                           multiphysics/poroelastic/poro_config.hpp \
+                          multiphysics/poroelastic/tests/poro_fixtures.hpp \
                           $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) $(TOML_FLAGS) -DSEAS_USE_MPI \
@@ -3487,6 +3488,34 @@ test-poro-p0: seas_test_poro_p0 seas_nitsche_dyn_driver seas_driver
 	@$(call PORO_P0_EXPECT_ABORT,./seas_nitsche_dyn_driver --config poro_p0_decks/ok.toml --lts rate2,U0-6 local time stepping,local time stepping (--lts rate2) is refused)
 	@$(call PORO_P0_EXPECT_ABORT,./seas_driver poro_p0_decks/qd.toml,U0-6 quasi-dynamic solver,gets the poroelastic option in step P7)
 	@rm -rf poro_p0_decks
+
+# P1.1: the Biot material sample.  test-poro-p1 = U1-1 to U1-4 in
+# seas_test_poro_p1 (1, 2 and 4 ranks).  check-poro-refs regenerates
+# refs.json and poro_test_refs.hpp from tests/refs/poro_test_refs.py and
+# fails on any byte that differs.
+PYTHON ?= python3
+PORO_P1_HEADERS = multiphysics/poroelastic/poro_config.hpp \
+                  multiphysics/poroelastic/poro_material.hpp \
+                  multiphysics/poroelastic/tests/poro_fixtures.hpp \
+                  multiphysics/poroelastic/tests/poro_test_refs.hpp
+TEST_PORO_P1_SRC = multiphysics/poroelastic/tests/test_poro_p1.cpp
+TEST_PORO_P1_OBJ = $(TEST_PORO_P1_SRC:.cpp=.o)
+$(TEST_PORO_P1_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PORO_P1_HEADERS) \
+                          $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) $(TOML_FLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_poro_p1: $(TEST_PORO_P1_OBJ) $(PORO_CONFIG_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PORO_P1_OBJ) $(PORO_CONFIG_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-poro-p1: seas_test_poro_p1
+	for np in 1 2 4; do $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_poro_p1 || exit 1; done
+
+check-poro-refs:
+	$(PYTHON) multiphysics/poroelastic/tests/refs/poro_test_refs.py --check multiphysics/poroelastic/tests
 
 # P6 long checks (minutes each; np=8 unless noted): T-15 energy balance and
 # its NIPG control, T-20 coupled dt refinement (dt0/4..dt0/16 vs dt0/64),
@@ -6088,7 +6117,7 @@ clean: clean-build clean-exec
 clean-build:
 	rm -f *.o *~ $(SEQ_MINIAPPS) $(PAR_MINIAPPS) $(PAR_LONG)
 	rm -f drivers/*.o tests/unit/*.o tests/verification/*.o tests/parallel/*.o
-	rm -f multiphysics/poroelastic/*.o multiphysics/poroelastic/tests/*.o seas_test_poro_p0
+	rm -f multiphysics/poroelastic/*.o multiphysics/poroelastic/tests/*.o seas_test_poro_p0 seas_test_poro_p1
 	rm -rf *.dSYM *.TVD.*breakpoints
 
 clean-exec:

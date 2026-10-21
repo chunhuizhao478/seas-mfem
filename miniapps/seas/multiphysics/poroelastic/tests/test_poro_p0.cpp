@@ -31,6 +31,7 @@
 #include "../../../friction/rate_state_closure.hpp"
 #include "../../../config/tpv102_params.hpp"
 #include "../poro_config.hpp"
+#include "poro_fixtures.hpp"
 
 #include <array>
 #include <cmath>
@@ -45,89 +46,7 @@
 using namespace mfem;
 using namespace mfem::seas;
 
-static int num_tests = 0, num_passed = 0, num_failed = 0;
-static int g_rank = 0;
-
-#define TEST_ASSERT(cond, msg) do { \
-   num_tests++; \
-   if (cond) { num_passed++; if (g_rank == 0) std::cout << "  PASSED: " << msg << "\n"; } \
-   else { num_failed++; if (g_rank == 0) std::cout << "  FAILED [" << __LINE__ << "]: " << msg << "\n"; } \
-} while(0)
-
-static const real_t kL = 30.0e3;
 static const real_t kCuse[4] = {0.0, 0.057, 0.11, 0.14};   // 0.5 C_eig (P3)
-
-static real_t RMax(real_t v, MPI_Comm c) { MPI_Allreduce(MPI_IN_PLACE, &v, 1, MPI_DOUBLE, MPI_MAX, c); return v; }
-static long LSum(long v, MPI_Comm c) { MPI_Allreduce(MPI_IN_PLACE, &v, 1, MPI_LONG, MPI_SUM, c); return v; }
-
-static long BitDiff(const Vector &a, const Vector &b)
-{
-   if (a.Size() != b.Size()) { return -1; }
-   long n = 0;
-   for (int i = 0; i < a.Size(); i++)
-   {
-      if (std::memcmp(&a(i), &b(i), sizeof(real_t)) != 0) { n++; }
-   }
-   return n;
-}
-
-/// max_i |a_i - b_i| / max_i |b_i| over all ranks.
-static real_t RelDiff(const Vector &a, const Vector &b, MPI_Comm c)
-{
-   real_t num = 0.0, den = 0.0;
-   for (int i = 0; i < a.Size(); i++)
-   {
-      num = std::max(num, std::abs(a(i) - b(i)));
-      den = std::max(den, std::abs(b(i)));
-   }
-   num = RMax(num, c);
-   den = RMax(den, c);
-   return den > 0.0 ? num / den : num;
-}
-
-// ---------------------------------------------------------------- fixture
-// F-B of plan rev 3, section 6.1: the TPV102 inline box of
-// test_nitsche_hook_spy.cpp (24 tets per hex, fault on Y = 0).
-
-static Mesh *TPV102Box(int nx, int ny, int nz)
-{
-   Mesh *mesh = new Mesh(Mesh::MakeCartesian3DWith24TetsPerHex(
-      nx, ny, nz, 2 * kL, 2 * kL, kL));
-   for (int v = 0; v < mesh->GetNV(); v++)
-   {
-      real_t *c = mesh->GetVertex(v);
-      c[0] -= kL; c[1] -= kL; c[2] -= kL;
-   }
-   const real_t tol = kL / nz * 0.1;
-   for (int b = 0; b < mesh->GetNBE(); b++)
-   {
-      Array<int> verts;
-      mesh->GetBdrElementVertices(b, verts);
-      real_t zc = 0.0;
-      for (int i = 0; i < verts.Size(); i++) { zc += mesh->GetVertex(verts[i])[2]; }
-      zc /= verts.Size();
-      mesh->SetBdrAttribute(b, (std::abs(zc) < tol) ? 1 : 5);
-   }
-   const real_t ytol = 1e-6 * kL;
-   std::vector<std::array<int, 3>> tris;
-   for (int f = 0; f < mesh->GetNumFaces(); f++)
-   {
-      if (mesh->GetFaceInformation(f).IsBoundary()) { continue; }
-      Array<int> fv;
-      mesh->GetFaceVertices(f, fv);
-      bool on_plane = true;
-      for (int i = 0; i < fv.Size(); i++)
-      {
-         if (std::abs(mesh->GetVertex(fv[i])[1]) > ytol) { on_plane = false; }
-      }
-      if (on_plane) { tris.push_back({fv[0], fv[1], fv[2]}); }
-   }
-   for (const auto &t : tris) { mesh->AddBdrTriangle(t[0], t[1], t[2], 3); }
-   mesh->FinalizeTopology();
-   mesh->Finalize();
-   mesh->SetAttributes();
-   return mesh;
-}
 
 static BoundaryConfig TPV102BC(bool absorbing)
 {
