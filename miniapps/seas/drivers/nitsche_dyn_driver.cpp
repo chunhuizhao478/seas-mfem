@@ -114,6 +114,7 @@
 //                               of aborting in tension (TPV12)
 //   O3 [slip_weakening_distance]  slip weakening from the slip path (TPV12,
 //                               TPV15, TPV22)
+//   O4 [forced_rupture]         forced-rupture nucleation (TPV22)
 
 #include "mfem.hpp"
 #include "../domain/nitsche_wave_operator.hpp"
@@ -129,6 +130,7 @@
 #include "../dynamic/nitsche_opt_depth_prestress.hpp"   // complex geometries O1
 #include "../dynamic/nitsche_opt_tension.hpp"            // complex geometries O2
 #include "../dynamic/nitsche_opt_slip_path.hpp"          // complex geometries O3
+#include "../dynamic/nitsche_opt_forced_rupture.hpp"     // complex geometries O4
 #include "../dynamic/lts_partition.hpp"   // METIS with element weights (plan item 6)
 #include "../solver/nitsche_lts_setup.hpp"   // --lts-report (plan item 7, P0)
 #include "../solver/nitsche_lts_run.hpp"     // --lts rate2 (plan item 7, P3/P4)
@@ -815,8 +817,8 @@ int main(int argc, char *argv[])
                   "[prestress_depth_table] stress_measure = \"effective\" (sigma - P_f I) is "
                   "exact only for a linear elastic bulk; it is refused with a [rheology] table");
    }
-   // complex geometries O2-O3 (headers): [fault_tension],
-   // [slip_weakening_distance]; the laws are checked where the closure is known
+   // complex geometries O2-O4 (headers): [fault_tension], [slip_weakening_distance],
+   // [forced_rupture]; the laws are checked where the closure is known
    nitsche_opt::TensionConfig tension_cfg;
    if (root.contains(nitsche_opt::TensionConfig::kTable))
    {
@@ -830,6 +832,12 @@ int main(int argc, char *argv[])
    if (root.contains(nitsche_opt::SlipPathConfig::kTable))
    {
       slip_path_cfg = nitsche_opt::ParseSlipPath(root.at(nitsche_opt::SlipPathConfig::kTable));
+   }
+   std::unique_ptr<nitsche_opt::ForcedRuptureConfig> forced_cfg;
+   if (root.contains(nitsche_opt::ForcedRuptureConfig::kTable))
+   {
+      forced_cfg.reset(new nitsche_opt::ForcedRuptureConfig(nitsche_opt::ParseForcedRupture(
+         root.at(nitsche_opt::ForcedRuptureConfig::kTable))));
    }
    MFEM_VERIFY(p >= 1 && p <= 4, "order p must be in 1..4 (P3 constants); got " << p);
    MFEM_VERIFY(cfl > 0.0 && cfl <= 1.0, "[numerics] cfl (fraction of C(p)) must be in (0,1]");
@@ -1340,6 +1348,8 @@ int main(int argc, char *argv[])
    MFEM_VERIFY(!slip_path_cfg.path || law.kind == LawKind::SlipWeakening,
                "[slip_weakening_distance] measure = \"slip_path\" needs [meta] law = "
                "\"slip_weakening\" (for rate and state psi is the state, not a slip path)");
+   MFEM_VERIFY(!forced_cfg || law.kind == LawKind::SlipWeakening, "[forced_rupture] needs "
+               "[meta] law = \"slip_weakening\"");
 
    // ------------------------------------------------------------ operator
    DomainConfig dcfg;
@@ -1445,9 +1455,32 @@ int main(int argc, char *argv[])
          op.SetPrakashClifton(pc_vstar, pc_len);
          op.SetPrakashCliftonState(sig0);
       }
-      // complex geometries O2-O3 (headers)
+      // complex geometries O2-O4 (headers)
       if (tension_cfg.floor) { op.SetTensionFloor(true); }
       if (slip_path_cfg.path) { op.SetSlipPathWeakening(true); }
+      if (forced_cfg)
+      {
+         Vector T(no);
+         long long nf = 0;   // forced DOFs
+         for (int j = 0; j < no; j++)
+         {
+            const real_t *x = &op.FaultPositions()(3 * j);
+            T(j) = forced_cfg->TimeAt(x);
+            if (std::isfinite(T(j))) { nf++; }
+         }
+         MPI_Allreduce(MPI_IN_PLACE, &nf, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+         MFEM_VERIFY(nf > 0, "[forced_rupture]: no fault DOF lies within r_crit_m = "
+                     << forced_cfg->r_crit << " m of the hypocentre");
+         op.SetForcedRupture(T, forced_cfg->t0);
+         if (g_rank == 0)
+         {
+            std::cout << "  forced rupture: " << nf << " fault DOFs within r_crit "
+                      << forced_cfg->r_crit << " m of (" << forced_cfg->hyp[0] << ", "
+                      << forced_cfg->hyp[1] << ", " << forced_cfg->hyp[2] << "), v "
+                      << forced_cfg->v_r << " m/s, smoothing " << forced_cfg->smoothing
+                      << ", t0 " << forced_cfg->t0 << " s\n";
+         }
+      }
       if (g_rank == 0 && (tension_cfg.floor || slip_path_cfg.path))
       {
          std::cout << "  fault options:" << (tension_cfg.floor ? " tension floor (the law sees "

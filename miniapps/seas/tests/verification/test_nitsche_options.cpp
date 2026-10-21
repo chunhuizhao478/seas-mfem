@@ -22,6 +22,13 @@
 //       path psi = Dc (slip that went out and came back): without the
 //       option the law sees |d| = 0 and every DOF sticks (70 < 81.24 MPa);
 //       with it the law sees psi, mu = mu_d and every DOF slips.
+//   U4  O4 SetForcedRupture: mu_s - (mu_s - mu_d) min(max(D, f2 Dc)/Dc, 1)
+//       equals LSWFrictionCoefficient_ForcedRupture (the TPV26/27 helper)
+//       to 4 ulp over a sweep of D and t (not bit for bit: (f2 Dc)/Dc and
+//       mu_s + (mu_d - mu_s) 1 round); one advance with T = 0, t0 = 1 s
+//       sticks at t = 0.5 s (mu = 0.601) and slips at t = 2 s (mu = mu_d).
+//       I4: T = +inf everywhere equals the advance without the option, bit
+//       for bit.  T(r) of plan 10.3 at r = 0, r_c / 2 and r >= r_c.
 //
 // Usage: mpirun -np 1 ./seas_test_nitsche_options
 
@@ -29,8 +36,10 @@
 #include "../../dynamic/nitsche_opt_depth_prestress.hpp"
 #include "../../dynamic/nitsche_opt_tension.hpp"
 #include "../../dynamic/nitsche_opt_slip_path.hpp"
+#include "../../dynamic/nitsche_opt_forced_rupture.hpp"
 #include "../../domain/nitsche_wave_operator.hpp"
 #include "../../friction/slip_weakening_closure.hpp"
+#include "../../spatial/code/spatial_friction.hpp"
 
 #include <array>
 #include <cmath>
@@ -419,6 +428,57 @@ static void TestU3()
                "I3: SetSlipPathWeakening(false) changes no bit");
 }
 
+static void TestU4()
+{
+   std::cout << "U4: O4 forced rupture\n";
+   // the identity, pointwise
+   real_t worst = 0.0;
+   for (real_t D : {0.0, 0.01, 0.1, 0.2, 0.3999, 0.4, 0.5, 2.0})
+      for (real_t t : {0.0, 0.1, 0.25, 0.3, 0.5, 0.77, 1.0, 1.3})
+      {
+         const real_t T = 0.3, t0 = 0.5;
+         real_t f2 = 0.0;
+         if (!(t >= T)) { f2 = 0.0; } else if (t < T + t0) { f2 = (t - T) / t0; } else { f2 = 1.0; }
+         const real_t Deff = (f2 > 0.0) ? std::max(D, f2 * kDc) : D;
+         const real_t mine = SlipWeakeningClosure::FrictionCoefficient(Deff, kMuS, kMuD, kDc);
+         const real_t ref = spatial::LSWFrictionCoefficient_ForcedRupture(D, kMuS, kMuD, kDc, t, T, t0);
+         worst = std::max(worst, std::abs(mine - ref));
+      }
+   std::cout << std::setprecision(3) << "    max |mu - mu_ref| " << worst << " ("
+             << worst / std::numeric_limits<real_t>::epsilon() << " eps)\n";
+   TEST_ASSERT(worst <= 4.0 * std::numeric_limits<real_t>::epsilon(),
+               "mu(D_eff) = LSWFrictionCoefficient_ForcedRupture to 4 ulp (64 points)");
+   // T(r) of plan 10.3
+   ForcedRuptureConfig fr;
+   fr.r_crit = 3000.0; fr.v_r = 0.7 * 3464.0; fr.smoothing = 0.081; fr.t0 = 0.5;
+   const real_t r = 1500.0, Tr = r / fr.v_r + 0.081 * 3000.0 / fr.v_r * (1.0 / (1.0 - 0.25) - 1.0);
+   TEST_ASSERT(fr.Time(0.0) == 0.0 && RelClose(fr.Time(r), Tr, 1e-15) && std::isinf(fr.Time(3000.0))
+               && std::isinf(fr.Time(5000.0)), "T(0) = 0, T(r_c/2) from 10.3, T(r >= r_c) = +inf");
+
+   // routing through one advance: T = 0, t0 = 1 s
+   OpFixture A(kTau0, -kSig0, 0.0), B(kTau0, -kSig0, 0.0);
+   A.State(0.0); B.State(0.0);
+   Vector T0(A.No());
+   T0 = 0.0;
+   A.op->SetForcedRupture(T0, 1.0);
+   B.op->SetForcedRupture(T0, 1.0);
+   A.op->LtsAdvanceFault(A.u, 0.5, nullptr);   // f2 = 0.5: mu 0.601, 72.12 > 70 MPa
+   B.op->LtsAdvanceFault(B.u, 2.0, nullptr);   // f2 = 1: mu_d, 63 < 70 MPa
+   TEST_ASSERT(A.MaxV() == 0.0, "t = 0.5 s (f2 = 0.5): every DOF sticks");
+   TEST_ASSERT(B.MinV() > 0.0, "t = 2 s (f2 = 1): every DOF slips");
+   // I4: T = +inf is the run without the option
+   OpFixture C(kTau0 + 12.0e6, -kSig0, 0.0), D(kTau0 + 12.0e6, -kSig0, 0.0);
+   C.State(0.0); D.State(0.0);
+   Vector Tinf(D.No());
+   Tinf = std::numeric_limits<real_t>::infinity();
+   D.op->SetForcedRupture(Tinf, 0.5);
+   C.op->LtsAdvanceFault(C.u, 1.0, nullptr);
+   D.op->LtsAdvanceFault(D.u, 1.0, nullptr);
+   TEST_ASSERT(C.MinV() > 0.0 && SameVec(C.op->SlipRate(), D.op->SlipRate())
+               && SameVec(C.op->Slip(), D.op->Slip()) && SameVec(C.op->State(), D.op->State()),
+               "I4: T = +inf changes no bit (82 MPa, slipping)");
+}
+
 int main(int argc, char *argv[])
 {
    Mpi::Init(argc, argv);
@@ -428,6 +488,7 @@ int main(int argc, char *argv[])
    TestU1Mesh();
    TestU2();
    TestU3();
+   TestU4();
    std::cout << "\n" << num_passed << " / " << num_tests << " passed, " << num_failed
              << " failed\n";
    return num_failed == 0 ? 0 : 1;

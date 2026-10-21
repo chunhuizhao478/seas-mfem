@@ -91,8 +91,8 @@
 // the elastic energy has for (u, d)), so it does not resist slip itself.
 // eta_bar = 0 (never calling SetKelvinVoigt) leaves every bit unchanged.
 //
-// Complex fault geometries (plan rev 2, Chunhui Zhao 2026-10-20): opt-in
-// fault options, each set by its own setter before the first step
+// Complex fault geometries (plan rev 2, Chunhui Zhao 2026-10-20): three
+// opt-in fault options, each set by its own setter before the first step
 // and read in boxes 9-10 (AdvanceFault_, so GTS and LTS alike); the closure,
 // FaultPointState and the CloseDOF signature are unchanged.  Never set,
 // every bit is unchanged.
@@ -102,7 +102,10 @@
 //                             tension); NaN still aborts.
 //   SetSlipPathWeakening (O3) slip weakening from the slip path at step start
 //                             psi^n (int |V| dt) instead of |d^n|.
-// O3 enters through the slip_abs argument of CloseDOF.
+//   SetForcedRupture (O4)     per-DOF forcing time T: D_eff = max(D,
+//                             f2(t) Dc), f2 = clamp((t - T)/t0, 0, 1), so
+//                             mu = mu_s - (mu_s - mu_d) max(min(D/Dc, 1), f2).
+// O3 and O4 enter through the slip_abs argument of CloseDOF.
 //
 // NitscheMaterialSample lives in nitsche_material_sample.hpp (moved there in
 // P3 to break an include cycle with nitsche_mass.hpp); it is re-exported here.
@@ -449,6 +452,26 @@ public:
       slip_path_ = on;
    }
    bool HasSlipPathWeakening() const { return slip_path_; }
+   /// Complex geometries O4 (header): forcing time per owned fault DOF (no;
+   /// +inf = never forced) and the ramp time t0 > 0.
+   void SetForcedRupture(const Vector &T, real_t t0)
+   {
+      MFEM_VERIFY(has_fault_, "SetForcedRupture: the operator has no fault");
+      MFEM_VERIFY(T.Size() == no_, "SetForcedRupture: size " << T.Size() << " != " << no_);
+      MFEM_VERIFY(t0 > 0.0, "SetForcedRupture: t0 = " << t0 << " must be > 0");
+      forced_T_ = T;
+      forced_t0_ = t0;
+   }
+   const Vector &ForcedRuptureTime() const { return forced_T_; }
+   /// f2(t) of owned DOF j (0 without SetForcedRupture).
+   real_t ForcedFactor(int j, real_t t) const
+   {
+      if (forced_T_.Size() == 0) { return 0.0; }
+      const real_t T = forced_T_(j);
+      if (!(t >= T)) { return 0.0; }
+      if (t < T + forced_t0_) { return (t - T) / forced_t0_; }
+      return 1.0;
+   }
    /// Projected prestress (3 no) and nucleation spatial traction (3 no);
    /// the nucleation enters as NucleationFactor(t) * NucleationTraction().
    const Vector &PrestressTraction() const { return S0_own_; }
@@ -518,7 +541,7 @@ public:
    /// sigma_pc (Prakash-Clifton) *sigma_pc = E *sigma_pc + omE sigma_eff on
    /// return and the closure sees that value instead of sigma_eff.
    /// slip_abs = |d^n| of DOF j, passed to the closure as st.slip_abs
-   /// (psi^n with O3; header).
+   /// (psi^n with O3, max(., f2 Dc) with O4; header).
    void CloseDOF(int j, const real_t TS[3], real_t psi, real_t V[3],
                  real_t &sigma_eff, real_t X[2], real_t *sigma_pc = nullptr,
                  real_t E = 0.0, real_t omE = 1.0, real_t slip_abs = 0.0) const
@@ -1156,8 +1179,13 @@ private:
          // |d^n|: d_ still holds d^n here (box 11 writes d^{n+1} below)
          const real_t *dn = &d_(3 * j);
          real_t dn_abs = std::sqrt(dn[0] * dn[0] + dn[1] * dn[1] + dn[2] * dn[2]);
-         // complex geometries O3 (header): the slip measure the law sees
+         // complex geometries O3, O4 (header): the slip measure the law sees
          if (slip_path_) { dn_abs = psi_(j); }
+         if (forced_T_.Size() > 0)
+         {
+            const real_t f2 = ForcedFactor(j, t);
+            if (f2 > 0.0) { dn_abs = std::max(dn_abs, f2 * Dc_own_(j)); }
+         }
          if (pc_)
          {
             // previous step's slip rate (SeisSol: slipRateMagnitude before the solve)
@@ -1530,6 +1558,8 @@ private:
    bool tension_floor_ = false;            // complex geometries O2
    mutable long long floored_ = 0;
    bool slip_path_ = false;                // complex geometries O3
+   Vector forced_T_;                       // complex geometries O4 (empty = off)
+   real_t forced_t0_ = 0.0;
    long steps_ = 0;
    NitscheStepRecord record_;
    bool lts_defer_red_ = false;   // LtsDeferRecordReduce
