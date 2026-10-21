@@ -3396,13 +3396,14 @@ test-nitsche-srw: seas_test_nitsche_srw
 
 # Nitsche standalone options for complex fault geometries (complex-geometries
 # plan rev 2, gates G-unit and G-inactive): depth prestress table (U1, I1),
-# tension floor (U2, I2), slip-path weakening (U3, I3) and forced rupture (U4,
-# I4).  Pointwise, serial-mesh and one fault advance.
+# tension floor (U2, I2), slip-path weakening (U3, I3), forced rupture (U4,
+# I4) and fault tip locks (U5).  Pointwise, serial-mesh and one fault advance.
 NITSCHE_OPT_HEADERS = dynamic/nitsche_opt_common.hpp \
                       dynamic/nitsche_opt_tension.hpp \
                       dynamic/nitsche_opt_slip_path.hpp \
                       dynamic/nitsche_opt_forced_rupture.hpp \
-                      dynamic/nitsche_opt_depth_prestress.hpp
+                      dynamic/nitsche_opt_depth_prestress.hpp \
+                      dynamic/nitsche_opt_tip_lock.hpp
 TEST_NITSCHE_OPTIONS_SRC = tests/verification/test_nitsche_options.cpp
 TEST_NITSCHE_OPTIONS_OBJ = $(TEST_NITSCHE_OPTIONS_SRC:.cpp=.o)
 $(TEST_NITSCHE_OPTIONS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(NITSCHE_OPT_HEADERS) \

@@ -29,6 +29,11 @@
 //       sticks at t = 0.5 s (mu = 0.601) and slips at t = 2 s (mu = mu_d).
 //       I4: T = +inf everywhere equals the advance without the option, bit
 //       for bit.  T(r) of plan 10.3 at r = 0, r_c / 2 and r >= r_c.
+//   U5  O5 [fault_tip_lock]: on a box with a partial fault on Y = 0
+//       (|X| <= a, Z >= -b; free surface Z = 0), the tip edges are the two
+//       side tips and the bottom, the trace is not a tip, the corner where a
+//       side tip meets the trace is locked, and WrapTipLock locks exactly
+//       the points on tips.
 //
 // Usage: mpirun -np 1 ./seas_test_nitsche_options
 
@@ -37,6 +42,7 @@
 #include "../../dynamic/nitsche_opt_tension.hpp"
 #include "../../dynamic/nitsche_opt_slip_path.hpp"
 #include "../../dynamic/nitsche_opt_forced_rupture.hpp"
+#include "../../dynamic/nitsche_opt_tip_lock.hpp"
 #include "../../domain/nitsche_wave_operator.hpp"
 #include "../../friction/slip_weakening_closure.hpp"
 #include "../../spatial/code/spatial_friction.hpp"
@@ -47,6 +53,7 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -259,6 +266,56 @@ static void TestU1Mesh()
    // (1.5 km deep); the two with a top and a bottom corner cross 1.5 km, the
    // top and bottom ones only touch it: 2 x 4 hex faces across |X| <= 2 km
    TEST_ASSERT(n_mid == 8, "8 faces cross a mid-layer depth");
+}
+
+static void TestU5()
+{
+   std::cout << "U5: O5 tip edges and locks\n";
+   const real_t a = 2000.0, b = 2000.0;   // fault |X| <= 2 km, Z >= -2 km
+   std::unique_ptr<Mesh> m(Box(6, 6, 3, a, b));
+   const auto tips = std::make_shared<const TipEdges>(*m, 3, std::set<int>{1});
+   // fault: 4 x 2 hex faces of 1 km, 4 triangles each
+   TEST_ASSERT(tips->NumFaultFaces() == 4 * 2 * 4, "32 fault faces");
+   // tip edges: 2 per side tip (2 km deep) + 4 along the bottom (4 km wide)
+   std::cout << "    tip edges " << tips->NumEdges() << "\n";
+   TEST_ASSERT(tips->NumEdges() == 2 + 2 + 4, "8 tip edges (2 + 2 sides, 4 bottom), trace excluded");
+   bool on_border = true;
+   const real_t tol = 1e-6;
+   for (const auto &s : tips->Segments())
+   {
+      for (int e = 0; e < 2; e++)
+      {
+         const real_t *x = &s[3 * e];
+         const bool side = std::abs(std::abs(x[0]) - a) < tol, bottom = std::abs(x[2] + b) < tol;
+         on_border = on_border && std::abs(x[1]) < tol && (side || bottom);
+      }
+   }
+   TEST_ASSERT(on_border, "every tip edge lies on a side tip or on the bottom");
+   const real_t p_side[3] = {a, 0.0, -700.0}, p_bot[3] = {123.0, 0.0, -b},
+                p_trace[3] = {-500.0, 0.0, 0.0}, p_corner[3] = {-a, 0.0, 0.0},
+                p_in[3] = {0.0, 0.0, -1000.0}, p_near[3] = {a - 1.0, 0.0, -700.0};
+   TEST_ASSERT(tips->OnTip(p_side) && tips->OnTip(p_bot), "points on a side tip and the bottom");
+   TEST_ASSERT(!tips->OnTip(p_trace), "the free-surface trace is not a tip");
+   TEST_ASSERT(tips->OnTip(p_corner), "the corner of a side tip and the trace is locked");
+   TEST_ASSERT(!tips->OnTip(p_in) && !tips->OnTip(p_near), "interior points (1 m from a tip) are free");
+
+   auto base = [](const real_t *, FaultPointState &st) {
+      st.mu_s = 0.548; st.mu_d = 0.373; st.Dc = 0.3; st.cohesion = 7.0e6;
+   };
+   const auto wrapped = WrapTipLock(base, tips);
+   FaultPointState s1, s2;
+   wrapped(p_side, s1);
+   wrapped(p_in, s2);
+   TEST_ASSERT(s1.mu_s == TipLockConfig::kLockedMuS && s1.cohesion == TipLockConfig::kLockedCohesion
+               && s1.mu_d == 0.373 && s1.Dc == 0.3, "WrapTipLock locks a tip point (mu_s, cohesion)");
+   FaultPointState s3;
+   base(p_in, s3);
+   TEST_ASSERT(std::memcmp(&s2, &s3, sizeof(FaultPointState)) == 0,
+               "WrapTipLock leaves an interior point bit for bit");
+
+   // without the exclusion the trace is a tip too
+   const TipEdges all(*m, 3, std::set<int>{});
+   TEST_ASSERT(all.NumEdges() == 8 + 4 && all.OnTip(p_trace), "no exclusion: the trace is a tip");
 }
 
 // ---------------------------------------------------------------- operator
@@ -486,6 +543,7 @@ int main(int argc, char *argv[])
    TestU1();
    TestI1();
    TestU1Mesh();
+   TestU5();
    TestU2();
    TestU3();
    TestU4();

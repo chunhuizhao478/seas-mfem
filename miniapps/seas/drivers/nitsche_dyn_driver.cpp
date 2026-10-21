@@ -115,6 +115,8 @@
 //   O3 [slip_weakening_distance]  slip weakening from the slip path (TPV12,
 //                               TPV15, TPV22)
 //   O4 [forced_rupture]         forced-rupture nucleation (TPV22)
+//   O5 [fault_tip_lock]         fault DOFs on the fault border locked, except
+//                               on excluded (free-surface) edges (TPV22)
 
 #include "mfem.hpp"
 #include "../domain/nitsche_wave_operator.hpp"
@@ -131,6 +133,7 @@
 #include "../dynamic/nitsche_opt_tension.hpp"            // complex geometries O2
 #include "../dynamic/nitsche_opt_slip_path.hpp"          // complex geometries O3
 #include "../dynamic/nitsche_opt_forced_rupture.hpp"     // complex geometries O4
+#include "../dynamic/nitsche_opt_tip_lock.hpp"           // complex geometries O5
 #include "../dynamic/lts_partition.hpp"   // METIS with element weights (plan item 6)
 #include "../solver/nitsche_lts_setup.hpp"   // --lts-report (plan item 7, P0)
 #include "../solver/nitsche_lts_run.hpp"     // --lts rate2 (plan item 7, P3/P4)
@@ -839,6 +842,12 @@ int main(int argc, char *argv[])
       forced_cfg.reset(new nitsche_opt::ForcedRuptureConfig(nitsche_opt::ParseForcedRupture(
          root.at(nitsche_opt::ForcedRuptureConfig::kTable))));
    }
+   // complex geometries O5 (header): [fault_tip_lock]
+   nitsche_opt::TipLockConfig tip_cfg;
+   if (root.contains(nitsche_opt::TipLockConfig::kTable))
+   {
+      tip_cfg = nitsche_opt::ParseTipLock(root.at(nitsche_opt::TipLockConfig::kTable));
+   }
    MFEM_VERIFY(p >= 1 && p <= 4, "order p must be in 1..4 (P3 constants); got " << p);
    MFEM_VERIFY(cfl > 0.0 && cfl <= 1.0, "[numerics] cfl (fraction of C(p)) must be in (0,1]");
    MFEM_VERIFY(!lts_on || cfl <= 0.6, "[numerics] cfl = " << cfl << ": local time stepping "
@@ -933,6 +942,28 @@ int main(int argc, char *argv[])
                    << " stress), " << depth_ps->depth.size() << " nodes over depth ["
                    << depth_ps->depth.front() << ", " << depth_ps->depth.back() << "] m, "
                    << depth_ps->jump.size() << " jump(s); no fault face crosses a jump\n";
+      }
+   }
+   std::shared_ptr<const nitsche_opt::TipEdges> tip_edges;
+   if (tip_cfg.enabled)
+   {
+      // complex geometries O5: the tip edges of the serial mesh (header)
+      MFEM_VERIFY(cfg.boundary.fault_attr > 0, "[boundary] fault_attr is required");
+      std::set<int> excl;
+      if (tip_cfg.has_exclude) { excl.insert(tip_cfg.exclude_attrs.begin(), tip_cfg.exclude_attrs.end()); }
+      else { excl.insert(cfg.boundary.natural_attrs.begin(), cfg.boundary.natural_attrs.end()); }
+      MFEM_VERIFY(!excl.count(cfg.boundary.fault_attr), "[fault_tip_lock] exclude_attrs "
+                  "contains the fault attribute " << cfg.boundary.fault_attr);
+      tip_edges = std::make_shared<const nitsche_opt::TipEdges>(*smesh, cfg.boundary.fault_attr, excl);
+      MFEM_VERIFY(tip_edges->NumEdges() > 0, "[fault_tip_lock]: the fault (attr "
+                  << cfg.boundary.fault_attr << ", " << tip_edges->NumFaultFaces()
+                  << " faces) has no tip edge outside the excluded attributes");
+      if (g_rank == 0)
+      {
+         std::cout << "  fault tips: " << tip_edges->NumEdges() << " tip edges on "
+                   << tip_edges->NumFaultFaces() << " fault faces; edges on attributes";
+         for (int a : excl) { std::cout << " " << a; }
+         std::cout << " stay free\n";
       }
    }
    if (lts_report)
@@ -1350,6 +1381,13 @@ int main(int argc, char *argv[])
                "\"slip_weakening\" (for rate and state psi is the state, not a slip path)");
    MFEM_VERIFY(!forced_cfg || law.kind == LawKind::SlipWeakening, "[forced_rupture] needs "
                "[meta] law = \"slip_weakening\"");
+   if (tip_edges)
+   {
+      // complex geometries O5: lock the DOFs on the tip edges (header)
+      MFEM_VERIFY(law.kind == LawKind::SlipWeakening, "[fault_tip_lock] locks by mu_s and "
+                  "cohesion: it needs [meta] law = \"slip_weakening\"");
+      fs.parameters = nitsche_opt::WrapTipLock(fs.parameters, tip_edges);
+   }
 
    // ------------------------------------------------------------ operator
    DomainConfig dcfg;
@@ -1358,6 +1396,21 @@ int main(int argc, char *argv[])
    MFEM_VERIFY(op.Orientation().GetReport().junction_edges == 0,
                "[fault_geometry] junction_policy = \"refuse\": the fault has "
                << op.Orientation().GetReport().junction_edges << " junction edges");
+   if (tip_edges)
+   {
+      long long nl[2] = {0, op.NumOwnedFaultDOFs()};
+      for (int j = 0; j < op.NumOwnedFaultDOFs(); j++)
+      {
+         if (tip_edges->OnTip(&op.FaultPositions()(3 * j))) { nl[0]++; }
+      }
+      MPI_Allreduce(MPI_IN_PLACE, nl, 2, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+      if (g_rank == 0)
+      {
+         std::cout << "  fault tips: " << nl[0] << " of " << nl[1] << " fault DOFs locked (mu_s "
+                   << nitsche_opt::TipLockConfig::kLockedMuS << ", cohesion "
+                   << nitsche_opt::TipLockConfig::kLockedCohesion << " Pa)\n";
+      }
+   }
    const real_t dt_cfl = ComputeMaxDt(op.Sample(), pmesh, p, cfl * kCeig[p]);
    const real_t dt_gts = std::min(dt_cfl, cfg.time.dt_max);
    // the step of the fault (and of the outputs): the global step, or with LTS
@@ -1461,20 +1514,27 @@ int main(int argc, char *argv[])
       if (forced_cfg)
       {
          Vector T(no);
-         long long nf = 0;   // forced DOFs
+         long long nf[2] = {0, 0};   // forced DOFs, forced tip-locked DOFs
          for (int j = 0; j < no; j++)
          {
             const real_t *x = &op.FaultPositions()(3 * j);
             T(j) = forced_cfg->TimeAt(x);
-            if (std::isfinite(T(j))) { nf++; }
+            if (std::isfinite(T(j)))
+            {
+               nf[0]++;
+               if (tip_edges && tip_edges->OnTip(x)) { nf[1]++; }
+            }
          }
-         MPI_Allreduce(MPI_IN_PLACE, &nf, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
-         MFEM_VERIFY(nf > 0, "[forced_rupture]: no fault DOF lies within r_crit_m = "
+         MPI_Allreduce(MPI_IN_PLACE, nf, 2, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+         MFEM_VERIFY(nf[0] > 0, "[forced_rupture]: no fault DOF lies within r_crit_m = "
                      << forced_cfg->r_crit << " m of the hypocentre");
+         MFEM_VERIFY(nf[1] == 0, "[forced_rupture]: " << nf[1] << " fault DOFs locked by "
+                     "[fault_tip_lock] lie within r_crit_m of the hypocentre; the forcing "
+                     "would weaken them");
          op.SetForcedRupture(T, forced_cfg->t0);
          if (g_rank == 0)
          {
-            std::cout << "  forced rupture: " << nf << " fault DOFs within r_crit "
+            std::cout << "  forced rupture: " << nf[0] << " fault DOFs within r_crit "
                       << forced_cfg->r_crit << " m of (" << forced_cfg->hyp[0] << ", "
                       << forced_cfg->hyp[1] << ", " << forced_cfg->hyp[2] << "), v "
                       << forced_cfg->v_r << " m/s, smoothing " << forced_cfg->smoothing
