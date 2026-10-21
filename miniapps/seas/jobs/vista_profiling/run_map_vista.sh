@@ -8,6 +8,7 @@
 #   *.map            the MAP profile (opens in the MAP GUI)
 #   map_functions.csv  every function's time, from MAP's main-thread view (--export-functions)
 #   profile.json     the whole profile as JSON (map --export), for the breakdown chart
+#   map.log          MAP's own log (--log)
 #   run/, driver.log the run's own outputs and log; its stations are compared with GOLD's first
 #                    TFINAL s (meant to be bitwise equal: the profiler only samples)
 # If MAP fails (exit code, or no .map file), the same run is repeated with perf record on four ranks
@@ -70,8 +71,12 @@ N=$SLURM_NTASKS
 T0=$(date +%s)
 map_rc=1
 if command -v map >/dev/null; then
-   echo "=== MAP: map --profile --export-functions=$OUT/map_functions.csv mpirun -np $N --map-by core --bind-to core ./seas_nitsche_dyn_driver_g $ARGS --output-dir $OUT/run"
-   map --profile --export-functions=$OUT/map_functions.csv \
+   # --mpi=openmpi: TACC's default Forge configuration (~/.forge_24.1.1/system.config, made at the first
+   # MAP run) turns MPI auto-detection off and sets the type "OpenMPI (Compatibility)", which has no express
+   # launch (map --list-mpis); this job uses express launch.  The likely cause of job 1085936's MAP exit,
+   # 8 s after "Waiting for licence"; MAP's own log (--log) says why if it exits again.
+   echo "=== MAP: map --profile --mpi=openmpi --log=$OUT/map.log --export-functions=$OUT/map_functions.csv mpirun -np $N --map-by core --bind-to core ./seas_nitsche_dyn_driver_g $ARGS --output-dir $OUT/run"
+   map --profile --mpi=openmpi --log=$OUT/map.log --export-functions=$OUT/map_functions.csv \
        mpirun -np $N --map-by core --bind-to core ./seas_nitsche_dyn_driver_g $ARGS \
        --output-dir $OUT/run > $OUT/driver.log 2>&1
    map_rc=$?
@@ -93,7 +98,10 @@ if [ -f $OUT/map_functions.csv ]; then
    head -60 $OUT/map_functions.csv
 fi
 if [ "$map_rc" != 0 ]; then
-   echo "=== MAP did not produce a profile (exit $map_rc): perf fallback on ranks 0 1 $((N / 2)) $((N - 1))"
+   echo "=== MAP did not produce a profile (exit $map_rc); the end of map.log and of MAP's console (map_driver.log):"
+   tail -20 $OUT/map.log 2>/dev/null | cut -c1-300
+   mv $OUT/driver.log $OUT/map_driver.log; tail -20 $OUT/map_driver.log | cut -c1-300
+   echo "=== perf fallback on ranks 0 1 $((N / 2)) $((N - 1))"
    rm -rf $OUT/run; mkdir -p $OUT/run $OUT/perf
    export PERF_DIR=$OUT/perf PERF_RANKS="0 1 $((N / 2)) $((N - 1))"
    s=$(date +%s)
