@@ -20,7 +20,7 @@
 #      seas_test_nitsche_lts, the rheology unit tests and the operator tests O1-O7
 #   2. tests: rheology U1-U11 (make test-rheology: 24, 13, 36 and 25 checks in the cloud), the six
 #      Nitsche gate test sets as build_verify_vista.sbatch runs them, the LTS suite (about 13 min;
-#      the fault closure it calls changed in R1) and O1-O7 (make test-nitsche-rheology: 34 checks per
+#      the fault closure it calls changed in R1) and O1-O7 (make test-nitsche-rheology: 36 checks per
 #      rank count, 1, 2 and 4 ranks; the operator changed in R3)
 #   3. meshes: TPV26/27 1000 m and 200 m from tpv26/mesh/tpv2627_half.geo with TACC gmsh, sha256 to
 #      miniapps/seas/MESH_SHA256_TPV2627_VISTA (run_nitsche_vista.sh accepts it); the TPV205 and TPV104
@@ -28,10 +28,10 @@
 #      jobs/vista_profiling/meshes.sha256, as build_lts_vista.sbatch does
 #   4. B1 on Vista: TPV26 1000 m p=1, 0 -> 2.5 s, 8 ranks.  Pass: no abort, and fault nodes farther than
 #      r_crit = 4 km from the hypocenter rupture (scripts/make_cplot.py), so the rupture leaves the forced
-#      zone.  Cloud reference (its own 1000 m mesh, 3 ranks, 0 -> 3.0 s): 2017 steps, dt 1.4877e-03 s, no
-#      abort; all 59 nodes inside r_crit ruptured, and outside it 1 node by 1.5 s (the plan's B1 time, too
-#      close to call), 88 by 2.5 s and 170 by 3.0 s, the farthest 9.1 km away.  The off-fault station
-#      files (tpv26_offfault_*.dat) are listed.
+#      zone.  Cloud reference (its own built-in-kernel 1000 m mesh, 3 ranks, 0 -> 2.5 s): 1772 steps, dt
+#      1.4112e-03 s, no abort; all 59 nodes inside r_crit ruptured, and 90 outside it by 2.5 s, the
+#      farthest 7.1 km away (on the first, OpenCASCADE mesh: 1 node by 1.5 s, the plan's B1 time, too
+#      close to call; 88-89 by 2.5 s).  The off-fault station files (tpv26_offfault_*.dat) are listed.
 #   4b. R3 output check: TPV27 deck as committed, 1000 m p=1, 0 -> 1.0 s, 8 ranks.  Pass: no abort and
 #      <output_dir>/rheology.vtkhdf holds 3 snapshots (output_dt_s = 0.5: t = 0, 0.5, 1.0 s).  The
 #      writer needs parallel HDF5, which the cloud does not have, so this is its first run.

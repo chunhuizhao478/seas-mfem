@@ -38,4 +38,8 @@ Cost at most: build 0.66 SU, B0 0.66 + 0.66 + 2.64 + 2.64 SU, B2 15.8 SU (estima
 
 ## Runs
 
-None yet.
+- Build 1085864 (babe089, 2026-10-21, node i617-051, 7 min 46 s): the build and every test passed
+  (rheology U1-U11 24/13/36/25, the six Nitsche gate sets, LTS 24, O1-O7 108 checks), then the job stopped
+  at the mesh step: the TACC gmsh module (4.15.0-git) has no OpenCASCADE, which the first
+  `tpv2627_half.geo` used, so gmsh wrote an empty mesh.  The .geo now uses gmsh's built-in kernel.  The
+  four B0 jobs 1085865-1085868 (afterok on it) never started.

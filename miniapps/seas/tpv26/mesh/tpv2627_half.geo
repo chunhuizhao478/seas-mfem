@@ -26,8 +26,12 @@
 // Physical groups (TPV26/27 decks): surface 101 free surface (Z = 0), 103 fault, 105 absorbing,
 // 99 the rest of the Y = 0 plane (interior after mirroring; mirror_mesh.py drops it);
 // volume 1.
-
-SetFactory("OpenCASCADE");
+//
+// Built with gmsh's built-in geometry kernel only (no OpenCASCADE: the Vista gmsh module has
+// none; Vista build job 1085864 got an empty mesh from the first, OpenCASCADE version, as the
+// TPV6/TPV31 .geo files did in d910b2f).  The Y = 0 face of the half-box is split into the fault
+// and the rest of the plane, which share the fault's two sides and bottom edge; the fault's top
+// edge lies in the free surface.
 
 DefineConstant[ lc_fault = 200 ];        // element size on the fault (m)
 DefineConstant[ lc = 5e3 ];              // largest element size (m)
@@ -36,28 +40,58 @@ DefineConstant[ box_factor = 2 ];        // element size in the box, in units of
 Fault_length = 40e3;
 Fault_width  = 20e3;
 Xmax = 65e3;  Ymax = 60e3;  Zmin = -60e3;
-
-Box(1) = {-Xmax, 0, Zmin, 2 * Xmax, Ymax, -Zmin};
-
-// the fault, made in the XY plane and turned into the Y = 0 plane: (x, y, z) -> (x, -z, y)
-Rectangle(101) = {-0.5 * Fault_length, -Fault_width, 0, Fault_length, Fault_width};
-Rotate {{1, 0, 0}, {0, 0, 0}, Pi / 2} { Surface{101}; }
-BooleanFragments{ Volume{1}; Delete; }{ Surface{101}; Delete; }
-
+xf = 0.5 * Fault_length;
 e = 1;
-fault() = Surface In BoundingBox{-0.5 * Fault_length - e, -e, -Fault_width - e,
-                                  0.5 * Fault_length + e, e, e};
-plane() = Surface In BoundingBox{-Xmax - e, -e, Zmin - e, Xmax + e, e, e};
-plane() -= fault();
-top()   = Surface In BoundingBox{-Xmax - e, -e, -e, Xmax + e, Ymax + e, e};
-all()   = Abs(Boundary{ Volume{:}; });
-absorb() = all();
-absorb() -= fault();
-absorb() -= plane();
-absorb() -= top();
+
+// The Y = 0 face: its corners and the fault corners (the fault's top edge is in Z = 0).
+Point(1) = {-Xmax, 0, 0, lc};
+Point(2) = {-xf, 0, 0, lc};
+Point(3) = {xf, 0, 0, lc};
+Point(4) = {Xmax, 0, 0, lc};
+Point(5) = {Xmax, 0, Zmin, lc};
+Point(6) = {-Xmax, 0, Zmin, lc};
+Point(7) = {-xf, 0, -Fault_width, lc};
+Point(8) = {xf, 0, -Fault_width, lc};
+Line(1) = {1, 2};
+Line(2) = {2, 3};
+Line(3) = {3, 4};
+Line(4) = {4, 5};
+Line(5) = {5, 6};
+Line(6) = {6, 1};
+Line(7) = {2, 7};
+Line(8) = {7, 8};
+Line(9) = {8, 3};
+Curve Loop(1) = {1, 7, 8, 9, 3, 4, 5, 6};
+Curve Loop(2) = {2, -9, -8, -7};
+Plane Surface(1) = {1};       // the Y = 0 plane outside the fault (99)
+Plane Surface(2) = {2};       // the fault (103)
+
+// The far side Y = Ymax and the faces that join it to the Y = 0 face.
+Point(11) = {-Xmax, Ymax, 0, lc};
+Point(14) = {Xmax, Ymax, 0, lc};
+Point(15) = {Xmax, Ymax, Zmin, lc};
+Point(16) = {-Xmax, Ymax, Zmin, lc};
+Line(11) = {1, 11};
+Line(14) = {4, 14};
+Line(15) = {5, 15};
+Line(16) = {6, 16};
+Line(21) = {11, 14};
+Line(22) = {14, 15};
+Line(23) = {15, 16};
+Line(24) = {16, 11};
+Curve Loop(11) = {21, 22, 23, 24};          // the far side Y = Ymax
+Curve Loop(12) = {1, 2, 3, 14, -21, -11};   // the free surface Z = 0
+Curve Loop(13) = {-5, 15, 23, -16};         // the bottom Z = Zmin
+Curve Loop(14) = {4, 15, -22, -14};         // the side X = Xmax
+Curve Loop(15) = {6, 11, -24, -16};         // the side X = -Xmax
+For k In {11:15}
+   Plane Surface(k) = {k};
+EndFor
+Surface Loop(1) = {1, 2, 11, 12, 13, 14, 15};
+Volume(1) = {1};
 
 Field[1] = Distance;
-Field[1].SurfacesList = {fault()};
+Field[1].SurfacesList = {2};
 Field[1].Sampling = 300;
 Field[2] = MathEval;
 Field[2].F = Sprintf("0.05*F1 + (F1/2.5e3)^2 + %g", lc_fault);
@@ -88,9 +122,9 @@ Mesh.MeshSizeFromPoints = 0;
 Mesh.MeshSizeExtendFromBoundary = 0;
 Mesh.MeshSizeFromCurvature = 0;
 
-Physical Surface(101) = {top()};
-Physical Surface(103) = {fault()};
-Physical Surface(105) = {absorb()};
-Physical Surface(99) = {plane()};
-Physical Volume(1) = {Volume{:}};
+Physical Surface(101) = {12};
+Physical Surface(103) = {2};
+Physical Surface(105) = {11, 13, 14, 15};
+Physical Surface(99) = {1};
+Physical Volume(1) = {1};
 Mesh.MshFileVersion = 2.2;
