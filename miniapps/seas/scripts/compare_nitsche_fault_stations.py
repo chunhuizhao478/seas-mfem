@@ -21,6 +21,11 @@ Sources (each LABEL=DIR, repeatable; the order given is kept):
                             station files are in its results/ subfolder.
 A station's file in DIR is the one whose stem ends in "_station_<name>" or
 in "_<key>", key = x2_<strike km>_x3_<depth km> from the station file.
+With --by-name (complex geometries, where the position is not a key) it is
+also the file whose stem ends in [<tag>_]x2_<a>_x3_<b> with a, b equal as
+numbers to those in the station name (x3 = down-dip km for a dipping
+fault) and, when the name carries a fault tag (main_, branch_, fault1_ ...),
+the same tag right before x2.
 
 Measures per station (t <= t_end):
   arrival   first time |V| > 1 mm/s (SCEC definition), |V| = |(V_h, V_v)|
@@ -35,6 +40,15 @@ Measures per station (t <= t_end):
             after a centred moving average of --noise-window s (0.1) in
             samples of the source's own median dt, w samples dropped at each
             end; |sigma_n| for the normal stress
+
+--signed (complex-geometries plan rev 2, Section 5.8): keep signs.  Our
+n-stress becomes -sigma_n (SCEC: extension positive) and the references'
+n-stress is not made absolute; per station the signed final h-slip and
+v-slip and the t = 0 h-shear, v-shear and n-stress are printed with the
+reference's, and pass item 0 checks that every final slip component above
+--slip-min and every t = 0 stress above 1 MPa has the reference's sign.
+The noise window then starts at the arrival of |V| instead of |V_h|
+(dip-slip faults).  Without the flag the output is unchanged.
 
 Pass test (plan rev 1.3, section 8; accepted by Chunhui Zhao 2026-10-16),
 against the first --ref, for the LAST --run:
@@ -83,14 +97,33 @@ def read_stations(path):
     return out
 
 
-def find_file(d, st):
+_X2X3 = re.compile(r"(?:^|_)(?:([A-Za-z]+[0-9]*)_)?x2_(-?[0-9.]+)_x3_(-?[0-9.]+)$")
+
+
+def _parse_x2x3(stem):
+    """-> (tag or None, x2, x3) for a stem ending in [tag_]x2_<a>_x3_<b>, else None."""
+    m = _X2X3.search(stem)
+    if not m:
+        return None
+    try:
+        return m.group(1), float(m.group(2)), float(m.group(3))
+    except ValueError:
+        return None
+
+
+def find_file(d, st, by_name=False):
     hits = []
+    want = _parse_x2x3(st["name"]) if by_name else None
     for f in sorted(os.listdir(d)):
         stem, ext = os.path.splitext(f)
         if ext not in (".dat", ".txt"):
             continue
         if stem.endswith("_station_" + st["name"]) or stem.endswith("_" + st["key"]):
             hits.append(os.path.join(d, f))
+        elif want is not None and "_station_" not in stem:
+            got = _parse_x2x3(stem)
+            if got and got[1] == want[1] and got[2] == want[2] and (want[0] is None or got[0] == want[0]):
+                hits.append(os.path.join(d, f))
     if len(hits) > 1:
         sys.exit(f"{d}: more than one file for station {st['name']}: {hits}")
     return hits[0] if hits else None
@@ -113,8 +146,9 @@ def _numeric_rows(path, ncol_max=9):
     return np.array([r[:n] for r in rows])
 
 
-def load(path, fmt):
-    """-> dict KEYS -> array (m, m/s, MPa); missing columns are absent."""
+def load(path, fmt, signed=False):
+    """-> dict KEYS -> array (m, m/s, MPa); missing columns are absent.
+    signed: n-stress keeps the SCEC sign (ours, compression positive, is negated)."""
     A = _numeric_rows(path)
     nc = A.shape[1]
     d = {}
@@ -135,19 +169,23 @@ def load(path, fmt):
     else:
         sys.exit(f"unknown format {fmt}")
     if "n-stress" in d:
-        d["n-stress"] = np.abs(d["n-stress"])      # DRDG3D TPV102 writes -120
+        if not signed:
+            d["n-stress"] = np.abs(d["n-stress"])      # DRDG3D TPV102 writes -120
+        elif fmt == "nitsche":
+            d["n-stress"] = -d["n-stress"]             # sigma_n (compression +) -> SCEC
     d["_ncol"] = nc
     return d
 
 
 # ------------------------------------------------------------------ measures
-def noise_rms(d, k, window, after):
+def noise_rms(d, k, window, after, signed=False):
     """Noise of column k of d (already cut at t_end): the measure of the
     TPV102 and damping-test reports (rms() in their build scripts).  The
     arrival uses |V_h| where those scripts used V_h > 1 mm/s; the two agree
-    for every benchmark here, whose ruptures slip in +h."""
+    for every benchmark here, whose ruptures slip in +h.  signed: |V|."""
     t = d["t"]
-    i = np.nonzero(np.abs(d["h-slip-rate"]) > 1e-3)[0]
+    v = np.hypot(d["h-slip-rate"], d["v-slip-rate"]) if signed else np.abs(d["h-slip-rate"])
+    i = np.nonzero(v > 1e-3)[0]
     if i.size == 0:
         return float("nan")
     m = t >= t[i[0]] + after
@@ -161,7 +199,7 @@ def noise_rms(d, k, window, after):
     return float(np.sqrt(np.mean(r * r)))
 
 
-def measures(d, t_end, window, after):
+def measures(d, t_end, window, after, signed=False):
     t = d["t"]
     V = np.hypot(d["h-slip-rate"], d["v-slip-rate"])
     m = t <= t_end + 1e-12
@@ -174,11 +212,26 @@ def measures(d, t_end, window, after):
     }
     if "state" in d:
         out["state"] = float(np.interp(t_end, t, d["state"]))
+    if signed:
+        out["h_slip"] = float(np.interp(t_end, t, d["h-slip"]))
+        out["v_slip"] = float(np.interp(t_end, t, d["v-slip"]))
+        for k, lab in (("h-shear-stress", "th0"), ("v-shear-stress", "tv0"), ("n-stress", "sn0")):
+            if k in d:
+                out[lab] = float(d[k][0])
     dc = {k: v[m] for k, v in d.items() if isinstance(v, np.ndarray)}
     for k, lab in (("n-stress", "noise_sn"), ("h-shear-stress", "noise_th"), ("v-shear-stress", "noise_tv")):
         if k in d:
-            out[lab] = noise_rms(dc, k, window, after)
+            out[lab] = noise_rms(dc, k, window, after, signed)
     return out
+
+
+def sign_rows(mo, mr, slip_min):
+    """-> [(quantity, ours, ref, same sign)] for the signed checks (--signed)."""
+    rows = []
+    for k, lim in (("h_slip", slip_min), ("v_slip", slip_min), ("th0", 1.0), ("tv0", 1.0), ("sn0", 1.0)):
+        if k in mo and k in mr and abs(mr[k]) > lim:
+            rows.append((k, mo[k], mr[k], np.sign(mo[k]) == np.sign(mr[k])))
+    return rows
 
 
 def misfit(mo, mr):
@@ -223,6 +276,10 @@ def main():
     ap.add_argument("--peak-min-stations", type=int, default=None)
     ap.add_argument("--json", default=None)
     ap.add_argument("--list-columns", action="store_true")
+    ap.add_argument("--by-name", action="store_true",
+                    help="also match files by [tag_]x2_<a>_x3_<b> in the station name")
+    ap.add_argument("--signed", action="store_true",
+                    help="keep signs; print and check signed slip and t = 0 stresses (item 0)")
     a = ap.parse_args()
 
     stations = read_stations(a.stations)
@@ -234,10 +291,10 @@ def main():
     data = {}
     for kind, lab, d, fmt in srcs:
         for st in stations:
-            f = find_file(d, st)
+            f = find_file(d, st, a.by_name)
             if f is None:
                 continue
-            data[(lab, st["name"])] = load(f, fmt)
+            data[(lab, st["name"])] = load(f, fmt, a.signed)
             if a.list_columns:
                 dd = data[(lab, st["name"])]
                 print(f"{lab:14s} {st['name']:16s} {fmt:8s} {dd['_ncol']} cols "
@@ -261,7 +318,7 @@ def main():
             t_end = min(ends)
     M = {}
     for (lab, name), d in data.items():
-        M[(lab, name)] = measures(d, t_end, a.noise_window, a.noise_after)
+        M[(lab, name)] = measures(d, t_end, a.noise_window, a.noise_after, a.signed)
 
     print(f"# stations {a.stations}; t_end {t_end} s; noise: {a.noise_window} s centred moving average,"
           f" from arrival + {a.noise_after} s")
@@ -299,6 +356,20 @@ def main():
         _write(a.json, summary)
         return
     r0 = refs[0]
+    if a.signed:
+        print(f"\n# signed checks vs {r0}: final slip (m) where |ref| > {a.slip_min} m, t = 0 stresses"
+              f" (MPa, SCEC signs) where |ref| > 1 MPa")
+        bad = []
+        for lab in runs:
+            for st in stations:
+                n = st["name"]
+                if (lab, n) not in M or (r0, n) not in M:
+                    continue
+                for q, vo, vr, ok in sign_rows(M[(lab, n)], M[(r0, n)], a.slip_min):
+                    print(f"{n:22s} {lab:14s} {q:7s} {vo:+12.5f} {vr:+12.5f}  {'same sign' if ok else 'SIGN DIFFERS'}")
+                    if not ok:
+                        bad.append(f"{lab}|{n}|{q}")
+        summary["signed_mismatch"] = bad
     # reference spread
     for r in refs[1:]:
         fs = [misfit(M[(r, s["name"])], M[(r0, s["name"])]) for s in stations
@@ -341,6 +412,9 @@ def main():
                      for k in ("arrival", "slip", "peak"))
         print(f"\n# pass test for run {last} against {r0}"
               + (f" (stations missing: {', '.join(missing)})" if missing else ""))
+        if a.signed:
+            p0 = not [b for b in summary["signed_mismatch"] if b.startswith(last + "|")]
+            print(f"  0 signs of final slip and t = 0 stresses agree: {'PASS' if p0 else 'FAIL'}")
         print(f"  1 arrival within {a.arrival_tol} s at every station: {'PASS' if p1 else 'FAIL'}")
         print(f"  2 slip within {100 * a.slip_tol:.0f}% where ref slip > {a.slip_min} m: {'PASS' if p2 else 'FAIL'}")
         print(f"  3 peak within {100 * a.peak_tol:.0f}% at {npk} of {len(fs)} stations"
@@ -349,6 +423,8 @@ def main():
               + ("n/a (one run)" if p4 is None else ("PASS" if p4 else "FAIL")))
         summary["pass"] = {"run": last, "ref": r0, "1": p1, "2": p2, "3": p3, "3_count": npk, "4": p4,
                            "missing": missing}
+        if a.signed:
+            summary["pass"]["0"] = p0
     _write(a.json, summary)
 
 
