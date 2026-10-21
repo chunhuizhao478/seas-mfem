@@ -27,7 +27,13 @@
 //   2. Block tree: a pair of clusters (t, s) is admissible when
 //      max(diam t, diam s) <= eta·dist(t, s); other pairs are split, and a
 //      pair with a leaf is a dense block.  Block (t, s) holds the ncomp·|t|
-//      rows of t and the 2·|s| columns of s.
+//      rows of t and the 2·|s| columns of s.  An admissible pair whose
+//      smaller side (rows or columns) exceeds SEAS_QD_HMAT_SVD_SIDE_MAX is
+//      split too, into its four sub-pairs: dgesdd's 32-bit LAPACK needs
+//      about 4·min(m, n)² workspace entries, and above 2³¹ its own workspace
+//      query overflows and returns a far too small size without an error
+//      (p = 2, 1000 m: 41,904 × 27,936 blocks, Vista job 1084328).  No block
+//      of the p = 1 production G reaches the cap (largest 20,952 × 13,968).
 //   3. Compression: each block is gathered on one worker rank; an admissible
 //      block is cut by an exact SVD (LAPACK dgesdd) to the smallest rank k
 //      with ||A - A_k||_F <= eps·||A||_F, and kept dense when k·(m + n) >=
@@ -69,6 +75,13 @@
 #include <string>
 #include <type_traits>
 #include <vector>
+
+// Largest smaller side of an admissible block cut by one SVD (see 2. above):
+// 4·16384² = 2³⁰, half of what 32-bit LAPACK can address.  A test build may
+// lower it to exercise the split on a small mesh.
+#ifndef SEAS_QD_HMAT_SVD_SIDE_MAX
+#define SEAS_QD_HMAT_SVD_SIDE_MAX 16384
+#endif
 
 #ifdef MFEM_USE_LAPACK
 extern "C" void dgesdd_(char *jobz, int *m, int *n, double *a, int *lda,
@@ -807,12 +820,19 @@ private:
    {
       const Cluster &ct = clusters_[t], &cs = clusters_[s];
       const double d = Dist(ct, cs);
-      if (d > 0.0 && std::max(Diam(ct), Diam(cs)) <= eta_ * d)
+      const bool leaf = ct.kid[0] < 0 || cs.kid[0] < 0;
+      // A far pair too big for one SVD goes on to its sub-pairs, which are
+      // as far apart and smaller, so they are admissible in turn.
+      const bool svd_fits = std::min(ncomp_ * (ct.hi - ct.lo),
+                                     2 * (cs.hi - cs.lo)) <=
+                            SEAS_QD_HMAT_SVD_SIDE_MAX;
+      if (d > 0.0 && std::max(Diam(ct), Diam(cs)) <= eta_ * d &&
+          (svd_fits || leaf))
       {
          blocks_.push_back({t, s, true, -1});
          return;
       }
-      if (ct.kid[0] < 0 || cs.kid[0] < 0)
+      if (leaf)
       {
          blocks_.push_back({t, s, false, -1});
          return;
@@ -884,8 +904,14 @@ private:
             if (b >= 0) { PackRows(b, rows, send); }
             scount[r] = static_cast<int>(send.size()) - sdispl[r];
          }
+         MFEM_VERIFY(send.size() <= size_t(INT_MAX), "QD H-matrix: "
+                     << send.size() << " values to send in one round, more "
+                     "than MPI's int counts hold");
          if (mine >= 0)
          {
+            MFEM_VERIFY(Rows(mine) * Cols(mine) <= INT_MAX, "QD H-matrix: a "
+                        << Rows(mine) << " x " << Cols(mine) << " block has "
+                        "more values than MPI's int counts hold");
             const Cluster &t = clusters_[blocks_[mine].t];
             const long long n = Cols(mine);
             for (long long p = t.lo; p < t.hi; p++)
@@ -965,6 +991,9 @@ private:
             }
             scount[r] = static_cast<int>(send.size()) - sdispl[r];
          }
+         MFEM_VERIFY(send.size() <= size_t(INT_MAX), "QD H-matrix: block "
+                     << mine << " sends " << send.size() << " values, more "
+                     "than MPI's int counts hold");
          if (keep) { kept_blocks_.push_back({mine, std::move(full)}); }
          full.clear();
          full.shrink_to_fit();
@@ -1076,6 +1105,17 @@ private:
    int Truncate(int b, std::vector<real_t> &a) const
    {
 #ifdef MFEM_USE_LAPACK
+      // dgesdd (jobz = 'S') needs at most 4·mn² + 7·mn + 64·(m + n)
+      // workspace entries (above every query of reference LAPACK and
+      // OpenBLAS up to mn = 23,000).  Above 2³¹ its own query overflows and
+      // returns a too small size with info 0, so check here, in 64 bits.
+      const long long mn64 = std::min(Rows(b), Cols(b));
+      const long long need = 4 * mn64 * mn64 + 7 * mn64 +
+                             64 * (Rows(b) + Cols(b));
+      MFEM_VERIFY(need < INT_MAX, "QD H-matrix: a " << Rows(b) << " x "
+                  << Cols(b) << " block needs about " << need << " dgesdd "
+                  "workspace entries, more than 32-bit LAPACK can address; "
+                  "lower SEAS_QD_HMAT_SVD_SIDE_MAX");
       int m = static_cast<int>(Rows(b)), n = static_cast<int>(Cols(b));
       // Row-major m×n is column-major Aᵀ (n×m): Aᵀ = V Σ Uᵀ, so dgesdd's
       // "U" is V (n×mn) and its "Vᵀ" is Uᵀ (mn×m).
