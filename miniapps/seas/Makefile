@@ -3210,6 +3210,31 @@ test-nitsche-pf: seas_test_nitsche_pf
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_pf
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_pf
 
+# Station output of the Nitsche driver (speed-next O2, Chunhui Zhao
+# 2026-10-20): buffered rows, the members-only copy average against the world
+# version, the signal flag (O2-1 .. O2-4).
+TEST_STATION_OUTPUT_SRC = tests/verification/test_station_output.cpp
+TEST_STATION_OUTPUT_OBJ = $(TEST_STATION_OUTPUT_SRC:.cpp=.o)
+$(TEST_STATION_OUTPUT_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             dynamic/fault_station_file.hpp \
+                             dynamic/station_copy_average.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_station_output: $(TEST_STATION_OUTPUT_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_STATION_OUTPUT_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-station-output: seas_test_station_output
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_station_output
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_station_output
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 3 ./seas_test_station_output
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_station_output
+	rm -rf test_station_output_out
+
 # Nitsche dynamic rupture P6 (first rupture, TPV102 on the inline mesh; plan
 # N-01 fault path, C-04, N-10 fixture): T-04, T-13(a), T-15, T-20, T-21.
 # The abort modes must exit non-zero (MFEM_USE_EXCEPTIONS=NO: tested by exit

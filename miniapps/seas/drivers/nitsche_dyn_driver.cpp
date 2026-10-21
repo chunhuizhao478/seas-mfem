@@ -35,6 +35,20 @@
 // weighted average over those copies (summed on rank 0 in face-centroid
 // order); --station-copies first keeps the writer's single nearest copy.
 //
+// Station output cost (speed-next O2, Chunhui Zhao 2026-10-20; the files are
+// the same bit for bit): --station-comm sub (default) averages the copies
+// over the ranks that hold them, in their own communicator, with the order
+// of the sum computed once (dynamic/station_copy_average.hpp); world is the
+// code before O2, a collective of every rank each station step.  The
+// station and envelope rows reach the files every --station-flush-every n
+// rows (default 100; 1 = every row, as before) and at the end; SIGTERM (the
+// wall-time limit), SIGINT or SIGUSR1 makes every rank flush its files at
+// the end of its step and write every row from there on, until the job is
+// killed (a second SIGTERM or SIGINT ends it at once).  An abort inside the
+// run (MFEM_VERIFY) loses up to n - 1 rows per file; --station-flush-every
+// 1 keeps them.  Only the DOFs the stations read get their station data
+// each station step.
+//
 // Station columns (SCEC map, plan "The SCEC conventions, mapped"):
 //   slip1 = delta.dhat (v-slip), slip2 = delta.shat (h-slip),
 //   V1 = V.dhat, V2 = V.shat,
@@ -554,7 +568,8 @@ int main(int argc, char *argv[])
          std::cerr << "usage: seas_nitsche_dyn_driver --config deck.toml [--mesh m.msh]"
                       " [--order p] [--tfinal s] [--output-dir d] [--prefix name]"
                       " [--station-every n] [--dump-every n] [--log-every n]"
-                      " [--station-copies average|first] [--fast-fault 0|1]"
+                      " [--station-copies average|first] [--station-comm sub|world]"
+                      " [--station-flush-every n] [--fast-fault 0|1]"
                       " [--fused-spmv 0|1] [--dense-blocks 0|1] [--fault-weight w]"
                       " [--fast-fault-output 0|1] [--lts-report 0|1]"
                       " [--lts-report-cap n] [--lts-report-ranks a,b,...]"
@@ -589,6 +604,9 @@ int main(int argc, char *argv[])
    const int dump_every = ArgInt(argc, argv, "--dump-every", 0);
    const int log_every = ArgInt(argc, argv, "--log-every", 100);
    const std::string station_copies = ArgStr(argc, argv, "--station-copies", "average");
+   // speed-next O2 (header, "Station output cost")
+   const std::string station_comm = ArgStr(argc, argv, "--station-comm", "sub");
+   const int station_flush_every = ArgInt(argc, argv, "--station-flush-every", 100);
    // Profiling plan (Chunhui Zhao, 2026-10-17) items 3, 4, 6: precomputed fault
    // face operators, fused K u + K_eta v, fault-weighted partition.  1 = on.
    const int fast_fault = ArgInt(argc, argv, "--fast-fault", 1);
@@ -626,6 +644,10 @@ int main(int argc, char *argv[])
    MFEM_VERIFY(!lts_same || lts_on, "--lts-same-step needs --lts rate2");
    MFEM_VERIFY(station_copies == "average" || station_copies == "first",
                "--station-copies " << station_copies << ": expected average or first");
+   MFEM_VERIFY(station_comm == "sub" || station_comm == "world",
+               "--station-comm " << station_comm << ": expected sub or world");
+   MFEM_VERIFY(station_flush_every >= 1, "--station-flush-every " << station_flush_every
+               << ": expected >= 1");
    const real_t cfl = cfg.numerics.cfl;
    const real_t penalty_factor = TomlReal(t_num, "penalty_factor", 1.0);
    const bool energy_on = TomlBool(t_diag, "energy_balance", false);
@@ -1344,6 +1366,7 @@ int main(int argc, char *argv[])
    // stations from the station file the deck names (header, "Stations")
    std::unique_ptr<FaultStationWriter> stations;
    std::unique_ptr<StationCopyAverage> station_avg;
+   std::vector<int> station_dofs;   // the owned DOFs the stations read (sorted)
    std::string state_label = "log10_theta";
    if (t_st)
    {
@@ -1398,11 +1421,39 @@ int main(int argc, char *argv[])
          state_fn = [](const DOFData &d) { return d.psi; };
       }
       stations = std::make_unique<FaultStationWriter>();
-      stations->Open(out_dir, prefix, st_list, snap, state_label, state_fn);
+      stations->Open(out_dir, prefix, st_list, snap, state_label, state_fn, station_flush_every);
       if (station_copies == "average")
       {
          station_avg = std::make_unique<StationCopyAverage>(
-            StationCopyGeometry(op), op.FaultPositions(), st_list, out_dir, prefix);
+            StationCopyGeometry(op), op.FaultPositions(), st_list, out_dir, prefix,
+            station_comm == "sub", station_flush_every);
+      }
+      station_dofs = stations->Dofs();
+      if (station_avg)
+      {
+         const std::vector<int> d = station_avg->Dofs();
+         station_dofs.insert(station_dofs.end(), d.begin(), d.end());
+      }
+      std::sort(station_dofs.begin(), station_dofs.end());
+      station_dofs.erase(std::unique(station_dofs.begin(), station_dofs.end()), station_dofs.end());
+      if (station_flush_every > 1) { InstallStationSignalHandlers(); }
+      int nmem = station_avg ? station_avg->Members() : 0, nown = static_cast<int>(stations->Dofs().size());
+      int root = (station_avg && station_avg->Root()) ? g_rank : -1;
+      MPI_Allreduce(MPI_IN_PLACE, &nown, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+      MPI_Allreduce(MPI_IN_PLACE, &root, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+      MPI_Allreduce(MPI_IN_PLACE, &nmem, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+      if (g_rank == 0)
+      {
+         std::cout << "  station output: rows flushed every " << station_flush_every << " row(s)"
+                   << (station_flush_every > 1 ? " and on SIGTERM/SIGINT/SIGUSR1" : "") << "; ";
+         if (station_avg)
+         {
+            std::cout << "copy average over " << (station_comm == "sub" ? "the " : "all ") << nmem
+                      << " rank(s) " << (station_comm == "sub" ? "holding copies" : "(world)")
+                      << ", envelope files on rank " << root;
+         }
+         else { std::cout << "nearest copy only"; }
+         std::cout << "; " << nown << " station file(s)\n";
       }
       if (g_rank == 0)
       {
@@ -1432,24 +1483,25 @@ int main(int argc, char *argv[])
    std::vector<DOFData> dofdata(no);
    auto fill_dofdata = [&]() {
       const Vector &d = op.Slip(), &V = op.SlipRate(), &psi = op.State();
-      Vector Xs = op.LastShear(), sg = op.LastSigmaEff();
-      const bool have_x = Xs.Size() == 2 * no;
+      const bool have_x = op.LastShear().Size() == 2 * no;
+      Vector Xb, sgb;
       if (!have_x)
       {
          // before the first step: no bulk traction yet, the total traction
          // is the projected background (prestress + nucleation at t)
          Vector S;
          op.BackgroundTraction(op.GetTime(), S);
-         Xs.SetSize(2 * no);
-         sg.SetSize(no);
+         Xb.SetSize(2 * no);
+         sgb.SetSize(no);
          for (int j = 0; j < no; j++)
          {
             const real_t *n = &op.FaultFrames()(9 * j), *dd = &op.FaultFrames()(9 * j + 3),
                           *ss = &op.FaultFrames()(9 * j + 6);
-            ff::ToLocal(&S(3 * j), 0.0, n, dd, ss, Xs(2 * j), Xs(2 * j + 1), sg(j));
+            ff::ToLocal(&S(3 * j), 0.0, n, dd, ss, Xb(2 * j), Xb(2 * j + 1), sgb(j));
          }
       }
-      for (int j = 0; j < no; j++)
+      const Vector &Xs = have_x ? op.LastShear() : Xb, &sg = have_x ? op.LastSigmaEff() : sgb;
+      for (int j : station_dofs)
       {
          const real_t *dd = &op.FaultFrames()(9 * j + 3), *ss = &op.FaultFrames()(9 * j + 6);
          DOFData &q = dofdata[j];
@@ -1651,6 +1703,7 @@ int main(int argc, char *argv[])
    // assembles K, K_eta, the fused pattern and the fault face operators
    double step_sec = 0.0, step1_sec = 0.0, fault_sec1 = 0.0;
    long lts_next_log = log_every;   // LTS: log at the first sync point from here
+   bool station_signal_seen = false;
    for (long s = 1; s <= nsteps; s++)
    {
       real_t h = dt;
@@ -1701,6 +1754,19 @@ int main(int argc, char *argv[])
          fill_dofdata();
          if (station_avg) { station_avg->Apply(t, dofdata); }
          stations->WriteStep(t, dofdata);
+      }
+      if (stations && !station_signal_seen && StationSignal() != 0)
+      {
+         // header, "Station output cost": this rank's files, from here every row
+         station_signal_seen = true;
+         stations->SetFlushEvery(1);
+         stations->Flush();
+         if (station_avg) { station_avg->SetFlushEvery(1); station_avg->Flush(); }
+         if (g_rank == 0)
+         {
+            std::cout << "  signal " << StationSignal() << " at step " << s << " (t = " << t
+                      << " s): station files flushed; every row is flushed from here\n" << std::flush;
+         }
       }
       if (dump && s % dump_every == 0)
       {
