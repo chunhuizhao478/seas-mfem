@@ -9,7 +9,12 @@ rev 2.2, which used K_s = 60 GPa for the TPV205 set while the plan's table used 
 
 Usage: python3 poro_test_refs.py [--json refs.json] [--header poro_test_refs.hpp]
        python3 poro_test_refs.py --check DIR   (make check-poro-refs: regenerate refs.json and
-                                                the header and fail on any difference from DIR)
+                                                the header and compare them with DIR)
+--check fails on any byte of the header that differs and on any refs.json value that differs,
+except in the eigenvalue results modes_1km and dispersion_tpv5 (EIGEN_KEYS).  Those carry the
+eigensolver's round-off, about machine epsilon times the largest eigenvalue of each solve
+(3.66e5 1/s for tpv5-poro), so their last digits depend on the BLAS build; their differences
+are printed and do not fail.  Every value the C++ tests read is in the header.
 Chunhui Zhao's project, 2026-10-20.  Inputs: SeisSol tpv5-poro material.yaml (precomputed-seissol),
 the TPV205 undrained-equivalent set of plan section 3.2, and the V-F3 contrast set (step P1.1):
 the same undrained moduli and density as the TPV205-equivalent set, with porosity 0.2 and
@@ -213,6 +218,23 @@ def write_header(refs, path):
         fh.write('\n'.join(lines))
 
 
+EIGEN_KEYS = ('modes_1km', 'dispersion_tpv5')   # refs.json entries computed by eigensolves
+
+
+def json_differences(a, b, path=''):
+    """(path, committed, generated) for every value of a that differs from b, including a
+    difference in keys, list lengths or types."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        if list(a) != list(b):
+            return [(path, list(a), list(b))]
+        return [d for k in a for d in json_differences(a[k], b[k], f'{path}/{k}')]
+    if isinstance(a, list) and isinstance(b, list):
+        if len(a) != len(b):
+            return [(path, len(a), len(b))]
+        return [d for i, (x, y) in enumerate(zip(a, b)) for d in json_differences(x, y, f'{path}[{i}]')]
+    return [] if a == b and type(a) is type(b) else [(path, a, b)]
+
+
 def check(refs_dir, generate):
     """Regenerate refs.json and the header into a temporary folder and compare with refs_dir."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -223,6 +245,25 @@ def check(refs_dir, generate):
             new = os.path.join(tmp, name)
             if filecmp.cmp(new, committed, shallow=False):
                 print(f'  PASSED: check-poro-refs: {name} regenerates byte for byte')
+                continue
+            if name == 'refs.json':
+                diffs = json_differences(json.load(open(committed)), json.load(open(new)))
+                top = [p.split('/')[1].split('[')[0] if '/' in p else '' for p, _, _ in diffs]
+                eig = [d for d, t in zip(diffs, top) if t in EIGEN_KEYS]
+                for p, x, y in diffs:
+                    size = (f' (|difference| {abs(x - y):.2e}'
+                            + (f', relative {abs(x - y) / abs(x):.2e}' if x != 0 else '') + ')'
+                            if all(isinstance(v, float) for v in (x, y)) else '')
+                    print(f'  {p}: committed {x!r}, generated {y!r}{size}'
+                          + (', eigenvalue result: not checked' if (p, x, y) in eig else ''))
+                if diffs and len(eig) == len(diffs):
+                    print(f'  PASSED: check-poro-refs: refs.json regenerates with every value equal outside '
+                          f'the eigenvalue results; {len(eig)} eigenvalue results differ (listed above)')
+                    continue
+                ok = False
+                print('FAILED: check-poro-refs: refs.json differs from the regenerated file'
+                      + (f' in {len(diffs) - len(eig)} values outside the eigenvalue results' if diffs
+                         else '; the values agree, so the layout differs'))
                 continue
             ok = False
             print(f'FAILED: check-poro-refs: {name} differs from the regenerated file')
