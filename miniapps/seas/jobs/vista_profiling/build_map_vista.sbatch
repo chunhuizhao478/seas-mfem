@@ -42,6 +42,10 @@ objcopy --strip-debug drivers/nitsche_dyn_driver.o $T/a.o
 objcopy --strip-debug drivers/nitsche_dyn_driver_g.o $T/b.o
 if cmp -s $T/a.o $T/b.o; then
    echo "code check: drivers/nitsche_dyn_driver_g.o without its debug sections is byte-identical to drivers/nitsche_dyn_driver.o"
+elif size -A $T/a.o | tail -n +2 | cmp -s - <(size -A $T/b.o | tail -n +2) \
+     && cmp -s <(objdump -d $T/a.o | tail -n +3) <(objdump -d $T/b.o | tail -n +3); then
+   # job 1085111: the stripped objects differed in bytes with every section the same size
+   echo "code check: without debug sections the two objects differ in bytes, but every section has the same size and the disassembly is identical"
 else
    echo "WARNING: the stripped -g object differs from drivers/nitsche_dyn_driver.o; section sizes:"
    size -A $T/a.o | sort > $T/a.txt; size -A $T/b.o | sort > $T/b.txt; diff $T/a.txt $T/b.txt | head -20

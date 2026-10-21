@@ -11,7 +11,8 @@
 #   run/, driver.log the run's own outputs and log; its stations are compared with GOLD's first
 #                    TFINAL s (meant to be bitwise equal: the profiler only samples)
 # If MAP fails (exit code, or no .map file), the same run is repeated with perf record on four ranks
-# (perf_wrap.sh: rank 0, rank 1, the middle and the last rank) and `perf report` text per rank.
+# (perf_wrap.sh: rank 0, rank 1, the middle and the last rank) and `perf report` text per rank, and the
+# job then exits 1.
 # Runs only from a clean pushed checkout (repo CLAUDE.md guard) whose -g driver was built at the same
 # commit (BUILD_COMMIT_VISTA_G) and whose mesh sha256 is in jobs/vista_profiling/meshes.sha256.
 export LC_ALL=C LANG=C
@@ -44,9 +45,22 @@ grep -q "^$SHA  $MESH\$" jobs/vista_profiling/meshes.sha256 \
 module purge; module load TACC
 module swap nvidia gcc/14.2.0 2>/dev/null || module load gcc/14.2.0
 module load cuda/12.6 openmpi/5.0.5 hypre/2.31.0 metis/5.1.0.3 phdf5/1.14.6
+# map/24.1.1 puts Forge's own libstdc++ (/home1/apps/forge/24.1.1/lib, without GLIBCXX_3.4.32) on
+# LD_LIBRARY_PATH ahead of gcc 14's, and the gcc 14 driver then stops at startup on every rank, under MAP
+# and under perf alike (job 1085112).  gcc 14's libstdc++ goes back in front; it also serves MAP, being newer.
+GCC_LIB=$(dirname "$(g++ -print-file-name=libstdc++.so.6)")
 module load map/24.1.1 || echo "WARNING: module map/24.1.1 did not load"
+case "$GCC_LIB" in
+   /*) export LD_LIBRARY_PATH=$GCC_LIB:$LD_LIBRARY_PATH ;;
+   *) echo "ERROR: gcc 14's libstdc++ not found (g++ -print-file-name=libstdc++.so.6)"; exit 2 ;;
+esac
 echo "modules: $(module -t list 2>&1 | tr '\n' ' ')"
 echo "map: $(command -v map)  mpirun: $(command -v mpirun)  perf: $(command -v perf)  perf_event_paranoid $(cat /proc/sys/kernel/perf_event_paranoid)"
+LDD=$(ldd ./seas_nitsche_dyn_driver_g 2>&1)          # the driver must load in this environment
+echo "libstdc++: $(echo "$LDD" | awk '/libstdc\+\+/ {print $3}')"
+if echo "$LDD" | grep -q "not found"; then
+   echo "ERROR: seas_nitsche_dyn_driver_g cannot load its libraries here:"; echo "$LDD" | grep "not found"; exit 2
+fi
 OUT=$SCRATCH/nitsche_profiling/map_${PROB}_200m_p${ORDER}_$SLURM_JOB_ID
 mkdir -p $OUT/run
 cp "$DECK" $OUT/
@@ -96,3 +110,5 @@ echo "--- stations against the first $TFINAL s of $GOLD (meant to be bitwise equ
 python3 -I jobs/vista_profiling/compare_stations.py $GOLD $OUT/run --tmax $TFINAL --time-tol 2e-9 --groups
 du -sh $OUT/*
 echo "total $(( $(date +%s) - T0 )) s"
+# a job without a MAP profile fails in Slurm, perf fallback or not
+[ "$map_rc" = 0 ] || { echo "ERROR: MAP did not produce a profile (exit $map_rc)"; exit 1; }
