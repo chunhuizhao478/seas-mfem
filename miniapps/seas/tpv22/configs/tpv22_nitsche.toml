@@ -1,0 +1,195 @@
+# =====================================================================
+#  SCEC TPV22 — linear slip weakening with forced-rupture nucleation on two
+#  vertical right-lateral faults with an extensional stepover, linear
+#  elastic, run through the Nitsche dynamic-rupture driver
+#  (seas_nitsche_dyn_driver; complex-geometries plan rev 2, phase P3).
+#
+#  Built from tpv205/configs/tpv205_nitsche.toml (KV kv_eta = 0.1 and
+#  Prakash-Clifton, as the Track 2 golds) with the TPV22 values of
+#  TPV22_23_Description_v08.pdf:
+#
+#   - Faults (one tag, 103): fault 1 on Y = 0, X in [-25, 5] km; fault 2 on
+#     Y = -1.6 km, X in [-5, 25] km; both 20 km deep from the free surface
+#     (tpv22/mesh/tpv22_*.geo).  Both share ref_normal (0, -1, 0), so h-slip
+#     is positive for right-lateral motion on both (as TPV205).
+#   - Prestress: [prestress_depth_table] (option O1), total stress, tension
+#     positive: sigma_yy = -60 MPa; sigma_xy = 29.38 MPa down to 15 km depth,
+#     then linear to 14.69 MPa at 20 km (the fault bottom).  The same global
+#     tensor gives both parallel faults the same traction.  [stress] stays
+#     at zero: O1 refuses a non-zero background tensor.
+#   - Friction: mu_s 0.548, mu_d 0.373, d_0 0.30 m; cohesion
+#     1.4 kPa/m x (5000 m - depth) above 5 km depth, 0 below (the existing
+#     depth-linear rule, as TPV31).
+#   - Border: [fault_tip_lock] (option O5) locks every fault DOF on a border
+#     edge of either fault except along the free-surface traces ("border
+#     nodes do not slip").
+#   - Material: rho 2670, Vs 3464, Vp 6000.
+#   - Boundary attributes of the TPV22 meshes: free 101, fault 103,
+#     absorbing 105.
+#   - Stations: tpv22/stations/tpv22_fault_stations.csv (18 points, 7 on
+#     fault 1 and 11 on fault 2; x2 = global X km, x3 = depth km).
+#
+#   - Nucleation: [forced_rupture] (option O4), the spec's forced rupture
+#     around the hypocentre (-10, 0, 10 km depth) on fault 1: r_crit 3 km,
+#     speed 0.7 Vs = 2424.8 m/s, smoothing 0.081, t0 0.5 s.  Nothing else
+#     nucleates (29.38 MPa < 0.548 x 60 MPa).
+#   - Weakening distance: [slip_weakening_distance] (option O3) "slip_path",
+#     the spec's total slip path distance.
+#
+#  Meshes are generated, not committed (from miniapps/seas, pythonenv):
+#    gmsh -3 tpv22/mesh/tpv22_1000m.geo -format msh22 -o tpv22/mesh/tpv22_1000m.msh
+#    gmsh -3 tpv22/mesh/tpv22_200m.geo  -format msh22 -o tpv22/mesh/tpv22_200m.msh
+#  The 1000 m mesh does not resolve the cohesive zone (810 m, plan 10.5):
+#  smoke runs only.  Production uses --mesh with the 200 m mesh.
+#
+#  Scope: Chunhui Zhao, 2026-10-20.
+# =====================================================================
+
+[meta]
+schema_version = 1
+law            = "slip_weakening"
+description    = "SCEC TPV22 (linear slip weakening, two vertical faults with an extensional stepover, elastic) via the Nitsche dynamic-rupture driver — depth-dependent prestress, locked fault borders."
+
+[problem]
+tag = "tpv22"   # output file prefix; the stations come from [output.stations]
+
+# Material: homogeneous, rho = 2670, cs = 3464, cp = 6000:
+#   mu = rho cs^2, lambda = rho (cp^2 - 2 cs^2).
+[material_constant_fallback]
+lambda = 32043759360.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0     # sigma_min of the Nitsche sigma_n_eff range check
+
+[mesh]
+# 1000 m smoke mesh; production overrides with --mesh (200 m).
+path  = "tpv22/mesh/tpv22_1000m.msh"
+order = 1
+
+[velocity]
+use_sidecar = false
+
+# Zero: the prestress comes from [prestress_depth_table].
+[stress]
+kind        = "constant_tensor"
+sigma_xx_pa = 0.0
+sigma_yy_pa = 0.0
+sigma_zz_pa = 0.0
+sigma_xy_pa = 0.0
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+# Option O1: the total prestress tensor (global frame, tension positive),
+# piecewise linear in depth = -(x . up); no jumps.
+[prestress_depth_table]
+stress_measure = "total"
+depth_m        = [0.0, 15000.0, 20000.0]
+sigma_xx_pa    = [0.0, 0.0, 0.0]
+sigma_yy_pa    = [-60.0e6, -60.0e6, -60.0e6]
+sigma_zz_pa    = [0.0, 0.0, 0.0]
+sigma_xy_pa    = [29.38e6, 29.38e6, 14.69e6]
+sigma_yz_pa    = [0.0, 0.0, 0.0]
+sigma_xz_pa    = [0.0, 0.0, 0.0]
+
+# Option O5: lock both fault borders except the traces (natural attrs).
+[fault_tip_lock]
+enabled = true
+
+# Option O3: mu from the slip path int |V| dt, not |slip|.
+[slip_weakening_distance]
+measure = "slip_path"
+
+# Option O4: forced rupture, T(r) = r/v + s r_c/v (1/(1 - (r/r_c)^2) - 1)
+# for r < r_c, f2 = clamp((t - T)/t0, 0, 1), mu = mu_s + (mu_d - mu_s) max(f1, f2).
+[forced_rupture]
+hypocenter_m      = [-10000.0, 0.0, -10000.0]
+r_crit_m          = 3000.0
+rupture_speed_m_s = 2424.8
+smoothing         = 0.081
+t0_s              = 0.5
+
+[numerics]
+cfl            = 0.5        # fraction of C(p) (P3)
+penalty_factor = 1.0        # IP penalty scale (Nitsche driver only)
+# Kelvin-Voigt damping (Day et al. 2005 A8): beta_e = kv_eta (1/3) (h_e/p) / c_s,e, h_e = 6V/A
+kv_eta    = 0.1
+kv_scale  = "node"
+kv_length = "inscribed"
+
+[time]
+tfinal     = "15s"
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.05s"
+
+[output]
+output_dir     = "output_tpv22_nitsche"
+restart_prefix = "cp"
+# Fault ParaView output: ONE <output_dir>/fault.vtkhdf per run.
+paraview_enabled       = true
+paraview_fault         = "hdf5"
+paraview_fault_dt      = "0.02s"
+paraview_fault_zfp_tol = 0.0
+paraview_fault_deflate_level = 1
+paraview_free_surface  = "off"   # the Nitsche driver writes no free-surface slice
+
+# On-fault stations: the committed station file (scripts/make_fault_stations.py),
+# each station snapped to the nearest fault node in 3-D; the run aborts if that
+# node is farther than snap_tolerance_m (<prefix>_station_snap.txt lists them).
+# The two faults are 1.6 km apart, more than the tolerance.
+[output.stations]
+file             = "tpv22/stations/tpv22_fault_stations.csv"
+snap_tolerance_m = 700.0
+
+# Linear slip weakening: mu = mu_s - (mu_s - mu_d) min(slip/d_c, 1).
+[friction.slip_weakening]
+mu_s_default     = 0.548
+mu_d_default     = 0.373
+d_c_default      = 0.30
+cohesion_default = 0.0
+
+# Cohesion = 1400 Pa/m x (5000 m - depth) above 5 km depth (7 MPa at the
+# surface), clamped to 0 below.
+[[friction.slip_weakening.spatial]]
+kind                     = "depth"
+z_min_m                  = -5000.0
+z_max_m                  =     0.0
+cohesion_taper_axis      = "z"
+cohesion_ref_depth_m     = 5000.0
+cohesion_grad_pa_per_m   = 1400.0
+cohesion_floor_pa        = 0.0
+
+[boundary]
+fault_attr      = 103
+natural_attrs   = [101]
+absorbing_attrs = [105]
+
+[fault_geometry]
+ref_normal        = [0.0, -1.0, 0.0]
+up                = [0.0,  0.0, 1.0]
+kind              = "vertical_strike_slip"
+orientation       = "propagated"
+pin_by            = "reference"
+tangent           = "pointwise"
+junction_policy   = "refuse"
+pin_min_margin    = 0.1
+
+# Forced-rupture hypocentre on fault 1 (SCEC (-10, 10, 0) km).
+[hypocenter]
+x_m                 = -10000.0
+y_m                 = 0.0
+z_m                 = -10000.0
+nucleation_radius_m = 3000.0
+
+[diagnostics]
+energy_balance = false
+
+# Prakash-Clifton regularization of the normal stress the law sees
+# (SeisSol TPV6/7 values, as the validated TPV102 deck).
+[friction.prakash_clifton]
+v_star = 1.0      # m/s
+length = 0.01     # m
