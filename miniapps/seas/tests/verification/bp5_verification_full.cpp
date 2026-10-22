@@ -35,6 +35,9 @@
 //   --V-nuc VAL                Nucleation slip rate [m/s] (default: 0.03)
 //   --delta-tau-factor VAL     Delta-tau multiplier (default: 1.0, Tandem: 0.0)
 //   --solver mumps|cg           Linear solver (default: cg)
+//   --solver cudss             cuDSS direct solver on the GPU (GPU plan G3;
+//                              needs MFEM_USE_CUDSS, --device cuda and
+//                              --qd-operators matrix)
 //   --check-residual           Warn if post-solve ||K*x-b||/||b|| > 1e-8
 //   --monitor-traction N       Log tau_pre/traction/total every N RHS evals
 //   --dump-bdr-vtk             Output boundary attributes to VTK
@@ -47,6 +50,53 @@
 //   --regression-tolerance TOL Regression test: fail if any per-field relative
 //                              L2 error exceeds TOL (negative = skip check)
 //   --ref-prefix PFX           Reference file prefix (auto-detected if omitted)
+//   --stage-timers N           Time the parts of each stage and of the step
+//                              monitor; print a table every N accepted steps
+//                              and at exit (GPU plan G0)
+//   --exit-after-assembly      Assemble K, write its statistics JSON (as
+//                              --matrix-stats, without the symmetry check),
+//                              then exit without factorizing (GPU plan G0)
+//   --perturb-initial-state S  Test only: scale every initial state entry by
+//                              1 + 1e-15 r, r uniform in [-1, 1], seed S
+//   --check-accepted-state     After each accepted step, compare the cached
+//                              traction, sigma_n, V and V_max with a fresh
+//                              evaluation at the accepted state (GPU plan G0)
+//   --device STR               MFEM device: cpu (default), cuda, debug, or any
+//                              mfem::Device string (GPU plan G1)
+//   --device-id N              GPU for this rank (default: node-local rank
+//                              modulo the number of visible GPUs)
+//   --qd-operators MODE        auto (default): matrix with --dg-method IP,
+//                              loops with BR2 or SEAS_DEBUG_FACE_TRACE;
+//                              loops: per-stage face loops;
+//                              matrix: B, D, C, N operators built once,
+//                              b = B*slip + D*g(t), T = C_u*u + C_d*slip
+//                              (GPU plan G2; IP only, no face tracer)
+//   --qd-green                 Opt-in (QD speed item 3): stages through the
+//                              discrete Green's function, T = G*slip +
+//                              t*T_D, built once with blocked solves; no
+//                              volume solve per stage.  Needs --qd-operators
+//                              matrix, a linear elastic bulk and loading
+//                              g(t) = t*g_hat; CPU only.  G is dense,
+//                              (2|3)*N_f x 2*N_f (37.5 GB for production p=1)
+//   --qd-green-block M         Unit slips per blocked solve (default 64)
+//   --qd-green-cache FILE      Read G from FILE if it exists, else build it
+//                              and write FILE (any rank count)
+//   --qd-green-tol X           Max rel. difference of G to a solve, checked
+//                              after the build or read (default 1e-8)
+//   --qd-green-check N         Every N stages also run the solve path and
+//                              report the difference (default 0 = off)
+//   --qd-green-compress EPS    Opt-in (QD speed item 4): store G as an
+//                              H-matrix, each far block cut by SVD to
+//                              relative Frobenius error EPS (0 < EPS < 1;
+//                              1e-10 is round-off for production G).  Needs
+//                              --qd-green and MFEM with LAPACK
+//   --qd-green-leaf N          Cluster tree leaf size in fault DOFs (64)
+//   --qd-green-eta X           Admissibility max(diam) <= X*dist (2)
+//   --qd-green-hcache FILE     Read the H-matrix from FILE if it fits this
+//                              mesh, EPS, leaf and eta, else compress (from
+//                              --qd-green-cache if given) and write FILE
+//   --qd-green-compress-mem G  GiB per node for blocks being compressed or
+//                              read at once (default 64)
 
 #include "mfem.hpp"
 #ifdef MFEM_USE_PETSC
@@ -87,6 +137,9 @@
 #include <algorithm>
 #include <set>
 #include <map>
+#include <random>
+#include <cstdint>
+#include <limits>
 #include <dirent.h>
 
 using namespace mfem;
@@ -373,7 +426,10 @@ int RunComparison(const std::string &output_dir,
          const auto &sim_field = GetBP5Field(sim_data, f);
          double err = RelativeL2Error(sim_field, ref_interp);
 
-         bool field_fail = (regression_tol >= 0.0 && err > regression_tol);
+         // A NaN error compares false against the tolerance, so a
+         // non-finite error is counted as a failure explicitly.
+         bool field_fail = (regression_tol >= 0.0 &&
+                            (!std::isfinite(err) || err > regression_tol));
          const char *status = field_fail ? "FAIL" : "ok";
 
          std::cout << "    " << std::setw(16) << BP5FieldNames[f]
@@ -401,7 +457,8 @@ int RunComparison(const std::string &output_dir,
    {
       auto ref_gv_interp = InterpolateOnto(ref_gt, ref_gv, sim_gt);
       double err = RelativeL2Error(sim_gv, ref_gv_interp);
-      bool g_fail = (regression_tol >= 0.0 && err > regression_tol);
+      bool g_fail = (regression_tol >= 0.0 &&
+                     (!std::isfinite(err) || err > regression_tol));
       const char *status = g_fail ? "FAIL" : "ok";
 
       std::cout << "  Global log10(Vmax): L2_rel = " << std::scientific
@@ -476,6 +533,195 @@ int RunComparison(const std::string &output_dir,
 }
 
 // ============================================================================
+// GPU plan G0 measurements: --stage-timers and --check-accepted-state
+// ============================================================================
+
+/// Measurement state shared by the PETSc TS monitor and the built-in loop.
+struct G0Measure
+{
+   seas::StageTimers timers;
+   int timer_interval = 0;            // --stage-timers N (0 = off)
+   double loop_start = 0.0;           // MPI_Wtime() when time stepping began
+   bool check_accepted_state = false; // --check-accepted-state
+   real_t check_max = 0.0;            // largest difference over all checks
+   int check_count = 0;
+
+   bool TimersOn() const { return timer_interval > 0; }
+   seas::StageTimers *Timers() { return TimersOn() ? &timers : nullptr; }
+};
+
+/// Print the stage-timer table.  Collective: every rank calls it at the same
+/// accepted step.  "max" is the slowest rank, "mean" the average over ranks;
+/// per-call and per-step figures use the slowest rank.  monitor_step is the
+/// monitor minus its output and checkpoint parts; ts_other is the loop wall
+/// time outside the operator and the monitor (PETSc's RK vector updates and
+/// step control).
+static void PrintStageTimers(const G0Measure &g0, int accepted_steps,
+                             const char *when, MPIContext &mpi)
+{
+   using ST = seas::StageTimers;
+   const int np = ST::NumParts;
+   const int n = np + 2;  // + monitor_step, ts_other
+   std::vector<double> sec(n), sec_max(n), sec_sum(n);
+   std::vector<long long> calls(n, 0), calls_max(n);
+   for (int p = 0; p < np; p++)
+   {
+      sec[p] = g0.timers.Seconds(p);
+      calls[p] = g0.timers.Calls(p);
+   }
+   const double loop = MPI_Wtime() - g0.loop_start;
+   sec[np] = sec[ST::MonitorTotal] - sec[ST::MonitorOutput]
+             - sec[ST::MonitorCheckpoint];
+   calls[np] = calls[ST::MonitorTotal];
+   sec[np + 1] = loop - sec[ST::StageTotal] - sec[ST::MonitorTotal];
+   calls[np + 1] = accepted_steps;
+   double loop_max = 0.0;
+   MPI_Comm comm = mpi.GetComm();
+   MPI_Reduce(sec.data(), sec_max.data(), n, MPI_DOUBLE, MPI_MAX, 0, comm);
+   MPI_Reduce(sec.data(), sec_sum.data(), n, MPI_DOUBLE, MPI_SUM, 0, comm);
+   MPI_Reduce(calls.data(), calls_max.data(), n, MPI_LONG_LONG, MPI_MAX, 0,
+              comm);
+   MPI_Reduce(&loop, &loop_max, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
+   if (!mpi.IsRoot()) { return; }
+
+   const int nranks = mpi.Size();
+   const int steps = std::max(accepted_steps, 1);
+   std::ostringstream o;
+   o << "\n[STAGE-TIMERS] " << when << ": " << accepted_steps
+     << " accepted steps, " << calls_max[ST::StageTotal]
+     << " stages, loop wall " << std::fixed << std::setprecision(3)
+     << loop_max << " s (" << std::scientific << std::setprecision(4)
+     << loop_max / steps << " s/step), " << nranks << " ranks\n";
+   o << "[STAGE-TIMERS] matrix_setup (assembly + solver setup, once): max "
+     << std::fixed << std::setprecision(3) << sec_max[ST::MatrixSetup]
+     << " s, mean " << sec_sum[ST::MatrixSetup] / nranks << " s\n";
+   o << "[STAGE-TIMERS] " << std::left << std::setw(20) << "part"
+     << std::right << std::setw(10) << "calls" << std::setw(14) << "max s"
+     << std::setw(14) << "mean s" << std::setw(14) << "ms/call"
+     << std::setw(14) << "s/step" << std::setw(9) << "% loop" << "\n";
+   auto row = [&](const char *name, int p)
+   {
+      const double per_call = calls_max[p] > 0
+                              ? 1e3 * sec_max[p] / calls_max[p] : 0.0;
+      o << "[STAGE-TIMERS] " << std::left << std::setw(20) << name
+        << std::right << std::setw(10) << calls_max[p]
+        << std::scientific << std::setprecision(4)
+        << std::setw(14) << sec_max[p] << std::setw(14) << sec_sum[p] / nranks
+        << std::setw(14) << per_call << std::setw(14) << sec_max[p] / steps
+        << std::fixed << std::setprecision(2) << std::setw(9)
+        << (loop_max > 0.0 ? 100.0 * sec_max[p] / loop_max : 0.0) << "\n";
+   };
+   for (int p = ST::SlipExpand; p <= ST::StageTotal; p++)
+   {
+      row(ST::Name(p), p);
+   }
+   row("monitor_step", np);
+   row(ST::Name(ST::MonitorOutput), ST::MonitorOutput);
+   row(ST::Name(ST::MonitorCheckpoint), ST::MonitorCheckpoint);
+   row(ST::Name(ST::MonitorTotal), ST::MonitorTotal);
+   row("ts_other", np + 1);
+   std::cout << o.str();
+   std::cout.flush();
+}
+
+/// --check-accepted-state: compare what the monitor and the station writers
+/// take from the operator's caches (left by its last call) with one fresh
+/// evaluation at the accepted state: displacement, shear and normal
+/// traction, slip rate, the station slip rate re-solved from the cached
+/// traction, and local and global V_max.  Each difference is
+/// max|cached - fresh| / max|fresh|, reduced over ranks.  Called after the
+/// step's output, so the run's output is unchanged; the fresh call refreshes
+/// the caches, which the next step's stages overwrite before the monitor
+/// reads them again.  Collective.
+static void CheckAcceptedState(G0Measure &g0, PBP5SEASOp &seas_op,
+                               RateStateFaultOperator<ParMesh, 2> &fault_op,
+                               const Vector &state, real_t time, int step,
+                               MPIContext &mpi)
+{
+   seas_op.RefreshDisplacement();  // --qd-green: solve u of the last stage
+   Vector u_c(seas_op.GetDisplacement());
+   const Vector T_c(seas_op.GetTraction());
+   const Vector *Tn_c_ptr = seas_op.GetFrictionNormalTraction();
+   Vector Tn_c;
+   if (Tn_c_ptr) { Tn_c = *Tn_c_ptr; }
+   const Vector V_c(fault_op.GetSlipRate());
+   const real_t vmax_local_c = fault_op.GetMaxSlipRate();
+   const real_t vmax_global_c = seas_op.GetMaxSlipRate();
+   Vector Vst_c;
+   fault_op.RecomputeSlipRate(T_c, state, Vst_c,
+                              Tn_c_ptr ? &Tn_c : nullptr);
+
+   Vector rate(state.Size());
+   seas_op.SetTime(time);
+   seas_op.Mult(state, rate);
+   seas_op.RefreshDisplacement();
+
+   const Vector &u_f = seas_op.GetDisplacement();
+   const Vector &T_f = seas_op.GetTraction();
+   const Vector *Tn_f_ptr = seas_op.GetFrictionNormalTraction();
+   const Vector &V_f = fault_op.GetSlipRate();
+   const real_t vmax_local_f = fault_op.GetMaxSlipRate();
+   const real_t vmax_global_f = seas_op.GetMaxSlipRate();
+   Vector Vst_f;
+   fault_op.RecomputeSlipRate(T_f, state, Vst_f, Tn_f_ptr);
+
+   auto rel = [&](const Vector &a, const Vector &b) -> real_t
+   {
+      real_t num = 0.0, den = 0.0;
+      if (a.Size() != b.Size())
+      {
+         num = std::numeric_limits<real_t>::infinity();
+      }
+      else
+      {
+         // u_c / u_f copy the displacement GridFunction, device-valid on a
+         // GPU device; read them on the host.
+         a.HostRead();
+         b.HostRead();
+         for (int i = 0; i < a.Size(); i++)
+         {
+            num = std::max(num, std::abs(a(i) - b(i)));
+            den = std::max(den, std::abs(b(i)));
+         }
+      }
+      num = mpi.GlobalMax(num);
+      den = mpi.GlobalMax(den);
+      return den > 0.0 ? num / den : num;
+   };
+   auto rel_scalar = [](real_t a, real_t b) -> real_t
+   {
+      return std::abs(b) > 0.0 ? std::abs(a - b) / std::abs(b)
+                               : std::abs(a - b);
+   };
+
+   const real_t d_u = rel(u_c, u_f);
+   const real_t d_T = rel(T_c, T_f);
+   // The initial-condition solve does not pass sigma_n to the friction
+   // solve; there is then no cached normal traction to compare (-1).
+   const int have_Tn = mpi.GlobalMaxInt((Tn_c_ptr && Tn_f_ptr) ? 1 : 0);
+   const real_t d_Tn = have_Tn ? rel(Tn_c, *Tn_f_ptr) : -1.0;
+   const real_t d_V = rel(V_c, V_f);
+   const real_t d_Vst = rel(Vst_c, Vst_f);
+   const real_t d_vl = mpi.GlobalMax(rel_scalar(vmax_local_c, vmax_local_f));
+   const real_t d_vg = rel_scalar(vmax_global_c, vmax_global_f);
+   const real_t d_max = std::max({d_u, d_T, d_Tn, d_V, d_Vst, d_vl, d_vg});
+   g0.check_max = std::max(g0.check_max, d_max);
+   g0.check_count++;
+
+   if (mpi.IsRoot())
+   {
+      std::cout << std::scientific << std::setprecision(3)
+                << "[ACCEPTED-STATE] step " << step << " t "
+                << time / BP5Params::seconds_per_year << " yr V_max "
+                << vmax_global_f << ": u " << d_u << " T " << d_T
+                << " Tn " << d_Tn << " V " << d_V << " V_station " << d_Vst
+                << " Vmax_local " << d_vl << " Vmax_global " << d_vg
+                << (d_max > 1e-12 ? "  ABOVE 1e-12" : "  ok") << "\n";
+      std::cout.flush();
+   }
+}
+
+// ============================================================================
 // TSSolve monitor context and callback (Tandem-style time stepping)
 // ============================================================================
 #ifdef MFEM_USE_PETSC
@@ -487,7 +733,8 @@ struct BP5MonitorCtx
 {
    // Core objects (non-owning)
    MPIContext *mpi;
-   Vector *state;                                       // shares memory with PETSc Vec
+   Vector *state;   // shares its host array with PETSc's solution Vec; read
+                    // it through MonitorHostState() (GPU plan G4)
    ParallelBP5BenchmarkOutput *bench_out;
    seas::FaceTraceLogger<ParMesh> *face_tracer;
    RateStateFaultOperator<ParMesh, 2> *fault_op;
@@ -522,18 +769,62 @@ struct BP5MonitorCtx
    // restart chains (R-005).
    seas::ParaViewOutput<ParMesh> *pv_out = nullptr;     // may be nullptr
    int restart_rejections_carryover = 0;                 // R-303 / R-005
+
+   G0Measure *g0 = nullptr;  // --stage-timers / --check-accepted-state
+
+   Array<int> nan_workspace;    // the NaN check's reduction (GPU plan G4)
+   bool state_on_host = false;  // MonitorHostState() ran in this call
 };
 
-/// PETSc TSMonitor callback — called after every accepted step inside TSSolve.
+/// GPU plan G4: the accepted state on the host, for the parts of the monitor
+/// that need it there (output, checkpoint, tracer, the G0 check).  Run()
+/// placed the driver's state host array in PETSc's solution Vec u; on a GPU,
+/// PETSc's current copy may be on the device while state's flags still say
+/// host-valid.  Reading u on the host brings it into state's array (a copy
+/// only when PETSc's copy is on the GPU), and HostReadWrite() then drops any
+/// device copy of state, so a kernel that reads state copies the current
+/// values.  Once per monitor call; ReleaseMonitorState() ends it.
+static const Vector &MonitorHostState(Vec u, BP5MonitorCtx &mon)
+{
+   Vector &state = *mon.state;
+   if (mon.state_on_host) { return state; }
+   const PetscScalar *u_host = nullptr;
+   PetscErrorCode ierr = VecGetArrayRead(u, &u_host);
+   MFEM_VERIFY(ierr == PETSC_SUCCESS, "VecGetArrayRead(u) failed");
+   const bool aliased = state.Size() == 0 ||
+                        static_cast<const void *>(u_host) ==
+                        static_cast<const void *>(state.GetData());
+   ierr = VecRestoreArrayRead(u, &u_host);
+   MFEM_VERIFY(ierr == PETSC_SUCCESS, "VecRestoreArrayRead(u) failed");
+   MFEM_VERIFY(aliased, "PETSc's solution Vec is not placed on the "
+               "driver's state vector; the monitor would read stale data");
+   state.HostReadWrite();
+   mon.state_on_host = true;
+   return state;
+}
+
+/// GPU plan G4: at the end of a monitor call that read the state, hand the
+/// host array back to PETSc: kernels that read state since left a device
+/// copy (which the debug device guards by protecting the host pages that
+/// PETSc writes next).
+static void ReleaseMonitorState(BP5MonitorCtx &mon)
+{
+   if (!mon.state_on_host) { return; }
+   mon.state->HostReadWrite();
+   mon.state_on_host = false;
+}
+
+/// Body of the PETSc TSMonitor callback below.
 /// Matches Tandem's MonitorQD::monitor pattern: read state, do I/O.
-static PetscErrorCode bp5_ts_monitor_callback(
+/// GPU plan G4: each accepted step reads only V_max and a non-finite flag;
+/// the state comes to the host (MonitorHostState) only for output.
+static PetscErrorCode bp5_ts_monitor_body(
    TS ts, PetscInt step, PetscReal time, Vec u, void *ctx)
 {
    PetscFunctionBeginUser;
    auto *mon = static_cast<BP5MonitorCtx*>(ctx);
+   seas::StageTimers *timers = mon->g0 ? mon->g0->Timers() : nullptr;
 
-   // state already reflects the accepted step (PlaceMemory shares memory).
-   Vector &state  = *mon->state;
    auto   &mpi    = *mon->mpi;
 
    // Get dt for console output
@@ -544,19 +835,40 @@ static PetscErrorCode bp5_ts_monitor_callback(
    // Face tracer
    if (mon->face_tracer->IsActive())
    {
-      mon->face_tracer->CommitStep(static_cast<int>(step), time, state, false);
+      mon->face_tracer->CommitStep(static_cast<int>(step), time,
+                                   MonitorHostState(u, *mon), false);
    }
 
-   // V_max & NaN check
+   // V_max & NaN check.  GPU plan G4: the check covers the whole state, in
+   // a reduction over PETSc's current copy of it, wherever that is (it was
+   // the first 100 entries, on the host).
    real_t V_max = mon->seas_op->GetMaxSlipRate();
    {
       bool has_nan = !std::isfinite(V_max);
       if (!has_nan)
       {
-         for (int i = 0; i < std::min(state.Size(), 100); i++)
+         const PetscScalar *X = nullptr;
+         PetscMemType mtype;
+         PetscInt n = 0;
+         PetscErrorCode ierr = VecGetLocalSize(u, &n);
+         MFEM_VERIFY(ierr == PETSC_SUCCESS, "VecGetLocalSize(u) failed");
+         ierr = VecGetArrayReadAndMemType(u, &X, &mtype);
+         MFEM_VERIFY(ierr == PETSC_SUCCESS,
+                     "VecGetArrayReadAndMemType(u) failed");
+         const bool use_dev = PetscMemTypeDevice(mtype);
+         MFEM_VERIFY(!use_dev ||
+                     Device::Allows(Backend::CUDA_MASK | Backend::HIP_MASK),
+                     "PETSc keeps the state on a device MFEM does not use");
+         int non_finite = 0;
+         reduce(static_cast<int>(n), non_finite,
+                [=] MFEM_HOST_DEVICE (int i, int &r)
          {
-            if (!std::isfinite(state(i))) { has_nan = true; break; }
-         }
+            r |= std::isfinite(X[i]) ? 0 : 1;
+         }, BOrReducer<int>{}, use_dev, mon->nan_workspace);
+         ierr = VecRestoreArrayReadAndMemType(u, &X);
+         MFEM_VERIFY(ierr == PETSC_SUCCESS,
+                     "VecRestoreArrayReadAndMemType(u) failed");
+         has_nan = (non_finite != 0);
       }
       int local_nan = has_nan ? 1 : 0;
       int global_nan = mpi.GlobalSumInt(local_nan);
@@ -601,15 +913,19 @@ static PetscErrorCode bp5_ts_monitor_callback(
    }
 
    // I/O: adaptive schedule or every step
+   if (timers) { timers->Start(seas::StageTimers::MonitorOutput); }
    if (mon->write_every_step)
    {
-      mon->bench_out->ForceWrite(time, state, *mon->fault_op,
+      mon->bench_out->ForceWrite(time, MonitorHostState(u, *mon),
+                                 *mon->fault_op,
                                  mon->seas_op->GetTraction(),
                                  mon->seas_op->GetFrictionNormalTraction(),
                                  V_max);
       mon->bench_out->Flush();
    }
-   else if (mon->bench_out->Write(time, state, *mon->fault_op,
+   else if (mon->bench_out->WriteDue(time, V_max) &&
+            mon->bench_out->Write(time, MonitorHostState(u, *mon),
+                                  *mon->fault_op,
                                   mon->seas_op->GetTraction(),
                                   mon->seas_op->GetFrictionNormalTraction(),
                                   V_max))
@@ -617,9 +933,12 @@ static PetscErrorCode bp5_ts_monitor_callback(
       mon->bench_out->Flush();
    }
 
-   // ParaView output (adaptive schedule, MPI-collective)
+   // ParaView output (adaptive schedule, MPI-collective).  It writes
+   // mon->state; its volume path reads the state before it asks the
+   // schedule, so with ParaView on, the state comes to the host every step.
    if (mon->paraview_write_fn)
    {
+      MonitorHostState(u, *mon);
       mon->paraview_write_fn(static_cast<int>(step), time, V_max);
    }
 
@@ -629,17 +948,21 @@ static PetscErrorCode bp5_ts_monitor_callback(
       mon->global_out->WriteStep(
          {time, V_max > 0.0 ? std::log10(V_max) : -300.0});
    }
+   if (timers) { timers->Stop(seas::StageTimers::MonitorOutput); }
 
    // Checkpoint
    int istep = static_cast<int>(step);
    if (mon->checkpoint_interval > 0 && istep % mon->checkpoint_interval == 0)
    {
+      seas::ScopedStageTimer ckpt_timer(timers,
+                                        seas::StageTimers::MonitorCheckpoint);
       Vector u_vec;
+      mon->seas_op->RefreshDisplacement();  // --qd-green: solve u once
       u_vec = mon->seas_op->GetDisplacement();
       Vector empty_k0;
       WriteCheckpoint(mon->full_prefix, time, mon->current_dt,
                       istep, mon->num_seismic_events, mon->in_seismic_event,
-                      state, u_vec,
+                      MonitorHostState(u, *mon), u_vec,
                       mon->seas_op->GetTraction(), mon->fault_op->GetSlipRate(),
                       false, empty_k0, mon->mpi);
 
@@ -713,6 +1036,47 @@ static PetscErrorCode bp5_ts_monitor_callback(
    }
 
    PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+/// PETSc TSMonitor callback — called after every accepted step inside TSSolve
+/// (and once at step 0 before the first step).  Runs the monitor body, then
+/// the G0 measurements, which stay outside the monitor's own timer.
+static PetscErrorCode bp5_ts_monitor_callback(
+   TS ts, PetscInt step, PetscReal time, Vec u, void *ctx)
+{
+   auto *mon = static_cast<BP5MonitorCtx*>(ctx);
+   G0Measure *g0 = mon->g0;
+   PetscErrorCode ierr;
+   {
+      seas::ScopedStageTimer timer(g0 ? g0->Timers() : nullptr,
+                                   seas::StageTimers::MonitorTotal);
+      ierr = bp5_ts_monitor_body(ts, step, time, u, ctx);
+   }
+   if (ierr != PETSC_SUCCESS || !g0)
+   {
+      ReleaseMonitorState(*mon);
+      return ierr;
+   }
+   TSConvergedReason reason;
+   TSGetConvergedReason(ts, &reason);
+   if (reason < 0)  // NaN abort in the body
+   {
+      ReleaseMonitorState(*mon);
+      return ierr;
+   }
+   if (g0->check_accepted_state)
+   {
+      CheckAcceptedState(*g0, *mon->seas_op, *mon->fault_op,
+                         MonitorHostState(u, *mon), time,
+                         static_cast<int>(step), *mon->mpi);
+   }
+   ReleaseMonitorState(*mon);
+   if (g0->TimersOn() && step > 0 && step % g0->timer_interval == 0)
+   {
+      PrintStageTimers(*g0, static_cast<int>(step), "every N steps",
+                       *mon->mpi);
+   }
+   return ierr;
 }
 
 #endif // MFEM_USE_PETSC
@@ -831,6 +1195,19 @@ int main(int argc, char *argv[])
    // One-shot stiffness-matrix analysis (writes JSON, optional early exit).
    bool matrix_stats = false;
    bool exit_after_factorize = false;
+   // GPU plan G0 measurements.
+   int stage_timer_interval = 0;       // --stage-timers N (0 = off)
+   bool exit_after_assembly = false;   // --exit-after-assembly
+   long long perturb_seed = -1;        // --perturb-initial-state SEED
+   bool check_accepted_state = false;  // --check-accepted-state
+   // GPU plan G1.
+   std::string device_str = "cpu";     // --device STR
+   int device_id_override = -1;        // --device-id N (-1 = automatic)
+   // GPU plan G2.
+   std::string qd_operators = "auto";  // --qd-operators auto|loops|matrix
+   bool qd_green = false;              // --qd-green (QD speed item 3)
+   seas::QDGreenConfig qd_green_config;
+   int qd_green_check = 0;             // --qd-green-check N
 
    for (int i = 1; i < argc; i++)
    {
@@ -898,6 +1275,20 @@ int main(int argc, char *argv[])
       if (arg == "--verify") { verify_parallel = true; }
       if (arg == "--matrix-stats") { matrix_stats = true; }
       if (arg == "--exit-after-factorize") { exit_after_factorize = true; }
+      if (arg == "--stage-timers" && i + 1 < argc)
+      {
+         stage_timer_interval = std::atoi(argv[++i]);
+         MFEM_VERIFY(stage_timer_interval > 0,
+                     "--stage-timers N needs N > 0");
+      }
+      if (arg == "--exit-after-assembly") { exit_after_assembly = true; }
+      if (arg == "--perturb-initial-state" && i + 1 < argc)
+      {
+         perturb_seed = std::atoll(argv[++i]);
+         MFEM_VERIFY(perturb_seed >= 0,
+                     "--perturb-initial-state SEED needs SEED >= 0");
+      }
+      if (arg == "--check-accepted-state") { check_accepted_state = true; }
       if (arg == "--bc-mode" && i + 1 < argc) { bc_mode_str = argv[++i]; }
       if (arg == "--psi-init-mode" && i + 1 < argc)
       {
@@ -932,6 +1323,57 @@ int main(int argc, char *argv[])
          tandem_dt_init = std::atof(argv[++i]);
       }
       if (arg == "--petsc-ts") { use_petsc_ts = true; }
+      if (arg == "--device" && i + 1 < argc) { device_str = argv[++i]; }
+      if (arg == "--qd-operators" && i + 1 < argc)
+      {
+         qd_operators = argv[++i];
+         MFEM_VERIFY(qd_operators == "auto" || qd_operators == "loops" ||
+                     qd_operators == "matrix",
+                     "--qd-operators: auto, loops or matrix, got '"
+                     << qd_operators << "'");
+      }
+      if (arg == "--qd-green") { qd_green = true; }
+      if (arg == "--qd-green-block" && i + 1 < argc)
+      {
+         qd_green_config.block = std::atoi(argv[++i]);
+      }
+      if (arg == "--qd-green-cache" && i + 1 < argc)
+      {
+         qd_green_config.cache_path = argv[++i];
+      }
+      if (arg == "--qd-green-tol" && i + 1 < argc)
+      {
+         qd_green_config.tol = std::atof(argv[++i]);
+      }
+      if (arg == "--qd-green-check" && i + 1 < argc)
+      {
+         qd_green_check = std::atoi(argv[++i]);
+      }
+      if (arg == "--qd-green-compress" && i + 1 < argc)
+      {
+         qd_green_config.compress = std::atof(argv[++i]);
+      }
+      if (arg == "--qd-green-leaf" && i + 1 < argc)
+      {
+         qd_green_config.leaf = std::atoi(argv[++i]);
+      }
+      if (arg == "--qd-green-eta" && i + 1 < argc)
+      {
+         qd_green_config.eta = std::atof(argv[++i]);
+      }
+      if (arg == "--qd-green-hcache" && i + 1 < argc)
+      {
+         qd_green_config.hcache_path = argv[++i];
+      }
+      if (arg == "--qd-green-compress-mem" && i + 1 < argc)
+      {
+         qd_green_config.compress_mem_gib = std::atof(argv[++i]);
+      }
+      if (arg == "--device-id" && i + 1 < argc)
+      {
+         device_id_override = std::atoi(argv[++i]);
+         MFEM_VERIFY(device_id_override >= 0, "--device-id N needs N >= 0");
+      }
       if (arg == "--paraview") { use_paraview = true; }
       if (arg == "--paraview-every" && i + 1 < argc)
       {
@@ -1133,6 +1575,59 @@ int main(int argc, char *argv[])
       no_psi_clamp = true;
    }
 
+   // G0 measurement flags that do not combine.
+   MFEM_VERIFY(!(stage_timer_interval > 0 && check_accepted_state),
+               "--stage-timers and --check-accepted-state do not combine: "
+               "the check's extra operator call would be timed as a stage");
+   MFEM_VERIFY(!(exit_after_assembly && exit_after_factorize),
+               "--exit-after-assembly and --exit-after-factorize do not "
+               "combine");
+   MFEM_VERIFY(perturb_seed < 0 || restart_prefix.empty(),
+               "--perturb-initial-state applies to a fresh start only, "
+               "not to --restart");
+
+   // MFEM device (GPU plan G1).  Configured before PETSc is initialized,
+   // because MFEMInitializePetsc picks PETSc's GPU from it, and before any
+   // mesh, space or vector.  It lives to the end of main: its destructor
+   // finalizes hypre.
+   int device_id = device_id_override;
+   if (device_id < 0)
+   {
+      device_id = 0;
+#if defined(MFEM_USE_CUDA) || defined(MFEM_USE_HIP)
+      // One GPU per rank on a node: node-local rank modulo the visible GPUs.
+      // Counted only for a GPU backend: a GPU build may run --device cpu on
+      // a node without a GPU, where the count aborts.
+      const bool gpu_backend = device_str.find("cuda") != std::string::npos ||
+                               device_str.find("hip") != std::string::npos;
+      const int num_gpu = gpu_backend ? Device::GetDeviceCount() : 0;
+      if (num_gpu > 1)
+      {
+         MPI_Comm node_comm;
+         MPI_Comm_split_type(mpi.GetComm(), MPI_COMM_TYPE_SHARED, 0,
+                             MPI_INFO_NULL, &node_comm);
+         int node_rank = 0;
+         MPI_Comm_rank(node_comm, &node_rank);
+         MPI_Comm_free(&node_comm);
+         device_id = node_rank % num_gpu;
+      }
+#endif
+   }
+   Device device(device_str, device_id);
+   if (mpi.IsRoot()) { device.Print(); }
+   // GPU plan G4: on a device the fault RHS writes its rate there, and only
+   // PETSc TS keeps the time-stepping vectors there too; the in-house RK45
+   // reads them on the host.
+   if (Device::Allows(Backend::DEVICE_MASK) && !use_petsc_ts)
+   {
+      if (mpi.IsRoot())
+      {
+         std::cerr << "ERROR: --device " << device_str << " needs --petsc-ts "
+                   << "(the in-house RK45 steps on the host).\n";
+      }
+      return 2;
+   }
+
 #ifndef MFEM_USE_PETSC
    if (use_petsc_ts)
    {
@@ -1175,6 +1670,73 @@ int main(int argc, char *argv[])
       dg_method = DGMethod::BR2;
    }
 
+   auto env_truthy = [](const char *name) -> bool
+   {
+      const char *v = std::getenv(name);
+      if (!v || !*v) { return false; }
+      std::string s(v);
+      std::transform(s.begin(), s.end(), s.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      return !(s == "0" || s == "false" || s == "off" || s == "no");
+   };
+
+   // QD speed item 1: the stage operators are the default wherever they
+   // apply.  They need the IP method, and the face tracer
+   // (SEAS_DEBUG_FACE_TRACE, below) needs the loops' decomposed traction.
+   std::string qd_operators_why = "--qd-operators";
+   if (qd_operators == "auto")
+   {
+      if (dg_method != DGMethod::IP)
+      {
+         qd_operators = "loops";
+         qd_operators_why = "default; matrix needs --dg-method IP";
+      }
+      else if (env_truthy("SEAS_DEBUG_FACE_TRACE"))
+      {
+         qd_operators = "loops";
+         qd_operators_why = "default; SEAS_DEBUG_FACE_TRACE needs the loops";
+      }
+      else
+      {
+         qd_operators = "matrix";
+         qd_operators_why = "default";
+      }
+   }
+   {
+      const seas::QDGreenConfig &c = qd_green_config;
+      const bool h_flags = c.compress != 0.0 || !c.hcache_path.empty();
+      std::string bad;
+      if (h_flags && !qd_green) { bad = "--qd-green-compress and "
+                                  "--qd-green-hcache need --qd-green"; }
+      else if (!c.hcache_path.empty() && c.compress == 0.0)
+      {
+         bad = "--qd-green-hcache needs --qd-green-compress";
+      }
+      else if (c.compress != 0.0 && !(c.compress > 0.0 && c.compress < 1.0))
+      {
+         bad = "--qd-green-compress: EPS must be in (0, 1)";
+      }
+      else if (c.leaf < 1 || !(c.eta > 0.0) || !(c.compress_mem_gib > 0.0))
+      {
+         bad = "--qd-green-leaf, --qd-green-eta and --qd-green-compress-mem "
+               "must be positive";
+      }
+      if (!bad.empty())
+      {
+         if (mpi.IsRoot()) { std::cerr << "ERROR: " << bad << ".\n"; }
+         return 2;
+      }
+   }
+   if (qd_green && qd_operators != "matrix")
+   {
+      if (mpi.IsRoot())
+      {
+         std::cerr << "ERROR: --qd-green needs --qd-operators matrix (here "
+                   << qd_operators << ": " << qd_operators_why << ").\n";
+      }
+      return 2;
+   }
+
    // Process --solver flag
    SolverType solver_type = SolverType::MUMPS_BLR;
    if (solver_str == "mumps" || solver_str == "MUMPS")
@@ -1204,6 +1766,10 @@ int main(int argc, char *argv[])
    else if (solver_str == "cg" || solver_str == "CG")
    {
       solver_type = SolverType::CG_AMG;
+   }
+   else if (solver_str == "cudss" || solver_str == "CUDSS")
+   {
+      solver_type = SolverType::CUDSS;
    }
 
    // Verify requested solver is actually available at compile time.
@@ -1250,6 +1816,33 @@ int main(int argc, char *argv[])
       return 2;
    }
 #endif
+   // GPU plan G3: cuDSS solves on device vectors, so it needs a GPU device,
+   // and the stage operators keep b, u and T there (the face loops build
+   // b on the host).
+   if (solver_type == SolverType::CUDSS)
+   {
+      std::string why;
+#ifndef MFEM_USE_CUDSS
+      why = "requires MFEM built with MFEM_USE_CUDSS=YES (build_horizon.sh "
+            "MODE=cuda)";
+#endif
+      if (why.empty() && !Device::Allows(Backend::CUDA_MASK))
+      {
+         why = "requires --device cuda";
+      }
+      if (why.empty() && qd_operators != "matrix")
+      {
+         why = "requires --qd-operators matrix";
+      }
+      if (!why.empty())
+      {
+         if (mpi.IsRoot())
+         {
+            std::cerr << "ERROR: --solver cudss " << why << ".\n";
+         }
+         return 2;
+      }
+   }
 
    // Process --bc-mode flag
    BCMode bc_mode = BCMode::FarField;
@@ -1486,6 +2079,7 @@ int main(int argc, char *argv[])
       else if (solver_type == SolverType::SUPERLU) solver_desc = "SuperLU_DIST (direct)";
       else if (solver_type == SolverType::STRUMPACK) solver_desc = "STRUMPACK BLR (approximate direct)";
       else if (solver_type == SolverType::GMRES_BlockILU) solver_desc = "GMRES+BlockILU (iterative)";
+      else if (solver_type == SolverType::CUDSS) solver_desc = "cuDSS (direct, GPU)";
       std::cout << "  Solver: " << solver_desc << "\n";
       std::string bc_desc = "FarField";
       if (bc_mode == BCMode::XOnly) bc_desc = "XOnly (attrs 1-2 Dirichlet, 3-6 Natural)";
@@ -1593,6 +2187,34 @@ int main(int argc, char *argv[])
                 << " (rank 0)\n";
    }
 
+   // Matrix-count mode (GPU plan G0): assemble K, write its statistics, and
+   // exit before any factorization, so meshes whose factor may not fit can
+   // still be counted.
+   if (exit_after_assembly)
+   {
+      const std::string stats_path =
+         output_dir + "/" + output_prefix + "_matrix_stats.json";
+      domain.SetMatrixStatsConfig(true, stats_path);
+      if (mpi.IsRoot())
+      {
+         std::cout << "  [matrix-stats] --exit-after-assembly: assembling K "
+                   << "(no factorization); JSON -> " << stats_path << "\n";
+      }
+      const double t0 = MPI_Wtime();
+      domain.AssembleMatrixOnly();
+      const double t_asm = mpi.GlobalMax(MPI_Wtime() - t0);
+      if (mpi.IsRoot())
+      {
+         std::cout << "  [matrix-stats] K assembled in " << t_asm
+                   << " s (slowest rank); exiting.\n";
+      }
+      MPI_Barrier(MPI_COMM_WORLD);
+#ifdef MFEM_USE_PETSC
+      if (petsc_initialized) { MFEMFinalizePetsc(); }
+#endif
+      return 0;
+   }
+
    // =========================================================================
    // Fault components
    // =========================================================================
@@ -1646,6 +2268,21 @@ int main(int argc, char *argv[])
    // =========================================================================
    PBP5SEASOp seas_op(&domain, &fault_op, &mpi);
 
+   G0Measure g0;
+   g0.timer_interval = stage_timer_interval;
+   g0.check_accepted_state = check_accepted_state;
+   if (g0.TimersOn())
+   {
+      domain.SetStageTimers(g0.Timers());
+      seas_op.SetStageTimers(g0.Timers());
+      // GPU plan G3: on a GPU, kernels run asynchronously; wait for them at
+      // each timer start and stop so each part is charged its own GPU time.
+      if (Device::Allows(Backend::CUDA_MASK | Backend::HIP_MASK))
+      {
+         g0.timers.SetDeviceSync([]() { MFEM_DEVICE_SYNC; });
+      }
+   }
+
    // v51: dip traction diagnostics
    if (zero_dip_traction)
    {
@@ -1660,19 +2297,42 @@ int main(int argc, char *argv[])
                 << (elastic_sigma_n ? "ON (default, Tandem)" : "OFF (--no-elastic-sigma-n)")
                 << "\n";
    }
+   // GPU plan G2: per-stage operators instead of the face loops
+   if (qd_operators == "matrix")
+   {
+      seas_op.SetQDOperators(true);
+      domain.GetQDStageOperators()->PrintSummary(mpi.GetComm(), std::cout);
+   }
+   if (mpi.IsRoot())
+   {
+      std::cout << "  [G2] qd-operators: " << qd_operators << " ("
+                << qd_operators_why << ")\n";
+   }
+   // QD speed item 3: stages through the Green's function (opt-in)
+   if (qd_green)
+   {
+      seas_op.SetQDGreen(qd_green_config, qd_green_check);
+   }
+   if (mpi.IsRoot())
+   {
+      std::cout << "  [QD-GREEN] " << (qd_green ? "ON" : "off (--qd-green)");
+      if (qd_green)
+      {
+         std::cout << ", check every " << qd_green_check << " stages"
+                   << (qd_green_check > 0 ? "" : " (off)");
+         if (qd_green_config.compress > 0.0)
+         {
+            std::cout << ", H-matrix eps " << qd_green_config.compress
+                      << " leaf " << qd_green_config.leaf << " eta "
+                      << qd_green_config.eta;
+         }
+      }
+      std::cout << "\n";
+   }
 
    // Face tracer for per-face diagnostics (rank-local, no MPI)
    // Coordinate window selects faces in the region where prior blowups occurred.
    // All ranks participate; max_traced_faces limits output per rank.
-   auto env_truthy = [](const char *name) -> bool
-   {
-      const char *v = std::getenv(name);
-      if (!v || !*v) { return false; }
-      std::string s(v);
-      std::transform(s.begin(), s.end(), s.begin(),
-                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-      return !(s == "0" || s == "false" || s == "off" || s == "no");
-   };
    auto env_int = [](const char *name, int default_value) -> int
    {
       const char *v = std::getenv(name);
@@ -1802,6 +2462,33 @@ int main(int argc, char *argv[])
 #endif
       return 0;
    }
+
+   // Round-off perturbation of the initial state (test only, GPU plan G0
+   // floors): every entry is scaled by 1 + 1e-15 r, r uniform in [-1, 1].
+   // The initial slip is zero, so in practice this perturbs the state
+   // variable.  The generator is seeded per rank, so the pattern depends on
+   // the partition; any pattern serves to show how far a reordering of the
+   // arithmetic can move a 50-step result.
+   if (perturb_seed >= 0)
+   {
+      std::mt19937_64 gen(static_cast<std::uint64_t>(perturb_seed)
+                          + 1000003ULL * static_cast<std::uint64_t>(mpi.Rank()));
+      std::uniform_real_distribution<double> dist(-1.0, 1.0);
+      state.HostReadWrite();  // GPU plan G4: host loop
+      for (int i = 0; i < state.Size(); i++)
+      {
+         state(i) *= 1.0 + 1e-15 * dist(gen);
+      }
+      if (mpi.IsRoot())
+      {
+         std::cout << "  [perturb] initial state scaled by 1 + 1e-15 r "
+                   << "(seed " << perturb_seed << ")\n";
+      }
+   }
+
+   // Stage timers: keep the one-off matrix setup, drop the two
+   // initial-condition solves from the per-stage figures.
+   if (g0.TimersOn()) { g0.timers.ResetStageParts(); }
 
    real_t V_init = seas_op.GetMaxSlipRate();
    if (mpi.IsRoot())
@@ -2231,6 +2918,7 @@ int main(int argc, char *argv[])
       std::ofstream vtp(vtp_file);
       vtp << "owned_dof,x2,x3,param_a,param_Dc,psi_init\n";
       vtp << std::setprecision(10);
+      state.HostRead();  // GPU plan G4: host loop
       for (int i = 0; i < n_owned; i++)
       {
          real_t psi_i = state(i * 3 + 2);  // BP5: [slip_dip, slip_strike, psi]
@@ -2284,6 +2972,7 @@ int main(int argc, char *argv[])
             const int spn = 3;  // BP5: [slip_dip, slip_strike, psi]
             const int n_owned = fault_op.NumNodes();
             Vector owned_psi(n_owned);
+            state.HostRead();  // GPU plan G4: host loop
             for (int i = 0; i < n_owned; i++)
             {
                owned_psi(i) = state(i * spn + 2);
@@ -2321,6 +3010,13 @@ int main(int argc, char *argv[])
       }
 
       // -------- Volume-PVD path (default) --------
+      // --qd-green: the volume output reads the live displacement, which
+      // the stages no longer compute; solve it once when this step writes.
+      if (seas_op.QDGreenActive() &&
+          pv_out->PeekShouldWrite(step_num, time, V_max))
+      {
+         seas_op.RefreshDisplacement();
+      }
       // Expand owned fault vectors to local (all faces) for visualization
       Vector owned_slip;
       fault_op.GetSlip(state, owned_slip);
@@ -2334,6 +3030,7 @@ int main(int argc, char *argv[])
          const int spn = 3;  // BP5: [slip_dip, slip_strike, psi]
          const int n_owned = fault_op.NumNodes();
          Vector owned_psi(n_owned);
+         state.HostRead();  // GPU plan G4: host loop
          for (int i = 0; i < n_owned; i++)
          {
             owned_psi(i) = state(i * spn + 2);
@@ -2510,6 +3207,54 @@ int main(int argc, char *argv[])
       PetscErrorCode ierr = TSSetFromOptions(ts);
       MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSSetFromOptions failed");
 
+      // QD speed-up plan v2, item A: the options file may pick another RK
+      // tableau or step controller.  The monitor reads V_max, traction and
+      // slip rate from the operator's caches, which the last stage
+      // evaluation of the step left.  That stage is at the accepted state
+      // only for an RK tableau with the FSAL property (3bs, 5dp, 5bs, 6vr);
+      // with any other (7vr, 8vr, another TS type) event detection and
+      // output would read an inner stage, so the run stops.
+      {
+         TSType ts_type = nullptr;
+         ierr = TSGetType(ts, &ts_type);
+         MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSGetType failed");
+         PetscBool is_rk = PETSC_FALSE;
+         ierr = PetscStrcmp(ts_type, TSRK, &is_rk);
+         MFEM_VERIFY(ierr == PETSC_SUCCESS, "PetscStrcmp failed");
+         TSRKType rk_type = nullptr;
+         PetscBool fsal = PETSC_FALSE;
+         if (is_rk)
+         {
+            ierr = TSRKGetType(ts, &rk_type);
+            MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSRKGetType failed");
+            ierr = TSRKGetTableau(ts, nullptr, nullptr, nullptr, nullptr,
+                                  nullptr, nullptr, nullptr, &fsal);
+            MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSRKGetTableau failed");
+         }
+         MFEM_VERIFY(is_rk && fsal,
+                     "PETSc TS " << ts_type << (is_rk ? " " : "")
+                     << (is_rk ? rk_type : "") << ": the monitor needs an "
+                     "RK tableau with the FSAL property (3bs, 5dp, 5bs, "
+                     "6vr), because it reads the operator's caches from the "
+                     "last stage of each step");
+         TSAdapt tsad;
+         ierr = TSGetAdapt(ts, &tsad);
+         MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSGetAdapt failed");
+         TSAdaptType adapt_type = nullptr;
+         ierr = TSAdaptGetType(tsad, &adapt_type);
+         MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSAdaptGetType failed");
+         PetscReal atol = 0.0, rtol = 0.0;
+         ierr = TSGetTolerances(ts, &atol, nullptr, &rtol, nullptr);
+         MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSGetTolerances failed");
+         if (mpi.IsRoot())
+         {
+            std::cout << "  [TS] rk " << rk_type << " (FSAL), adapt "
+                      << adapt_type << ", atol " << std::scientific
+                      << std::setprecision(3) << atol << ", rtol " << rtol
+                      << std::defaultfloat << "\n";
+         }
+      }
+
       // Set initial dt once — MFEM's Run() will pass this to TSSolve.
       // Matches Tandem: set dt once, then TSSolve handles everything.
       ierr = TSSetTimeStep(ts, dt_init);
@@ -2545,6 +3290,8 @@ int main(int argc, char *argv[])
       petsc_mon_ctx.pv_out = pv_out.get();
       petsc_mon_ctx.restart_rejections_carryover =
          restart_rejections_carryover;
+      petsc_mon_ctx.g0 = (g0.TimersOn() || g0.check_accepted_state)
+                         ? &g0 : nullptr;
 
       ierr = TSMonitorSet(ts, bp5_ts_monitor_callback, &petsc_mon_ctx,
                           nullptr);
@@ -2782,6 +3529,7 @@ int main(int argc, char *argv[])
    // =========================================================================
    // Main time-stepping loop
    // =========================================================================
+   g0.loop_start = MPI_Wtime();
 #ifdef MFEM_USE_PETSC
    if (use_petsc_ts)
    {
@@ -2832,7 +3580,17 @@ int main(int argc, char *argv[])
                      "restart_prefix.empty().");
       }
 
-      petsc_ode->Run(state, t, current_dt, t_final);
+      // GPU plan G4: SetInitialCondition may have left a device copy of
+      // state; mark the host copy current so Run() places the host array in
+      // PETSc's solution Vec on every backend (PETSc moves it to the GPU
+      // itself), as before G4.
+      state.HostReadWrite();
+      {
+         // The whole TSSolve as one NVTX range: the G4 trace check counts
+         // the copies inside it (jobs/vista/g4_trace_check.py).
+         seas::NvtxRange ts_range("seas:ts_solve");
+         petsc_ode->Run(state, t, current_dt, t_final);
+      }
 
       // Retrieve final step count and rejection count from PETSc
       {
@@ -2871,6 +3629,8 @@ int main(int argc, char *argv[])
          if (!accepted) { continue; }
          current_dt = ode_solver.GetDt();
          step++;
+         seas::StageTimers *timers = g0.Timers();
+         if (timers) { timers->Start(seas::StageTimers::MonitorTotal); }
 
          // Post-step psi clamping is MFEM-specific. Tandem does not do this,
          // so keep it switchable and instrumented while debugging.
@@ -2991,6 +3751,7 @@ int main(int argc, char *argv[])
          }
 
          // I/O: adaptive schedule or every step
+         if (timers) { timers->Start(seas::StageTimers::MonitorOutput); }
          if (write_every_step)
          {
             bench_out.ForceWrite(t, state, fault_op, seas_op.GetTraction(),
@@ -3012,11 +3773,15 @@ int main(int argc, char *argv[])
             global_out->WriteStep(
                {t, V_max > 0.0 ? std::log10(V_max) : -300.0});
          }
+         if (timers) { timers->Stop(seas::StageTimers::MonitorOutput); }
 
          // Checkpoint
          if (checkpoint_interval > 0 && step % checkpoint_interval == 0)
          {
+            seas::ScopedStageTimer ckpt_timer(
+               timers, seas::StageTimers::MonitorCheckpoint);
             Vector u_vec;
+            seas_op.RefreshDisplacement();  // --qd-green: solve u once
             u_vec = seas_op.GetDisplacement();
             WriteCheckpoint(full_prefix, t, current_dt,
                             step, num_seismic_events, in_seismic_event,
@@ -3042,6 +3807,18 @@ int main(int argc, char *argv[])
             std::cout.flush();
          }
 
+         if (timers) { timers->Stop(seas::StageTimers::MonitorTotal); }
+
+         // G0 measurements, outside the monitor's own timer.
+         if (g0.check_accepted_state)
+         {
+            CheckAcceptedState(g0, seas_op, fault_op, state, t, step, mpi);
+         }
+         if (g0.TimersOn() && step % g0.timer_interval == 0)
+         {
+            PrintStageTimers(g0, step, "every N steps", mpi);
+         }
+
          // Intentional early exit: dump only the first accepted step for
          // cross-verification with Tandem (v59 diagnostic).
          if (debug_first_step_dump)
@@ -3055,12 +3832,26 @@ int main(int argc, char *argv[])
       }
    }
 
+   if (g0.TimersOn())
+   {
+      PrintStageTimers(g0, step, "end of run", mpi);
+   }
+   if (g0.check_accepted_state && mpi.IsRoot())
+   {
+      std::cout << "[ACCEPTED-STATE] summary: " << g0.check_count
+                << " checks, largest difference " << std::scientific
+                << std::setprecision(3) << g0.check_max
+                << (g0.check_max > 1e-12 ? " (ABOVE 1e-12)" : " (<= 1e-12)")
+                << "\n";
+   }
+
    // =========================================================================
    // Final checkpoint and close
    // =========================================================================
    if (checkpoint_interval > 0)
    {
       Vector u_vec;
+      seas_op.RefreshDisplacement();  // --qd-green: solve u once
       u_vec = seas_op.GetDisplacement();
       WriteCheckpoint(full_prefix, t, current_dt,
                       step, num_seismic_events, in_seismic_event,
@@ -3130,6 +3921,15 @@ int main(int argc, char *argv[])
       global_out->Close();
    }
 
+   if (qd_operators == "matrix")
+   {
+      const long long rejected = use_petsc_ts
+                                 ? step_rejections
+                                 : ode_solver.GetTotalRejections();
+      domain.PrintQDStageEvalSummary(step, rejected, std::cout);
+      seas_op.PrintQDGreenCheckSummary(std::cout);
+   }
+
    if (mpi.IsRoot())
    {
       std::cout << "\n=== BP5 Simulation Summary ===\n";
@@ -3181,6 +3981,10 @@ int main(int argc, char *argv[])
    mpi.Bcast(regression_rc);
 
 #ifdef MFEM_USE_PETSC
+   // Destroy the TS before PetscFinalize(): destroyed afterwards (at the end
+   // of main), it queries a freed communicator and MPI aborts the run with
+   // exit code 1 after all output is written.
+   petsc_ode.reset();
    if (petsc_initialized)
    {
       MFEMFinalizePetsc();

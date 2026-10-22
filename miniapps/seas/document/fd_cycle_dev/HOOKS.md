@@ -15,7 +15,9 @@ and add its pin to `tests/cycle/test_cycle_api_pin.cpp`.
 
 ## Landed
 
-The branch point is `nitsche-dynamic-rupture` at `010b56e`.
+The branch point was `nitsche-dynamic-rupture` at `010b56e`. The branch has since
+merged it at `4c97e32` (merge `7baf0a4`, 20 Oct 2026) and at `b1f5446`, the QD
+speedup (22 Oct 2026); `cycle-owned-check` diffs against the latest merge base.
 
 | Hook | File and method | Commit | Pinned |
 |------|-----------------|--------|--------|
@@ -35,8 +37,10 @@ The branch point is `nitsche-dynamic-rupture` at `010b56e`.
 A change taken whole from another branch is cherry-picked with `-x` and its
 commit is listed in `CYCLE_IMPORTS` in `cycle/cycle.mk`; `cycle-owned-check`
 then requires the branch to change that commit's files by exactly its patch.
+Once `nitsche-dynamic-rupture` carries the change and the branch merges it,
+the commit leaves `CYCLE_IMPORTS`.
 
 | Change | Home branch, commit | Merged here | Gates re-run |
 |--------|---------------------|-------------|--------------|
-| Station sigma_n fix: station V and tau re-solved with the normal traction the solver used (`SEASQuasiDynamicOperator::GetFrictionNormalTraction`, BP5 station writers, `seas_driver`, `seas_bp5_full`, unit test). Chunhui Zhao, 16 Oct 2026: use the same QD path as the Vista run (job 1074099) for fully dynamic development | `gpu-qd-bp5` `ef70517` | cherry-picked; `QDPhase::FillStationFields` passes the same normal traction | API pin, parity, 50 steps vs `gpu-qd-bp5` `seas_bp5_full`, restart; P0 job checks time, slip, state, global vs the older golden |
-| Track 2's H-B1 (`FaultPointState` 3 -> 8 scalars, `CloseDOF` trailing `slip_abs`) | `nitsche-benchmarks` `bb89a65`; reaches `nitsche-dynamic-rupture` only when track 2 finishes and Chunhui Zhao asks | | L-00, T12, P0/P1 BP5 gates, API pin |
+| Station sigma_n fix: station V and tau re-solved with the normal traction the solver used (`SEASQuasiDynamicOperator::GetFrictionNormalTraction`, BP5 station writers, `seas_driver`, `seas_bp5_full`, unit test). Chunhui Zhao, 16 Oct 2026: use the same QD path as the Vista run (job 1074099) for fully dynamic development | `gpu-qd-bp5` `ef70517` | cherry-picked; `QDPhase::FillStationFields` passes the same normal traction. Since the merge of `nitsche-dynamic-rupture` `b1f5446` the commit itself is in the trunk, so it left `CYCLE_IMPORTS` | API pin, parity, 50 steps vs `gpu-qd-bp5` `seas_bp5_full`, restart; P0 job checks time, slip, state, global vs the older golden |
+| Track 2's H-B1 (`FaultPointState` 3 -> 8 scalars, `CloseDOF` trailing `slip_abs`) | `nitsche-benchmarks` `bb89a65`; reached `nitsche-dynamic-rupture` with `e4182a7` | with the trunk merge `7baf0a4` (trunk `4c97e32`) | L-10, T12, P2, P3, P4, snapshots, API pin |

@@ -14,6 +14,7 @@
 
 #include "mfem.hpp"
 #include "../common/seas_types.hpp"
+#include "qd_green_operator.hpp"
 
 namespace mfem
 {
@@ -279,6 +280,54 @@ public:
    /// Get MPI communicator (parallel only)
    virtual MPI_Comm GetComm() const { return MPI_COMM_WORLD; }
 #endif
+
+   /// @brief GPU plan G2: build the per-stage operators B, D, C_u, C_δ
+   /// (and N_u, N_δ with @a with_normal) once, for SolveStage().
+   ///
+   /// Default: not supported.  ElasticityDomainOperator overrides it for a
+   /// parallel mesh with the IP method.
+   virtual void BuildQDStageOperators(bool with_normal)
+   {
+      MFEM_ABORT("This domain operator has no QD stage operators "
+                 "(--qd-operators matrix); with_normal = " << with_normal);
+   }
+
+   /// @brief GPU plan G2: one quasi-dynamic stage through the operators of
+   /// BuildQDStageOperators(): b = B·δ + D·g(t), K u = b,
+   /// T = C_u·u + C_δ·δ and, when @a normal_owned is given,
+   /// T_n = N_u·u + N_δ·δ.  Slip and tractions are on owned fault DOFs.
+   virtual void SolveStage(real_t /*time*/, const Vector & /*slip_owned*/,
+                           GridFuncType & /*displacement*/,
+                           Vector & /*traction_owned*/,
+                           Vector * /*normal_owned*/)
+   {
+      MFEM_ABORT("This domain operator has no QD stage operators "
+                 "(--qd-operators matrix)");
+   }
+
+   /// @brief QD speed item 3 (--qd-green): build, or read from
+   /// @a config.cache_path, the discrete Green's function of the stage
+   /// operators (qd_green_operator.hpp), for GreenStage().  Needs
+   /// BuildQDStageOperators() first.
+   ///
+   /// Default: not supported.  ElasticityDomainOperator overrides it for a
+   /// parallel mesh with the IP method.
+   virtual void BuildQDGreen(const QDGreenConfig &config)
+   {
+      MFEM_ABORT("This domain operator has no QD Green's function "
+                 "(--qd-green); block = " << config.block);
+   }
+
+   /// @brief QD speed item 3: one quasi-dynamic stage through the Green's
+   /// function, T = G·δ + t·T_D (and T_n with @a normal_owned).  No volume
+   /// solve: the displacement is not computed.
+   virtual void GreenStage(real_t /*time*/, const Vector & /*slip_owned*/,
+                           Vector & /*traction_owned*/,
+                           Vector * /*normal_owned*/)
+   {
+      MFEM_ABORT("This domain operator has no QD Green's function "
+                 "(--qd-green)");
+   }
 };
 
 // Convenience type aliases

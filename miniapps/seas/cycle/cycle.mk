@@ -206,7 +206,9 @@ CYCLE_HOOK_GREP = grep -xF $(foreach f,$(CYCLE_HOOK_FILES),-e $(f))
 # Fixes taken whole from other branches (HOOKS.md, "Shared changes merged from
 # other tracks"), cherry-picked with -x: the branch may change the files such
 # a commit touches only by exactly that commit's change (same patch id).
-CYCLE_IMPORTS = ef70517101ab3824e0955d7c7e3f9013e8eacf8c
+# None now: the station fix ef70517 came with nitsche-dynamic-rupture
+# b1f5446 (the QD speedup merge), so it is no longer the branch's change.
+CYCLE_IMPORTS =
 cycle-owned-check:
 	@base=$$(git merge-base HEAD $(CYCLE_BASE)) || { echo "ERROR: no merge base with $(CYCLE_BASE)"; exit 1; }; \
 	echo "Branch point: $$base ($(CYCLE_BASE))"; \

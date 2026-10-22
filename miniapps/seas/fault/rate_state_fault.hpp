@@ -17,6 +17,7 @@
 #include "../friction/friction_law.hpp"
 #include "../friction/dieterich_ruina.hpp"
 #include "../friction/state_evolution.hpp"
+#include "../friction/device_rate_state.hpp"
 #include "../config/bp2_params.hpp"
 #include "../config/bp5_params.hpp"
 #include "../common/mpi_context.hpp"
@@ -169,7 +170,15 @@ public:
          Dc_values_ = geom_->GetDcValues();
          tau_pre_ = geom_->GetTauPre();
          V_init_values_ = geom_->GetVInit();
+         // GPU plan G4: the fault kernels read their own copies of a and
+         // eta, so the geometry's stay on the host for its other readers.
+         a_values_ = geom_->GetAValues();
+         eta_values_ = geom_->GetEtaValues();
       }
+      // GPU plan G4: the RHS kernel evaluates the aging law in psi form
+      // itself (RSAgingRatePsi); ComputeRHS checks that it is the law given.
+      aging_psi_ = dynamic_cast<const AgingLawPsi *>(evolution);
+      slip_rate_.UseDevice(true);
    }
 
    /// @brief Phase 6 §6 — enable SAFS-mode per-DOF normal stress and
@@ -288,6 +297,9 @@ public:
    {
       MFEM_ASSERT(state.Size() == StateSize(),
                   "State vector has wrong size");
+      // Host loop over every entry (GPU plan G4: host loops say so, so that
+      // a device copy left by an earlier kernel is not used afterwards).
+      state.HostWrite();
 
       for (int i = 0; i < num_nodes_; i++)
       {
@@ -341,6 +353,10 @@ public:
                   "Traction vector has wrong size");
       MFEM_ASSERT(state.Size() == StateSize(),
                   "State vector has wrong size");
+      traction.HostRead();
+      state.HostReadWrite();
+      slip_rate_.HostReadWrite();
+      HostReadParams_();
 
       V_max_ = 0.0;
       const Vector &a_values = geom_->GetAValues();
@@ -470,14 +486,18 @@ public:
                      << normal_traction->Size() << " vs " << num_nodes_);
       }
 
-      V_max_ = 0.0;
-      const Vector &a_values = geom_->GetAValues();
-      const Vector &eta_values = geom_->GetEtaValues();
-      const Vector &depths = geom_->GetDepths();
-
-      for (int i = 0; i < num_nodes_; i++)
+      if constexpr (SlipComponents == 1)
       {
-         if constexpr (SlipComponents == 1)
+         traction.HostRead();
+         state.HostRead();
+         rate.HostWrite();
+         slip_rate_.HostWrite();
+         V_max_ = 0.0;
+         const Vector &a_values = geom_->GetAValues();
+         const Vector &eta_values = geom_->GetEtaValues();
+         const Vector &depths = geom_->GetDepths();
+
+         for (int i = 0; i < num_nodes_; i++)
          {
             // ---- BP2 scalar path (unchanged) ----
             if (depths(i) < -params_.Wf)
@@ -512,113 +532,29 @@ public:
             rate(i * StatePerNode + ThetaIndex) =
                evolution_->Rate(V, state_var, params_.Dc);
          }
-         else
+      }
+      else
+      {
+         // ---- BP5 vector path ----
+         // GPU plan G4: one kernel over the fault nodes, on the device when
+         // MFEM has one (friction/device_rate_state.hpp, the host code's
+         // arithmetic step for step).  No below-fault hardcoded branch: the
+         // friction solver handles all DOFs, matching Tandem's approach.
+         // v55 fix (Tandem DieterichRuinaBase.h:87): sigma_n_eff = SnPre +
+         // normal_traction, with SnPre = SigmaNAt_(i) (Phase 6 §6).
+         MFEM_VERIFY(aging_psi_ != nullptr,
+                     "RateStateFaultOperator: the BP5 fault RHS evaluates the "
+                     "aging law in psi form (AgingLawPsi); got "
+                     << evolution_->GetName());
+         const bool use_dev = Device::Allows(Backend::DEVICE_MASK);
+         const RSReduceValue res =
+            RSFaultRHS(num_nodes_, use_dev, DeviceParams_(),
+                       FaultInputs_(traction, state, normal_traction),
+                       Dc_values_, rate, slip_rate_, rs_workspace_);
+         V_max_ = res.first;
+         if (res.second != 0)
          {
-            // ---- BP5 vector path ----
-            // No below-fault hardcoded branch: let friction solver handle
-            // all DOFs naturally, matching Tandem's approach.
-
-            real_t psi = state(i * StatePerNode + PsiIndex);
-            real_t tau_vec[2] = {TauPreAt_(2*i) + traction(2*i),
-                                 TauPreAt_(2*i+1) + traction(2*i+1)};
-            real_t a = a_values(i);
-            real_t eta = eta_values(i);
-            real_t Dc = Dc_values_(i);
-
-            // v55 fix: elastic sigma_n feedback matching Tandem DieterichRuinaBase.h:87
-            //   Tandem: snAbs = -sn + SnPre  (sn = T·n, negative in compression)
-            //   MFEM:   normal_traction = -T·n (positive in compression, from NormalStress)
-            //   Match:  sigma_n_eff = SnPre + normal_traction
-            //           compression → normal_traction > 0 → sigma_n_eff > SnPre ✓
-            // Phase 6 §6: SnPre = SigmaNAt_(i) which routes between
-            // sigma_n_bp5_ (BP5, default) and (*sigma_n_per_dof_)(i)
-            // (SAFS).  No change to the elastic-feedback combination.
-            const real_t sigma_n_pre = SigmaNAt_(i);
-            real_t sigma_n_eff = sigma_n_pre;
-            if (normal_traction)
-            {
-               // Tandem DieterichRuinaBase.h:87: snAbs = -sn + SnPre
-               // No floor — match Tandem exactly.
-               sigma_n_eff = sigma_n_pre + (*normal_traction)(i);
-            }
-
-            // v58: catch first non-finite friction input or sigma_n_eff <= 0
-            {
-               bool bad_input = !std::isfinite(psi) ||
-                                !std::isfinite(tau_vec[0]) ||
-                                !std::isfinite(tau_vec[1]) ||
-                                !std::isfinite(sigma_n_eff) ||
-                                !std::isfinite(a) ||
-                                !std::isfinite(eta) ||
-                                !std::isfinite(Dc);
-               if (bad_input)
-               {
-                  int rank = mpi_ctx_ ? mpi_ctx_->Rank() : 0;
-                  real_t x2 = geom_ ? geom_->GetCoordsX2()(i) : 0.0;
-                  real_t x3 = geom_ ? geom_->GetCoordsX3()(i) : 0.0;
-                  std::cerr << std::scientific << std::setprecision(15)
-                     << "[FRIC-GUARD] NON-FINITE INPUT r=" << rank
-                     << " d=" << i << " x=" << x2 << " z=" << x3
-                     << " psi=" << psi
-                     << " tau=(" << tau_vec[0] << "," << tau_vec[1] << ")"
-                     << " sn_eff=" << sigma_n_eff
-                     << " a=" << a << " eta=" << eta << " Dc=" << Dc
-                     << " trac=(" << traction(2*i) << "," << traction(2*i+1) << ")"
-                     << " sn_el=" << (normal_traction ? (*normal_traction)(i) : 0.0)
-                     << " slip=(" << state(i*StatePerNode) << ","
-                     << state(i*StatePerNode+1) << ")"
-                     << std::endl;
-                  MFEM_ABORT("Non-finite friction input at DOF " << i);
-               }
-               if (sigma_n_eff <= 0.0)
-               {
-                  int sn_rank = mpi_ctx_ ? mpi_ctx_->Rank() : 0;
-                  real_t sn_x2 = geom_ ? geom_->GetCoordsX2()(i) : 0.0;
-                  real_t sn_x3 = geom_ ? geom_->GetCoordsX3()(i) : 0.0;
-                  std::cerr << "[FRIC-GUARD] sigma_n_eff <= 0 at DOF "
-                            << i << " r=" << sn_rank
-                            << " x2=" << sn_x2 << " x3=" << sn_x3
-                            << " sn_eff=" << sigma_n_eff
-                            << " sn_el=" << (normal_traction ? (*normal_traction)(i) : 0.0)
-                            << std::endl;
-               }
-            }
-
-            int dbg_rank = mpi_ctx_ ? mpi_ctx_->Rank() : 0;
-            real_t dbg_x = geom_ ? geom_->GetCoordsX2()(i) : 0.0;
-            real_t dbg_z = geom_ ? geom_->GetCoordsX3()(i) : 0.0;
-
-            real_t V_vec[2];
-            dr_friction_->SolveSlipRateVectorPsi(
-               tau_vec, psi, sigma_n_eff, eta, a, V_vec,
-               nullptr, dbg_rank, i, dbg_x, dbg_z);
-
-            real_t V_abs = std::sqrt(V_vec[0]*V_vec[0] + V_vec[1]*V_vec[1]);
-
-            if (!std::isfinite(V_vec[0]) || !std::isfinite(V_vec[1]) ||
-                !std::isfinite(V_abs))
-            {
-               std::cerr << std::scientific << std::setprecision(15)
-                  << "[FRIC-GUARD] NON-FINITE V r=" << dbg_rank
-                  << " d=" << i << " x=" << dbg_x << " z=" << dbg_z
-                  << " V=(" << V_vec[0] << "," << V_vec[1] << ")"
-                  << " |V|=" << V_abs
-                  << " tau=(" << tau_vec[0] << "," << tau_vec[1] << ")"
-                  << " psi=" << psi << " sn_eff=" << sigma_n_eff
-                  << " a=" << a << " eta=" << eta
-                  << std::endl;
-               MFEM_ABORT("Non-finite V from friction solver at DOF " << i);
-            }
-
-            rate(i * StatePerNode + 0) = V_vec[0];
-            rate(i * StatePerNode + 1) = V_vec[1];
-            rate(i * StatePerNode + PsiIndex) =
-               evolution_->Rate(V_abs, psi, Dc);
-
-            slip_rate_(2*i) = V_vec[0];
-            slip_rate_(2*i+1) = V_vec[1];
-            V_max_ = std::max(V_max_, V_abs);
-
+            ReportRHSStatus_(res.second, traction, state, normal_traction);
          }
       }
 
@@ -630,6 +566,9 @@ public:
             monitor_call_count_++;
             if (monitor_call_count_ % monitor_interval_ == 0)
             {
+               traction.HostRead();
+               slip_rate_.HostRead();
+               HostReadParams_();
                // Auto-pick stations if not specified
                std::vector<int> stations = monitor_stations_;
                if (stations.empty() && num_nodes_ > 0)
@@ -687,13 +626,18 @@ public:
    {
       MFEM_ASSERT(state.Size() == StateSize(), "State vector has wrong size");
       slip.SetSize(SlipSize());
-      for (int i = 0; i < num_nodes_; i++)
+      // GPU plan G4: a copy kernel, on the device when slip lives there (the
+      // QD stage's slip_); on the host otherwise, as before.
+      const bool use_dev = slip.UseDevice() &&
+                           Device::Allows(Backend::DEVICE_MASK);
+      const int nc = SlipComponents;
+      const int spn = StatePerNode;
+      const real_t *X = state.Read(use_dev);
+      real_t *S = slip.Write(use_dev);
+      forall_switch(use_dev, SlipSize(), [=] MFEM_HOST_DEVICE (int k)
       {
-         for (int c = 0; c < SlipComponents; c++)
-         {
-            slip(i * SlipComponents + c) = state(i * StatePerNode + c);
-         }
-      }
+         S[k] = X[(k / nc) * spn + k % nc];
+      });
    }
 
    /// @brief Extract theta from state vector.
@@ -707,6 +651,9 @@ public:
    {
       MFEM_ASSERT(state.Size() == StateSize(), "State vector has wrong size");
       theta.SetSize(num_nodes_);
+      state.HostRead();
+      theta.HostWrite();
+      HostReadParams_();
       if (use_psi_)
       {
          for (int i = 0; i < num_nodes_; i++)
@@ -744,6 +691,8 @@ public:
    {
       MFEM_ASSERT(slip.Size() == SlipSize(), "Slip vector has wrong size");
       MFEM_ASSERT(state.Size() == StateSize(), "State vector has wrong size");
+      slip.HostRead();
+      state.HostReadWrite();
       for (int i = 0; i < num_nodes_; i++)
       {
          for (int c = 0; c < SlipComponents; c++)
@@ -761,6 +710,8 @@ public:
    {
       MFEM_ASSERT(theta.Size() == num_nodes_, "Theta vector has wrong size");
       MFEM_ASSERT(state.Size() == StateSize(), "State vector has wrong size");
+      theta.HostRead();
+      state.HostReadWrite();
       for (int i = 0; i < num_nodes_; i++)
       {
          state(i * StatePerNode + ThetaIndex) = theta(i);
@@ -905,12 +856,14 @@ public:
       }
 
       V_out.SetSize(SlipComponents * num_nodes_);
-      const Vector &a_values = geom_->GetAValues();
-      const Vector &eta_values = geom_->GetEtaValues();
-
-      for (int i = 0; i < num_nodes_; i++)
+      if constexpr (SlipComponents == 1)
       {
-         if constexpr (SlipComponents == 1)
+         traction.HostRead();
+         state.HostRead();
+         V_out.HostWrite();
+         const Vector &a_values = geom_->GetAValues();
+         const Vector &eta_values = geom_->GetEtaValues();
+         for (int i = 0; i < num_nodes_; i++)
          {
             const Vector &depths = geom_->GetDepths();
             if (depths(i) < -params_.Wf)
@@ -935,28 +888,27 @@ public:
             }
             V_out(i) = V;
          }
-         else
+      }
+      else
+      {
+         // GPU plan G4: one kernel over the fault nodes, as in ComputeRHS.
+         const bool use_dev = Device::Allows(Backend::DEVICE_MASK);
+         const int status =
+            RSFaultSlipRate(num_nodes_, use_dev, DeviceParams_().V0,
+                            FaultInputs_(traction, state, normal_traction),
+                            V_out, rs_workspace_);
+         if (status != 0)
          {
-            real_t psi = state(i * StatePerNode + PsiIndex);
-            real_t tau_vec[2] = {TauPreAt_(2*i) + traction(2*i),
-                                 TauPreAt_(2*i+1) + traction(2*i+1)};
-            real_t a = a_values(i);
-            real_t eta = eta_values(i);
-
-            // Match ComputeRHS() sigma_n_eff logic for elastic normal stress.
-            // Phase 6 §6: route SnPre via SigmaNAt_(i).
-            const real_t sigma_n_pre = SigmaNAt_(i);
-            real_t sigma_n_eff = sigma_n_pre;
-            if (normal_traction)
-            {
-               sigma_n_eff = sigma_n_pre + (*normal_traction)(i);
-            }
-
-            real_t V_vec[2];
-            dr_friction_->SolveSlipRateVectorPsi(
-               tau_vec, psi, sigma_n_eff, eta, a, V_vec);
-            V_out(2*i) = V_vec[0];
-            V_out(2*i+1) = V_vec[1];
+            // A kernel cannot print: the host loop reruns on the same
+            // inputs, into scratch, for today's [FRIC-RESID] and
+            // [FRIC-BRACKET] lines and its stop on a failed Brent step.
+            Vector V_host;
+            RecomputeSlipRateHost_(traction, state, V_host, normal_traction);
+            MFEM_VERIFY(!(status & kRSAbortSolve),
+                        "RateStateFaultOperator::RecomputeSlipRate: the "
+                        "fault kernel flagged status " << status
+                        << " (RSStatus, friction/device_rate_state.hpp), "
+                        "but the host rerun did not stop the run");
          }
       }
    }
@@ -974,6 +926,9 @@ public:
    real_t VerifyStressEquilibrium(const Vector &traction, const Vector &state,
                                   real_t tol = 1e-10) const
    {
+      traction.HostRead();
+      state.HostRead();
+      HostReadParams_();
       const Vector &a_values = geom_->GetAValues();
       const Vector &eta_values = geom_->GetEtaValues();
       const Vector &depths = geom_->GetDepths();
@@ -1067,6 +1022,7 @@ public:
          Vector slip, theta;
          GetSlip(state, slip);
          GetTheta(state, theta);
+         slip_rate_.HostRead();
 
          os << "  Theta range: [" << theta.Min() << ", " << theta.Max() << "] s\n";
 
@@ -1108,6 +1064,7 @@ public:
       else
       {
          V_max_ = 0.0;
+         V.HostRead();
          for (int i = 0; i < num_nodes_; i++)
          {
             real_t V_abs = std::sqrt(V(2*i)*V(2*i) + V(2*i+1)*V(2*i+1));
@@ -1162,6 +1119,8 @@ private:
    Vector Dc_values_;       ///< Per-DOF critical slip distance [NumNodes()]
    Vector tau_pre_;         ///< Per-DOF pre-stress [2 * NumNodes()] (BP5 only)
    Vector V_init_values_;   ///< Per-DOF initial velocity [2 * NumNodes()] (BP5 only)
+   Vector a_values_;        ///< Per-DOF a, for the fault kernels (BP5 only)
+   Vector eta_values_;      ///< Per-DOF eta, for the fault kernels (BP5 only)
 
    // Phase 6 §6 — SAFS-mode wiring.  Strict opt-in:
    //   safs_mode_ == false (default) → reads route to sigma_n_bp5_ /
@@ -1207,6 +1166,212 @@ private:
                   "(2 * num_nodes_ = " << 2 * num_nodes_ << ")");
       return safs_mode_ ? (*tau_pre_per_dof_)(idx) : tau_pre_(idx);
    }
+
+   /// GPU plan G4: the constants of the BP5 fault kernels.
+   RSDeviceParams DeviceParams_() const
+   {
+      RSDeviceParams prm;
+      prm.V0 = dr_friction_->GetConstants().V0;
+      prm.aging_b = aging_psi_ ? aging_psi_->GetB() : kRSNaN;
+      prm.aging_V0 = aging_psi_ ? aging_psi_->GetV0() : kRSNaN;
+      prm.aging_f0 = aging_psi_ ? aging_psi_->GetF0() : kRSNaN;
+      return prm;
+   }
+
+   /// GPU plan G4: where the BP5 fault kernels find their inputs, with the
+   /// SAFS routing of SigmaNAt_ and TauPreAt_.
+   RSFaultInputs FaultInputs_(const Vector &traction, const Vector &state,
+                              const Vector *normal_traction) const
+   {
+      RSFaultInputs in;
+      in.traction = &traction;
+      in.state = &state;
+      in.normal = normal_traction;
+      in.tau_pre = safs_mode_ ? tau_pre_per_dof_ : &tau_pre_;
+      in.sigma_n_dof = safs_mode_ ? sigma_n_per_dof_ : nullptr;
+      in.sigma_n = sigma_n_bp5_;
+      in.a = &a_values_;
+      in.eta = &eta_values_;
+      return in;
+   }
+
+   /// GPU plan G4: before a host loop, the host copies of the per-node
+   /// parameters that the fault kernels also read (the debug device guards
+   /// them once a kernel has).
+   void HostReadParams_() const
+   {
+      tau_pre_.HostRead();
+      Dc_values_.HostRead();
+      if (safs_mode_)
+      {
+         tau_pre_per_dof_->HostRead();
+         sigma_n_per_dof_->HostRead();
+      }
+   }
+
+   /// GPU plan G4: the ComputeRHS kernel flagged @a status (RSStatus bits).
+   /// A kernel cannot print, so the host loop of the BP5 path reruns on the
+   /// same inputs: it prints the [FRIC-GUARD], [FRIC-RESID] and
+   /// [FRIC-BRACKET] lines and stops the run where it always did.  It
+   /// writes nothing.
+   void ReportRHSStatus_(int status, const Vector &traction,
+                         const Vector &state,
+                         const Vector *normal_traction) const
+   {
+      traction.HostRead();
+      state.HostRead();
+      if (normal_traction) { normal_traction->HostRead(); }
+      HostReadParams_();
+      const Vector &a_values = geom_->GetAValues();
+      const Vector &eta_values = geom_->GetEtaValues();
+
+      for (int i = 0; i < num_nodes_; i++)
+      {
+            real_t psi = state(i * StatePerNode + PsiIndex);
+            real_t tau_vec[2] = {TauPreAt_(2*i) + traction(2*i),
+                                 TauPreAt_(2*i+1) + traction(2*i+1)};
+            real_t a = a_values(i);
+            real_t eta = eta_values(i);
+            real_t Dc = Dc_values_(i);
+
+            // v55 fix: elastic sigma_n feedback matching Tandem DieterichRuinaBase.h:87
+            //   Tandem: snAbs = -sn + SnPre  (sn = T·n, negative in compression)
+            //   MFEM:   normal_traction = -T·n (positive in compression, from NormalStress)
+            //   Match:  sigma_n_eff = SnPre + normal_traction
+            //           compression → normal_traction > 0 → sigma_n_eff > SnPre ✓
+            // Phase 6 §6: SnPre = SigmaNAt_(i) which routes between
+            // sigma_n_bp5_ (BP5, default) and (*sigma_n_per_dof_)(i)
+            // (SAFS).  No change to the elastic-feedback combination.
+            const real_t sigma_n_pre = SigmaNAt_(i);
+            real_t sigma_n_eff = sigma_n_pre;
+            if (normal_traction)
+            {
+               // Tandem DieterichRuinaBase.h:87: snAbs = -sn + SnPre
+               // No floor — match Tandem exactly.
+               sigma_n_eff = sigma_n_pre + (*normal_traction)(i);
+            }
+
+            // v58: catch first non-finite friction input or sigma_n_eff <= 0
+            {
+               bool bad_input = !std::isfinite(psi) ||
+                                !std::isfinite(tau_vec[0]) ||
+                                !std::isfinite(tau_vec[1]) ||
+                                !std::isfinite(sigma_n_eff) ||
+                                !std::isfinite(a) ||
+                                !std::isfinite(eta) ||
+                                !std::isfinite(Dc);
+               if (bad_input)
+               {
+                  int rank = mpi_ctx_ ? mpi_ctx_->Rank() : 0;
+                  real_t x2 = geom_ ? geom_->GetCoordsX2()(i) : 0.0;
+                  real_t x3 = geom_ ? geom_->GetCoordsX3()(i) : 0.0;
+                  std::cerr << std::scientific << std::setprecision(15)
+                     << "[FRIC-GUARD] NON-FINITE INPUT r=" << rank
+                     << " d=" << i << " x=" << x2 << " z=" << x3
+                     << " psi=" << psi
+                     << " tau=(" << tau_vec[0] << "," << tau_vec[1] << ")"
+                     << " sn_eff=" << sigma_n_eff
+                     << " a=" << a << " eta=" << eta << " Dc=" << Dc
+                     << " trac=(" << traction(2*i) << "," << traction(2*i+1) << ")"
+                     << " sn_el=" << (normal_traction ? (*normal_traction)(i) : 0.0)
+                     << " slip=(" << state(i*StatePerNode) << ","
+                     << state(i*StatePerNode+1) << ")"
+                     << std::endl;
+                  MFEM_ABORT("Non-finite friction input at DOF " << i);
+               }
+               if (sigma_n_eff <= 0.0)
+               {
+                  int sn_rank = mpi_ctx_ ? mpi_ctx_->Rank() : 0;
+                  real_t sn_x2 = geom_ ? geom_->GetCoordsX2()(i) : 0.0;
+                  real_t sn_x3 = geom_ ? geom_->GetCoordsX3()(i) : 0.0;
+                  std::cerr << "[FRIC-GUARD] sigma_n_eff <= 0 at DOF "
+                            << i << " r=" << sn_rank
+                            << " x2=" << sn_x2 << " x3=" << sn_x3
+                            << " sn_eff=" << sigma_n_eff
+                            << " sn_el=" << (normal_traction ? (*normal_traction)(i) : 0.0)
+                            << std::endl;
+               }
+            }
+
+            int dbg_rank = mpi_ctx_ ? mpi_ctx_->Rank() : 0;
+            real_t dbg_x = geom_ ? geom_->GetCoordsX2()(i) : 0.0;
+            real_t dbg_z = geom_ ? geom_->GetCoordsX3()(i) : 0.0;
+
+            real_t V_vec[2];
+            dr_friction_->SolveSlipRateVectorPsi(
+               tau_vec, psi, sigma_n_eff, eta, a, V_vec,
+               nullptr, dbg_rank, i, dbg_x, dbg_z);
+
+            real_t V_abs = std::sqrt(V_vec[0]*V_vec[0] + V_vec[1]*V_vec[1]);
+
+            if (!std::isfinite(V_vec[0]) || !std::isfinite(V_vec[1]) ||
+                !std::isfinite(V_abs))
+            {
+               std::cerr << std::scientific << std::setprecision(15)
+                  << "[FRIC-GUARD] NON-FINITE V r=" << dbg_rank
+                  << " d=" << i << " x=" << dbg_x << " z=" << dbg_z
+                  << " V=(" << V_vec[0] << "," << V_vec[1] << ")"
+                  << " |V|=" << V_abs
+                  << " tau=(" << tau_vec[0] << "," << tau_vec[1] << ")"
+                  << " psi=" << psi << " sn_eff=" << sigma_n_eff
+                  << " a=" << a << " eta=" << eta
+                  << std::endl;
+               MFEM_ABORT("Non-finite V from friction solver at DOF " << i);
+            }
+      }
+
+      MFEM_VERIFY(!(status & kRSAbortRHS),
+                  "RateStateFaultOperator::ComputeRHS: the fault kernel "
+                  "flagged status " << status << " (RSStatus, "
+                  "friction/device_rate_state.hpp), but the host rerun did "
+                  "not stop the run");
+   }
+
+   /// The host loop of RecomputeSlipRate (BP5 path), for the prints of
+   /// RecomputeSlipRate when its kernel flags a status.
+   void RecomputeSlipRateHost_(const Vector &traction, const Vector &state,
+                               Vector &V_out,
+                               const Vector *normal_traction) const
+   {
+      traction.HostRead();
+      state.HostRead();
+      if (normal_traction) { normal_traction->HostRead(); }
+      HostReadParams_();
+      V_out.SetSize(SlipComponents * num_nodes_);
+      V_out.HostWrite();
+      const Vector &a_values = geom_->GetAValues();
+      const Vector &eta_values = geom_->GetEtaValues();
+
+      for (int i = 0; i < num_nodes_; i++)
+      {
+            real_t psi = state(i * StatePerNode + PsiIndex);
+            real_t tau_vec[2] = {TauPreAt_(2*i) + traction(2*i),
+                                 TauPreAt_(2*i+1) + traction(2*i+1)};
+            real_t a = a_values(i);
+            real_t eta = eta_values(i);
+
+            // Match ComputeRHS() sigma_n_eff logic for elastic normal stress.
+            // Phase 6 §6: route SnPre via SigmaNAt_(i).
+            const real_t sigma_n_pre = SigmaNAt_(i);
+            real_t sigma_n_eff = sigma_n_pre;
+            if (normal_traction)
+            {
+               sigma_n_eff = sigma_n_pre + (*normal_traction)(i);
+            }
+
+            real_t V_vec[2];
+            dr_friction_->SolveSlipRateVectorPsi(
+               tau_vec, psi, sigma_n_eff, eta, a, V_vec);
+            V_out(2*i) = V_vec[0];
+            V_out(2*i+1) = V_vec[1];
+      }
+   }
+
+   /// GPU plan G4: the aging law in psi form behind evolution_, or null.
+   /// The BP5 fault kernels evaluate this law only.
+   const AgingLawPsi *aging_psi_ = nullptr;
+   /// Workspace of the BP5 fault reduction kernels.
+   mutable Array<RSReduceValue> rs_workspace_;
 
    // Traction monitoring
    int monitor_interval_ = 0;        ///< Log every N ComputeRHS calls (0=off)
