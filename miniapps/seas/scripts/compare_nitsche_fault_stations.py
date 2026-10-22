@@ -57,6 +57,9 @@ against the first --ref, for the LAST --run:
   3 peak slip rate within --peak-tol (10 %) at >= --peak-min-stations
   4 the median |misfit| of 1-3 decreases along the --run order
   (5, no abort, is read from the driver log, not here)
+A station where neither side passes 1 mm/s by t_end (no rupture there in
+the run or the reference) counts as agreeing in 1 and 3; one side only is
+a miss.
 With two or more --ref, the spread between the references is printed too.
 
 Usage (from miniapps/seas):
@@ -114,11 +117,19 @@ def _parse_x2x3(stem):
 def find_file(d, st, by_name=False):
     hits = []
     want = _parse_x2x3(st["name"]) if by_name else None
+    # a station named with a fault tag (main_, fault2_ ...) takes a file found by its position
+    # key only when that file carries the same tag: on two faults one key can name two stations
+    named = _parse_x2x3(st["name"])
+    tag = named[0] if named else None
     for f in sorted(os.listdir(d)):
         stem, ext = os.path.splitext(f)
         if ext not in (".dat", ".txt"):
             continue
-        if stem.endswith("_station_" + st["name"]) or stem.endswith("_" + st["key"]):
+        by_key = stem.endswith("_" + st["key"])
+        if by_key and tag is not None:
+            got = _parse_x2x3(stem)
+            by_key = got is not None and got[0] == tag
+        if stem.endswith("_station_" + st["name"]) or by_key:
             hits.append(os.path.join(d, f))
         elif want is not None and "_station_" not in stem:
             got = _parse_x2x3(stem)
@@ -238,7 +249,8 @@ def misfit(mo, mr):
     def rel(a, b):
         return (a - b) / b if b not in (0.0,) and np.isfinite(b) else float("nan")
     return {"d_arrival": mo["arrival"] - mr["arrival"], "r_slip": rel(mo["slip"], mr["slip"]),
-            "r_peak": rel(mo["peak"], mr["peak"]), "ref_slip": mr["slip"]}
+            "r_peak": rel(mo["peak"], mr["peak"]), "ref_slip": mr["slip"],
+            "quiet": not np.isfinite(mo["arrival"]) and not np.isfinite(mr["arrival"])}
 
 
 def _fmt(v, f):
@@ -336,8 +348,11 @@ def main():
                     f" {_fmt(m.get('noise_tv', float('nan')), '7.3f')}")
             if refs and lab != refs[0] and (refs[0], n) in M:
                 f = misfit(m, M[(refs[0], n)])
-                line += (f"   dt {f['d_arrival']:+.3f} s  slip {100 * f['r_slip']:+6.2f}%"
-                         f"  peak {100 * f['r_peak']:+6.1f}%")
+                if f["quiet"]:
+                    line += "   neither side passes 1 mm/s"
+                else:
+                    line += (f"   dt {f['d_arrival']:+.3f} s  slip {100 * f['r_slip']:+6.2f}%"
+                             f"  peak {100 * f['r_peak']:+6.1f}%")
             print(line)
     summary = {"stations": a.stations, "t_end": t_end, "noise_window": a.noise_window,
                "noise_after": a.noise_after,
@@ -378,7 +393,7 @@ def main():
             print(f"\n# reference spread {r} vs {r0}: max |dt| {np.nanmax([abs(f['d_arrival']) for f in fs]):.3f} s,"
                   f" max |slip| {100 * np.nanmax([abs(f['r_slip']) for f in fs]):.2f}%,"
                   f" peak within {100 * a.peak_tol:.0f}% at "
-                  f"{sum(abs(f['r_peak']) <= a.peak_tol for f in fs)} of {len(fs)}")
+                  f"{sum(f['quiet'] or abs(f['r_peak']) <= a.peak_tol for f in fs)} of {len(fs)}")
     # convergence + pass test
     med = {}
     for lab in runs:
@@ -401,9 +416,9 @@ def main():
         fs = {s["name"]: misfit(M[(last, s["name"])], M[(r0, s["name"])]) for s in stations
               if (last, s["name"]) in M and (r0, s["name"]) in M}
         missing = [s["name"] for s in stations if s["name"] not in fs]
-        p1 = all(abs(f["d_arrival"]) <= a.arrival_tol for f in fs.values()) and not missing
+        p1 = all(f["quiet"] or abs(f["d_arrival"]) <= a.arrival_tol for f in fs.values()) and not missing
         p2 = all(abs(f["r_slip"]) <= a.slip_tol for f in fs.values() if f["ref_slip"] > a.slip_min) and not missing
-        npk = sum(abs(f["r_peak"]) <= a.peak_tol for f in fs.values())
+        npk = sum(f["quiet"] or abs(f["r_peak"]) <= a.peak_tol for f in fs.values())
         p3 = None if a.peak_min_stations is None else npk >= a.peak_min_stations
         order = [lab for lab in runs if lab in med]
         p4 = None
