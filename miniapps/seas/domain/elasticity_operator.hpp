@@ -417,6 +417,10 @@ public:
    /// Local fault faces in the per-face operators: interior, shared.
    int FaultFaceOpsInterior() const { return ffo_.nfi; }
    int FaultFaceOpsShared() const { return ffo_.nf - ffo_.nfi; }
+   /// The per-face operators themselves, read-only: GPU dynamic-rupture plan
+   /// D2 copies the blocks G_f and the vdofs the traction reads to the
+   /// device (domain/nitsche_device_fault.hpp).
+   const auto &GetFaultFaceOps() const { return ffo_; }
    /// ComputeTraction(u, slip_bc, traction, &normal_traction) through the
    /// stored A_f.  `u` is the local (true) displacement vector.  Collective:
    /// exchanges u on the neighbour elements of shared fault faces only.

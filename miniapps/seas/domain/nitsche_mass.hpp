@@ -29,12 +29,20 @@
 // Apply uses it there.  Every other element keeps the scalar path; with no
 // blocks the result is bit-identical to P2/P3.
 //
+// Device (GPU dynamic-rupture plan D2): with an enabled mfem::Device and r or
+// a using it, Apply runs one mfem::forall over the elements with the same
+// stored inverses, copied once to flat device arrays on the first such call,
+// and the same operation order as the host loop (kernels::Mult is the
+// product of DenseMatrix::Mult); the debug device therefore gives the host
+// bits.  Without a device the host loop runs, unchanged.
+//
 // Scope (Chunhui Zhao, 2026-10-13): tetrahedral meshes only.
 
 #ifndef MFEM_SEAS_NITSCHE_MASS_HPP
 #define MFEM_SEAS_NITSCHE_MASS_HPP
 
 #include "mfem.hpp"
+#include "linalg/kernels.hpp"   // kernels::Mult in the device kernels (plan D2)
 #include "nitsche_material_sample.hpp"
 
 #include <map>
@@ -81,6 +89,9 @@ public:
          const FiniteElement *fe = fes_.GetFE(e);
          ElementTransformation *T = mesh.GetElementTransformation(e);
          const int nd = fe->GetDof();
+         if (e == 0) { nd_ = nd; }
+         MFEM_VERIFY(nd == nd_, "NitscheMass: element " << e << " has " << nd
+                     << " DOFs, element 0 " << nd_ << " (one order on the mesh)");
          DenseMatrix M(nd);
          M = 0.0;
          Vector shape(nd);
@@ -146,6 +157,20 @@ public:
                   "NitscheMass::Apply: input size " << r.Size()
                   << " != 3 * ndofs = " << 3 * ndofs_);
       a.SetSize(r.Size());
+      if (Device::IsEnabled() && (r.UseDevice() || a.UseDevice()))
+      {
+         if (minv_.empty()) { return; }   // a rank without elements
+         BuildDevice_();
+         switch (nd_)
+         {
+            case 4: ApplyDevice_<4>(r, a); return;     // p = 1
+            case 10: ApplyDevice_<10>(r, a); return;   // p = 2
+            case 20: ApplyDevice_<20>(r, a); return;   // p = 3
+            default:
+               MFEM_ABORT("NitscheMass::Apply: no device kernel for " << nd_
+                          << " DOFs per element (p = 1, 2, 3 only)");
+         }
+      }
       Vector x, y;
       for (size_t e = 0; e < minv_.size(); ++e)
       {
@@ -192,16 +217,98 @@ public:
    /// half_dt the damping blocks were built with (0 without blocks).
    real_t HalfDt() const { return half_dt_; }
    int NumDampedElements() const { return static_cast<int>(block_inv_.size()); }
+   /// Scalar DOFs per element (one order and geometry on the mesh).
+   int ElementDofs() const { return nd_; }
+   /// ElementScalarDofs of every element, element-major (GetNE() x nd), as
+   /// a device array (plan D2); built on the first call.
+   const Array<int> &DeviceElementDofs() const { BuildDevice_(); return d_dofs_; }
+
+private:
+   /// Flat copies of elem_dofs_, minv_ (column-major, as DenseMatrix
+   /// stores it), 1/rho and the damped blocks for the device kernel; d_blk_
+   /// holds each element's damped block (-1: the scalar path).
+   void BuildDevice_() const
+   {
+      if (d_built_) { return; }
+      const int ne = static_cast<int>(minv_.size()), nd = nd_;
+      d_dofs_.SetSize(ne * nd);
+      d_minv_.SetSize(ne * nd * nd);
+      d_inv_rho_.SetSize(ne);
+      d_blk_.SetSize(ne);
+      d_binv_.SetSize(static_cast<int>(block_inv_.size()) * 9 * nd * nd);
+      int *hd = d_dofs_.HostWrite(), *hb = d_blk_.HostWrite();
+      real_t *hm = d_minv_.HostWrite(), *hr = d_inv_rho_.HostWrite(),
+              *hbi = d_binv_.HostWrite();
+      for (int e = 0; e < ne; ++e)
+      {
+         for (int k = 0; k < nd; ++k) { hd[e * nd + k] = elem_dofs_[e][k]; }
+         const real_t *m = minv_[e].Data();
+         for (int i = 0; i < nd * nd; ++i) { hm[static_cast<size_t>(e) * nd * nd + i] = m[i]; }
+         hr[e] = inv_rho_(e);
+         hb[e] = -1;
+      }
+      int b = 0;
+      for (const auto &kv : block_inv_)
+      {
+         hb[kv.first] = b;
+         const real_t *m = kv.second.Data();
+         for (int i = 0; i < 9 * nd * nd; ++i) { hbi[static_cast<size_t>(b) * 9 * nd * nd + i] = m[i]; }
+         ++b;
+      }
+      d_built_ = true;
+   }
+
+public:
+   // The function holding the kernel is public: nvcc refuses an extended
+   // __host__ __device__ lambda inside a private or protected member.
+   template <int ND>
+   void ApplyDevice_(const Vector &r, Vector &a) const
+   {
+      const int ne = static_cast<int>(minv_.size()), n = ndofs_;
+      const real_t *dr = r.Read();
+      real_t *da = a.Write();
+      const int *dofs = d_dofs_.Read(), *blk = d_blk_.Read();
+      const real_t *mi = d_minv_.Read(), *ir = d_inv_rho_.Read(), *bi = d_binv_.Read();
+      mfem::forall(ne, [=] MFEM_HOST_DEVICE (int e)
+      {
+         const int *de = dofs + e * ND;
+         const int b = blk[e];
+         if (b >= 0)
+         {
+            // damped element: (rho_e M_e (x) I_3 + half_dt C_e)^{-1}
+            real_t x[3 * ND], y[3 * ND];
+            for (int c = 0; c < 3; ++c)
+               for (int k = 0; k < ND; ++k) { x[c * ND + k] = dr[c * n + de[k]]; }
+            kernels::Mult(3 * ND, 3 * ND, bi + static_cast<size_t>(b) * 9 * ND * ND, x, y);
+            for (int c = 0; c < 3; ++c)
+               for (int k = 0; k < ND; ++k) { da[c * n + de[k]] = y[c * ND + k]; }
+            return;
+         }
+         const real_t *m = mi + static_cast<size_t>(e) * ND * ND;
+         const real_t s = ir[e];
+         for (int c = 0; c < 3; ++c)
+         {
+            real_t x[ND], y[ND];
+            for (int k = 0; k < ND; ++k) { x[k] = dr[c * n + de[k]]; }
+            kernels::Mult(ND, ND, m, x, y);
+            for (int k = 0; k < ND; ++k) { da[c * n + de[k]] = y[k] * s; }
+         }
+      });
+   }
 
 private:
    DG_FECollection fec_;
    ParFiniteElementSpace fes_;
    int ndofs_ = 0;
+   int nd_ = 0;   ///< scalar DOFs per element
    real_t half_dt_ = 0.0;
    Vector inv_rho_;
    std::map<int, DenseMatrix> block_inv_;
    std::vector<DenseMatrix> minv_;
    std::vector<Array<int>> elem_dofs_;
+   mutable bool d_built_ = false;
+   mutable Array<int> d_dofs_, d_blk_;
+   mutable Vector d_minv_, d_inv_rho_, d_binv_;
 };
 
 /// Per-local-element density from the stiffness's material sample, so M and

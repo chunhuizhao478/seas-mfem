@@ -69,6 +69,12 @@
 //                      faster ones of the D2 bench; on the host the element
 //                      layout), element, team2, team4 or team8 (a team of
 //                      threads per element, 2, 4 or 8 elements per block).
+//   With a device (cuda, or debug to check it on the CPU), --matrix-free 1
+//   also runs the rest of the step there: the slip loads, the dashpot and the
+//   mass inverse (the device step, NitscheWaveOperator).  The fault stays on
+//   the host and reads the values of U and Udot it needs, gathered from the
+//   device each step.  It needs --fast-fault 1 and refuses decks with
+//   Dirichlet faces.
 //
 // Station copies (Chunhui Zhao, 2026-10-14): a station sits on a fault point
 // that carries one DOF per adjacent fault face (DG copies).  With
@@ -1707,6 +1713,13 @@ int main(int argc, char *argv[])
    op.SetDenseBlocks(dense_blocks != 0);
    StageTimers stage_timers;
    StageTimers *timers = stage_timers_every > 0 ? &stage_timers : nullptr;
+   // plan D2: on a GPU, kernels run asynchronously; wait for them at each
+   // timer start and stop so each part is charged its own GPU time (as the
+   // quasi-dynamic driver does, GPU plan G3)
+   if (Device::Allows(Backend::CUDA_MASK | Backend::HIP_MASK))
+   {
+      stage_timers.SetDeviceSync([]() { MFEM_DEVICE_SYNC; });
+   }
    op.SetStageTimers(timers);
    double timed_loop0 = 0.0;   // MPI_Wtime() at the end of step 1
    CentralDifferenceSolver ode;
@@ -1890,6 +1903,11 @@ int main(int argc, char *argv[])
          {
             std::cout << " (" << op.MatrixFreeBytes() / 1e6 << " MB over all ranks, layout "
                       << mf_layout_s << ")";
+         }
+         std::cout << ", device step " << (op.DeviceStepActive() ? "on" : "off");
+         if (op.DeviceStepActive() && op.HasFault())
+         {
+            std::cout << " (fault gather " << op.DeviceGatherValues() << " values per step over all ranks)";
          }
          std::cout << "\n";
       }

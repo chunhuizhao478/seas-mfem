@@ -98,6 +98,19 @@
 // (SetFusedStiffness, item 4) and the two hypre products.  The first one
 // takes precedence; with it K and K_eta are never assembled.
 //
+// The device step (GPU dynamic-rupture plan D2): with an enabled
+// mfem::Device and the matrix-free product, Mult and ImplicitSolve work on
+// the solver's device vectors.  K x + K_eta v, the slip loads G d and
+// G_eta V, the dashpot C v and the mass inverse run in device kernels, and
+// the fault (boxes 3-11) stays on the host: it reads the values of U^{n+1}
+// and Udot* its face operators need, gathered from the device each step,
+// and hands the local kernel slip back for the slip loads
+// (nitsche_device_fault.hpp).  It needs the per-face fault operators
+// (SetFastFaultKernels(true)) and refuses Dirichlet faces and the
+// Kelvin-Voigt Dirichlet velocity, which it does not implement yet.  Without
+// a device, or without the matrix-free product, the host code below runs on
+// host views of the vectors (plan D1), unchanged.
+//
 // NitscheMaterialSample lives in nitsche_material_sample.hpp (moved there in
 // P3 to break an include cycle with nitsche_mass.hpp); it is re-exported here.
 //
@@ -107,12 +120,14 @@
 #define MFEM_SEAS_NITSCHE_WAVE_OPERATOR_HPP
 
 #include "mfem.hpp"
+#include "linalg/kernels.hpp"   // kernels::Mult in the device kernels (plan D2)
 #include "nitsche_material_sample.hpp"
 #include "nitsche_mass.hpp"
 #include "elasticity_operator.hpp"
 #include "fused_stiffness_pair.hpp"
 #include "dense_block_stiffness.hpp"
 #include "nitsche_sipg_operator.hpp"
+#include "nitsche_device_fault.hpp"
 #include "../common/stage_timers.hpp"
 #include "../common/seas_device.hpp"
 #include "../integrator/dg_absorbing_bc_integrator.hpp"
@@ -285,6 +300,11 @@ public:
    void Mult(const Vector &x, const Vector &dxdt, Vector &y) const override
    {
       y.SetSize(height);
+      if (UseDeviceStep_())
+      {
+         Acceleration_(x, &dxdt, has_fault_ ? &d_ : nullptr, *mass_, y);
+         return;
+      }
       const Vector xh = HostReadView(x), vh = HostReadView(dxdt);
       Vector yh = HostWriteView(y);
       Acceleration_(xh, &vh, has_fault_ ? &d_ : nullptr, *mass_, yh);
@@ -311,32 +331,23 @@ public:
                   "NitscheWaveOperator::ImplicitSolve called twice at t = "
                   << t << "; exactly one call per time step is allowed.");
       last_solve_time_ = t;
+      k.SetSize(height);
+      if (UseDeviceStep_())
+      {
+         // plan D2: the work below runs on the device vectors; the fault
+         // gathers the values of x (and dxdt) it reads
+         if (has_fault_) { AdvanceFault_(x, t, &dxdt, true); }
+         StepAcceleration_(x, dxdt, fac1, k);
+         if (has_fault_) { last_accel_ = k; }
+         return;
+      }
       // x, dxdt and k may live on the device (plan D1): host views of them
       // for the fault and the acceleration below; k's device copy is
       // refreshed from the host view at the solver's next read
-      k.SetSize(height);
       const Vector xh = HostReadView(x), vh = HostReadView(dxdt);
       Vector kh = HostWriteView(k);
       if (has_fault_) { AdvanceFault_(xh, t, &vh); }
-      if (damping_blocks_.empty())
-      {
-         // the Kelvin-Voigt layer needs Udot* (at t_{n+1/2}); without it
-         // the call is P6's
-         kv_tv_shift_ = 0.5 * dt_;
-         Acceleration_(xh, kv_ ? &vh : nullptr, has_fault_ ? &d_ : nullptr, *mass_, kh);
-         kv_tv_shift_ = 0.0;
-      }
-      else
-      {
-         MFEM_VERIFY(mass_damped_ && mass_damped_->HalfDt() == fac1,
-                     "NitscheWaveOperator::ImplicitSolve: the damped mass "
-                     "(M + dt/2 C) was built for dt/2 = "
-                     << (mass_damped_ ? mass_damped_->HalfDt() : 0.0)
-                     << " but fac1 = " << fac1 << "; call SetTimeStep(dt).");
-         kv_tv_shift_ = 0.5 * dt_;
-         Acceleration_(xh, &vh, has_fault_ ? &d_ : nullptr, *mass_damped_, kh);
-         kv_tv_shift_ = 0.0;
-      }
+      StepAcceleration_(xh, vh, fac1, kh);
       if (has_fault_) { last_accel_ = kh; }
    }
 
@@ -756,7 +767,15 @@ public:
    /// Profiling plan item 3: fault traction and slip load through the
    /// precomputed per-face operators (default on).  Call before the first
    /// step; the operators are built (collectively) on first use.
-   void SetFastFaultKernels(bool on) { fast_fault_enabled_ = on; fast_fault_state_ = 0; }
+   void SetFastFaultKernels(bool on)
+   {
+      fast_fault_enabled_ = on;
+      fast_fault_state_ = 0;
+      // the device step's copies of the face operators are made again
+      dev_gather_.reset();
+      dev_slip_.reset();
+      dev_kv_slip_.reset();
+   }
    bool FastFaultKernelsActive() const { return fast_fault_state_ == 1; }
    /// True once the fused sweep is in use (after the first acceleration).
    bool FusedStiffnessActive() const { return fused_state_ == 1; }
@@ -782,6 +801,12 @@ public:
    }
    /// True once the matrix-free product is in use (after the first product).
    bool MatrixFreeActive() const { return static_cast<bool>(mf_); }
+   /// The device step (plan D2; header) ran; with a fault, the values it
+   /// copies to the host per step, summed over all ranks: the gathered
+   /// entries of U^{n+1}, and as many of Udot* with Kelvin-Voigt (one rank's
+   /// share times 8 bytes is its gather copy, jobs/vista/d2_trace_check.py).
+   bool DeviceStepActive() const { return dev_ready_; }
+   long long DeviceGatherValues() const { return dev_gather_global_; }
    /// Bytes of the matrix-free operator's data summed over the ranks (0 when
    /// not in use).
    long long MatrixFreeBytes() const { return mf_bytes_; }
@@ -953,16 +978,24 @@ private:
          else if (fuse) { fused_.Mult(x, *v, Kx_); }   // K x + K_eta v
          else { elast_->ApplyStiffness(x, Kx_); }
       }
+      const bool dev = UseDeviceStep_();
       {
          ScopedStageTimer timer(timers_, StageTimers::DynDirichletRHS);
-         elast_->AssembleDirichletOnlyRHS(F_, GetTime());
+         // the device step has no Dirichlet faces (UseDeviceStep_)
+         if (dev) { F_ = 0.0; }
+         else { elast_->AssembleDirichletOnlyRHS(F_, GetTime()); }
       }
       F_ -= Kx_;
       if (d)
       {
          ScopedStageTimer timer(timers_, StageTimers::DynSlipLoad);
          const double tf0 = MPI_Wtime();
-         if (UseFastFault_())
+         if (dev)
+         {
+            ToKernelLocal_(*d, slip_k_);
+            dev_slip_->AddMult(slip_k_, F_);
+         }
+         else if (UseFastFault_())
          {
             ToKernelLocal_(*d, slip_k_);
             elast_->AddSlipLoadFast(slip_k_, F_);
@@ -977,7 +1010,8 @@ private:
       if (!damping_blocks_.empty() && v)
       {
          ScopedStageTimer timer(timers_, StageTimers::DynDamping);
-         ApplyDamping(*v, Cv_);
+         if (dev) { ApplyDampingDevice_(*v, Cv_); }
+         else { ApplyDamping(*v, Cv_); }
          F_ -= Cv_;
       }
       if (kv_ && v)
@@ -1000,7 +1034,12 @@ private:
          {
             ScopedStageTimer timer(timers_, StageTimers::DynSlipLoad);
             const double tf0 = MPI_Wtime();
-            if (UseFastFault_())
+            if (dev)
+            {
+               ToKernelLocal_(V_, slip_k_);
+               dev_kv_slip_->AddMult(slip_k_, F_);
+            }
+            else if (UseFastFault_())
             {
                ToKernelLocal_(V_, slip_k_);
                kv_->AddSlipLoadFast(slip_k_, F_);
@@ -1017,6 +1056,127 @@ private:
       Minv.Apply(F_, a);
    }
 
+   /// Box 13 of ImplicitSolve at x = U^{n+1}, v = Udot*:
+   /// k = (M + dt/2 C)^{-1}(F - K x + G d - C v ...).
+   void StepAcceleration_(const Vector &x, const Vector &v, real_t fac1, Vector &k)
+   {
+      if (damping_blocks_.empty())
+      {
+         // the Kelvin-Voigt layer needs Udot* (at t_{n+1/2}); without it
+         // the call is P6's
+         kv_tv_shift_ = 0.5 * dt_;
+         Acceleration_(x, kv_ ? &v : nullptr, has_fault_ ? &d_ : nullptr, *mass_, k);
+         kv_tv_shift_ = 0.0;
+      }
+      else
+      {
+         MFEM_VERIFY(mass_damped_ && mass_damped_->HalfDt() == fac1,
+                     "NitscheWaveOperator::ImplicitSolve: the damped mass "
+                     "(M + dt/2 C) was built for dt/2 = "
+                     << (mass_damped_ ? mass_damped_->HalfDt() : 0.0)
+                     << " but fac1 = " << fac1 << "; call SetTimeStep(dt).");
+         kv_tv_shift_ = 0.5 * dt_;
+         Acceleration_(x, &v, has_fault_ ? &d_ : nullptr, *mass_damped_, k);
+         kv_tv_shift_ = 0.0;
+      }
+   }
+
+   /// The device step (plan D2; header): true with an enabled device and the
+   /// matrix-free product.  Collective on the first call and after
+   /// SetFastFaultKernels or SetKelvinVoigt: copies the dashpot blocks and
+   /// the fault's face operators (slip-load blocks, gathered vdofs) to the
+   /// device.
+   bool UseDeviceStep_() const
+   {
+      if (!Device::IsEnabled() || !UseMatrixFree_()) { return false; }
+      if (!dev_ready_)
+      {
+         MFEM_VERIFY(bc_.dirichlet_attrs.empty(),
+                     "NitscheWaveOperator: the device step (--matrix-free 1 on a device) has "
+                     "no Dirichlet loading yet (plan D2 takes the quasi-dynamic D g(t) "
+                     "operator for it), and this deck has Dirichlet faces; run it on the "
+                     "cpu device");
+         for (Vector *w : {&Kx_, &F_, &Cv_}) { w->UseDevice(true); }
+         const int nb = static_cast<int>(damping_blocks_.size()), nd = mass_->ElementDofs();
+         dev_damp_e_.SetSize(nb);
+         dev_damp_C_.SetSize(nb * 9 * nd * nd);
+         int *he = dev_damp_e_.HostWrite();
+         real_t *hc = dev_damp_C_.HostWrite();
+         int b = 0;
+         for (const auto &kv : damping_blocks_)
+         {
+            MFEM_VERIFY(kv.second.Height() == 3 * nd && kv.second.Width() == 3 * nd,
+                        "NitscheWaveOperator: damping block of element " << kv.first
+                        << " is not " << 3 * nd << " x " << 3 * nd);
+            he[b] = kv.first;
+            const real_t *c = kv.second.Data();
+            for (int i = 0; i < 9 * nd * nd; i++) { hc[static_cast<size_t>(b) * 9 * nd * nd + i] = c[i]; }
+            ++b;
+         }
+         dev_ready_ = true;
+      }
+      MFEM_VERIFY(!kv_vD_, "NitscheWaveOperator: the device step has no Kelvin-Voigt "
+                  "Dirichlet velocity (SetKelvinVoigt bc_velocity); run it on the cpu device");
+      if (has_fault_ && (!dev_slip_ || (kv_ && !dev_kv_slip_)))
+      {
+         MFEM_VERIFY(UseFastFault_(), "NitscheWaveOperator: the device step needs the "
+                     "per-face fault operators (SetFastFaultKernels(true), --fast-fault 1)");
+         std::vector<int> vd;
+         AppendFaultFaceVDofs(*elast_, vd);
+         if (kv_) { AppendFaultFaceVDofs(*kv_, vd); }
+         dev_gather_ = std::make_unique<FaultGather>(std::move(vd));
+         long long g = static_cast<long long>(dev_gather_->Size()) * (kv_ ? 2 : 1);
+         MPI_Allreduce(MPI_IN_PLACE, &g, 1, MPI_LONG_LONG, MPI_SUM, mesh_.GetComm());
+         dev_gather_global_ = g;
+         dev_slip_ = std::make_unique<DeviceSlipLoad>(*elast_);
+         if (kv_) { dev_kv_slip_ = std::make_unique<DeviceSlipLoad>(*kv_); }
+         xf_.SetSize(height);
+         xf_ = 0.0;
+         vf_.SetSize(height);
+         vf_ = 0.0;
+      }
+      return true;
+   }
+
+   /// Cv = C v in the device step: one thread per element with a dashpot
+   /// block, the product of ApplyDamping in the same order.
+   void ApplyDampingDevice_(const Vector &v, Vector &Cv) const
+   {
+      Cv.SetSize(v.Size());
+      Cv = 0.0;
+      if (dev_damp_e_.Size() == 0) { return; }
+      switch (mass_->ElementDofs())
+      {
+         case 4: DampingDevice_<4>(v, Cv); break;
+         case 10: DampingDevice_<10>(v, Cv); break;
+         case 20: DampingDevice_<20>(v, Cv); break;
+         default: MFEM_ABORT("NitscheWaveOperator: no device dashpot kernel for "
+                                << mass_->ElementDofs() << " DOFs per element");
+      }
+   }
+public:
+   // The function holding the kernel is public: nvcc refuses an extended
+   // __host__ __device__ lambda inside a private or protected member.
+   template <int ND>
+   void DampingDevice_(const Vector &v, Vector &Cv) const
+   {
+      const int n = mass_->NumScalarDofs(), nb = dev_damp_e_.Size();
+      const int *el = dev_damp_e_.Read(), *dofs = mass_->DeviceElementDofs().Read();
+      const real_t *C = dev_damp_C_.Read(), *dv = v.Read();
+      real_t *dc = Cv.ReadWrite();
+      mfem::forall(nb, [=] MFEM_HOST_DEVICE (int i)
+      {
+         const int *de = dofs + el[i] * ND;
+         real_t x[3 * ND], y[3 * ND];
+         for (int c = 0; c < 3; ++c)
+            for (int k = 0; k < ND; ++k) { x[c * ND + k] = dv[c * n + de[k]]; }
+         kernels::Mult(3 * ND, 3 * ND, C + static_cast<size_t>(i) * 9 * ND * ND, x, y);
+         for (int c = 0; c < 3; ++c)
+            for (int k = 0; k < ND; ++k) { dc[c * n + de[k]] += y[c * ND + k]; }
+      });
+   }
+
+private:
    /// Collective on the first call: build the per-face fault operators of K
    /// (and K_eta).  Every caller is reached on all ranks (has_fault_ is a
    /// global flag).
@@ -1130,8 +1290,10 @@ private:
    }
 
    /// Boxes 3-11 at t = t_{n+1}, x = U^{n+1}; v = Udot* (used only by the
-   /// Kelvin-Voigt layer).
-   void AdvanceFault_(const Vector &x, real_t t, const Vector *v = nullptr)
+   /// Kelvin-Voigt layer).  device: x and v are the device step's (plan D2);
+   /// the traction reads the values of them it needs, gathered to the host.
+   void AdvanceFault_(const Vector &x, real_t t, const Vector *v = nullptr,
+                      bool device = false)
    {
       MFEM_VERIFY(!pc_ || pc_seeded_, "NitscheWaveOperator: Prakash-Clifton is on "
                   "but sigma* was never seeded (SetPrakashCliftonState)");
@@ -1154,15 +1316,22 @@ private:
       // 5-8
       {
          ScopedStageTimer timer(timers_, StageTimers::DynFaultTraction);
-         TrialTraction(x, dstar_, Town_);
+         const Vector *xt = &x, *vt = v;
+         if (device)
+         {
+            dev_gather_->Gather(x, xf_, kv_ ? v : nullptr, kv_ ? &vf_ : nullptr);
+            xt = &xf_;
+            vt = kv_ ? &vf_ : nullptr;
+         }
+         TrialTraction(*xt, dstar_, Town_);
          if (kv_)
          {
             // Kelvin-Voigt: X* gains T_eta(Udot*, 0); its slope sigma_F^eta in
             // V^{n+1} goes into gamma (CloseDOF)
-            MFEM_VERIFY(v, "NitscheWaveOperator: the Kelvin-Voigt layer needs Udot*");
+            MFEM_VERIFY(vt, "NitscheWaveOperator: the Kelvin-Voigt layer needs Udot*");
             kv_zero_.SetSize(3 * no_);
             kv_zero_ = 0.0;
-            KVTrialTraction(*v, kv_zero_, kvT_);
+            KVTrialTraction(*vt, kv_zero_, kvT_);
             Town_ += kvT_;
          }
       }
@@ -1572,6 +1741,14 @@ private:
    int mf_batch_ = 2;
    mutable std::unique_ptr<NitscheSipgOperator> mf_;   ///< built on first use
    mutable long long mf_bytes_ = 0;
+   // the device step (plan D2; UseDeviceStep_)
+   mutable bool dev_ready_ = false;
+   mutable std::unique_ptr<FaultGather> dev_gather_;
+   mutable std::unique_ptr<DeviceSlipLoad> dev_slip_, dev_kv_slip_;
+   mutable long long dev_gather_global_ = 0;
+   mutable Vector xf_, vf_;            ///< host: gathered U^{n+1}, Udot* for the fault
+   mutable Array<int> dev_damp_e_;     ///< elements with a dashpot block
+   mutable Vector dev_damp_C_;         ///< their blocks C_e, column-major
    mutable double fault_sec_ = 0.0;
    StageTimers *timers_ = nullptr;   ///< D0 step-part timers (null: off)
 };

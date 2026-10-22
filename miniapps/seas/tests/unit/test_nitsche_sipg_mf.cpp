@@ -30,12 +30,22 @@
 // checks and the benchmark run (NitscheSipgOperator::SetLayout); --batch
 // 2,4,8 the team layout's elements per thread block (default 4).
 //
+// The rest of the D2 step on the device (with the checks): random r and
+// slip, the device result against the host one at --mtol (default 1e-14,
+// plan rev2 §4.3 for the mass inverse):
+//   [M]    NitscheMass::Apply, a = M^{-1} r
+//   [MC]   the same with damped blocks (rho_e M_e (x) I_3 + dt/2 C_e)^{-1}
+//          on every fifth element, C_e = c_e A^T A with a random A
+//   [Gd]   DeviceSlipLoad::AddMult against AddSlipLoadFast (rhs += G s)
+//   [T]    ComputeTractionFast on the values FaultGather brought back from
+//          the device against the same call on the host vector (exact)
+//
 // Usage (from miniapps/seas):
 //   mpirun -np N ./seas_test_nitsche_sipg_mf --mesh tpv205/mesh/tpv2053d_1000m.msh
 //       --order 1|2 [--device cpu|cuda|debug] [--device-id n] [--eta 0.1]
 //       [--hetero 0.2] [--dirichlet 105] [--reps 20] [--dense] [--no-check]
 //       [--fault-attr 103] [--natural 101] [--absorbing 105] [--tol 1e-13]
-//       [--layout element|team|both] [--batch 4[,2,8]]
+//       [--layout element|team|both] [--batch 4[,2,8]] [--mtol 1e-14]
 // Exit status 0 when every check passes.
 
 #include "mfem.hpp"
@@ -43,12 +53,15 @@
 #include "../../domain/elasticity_operator.hpp"
 #include "../../domain/dense_block_stiffness.hpp"
 #include "../../domain/nitsche_sipg_operator.hpp"
+#include "../../domain/nitsche_mass.hpp"
+#include "../../domain/nitsche_device_fault.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <random>
 #include <sstream>
@@ -183,6 +196,7 @@ int main(int argc, char *argv[])
    const real_t eta = std::atof(ArgStr(argc, argv, "--eta", "0.1").c_str());
    const real_t hetero = std::atof(ArgStr(argc, argv, "--hetero", "0").c_str());
    const real_t tol = std::atof(ArgStr(argc, argv, "--tol", "1e-13").c_str());
+   const real_t mtol = std::atof(ArgStr(argc, argv, "--mtol", "1e-14").c_str());
    const int reps = std::atoi(ArgStr(argc, argv, "--reps", "0").c_str());
    const bool check = !ArgFlag(argc, argv, "--no-check");
    const bool dense = ArgFlag(argc, argv, "--dense");
@@ -336,6 +350,85 @@ int main(int argc, char *argv[])
       {
          std::cout << "  (assembly of K and K_eta and the first products: " << std::setprecision(4)
                    << t_asm << " s)" << std::endl;
+      }
+   }
+
+   // ------------------------------------------------------------ mass, fault
+   if (check)
+   {
+      if (g_rank == 0)
+      {
+         std::cout << "\nmass inverse and fault transfers, device against host (tol " << Sci(mtol)
+                   << ")" << std::endl;
+      }
+      std::mt19937_64 rng(4321 + g_rank);
+      std::uniform_real_distribution<real_t> U(-1.0, 1.0);
+      const int ne = pm.GetNE();
+      Vector rho(ne);
+      for (int e = 0; e < ne; e++)
+      {
+         Vector xc(3);
+         pm.GetElementTransformation(e)->Transform(Geometries.GetCenter(Geometry::TETRAHEDRON), xc);
+         rho(e) = kRho * (1.0 + hetero * std::sin(3.1e-4 * xc(0) - 6.7e-4 * xc(2)));
+      }
+      std::map<int, DenseMatrix> blocks;
+      const int nd = ne > 0 ? pfes->GetFE(0)->GetDof() : 0;
+      const real_t half_dt = 1e-3;
+      for (int e = 0; e < ne; e += 5)
+      {
+         DenseMatrix A(3 * nd), &C = blocks[e];
+         for (int i = 0; i < 3 * nd; i++)
+            for (int j = 0; j < 3 * nd; j++) { A(i, j) = U(rng); }
+         C.SetSize(3 * nd);
+         MultAtB(A, A, C);
+         C *= 100.0 * rho(e) * pm.GetElementVolume(e) / (3 * nd);
+      }
+      NitscheMass m0(pm, p, rho), m1(pm, p, rho, &blocks, half_dt);
+      MFEM_VERIFY(m0.VSize() == n, "NitscheMass size " << m0.VSize() << " != " << n);
+      Vector rh(n), ah(n), rd(n), ad(n);
+      for (int i = 0; i < n; i++) { rh(i) = U(rng); }
+      for (Vector *w : {&rd, &ad}) { w->UseDevice(true); }
+      rd = rh;
+      for (int k = 0; k < 2; k++)
+      {
+         const NitscheMass &m = k ? m1 : m0;
+         m.Apply(rh, ah);   // host vectors: the host loop
+         m.Apply(rd, ad);   // device vectors: the kernel (the host loop on the cpu device)
+         const real_t err = RelErr(ad, ah);
+         Check(err <= mtol, std::string(k ? "[MC] damped M^-1 r, " + std::to_string(m1.NumDampedElements())
+                                        + " damped elements on rank 0"
+                                        : "[M]  M^-1 r") + ": rel err " + Sci(err));
+      }
+
+      int nfd = elast->GetNumFaultDOFs();
+      MPI_Allreduce(MPI_IN_PLACE, &nfd, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+      if (nfd > 0)
+      {
+         elast->BuildFaultFaceOps();
+         const int ns = 2 * elast->GetNumFaultDOFs();
+         Vector sl(ns), Gh(rh), Gd(n);
+         for (int i = 0; i < ns; i++) { sl(i) = 1e-3 * U(rng); }
+         Gd.UseDevice(true);
+         Gd = rh;
+         elast->AddSlipLoadFast(sl, Gh);
+         DeviceSlipLoad dsl(*elast);
+         dsl.AddMult(sl, Gd);
+         real_t err = RelErr(Gd, Gh);
+         Check(err <= mtol, "[Gd] slip load r + G s: rel err " + Sci(err));
+
+         std::vector<int> gv;
+         AppendFaultFaceVDofs(*elast, gv);
+         FaultGather fg(gv);
+         Vector xf(n), T1, N1, T2, N2;
+         xf = 0.0;
+         fg.Gather(ud, xf);
+         elast->ComputeTractionFast(uh, sl, T1, N1);
+         elast->ComputeTractionFast(xf, sl, T2, N2);
+         err = std::max(RelErr(T2, T1), RelErr(N2, N1));
+         long long ng = fg.Size();
+         MPI_Allreduce(MPI_IN_PLACE, &ng, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+         Check(err == 0.0, "[T]  fault traction from the " + std::to_string(ng)
+               + " gathered values (all ranks): rel err " + Sci(err));
       }
    }
 
