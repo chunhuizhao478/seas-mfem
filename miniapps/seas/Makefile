@@ -3481,7 +3481,7 @@ test-poro-p0: seas_test_poro_p0 seas_nitsche_dyn_driver seas_driver
 	@{ cat $(PORO_P0_DECK); printf '\n$(PORO_P0_TABLE)rho_solid = 2600.0\n'; } > poro_p0_decks/rho.toml
 	@{ cat $(PORO_P0_DECK); printf '\n$(PORO_P0_TABLE)rho_solid = 2855.5555555555557\nporosty = 0.1\n'; } > poro_p0_decks/typo.toml
 	@{ cat config/bp5_example.toml; printf '\n$(PORO_P0_TABLE)rho_solid = 2855.5555555555557\n'; } > poro_p0_decks/qd.toml
-	@$(call PORO_P0_EXPECT_ABORT,./seas_nitsche_dyn_driver --config poro_p0_decks/ok.toml,U0-4 option on,arrives in step P2.2)
+	@$(call PORO_P0_EXPECT_ABORT,./seas_nitsche_dyn_driver --config poro_p0_decks/ok.toml,U0-4 option on,its stepper in step P2.5)
 	@$(call PORO_P0_EXPECT_ABORT,./seas_nitsche_dyn_driver --config poro_p0_decks/rho.toml,U0-4 density mismatch,differs from the poroelastic bulk density)
 	@$(call PORO_P0_EXPECT_ABORT,./seas_nitsche_dyn_driver --config poro_p0_decks/typo.toml,U0-4 misspelt key,porosty: unknown key)
 	@$(call PORO_P0_EXPECT_ABORT,./seas_nitsche_dyn_driver --config $(PORO_P0_DECK) --poroelastic 1,U0-4 --poroelastic 1 without the table,--poroelastic 1 needs the [multiphysics.poroelastic] table)
@@ -3532,26 +3532,40 @@ check-poro-refs:
 	$(PYTHON) multiphysics/poroelastic/tests/refs/poro_test_refs.py --check multiphysics/poroelastic/tests
 
 # P2.1: DGPoroDivIntegrator, the divergence form B_c with its penalty, boundary
-# rows and source loads.  test-poro-p2 = U2-1, U2-2 and the extras X2-1 to X2-4
-# in seas_test_poro_p2 (1 and 2 ranks: F-A has two elements), then the two
-# aborts of X2-5.
+# rows and source loads.  P2.2: PoroNitscheOperator, the (u, w) operator and its
+# force.  test-poro-p2 = U2-1 to U2-8 and the extras X2-1 to X2-4 in
+# seas_test_poro_p2 (1, 2 and 4 ranks; U2-5 runs on 1 rank only), then the
+# aborts of X2-5 and X2-6.
 PORO_P2_HEADERS = multiphysics/poroelastic/dg_poro_div_integrator.hpp \
+                  multiphysics/poroelastic/poro_nitsche_operator.hpp \
+                  multiphysics/poroelastic/poro_config.hpp \
+                  multiphysics/poroelastic/poro_material.hpp \
+                  domain/nitsche_wave_operator.hpp \
                   multiphysics/poroelastic/tests/poro_fixtures.hpp \
                   multiphysics/poroelastic/tests/poro_test_refs.hpp
 TEST_PORO_P2_SRC = multiphysics/poroelastic/tests/test_poro_p2.cpp
 TEST_PORO_P2_OBJ = $(TEST_PORO_P2_SRC:.cpp=.o)
-$(TEST_PORO_P2_OBJ): %.o: $(SRC)%.cpp $(PORO_P2_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+$(TEST_PORO_P2_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PORO_P2_HEADERS) \
+                          $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
-	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) $(TOML_FLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
 
-seas_test_poro_p2: $(TEST_PORO_P2_OBJ)
-	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PORO_P2_OBJ) $(MFEM_LIBS)
+seas_test_poro_p2: $(TEST_PORO_P2_OBJ) $(PORO_CONFIG_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PORO_P2_OBJ) $(PORO_CONFIG_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
+# One BLAS thread per rank on 2 and 4 ranks: threaded OpenBLAS in every rank
+# made the 4-rank run more than 5 times slower on 4 cores (cloud, 2026-10-21).
 test-poro-p2: seas_test_poro_p2
-	for np in 1 2; do $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_poro_p2 || exit 1; done
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_poro_p2
+	for np in 2 4; do OPENBLAS_NUM_THREADS=1 $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_poro_p2 || exit 1; done
 	@$(call PORO_P0_EXPECT_ABORT,./seas_test_poro_p2 --abort interior-only,X2-5 boundary face without boundary terms,a boundary face reached an integrator built without boundary terms)
 	@$(call PORO_P0_EXPECT_ABORT,./seas_test_poro_p2 --abort penalty-one-sided,X2-5 penalty with one normal term,the fluid penalty on a boundary face belongs to the no-flow rows)
+	@$(call PORO_P0_EXPECT_ABORT,./seas_test_poro_p2 --abort dirichlet-interior,X2-6 Dirichlet attribute on interior faces,conditions on the outer boundary only)
+	@$(call PORO_P0_EXPECT_ABORT,./seas_test_poro_p2 --abort no-flow-fault,X2-6 no-flow attribute on the fault,a sealed fault arrives in step P6)
+	@$(call PORO_P0_EXPECT_ABORT,./seas_test_poro_p2 --abort kappa-zero,X2-6 zero fluid penalty,PoroNitscheOperator: the fluid penalty kappa_w)
 
 # P6 long checks (minutes each; np=8 unless noted): T-15 energy balance and
 # its NIPG control, T-20 coupled dt refinement (dt0/4..dt0/16 vs dt0/64),

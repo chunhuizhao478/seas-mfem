@@ -808,8 +808,9 @@ int main(int argc, char *argv[])
                   "the option on; the Biot bulk is stepped globally (plan rev 3, section 4.3)");
       const std::string rho_err = poro::CheckBulkDensity(poro_cfg, cfg.material_fallback.rho);
       if (!rho_err.empty()) { MFEM_ABORT("poroelastic: " << rho_err); }
-      MFEM_ABORT("poroelastic: the option is parsed and checked, but the Biot (u, w) bulk "
-                 "arrives in step P2.2 of plan rev 3; nothing runs with it on yet");
+      MFEM_ABORT("poroelastic: the option is parsed and checked, but the driver builds the "
+                 "Biot (u, w) operator and its stepper in step P2.5 of plan rev 3; nothing "
+                 "runs with it on yet");
    }
    MakeDirs(out_dir);
 

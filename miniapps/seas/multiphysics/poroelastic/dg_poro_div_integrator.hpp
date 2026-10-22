@@ -50,6 +50,14 @@
 // F_V, no-flow faces for the fluid rows of F_V and F_init.
 // DGPoroDivSourceIntegrator wraps it for ParLinearForm.
 //
+// AssembleDirichletRHS (added in step P2.2) assembles the load of the
+// kTrialNormal rows on a Dirichlet-u face, -int_F c (div b)(g.n): the
+// kTrialNormal term with the prescribed displacement g in place of the trial
+// field.  It is the g part of the coupling term -int alpha M (div q)
+// ((u - g).n) of section 6.6, so with u = g on the face the two cancel and the
+// face stays consistent once w != 0.  DGPoroDivDirichletIntegrator wraps it
+// for ParLinearForm.
+//
 // Quadrature: faces use 2p + 1 points, as the elastic face integrator; the
 // volume uses 2 OrderGrad, as MFEM's ElasticityIntegrator.  Both are exact
 // for a coefficient that is constant on each element (PoroMaterialSample) on
@@ -295,6 +303,41 @@ public:
       }
    }
 
+   /// Dirichlet load of the kTrialNormal rows on a boundary face:
+   /// -int_F c (div b)(g.n), with g evaluated on side 1 at the face points,
+   /// as the elastic Dirichlet load evaluates it (2p + 1 points).
+   void AssembleDirichletRHS(const FiniteElement &el,
+                             FaceElementTransformations &Trans,
+                             VectorCoefficient &g, Vector &elvect) const
+   {
+      MFEM_VERIFY(Trans.Elem2No < 0, "DGPoroDivIntegrator::AssembleDirichletRHS: "
+                  "an interior face; the Dirichlet load belongs to boundary faces.");
+      const int dim = el.GetDim();
+      const int n = dim * el.GetDof();
+      elvect.SetSize(n);
+      elvect = 0.0;
+
+      const IntegrationRule &ir =
+         IntRules.Get(Trans.GetGeometryType(), 2 * el.GetOrder() + 1);
+
+      Vector N(n), D(n), nor(dim), nhat(dim), gq(dim);
+      for (int q = 0; q < ir.GetNPoints(); q++)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         Trans.SetAllIntPoints(&ip);
+         CalcOrtho(Trans.Jacobian(), nor);
+         const real_t nl_q = nor.Norml2();
+         nhat.Set(1.0 / nl_q, nor);
+
+         real_t c1, detJ1;
+         const IntegrationPoint &eip1 = Trans.GetElement1IntPoint();
+         SideRows_(el, *Trans.Elem1, eip1, nhat, 1.0, N, D, 0, c1, detJ1);
+         g.Eval(gq, *Trans.Elem1, eip1);
+         const real_t W = -ip.weight * nl_q * (gq * nhat);
+         for (int r = 0; r < n; r++) { elvect(r) += W * D(r); }
+      }
+   }
+
 private:
    /// One side's rows at a face point: N = s_i phi_k nhat_p and
    /// D = c_i div(phi_k e_p), at offset off; also returns c_i and detJ_i.
@@ -358,6 +401,32 @@ public:
 private:
    const DGPoroDivIntegrator &B_;
    Coefficient &s_;
+};
+
+/// The Dirichlet load AssembleDirichletRHS as a LinearFormIntegrator, for
+/// ParLinearForm::AddBdrFaceIntegrator with the Dirichlet faces' marker (one
+/// instance per call, as above).  B and g are kept, not owned.
+class DGPoroDivDirichletIntegrator : public LinearFormIntegrator
+{
+public:
+   DGPoroDivDirichletIntegrator(const DGPoroDivIntegrator &B, VectorCoefficient &g)
+      : B_(B), g_(g) {}
+
+   void AssembleRHSElementVect(const FiniteElement &, ElementTransformation &,
+                               Vector &) override
+   {
+      MFEM_ABORT("DGPoroDivDirichletIntegrator: a boundary-face load; add it "
+                 "with AddBdrFaceIntegrator.");
+   }
+
+   void AssembleRHSElementVect(const FiniteElement &el,
+                               FaceElementTransformations &Tr,
+                               Vector &elvect) override
+   { B_.AssembleDirichletRHS(el, Tr, g_, elvect); }
+
+private:
+   const DGPoroDivIntegrator &B_;
+   VectorCoefficient &g_;
 };
 
 } // namespace seas

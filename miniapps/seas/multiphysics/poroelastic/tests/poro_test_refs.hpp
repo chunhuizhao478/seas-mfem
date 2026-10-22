@@ -103,6 +103,36 @@ constexpr double c_p_undrained = 6.0000000000000000e+03;
 constexpr double c_p_drained = 5.9190145516079765e+03;
 constexpr double diffusivity = 1.0372190641945067e+00;
 } // namespace vf3_contrast
+namespace patch_PT1
+{
+constexpr double A_du_dx = -5.5309734513274336e-05;
+constexpr double A_dw_dx = 2.8908554572271391e-05;
+constexpr double A_sigma_xx = -1.0000000000000000e+06;
+constexpr double A_p = 0.0000000000000000e+00;
+constexpr double B_du_dx = -1.1029773572171137e-05;
+constexpr double B_dw_dx = 5.7414164096054705e-06;
+constexpr double B_sigma_xx = -1.0000000000000002e+06;
+constexpr double B_p = 0.0000000000000000e+00;
+constexpr double u_at_interface = 1.0000000000000000e-03;
+constexpr double old_form_jump = 2.1286545272832804e-06;
+constexpr double S0 = -1.0000000000000000e+06;
+constexpr double V = 0.0000000000000000e+00;
+} // namespace patch_PT1
+namespace patch_PT2
+{
+constexpr double A_du_dx = -5.5309734513274336e-05;
+constexpr double A_dw_dx = 1.2890855457227139e-04;
+constexpr double A_sigma_xx = -1.0000000000000001e+06;
+constexpr double A_p = 8.1576206798166967e-11;
+constexpr double B_du_dx = -1.1029773572171137e-05;
+constexpr double B_dw_dx = 1.0574141640960548e-04;
+constexpr double B_sigma_xx = -1.0000000000000002e+06;
+constexpr double B_p = 0.0000000000000000e+00;
+constexpr double u_at_interface = 1.0000000000000000e-03;
+constexpr double old_form_jump = 2.1286545272832804e-06;
+constexpr double S0 = -1.0000000000000000e+06;
+constexpr double V = 1.0000000000000000e-04;
+} // namespace patch_PT2
 } // namespace poro_refs
 
 #endif // MFEM_SEAS_PORO_TEST_REFS_HPP

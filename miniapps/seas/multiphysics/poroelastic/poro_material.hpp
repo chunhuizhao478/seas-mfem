@@ -252,6 +252,13 @@ public:
    /// (lambda_u, mu, rho) for the elastic block (Proposition 6.2).
    NitscheMaterialSample &UndrainedSample() { return *undrained_; }
    const NitscheMaterialSample &UndrainedSample() const { return *undrained_; }
+   /// (lambda_u, mu, rho) as the order-0 MaterialField UndrainedSample() reads,
+   /// for building the elastic operator of the solid block (step P2.2): the
+   /// operator's own sample reads back the same values.
+   MaterialField UndrainedMaterial() const
+   {
+      return MaterialField::MakeGridFunction(rho_gf_, lambda_u_gf_, mu_gf_);
+   }
 
    /// All constants of local element e.
    const BiotConstants &Constants(int e) const { return constants_[e]; }

@@ -190,6 +190,11 @@ HEADER_SETS = ('tpv5_poro', 'tpv205_equivalent', 'vf3_contrast')
 HEADER_KEYS = ('mu', 'lam', 'Kf', 'Ks', 'kappa', 'phi', 'rho_f', 'rho_s', 'T', 'eta',
                'Kd', 'alpha', 'M', 'lam_u', 'Ku', 'B', 'rho', 'm', 'b', 'tau', 'f_c',
                'c_fast', 'c_slow', 'c_s_hf', 'c_s_lf', 'c_p_undrained', 'c_p_drained', 'diffusivity')
+# The patch-test fields of plan section 6.3 (step P2.2, tests U2-6 and U2-7): per side A (x < 0,
+# tpv5-poro) and B (x > 0, TPV205-equivalent), then the shared values.
+PATCH_SETS = ('patch_PT1', 'patch_PT2')
+PATCH_SIDE_KEYS = ('du_dx', 'dw_dx', 'sigma_xx', 'p')
+PATCH_KEYS = ('u_at_interface', 'old_form_jump', 'S0', 'V')
 
 
 def write_header(refs, path):
@@ -211,6 +216,16 @@ def write_header(refs, path):
         lines.append(f'namespace {name}')
         lines.append('{')
         for k in HEADER_KEYS:
+            lines.append(f'constexpr double {k} = {float(d[k]):.16e};')
+        lines.append(f'}} // namespace {name}')
+    for name in PATCH_SETS:
+        d = refs[name]
+        lines.append(f'namespace {name}')
+        lines.append('{')
+        for side in ('A', 'B'):
+            for k in PATCH_SIDE_KEYS:
+                lines.append(f'constexpr double {side}_{k} = {float(d[side][k]):.16e};')
+        for k in PATCH_KEYS:
             lines.append(f'constexpr double {k} = {float(d[k]):.16e};')
         lines.append(f'}} // namespace {name}')
     lines += ['} // namespace poro_refs', '', '#endif // MFEM_SEAS_PORO_TEST_REFS_HPP', '']

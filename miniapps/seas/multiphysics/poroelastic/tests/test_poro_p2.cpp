@@ -39,10 +39,50 @@
 // sum; summing in long double gave 1.00e-14).  Closed forms use the exact rules for linear functions on a triangle:
 // int f = |F| (f1 + f2 + f3) / 3, int f g = |F| (sum f_v g_v + sum f sum g) / 12.
 //
-// Usage: mpirun -np 1|2 ./seas_test_poro_p2 [--abort interior-only|penalty-one-sided]
+// Step P2.2: PoroNitscheOperator (poro_nitsche_operator.hpp), the bulk (u, w)
+// operator of (8.1) and its force (9.2), on the TPV102 box: F-B (tpv5-poro
+// everywhere) and F-C (tpv5-poro for x < 0, TPV205-equivalent for x > 0),
+// p = 1-3.  The outer faces are drained walls (free top, Dirichlet sides and
+// bottom), mixed walls (also Dirichlet + no-flow and absorbing + no-flow) or
+// clamped (Dirichlet everywhere), see Walls.
+//   U2-3  K symmetric for random x, y; K x on this rank count equal to K x on
+//         one rank (MPI_COMM_SELF copy, DOFs matched by position).
+//   U2-4  w = 0: the u rows of Force equal the Force of a NitscheWaveOperator
+//         built from (lambda_u, mu, rho), bit for bit, with and without slip,
+//         velocity and Kelvin-Voigt damping (absorbing faces present).
+//   U2-5  Every eigenvalue of K at half the chosen kappa_w (kKappaW) by
+//         LAPACK on the 2 x 2 x 1 box (1 rank; F-B and F-C drained, F-B
+//         mixed): none below -1e-10 lambda_max, and the count within 1e-10
+//         lambda_max of zero equal to the dimension of the divergence-free
+//         BDM_p fields with w.n = 0 on no-flow faces (u = 0), the null space
+//         of K.  Dense instead of the plan's LOBPCG, which cannot count that
+//         null space, chosen by Chunhui Zhao on 2026-10-21 in the review of
+//         step P2.2.
+//   U2-6  PT-1 on F-C, clamped: the force of the interpolated exact fields
+//         is zero; the revision 2.2 jump (alpha_A - alpha_B) u(0) against
+//         poro_test_refs.hpp.
+//   U2-7  (a) PT-2 (uniform V) likewise; (b) F_init of a quadratic p_init and
+//         (c) F_V of a linear V on F-B with mixed walls against their
+//         integrated-by-parts forms.
+//   U2-8  Consistency on F-B, drained: for random polynomial (u, w) of degree
+//         p with u = g on the Dirichlet faces, the force against the strong
+//         form (-div sigma, -grad(M zeta)) and its boundary terms (sigma n on
+//         the free surface, M zeta q.n on every drained face), integrated
+//         against each test function with a 2p + 4 rule.
+//   X2-6  (Makefile) --abort dirichlet-interior | no-flow-fault | kappa-zero
+//         abort with their messages.
+// U2-6 to U2-8 are measured against the largest of max |loads|, max |K x|
+// (and max |strong form| in U2-8) over the rows of one field.
+//
+// Usage: mpirun -np 1|2|4 ./seas_test_poro_p2 [--only U2-3|...|U2-8]
+//        [--abort interior-only|penalty-one-sided|dirichlet-interior|
+//                 no-flow-fault|kappa-zero]
 
 #include "mfem.hpp"
 #include "../dg_poro_div_integrator.hpp"
+#include "../poro_nitsche_operator.hpp"
+#include "../../../friction/rate_state_closure.hpp"
+#include "../../../config/tpv102_params.hpp"
 #include "poro_fixtures.hpp"
 #include "poro_test_refs.hpp"
 
@@ -52,6 +92,9 @@
 #include <cstdio>
 #include <functional>
 #include <iostream>
+#include <map>
+#include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -907,7 +950,8 @@ void TestX24()
    if (g_rank == 0) { std::cout << "--- X2-4 parallel assembly on " << np << " rank(s) against the serial one\n"; }
    if (np > 2)
    {
-      TEST_ASSERT(false, "X2-4 runs on 1 or 2 ranks (F-A has two elements)");
+      // F-A has two elements; make test-poro-p2 runs X2-4 on 1 and 2 ranks.
+      if (g_rank == 0) { std::cout << "  X2-4 runs on 1 or 2 ranks only (F-A has two elements)\n"; }
       return;
    }
    Mesh *mesh = TwoTets();
@@ -1020,6 +1064,1007 @@ int RunAbort(const std::string &mode)
    return 1;
 }
 
+// ================================================================== P2.2
+// Step P2.2: PoroNitscheOperator (poro_nitsche_operator.hpp) on F-B
+// (tpv5-poro everywhere) and F-C (tpv5-poro for x < 0, the TPV205-equivalent
+// set for x > 0), the TPV102 box with its fault on Y = 0.
+
+using mfem::seas::BoundaryConfig;
+using mfem::seas::DieterichRuinaFriction;
+using mfem::seas::DirichletFunc;
+using mfem::seas::FaultPointState;
+using mfem::seas::IFaultClosure;
+using mfem::seas::MaterialField;
+using mfem::seas::NitscheFaultSetup;
+using mfem::seas::NitscheWaveOperator;
+using mfem::seas::RateStateClosure;
+using mfem::seas::TPV102Params;
+using mfem::seas::poro::BiotConstants;
+using mfem::seas::poro::BiotFluidInputs;
+using mfem::seas::poro::BulkDensity;
+using mfem::seas::poro::DeriveBiotConstants;
+using mfem::seas::poro::PoroBoundaryConfig;
+using mfem::seas::poro::PoroMaterialSample;
+using mfem::seas::poro::PoroNitscheOperator;
+
+struct Medium
+{
+   BiotFluidInputs f;
+   real_t lam, mu;
+};
+
+#define PORO_MEDIUM(NS) Medium{BiotFluidInputs{NS::phi, NS::kappa, NS::eta, NS::T, \
+   NS::rho_f, NS::rho_s, NS::Kf, NS::Ks}, NS::lam, NS::mu}
+
+const Medium kMedA = PORO_MEDIUM(poro_refs::tpv5_poro);           // F-B; F-C x < 0
+const Medium kMedB = PORO_MEDIUM(poro_refs::tpv205_equivalent);   // F-C x > 0
+
+/// The outer faces (the fault on Y = 0 in every case):
+///   kDrained  z = 0 free surface (attribute 1), every other face Dirichlet (5);
+///   kMixed    z = 0 free; x = -L Dirichlet and no-flow (6); x = +L absorbing
+///             and no-flow (7); y = +-L and z = -L Dirichlet (5);
+///   kClamped  every outer face Dirichlet (1 and 5).
+/// All of them are drained except the no-flow faces.
+enum class Walls { kDrained, kMixed, kClamped };
+
+Mesh *BoxMesh(int nx, int ny, int nz, Walls walls)
+{
+   Mesh *m = TPV102Box(nx, ny, nz);
+   MarkSidesFC(*m);
+   if (walls == Walls::kMixed)
+   {
+      for (int b = 0; b < m->GetNBE(); b++)
+      {
+         if (m->GetBdrAttribute(b) != 5) { continue; }
+         Array<int> v;
+         m->GetBdrElementVertices(b, v);
+         real_t xc = 0.0;
+         for (int i = 0; i < v.Size(); i++) { xc += m->GetVertex(v[i])[0]; }
+         xc /= v.Size();
+         if (std::abs(xc + kL) < 1e-6 * kL) { m->SetBdrAttribute(b, 6); }
+         else if (std::abs(xc - kL) < 1e-6 * kL) { m->SetBdrAttribute(b, 7); }
+      }
+      m->SetAttributes();
+   }
+   return m;
+}
+
+const IFaultClosure &Closure()
+{
+   static DieterichRuinaFriction fr{{TPV102Params::V0, TPV102Params::f0, TPV102Params::b,
+                                     TPV102Params::Dc}};
+   static RateStateClosure cl(fr, RateStateClosure::StateLaw::Aging);
+   return cl;
+}
+
+/// The TPV102 fault of test_poro_p0.cpp (sigma_yy = -120 MPa, its broad
+/// gentle nucleation), without a pore pressure.
+NitscheFaultSetup FaultSetup()
+{
+   NitscheFaultSetup fs;
+   fs.closure = &Closure();
+   fs.prestress = [](const real_t[3], real_t s[9]) {
+      for (int i = 0; i < 9; i++) { s[i] = 0.0; }
+      s[1] = s[3] = TPV102Params::tau_ini;
+      s[4] = -TPV102Params::sigma_n;
+   };
+   fs.nucleation_spatial = [](const real_t x[3], real_t s[9]) {
+      for (int i = 0; i < 9; i++) { s[i] = 0.0; }
+      const real_t dx = x[0] - TPV102Params::hypo_along_strike;
+      const real_t dz = -x[2] - TPV102Params::hypo_down_dip;
+      const real_t r2 = (dx * dx + dz * dz) / (20.0e3 * 20.0e3);
+      s[1] = s[3] = 12.0e6 * std::exp(-r2);
+   };
+   fs.nucleation_temporal = [](real_t t) { return mfem::seas::NucleationTemporal(t); };
+   fs.parameters = [](const real_t x[3], FaultPointState &st) {
+      st.a = mfem::seas::ComputeA(x[0], -x[2]);
+      st.Dc = TPV102Params::Dc;
+   };
+   fs.sigma_min = 0.0;
+   return fs;
+}
+
+/// d = 0, V = V_ini along strike, psi in equilibrium (as test_poro_p0.cpp).
+void SeedState(NitscheWaveOperator &op)
+{
+   const int no = op.NumOwnedFaultDOFs();
+   Vector d(3 * no), V(3 * no), psi(no), S;
+   d = 0.0;
+   op.BackgroundTraction(0.0, S);
+   for (int j = 0; j < no; j++)
+   {
+      const real_t *f = &op.FaultFrames()(9 * j);
+      real_t X[2], sig;
+      mfem::seas::fault_frame::ToLocal(&S(3 * j), 0.0, f, f + 3, f + 6, X[0], X[1], sig);
+      FaultPointState st = op.FaultParams(j);
+      Closure().SeedEquilibrium(std::hypot(X[0], X[1]), TPV102Params::V_ini, sig, st);
+      psi(j) = st.psi;
+      for (int c = 0; c < 3; c++) { V(3 * j + c) = TPV102Params::V_ini * f[6 + c]; }
+   }
+   op.SetFaultState(d, V, psi);
+}
+
+/// Everything one operator needs, kept alive together.
+struct PoroBox
+{
+   std::unique_ptr<ParMesh> pm;
+   std::unique_ptr<PWConstCoefficient> lam, mu, rho;
+   MaterialField mf;
+   std::unique_ptr<PoroMaterialSample> sample;
+   NitscheFaultSetup fs;
+   BoundaryConfig bc;
+   PoroBoundaryConfig pbc;
+   std::unique_ptr<PoroNitscheOperator> op;
+};
+
+typedef std::function<void(BoundaryConfig &, PoroBoundaryConfig &, real_t &)> Tweak;
+
+/// The operator on `serial` (from BoxMesh) over `comm`; two_media = F-C.
+std::unique_ptr<PoroBox> MakeBox(Mesh &serial, MPI_Comm comm, int p, bool two_media,
+                                 Walls walls, real_t kappa_w, const DirichletFunc &g,
+                                 const Tweak &tweak = nullptr)
+{
+   auto B = std::make_unique<PoroBox>();
+   B->pm = std::make_unique<ParMesh>(comm, serial);
+   const Medium &mb = two_media ? kMedB : kMedA;
+   Vector lv(2), mv(2), rv(2);
+   lv(0) = kMedA.lam; lv(1) = mb.lam;
+   mv(0) = kMedA.mu;  mv(1) = mb.mu;
+   rv(0) = BulkDensity(kMedA.f); rv(1) = BulkDensity(mb.f);
+   B->lam = std::make_unique<PWConstCoefficient>(lv);
+   B->mu = std::make_unique<PWConstCoefficient>(mv);
+   B->rho = std::make_unique<PWConstCoefficient>(rv);
+   B->mf.mode = MaterialField::Mode::Coefficient;
+   B->mf.lambda_coef = B->lam.get();
+   B->mf.mu_coef = B->mu.get();
+   B->mf.rho_coef = B->rho.get();
+   B->sample = std::make_unique<PoroMaterialSample>(
+                  *B->pm, B->mf, [two_media](int, const Vector &x)
+   { return (two_media && x(0) > 0.0) ? kMedB.f : kMedA.f; });
+   B->fs = FaultSetup();
+   B->bc.fault_attr = 3;
+   switch (walls)
+   {
+      case Walls::kDrained:
+         B->bc.natural_attrs = {1};
+         B->bc.dirichlet_attrs = {5};
+         break;
+      case Walls::kMixed:
+         B->bc.natural_attrs = {1};
+         B->bc.dirichlet_attrs = {5, 6};
+         B->bc.absorbing_attrs = {7};
+         B->pbc.no_flow_attrs = {6, 7};
+         break;
+      case Walls::kClamped:
+         B->bc.dirichlet_attrs = {1, 5};
+         break;
+   }
+   B->bc.default_dirichlet_func = g;
+   if (tweak) { tweak(B->bc, B->pbc, kappa_w); }
+   B->op = std::make_unique<PoroNitscheOperator>(*B->pm, p, *B->sample, B->bc, kappa_w,
+                                                 B->pbc, mfem::seas::DomainConfig{}, &B->fs);
+   return B;
+}
+
+DirichletFunc ZeroG()
+{
+   return [](const Vector &, real_t, Vector &u) { u.SetSize(3); u = 0.0; };
+}
+
+/// A time-dependent far field (as test_poro_p0.cpp), so Force exercises the
+/// Dirichlet loads.
+DirichletFunc FarField()
+{
+   return [](const Vector &x, real_t t, Vector &u) {
+      u.SetSize(3);
+      u(0) = 1e-6 * t * x(1) / kL;
+      u(1) = -3e-7 * t * x(2) / kL;
+      u(2) = 2e-7 * t;
+   };
+}
+
+typedef std::function<void(const Vector &cen, const Vector &x, Vector &v)> NodeFn;
+
+/// f(centroid of e, x) at every node of every local element, as a vector of
+/// the space's vector DOFs.
+Vector ProjectNodes(ParFiniteElementSpace &fes, const NodeFn &f)
+{
+   ParMesh &m = *fes.GetParMesh();
+   Vector g(fes.GetVSize()), cen(3), x(3), val(3);
+   Array<int> vd;
+   IsoparametricTransformation T;
+   for (int e = 0; e < m.GetNE(); e++)
+   {
+      m.GetElementTransformation(e, &T);
+      T.Transform(Geometries.GetCenter(Geometry::TETRAHEDRON), cen);
+      const FiniteElement &fe = *fes.GetFE(e);
+      const IntegrationRule &nodes = fe.GetNodes();
+      const int nd = fe.GetDof();
+      fes.GetElementVDofs(e, vd);
+      for (int k = 0; k < nd; k++)
+      {
+         T.Transform(nodes.IntPoint(k), x);
+         f(cen, x, val);
+         for (int c = 0; c < 3; c++) { g(vd[c * nd + k]) = val(c); }
+      }
+   }
+   return g;
+}
+
+Vector Join(const Vector &a, const Vector &b)
+{
+   Vector x(a.Size() + b.Size());
+   for (int i = 0; i < a.Size(); i++) { x(i) = a(i); }
+   for (int i = 0; i < b.Size(); i++) { x(a.Size() + i) = b(i); }
+   return x;
+}
+
+ParFiniteElementSpace &Space(PoroBox &B) { return B.op->Elastic().Elasticity().GetFESpace(); }
+
+/// max_i |v_i| over rows [lo, hi) and all ranks.
+real_t MaxAbs(const Vector &v, int lo, int hi, MPI_Comm c)
+{
+   real_t m = 0.0;
+   for (int i = lo; i < hi; i++) { m = std::max(m, std::abs(v(i))); }
+   return RMax(m, c);
+}
+
+/// max_ij |A_ij x_j| for a one-rank HypreParMatrix (no off-diagonal part).
+real_t MaxTerm(const HypreParMatrix &A, const Vector &x)
+{
+   SparseMatrix D;
+   A.GetDiag(D);
+   const int *I = D.GetI(), *J = D.GetJ();
+   const real_t *a = D.GetData();
+   real_t m = 0.0;
+   for (int i = 0; i < D.Height(); i++)
+   {
+      for (int k = I[i]; k < I[i + 1]; k++) { m = std::max(m, std::abs(a[k] * x(J[k]))); }
+   }
+   return m;
+}
+
+/// The Rayleigh quotient after `iters` power iterations on K: a lower bound
+/// of |K|_2 (K is symmetric).
+real_t LambdaMax(const PoroNitscheOperator &op, MPI_Comm comm, int iters)
+{
+   Vector x(op.Height()), y;
+   x.Randomize(977 + 13 * g_rank);
+   x /= std::sqrt(InnerProduct(comm, x, x));
+   real_t lam = 0.0;
+   for (int it = 0; it < iters; it++)
+   {
+      op.ApplyStiffness(x, y);
+      lam = InnerProduct(comm, x, y);
+      x = y;
+      x /= std::sqrt(InnerProduct(comm, x, x));
+   }
+   return lam;
+}
+
+/// For each local vector DOF of a, the vector DOF of b at the same node and
+/// component (elements matched by centroid, nodes by position); both spaces
+/// on partitions of the same serial mesh.
+std::vector<int> MatchBoxDofs(ParFiniteElementSpace &a, ParFiniteElementSpace &b, real_t &gap)
+{
+   ParMesh &ma = *a.GetParMesh(), &mb = *b.GetParMesh();
+   std::vector<Vector> cb(mb.GetNE());
+   IsoparametricTransformation Ta, Tb;
+   for (int k = 0; k < mb.GetNE(); k++)
+   {
+      mb.GetElementTransformation(k, &Tb);
+      cb[k].SetSize(3);
+      Tb.Transform(Geometries.GetCenter(Geometry::TETRAHEDRON), cb[k]);
+   }
+   std::vector<int> map(a.GetVSize(), -1);
+   gap = 0.0;
+   Array<int> va, vb;
+   Vector ca(3), xa(3), xb(3), d(3);
+   for (int e = 0; e < ma.GetNE(); e++)
+   {
+      ma.GetElementTransformation(e, &Ta);
+      Ta.Transform(Geometries.GetCenter(Geometry::TETRAHEDRON), ca);
+      int E = -1;
+      for (int k = 0; k < mb.GetNE() && E < 0; k++)
+      {
+         d = cb[k];
+         d -= ca;
+         if (d.Normlinf() < 1e-9 * kL) { E = k; }
+      }
+      if (E < 0) { gap = 1e30; return map; }
+      mb.GetElementTransformation(E, &Tb);
+      const IntegrationRule &nodes = a.GetFE(e)->GetNodes();
+      const int nd = a.GetFE(e)->GetDof();
+      a.GetElementVDofs(e, va);
+      b.GetElementVDofs(E, vb);
+      for (int k = 0; k < nd; k++)
+      {
+         Ta.Transform(nodes.IntPoint(k), xa);
+         int K = -1;
+         real_t best = 1e30;
+         for (int l = 0; l < nd; l++)
+         {
+            Tb.Transform(nodes.IntPoint(l), xb);
+            xb -= xa;
+            if (xb.Normlinf() < best) { best = xb.Normlinf(); K = l; }
+         }
+         gap = std::max(gap, best);
+         for (int c = 0; c < 3; c++) { map[va[c * nd + k]] = vb[c * nd + K]; }
+      }
+   }
+   return map;
+}
+
+std::string Box(bool two_media) { return two_media ? "F-C" : "F-B"; }
+
+// ------------------------------------------------------------- U2-3
+
+void TestU23()
+{
+   if (g_rank == 0)
+   {
+      std::cout << "--- U2-3: K symmetric and the same on every rank count (mixed walls: "
+                   "Dirichlet, Dirichlet + no-flow, absorbing + no-flow, free)\n";
+   }
+   const int np = Mpi::WorldSize();
+   for (int two = 0; two <= 1; two++)
+   {
+      for (int p = 1; p <= 3; p++)
+      {
+         const std::string P = "U2-3 " + Box(two) + " p = " + std::to_string(p) + ": ";
+         std::unique_ptr<Mesh> m(BoxMesh(4, 4, 2, Walls::kMixed));
+         auto box = MakeBox(*m, MPI_COMM_WORLD, p, two, Walls::kMixed, 1.0, ZeroG());
+         const PoroNitscheOperator &op = *box->op;
+         const int N = op.Height();
+         Vector x(N), y(N), Kx, Ky;
+         x.Randomize(101 + 7 * g_rank);
+         y.Randomize(203 + 7 * g_rank);
+         op.ApplyStiffness(x, Kx);
+         op.ApplyStiffness(y, Ky);
+         const real_t yKx = InnerProduct(MPI_COMM_WORLD, y, Kx);
+         const real_t xKy = InnerProduct(MPI_COMM_WORLD, x, Ky);
+         const real_t nx = std::sqrt(InnerProduct(MPI_COMM_WORLD, x, x));
+         const real_t ny = std::sqrt(InnerProduct(MPI_COMM_WORLD, y, y));
+         const real_t lmax = LambdaMax(op, MPI_COMM_WORLD, 40);
+         const real_t rs = std::abs(yKx - xKy) / (nx * lmax * ny);
+         TEST_ASSERT(rs <= kR1, P + "|y^T K x - x^T K y| / (|x| |K| |y|) = " + Fmt(rs)
+                     + " for random x, y (|K| = " + Fmt(lmax) + ", 40 power iterations)");
+
+         // The same K x on one rank: the operator on MPI_COMM_SELF, x a
+         // field of the node positions with a jump between elements.
+         auto self = MakeBox(*m, MPI_COMM_SELF, p, two, Walls::kMixed, 1.0, ZeroG());
+         NodeFn fu = [](const Vector &cen, const Vector &x, Vector &v) {
+            for (int c = 0; c < 3; c++)
+            {
+               v(c) = std::sin(1.3 * x(0) / kL + 0.7 * x(1) / kL - 0.4 * x(2) / kL + c)
+                      + 0.2 * std::cos(5.1 * cen(0) / kL - 3.3 * cen(2) / kL + 2 * c);
+            }
+         };
+         NodeFn fw = [](const Vector &cen, const Vector &x, Vector &v) {
+            for (int c = 0; c < 3; c++)
+            {
+               v(c) = std::cos(0.9 * x(0) / kL - 1.1 * x(1) / kL + 0.6 * x(2) / kL - c)
+                      + 0.3 * std::sin(4.7 * cen(1) / kL + 2.9 * cen(0) / kL + c);
+            }
+         };
+         ParFiniteElementSpace &fp = Space(*box), &fs = Space(*self);
+         const Vector xp = Join(ProjectNodes(fp, fu), ProjectNodes(fp, fw));
+         const Vector xs = Join(ProjectNodes(fs, fu), ProjectNodes(fs, fw));
+         Vector kp, ks;
+         op.ApplyStiffness(xp, kp);
+         self->op->ApplyStiffness(xs, ks);
+         const int n = op.NumU(), ns = self->op->NumU();
+         Vector xsu(const_cast<Vector &>(xs), 0, ns), xsw(const_cast<Vector &>(xs), ns, ns);
+         PoroNitscheOperator &so = *self->op;
+         const real_t big = std::max({MaxTerm(so.Elastic().Elasticity().ParStiffness(), xsu),
+                                      MaxTerm(so.Zuw(), xsw), MaxTerm(so.Zwu(), xsu),
+                                      MaxTerm(so.Zww(), xsw)});
+         real_t gap;
+         const std::vector<int> map = MatchBoxDofs(fp, fs, gap);
+         real_t diff = 0.0;
+         for (int i = 0; i < n; i++)
+         {
+            diff = std::max(diff, std::abs(kp(i) - ks(map[i])));
+            diff = std::max(diff, std::abs(kp(n + i) - ks(ns + map[i])));
+         }
+         diff = RMax(diff, MPI_COMM_WORLD);
+         gap = RMax(gap, MPI_COMM_WORLD);
+         const real_t rr = diff / big;
+         TEST_ASSERT(gap < 1e-9 * kL && rr <= kRV,
+                     P + "K x on " + std::to_string(np) + " rank(s) equals K x on one rank "
+                     "(R = " + Fmt(rr) + " of the largest term, assembled vector)");
+      }
+   }
+}
+
+// ------------------------------------------------------------- U2-4
+
+void TestU24()
+{
+   if (g_rank == 0)
+   {
+      std::cout << "--- U2-4: locked fluid, the u rows against the elastic operator built "
+                   "from (lambda_u, mu, rho) (F-B, mixed walls, slip, Dirichlet, damping)\n";
+   }
+   const real_t rho = BulkDensity(kMedA.f);
+   const BiotConstants c = DeriveBiotConstants(kMedA.lam, kMedA.mu, rho, kMedA.f);
+   for (int p = 1; p <= 3; p++)
+   {
+      for (int kv = 0; kv <= 1; kv++)
+      {
+         const std::string P = "U2-4 p = " + std::to_string(p) + (kv ? ", Kelvin-Voigt" : "")
+                               + ": ";
+         std::unique_ptr<Mesh> m(BoxMesh(4, 4, 2, Walls::kMixed));
+         auto box = MakeBox(*m, MPI_COMM_WORLD, p, false, Walls::kMixed, 1.0, FarField());
+         PoroNitscheOperator &op = *box->op;
+         NitscheFaultSetup fs = FaultSetup();
+         NitscheWaveOperator ref(*box->pm, p, MaterialField::MakeConstant(c.lambda_u, kMedA.mu, rho),
+                                 box->bc, {}, &fs);
+         if (kv)
+         {
+            ref.SetKelvinVoigt(0.1, NitscheWaveOperator::KVScale::Node, -1.0);
+            op.Elastic().SetKelvinVoigt(0.1, NitscheWaveOperator::KVScale::Node, -1.0);
+         }
+         SeedState(ref);
+         SeedState(op.Elastic());
+         ref.SetTime(0.3);
+         op.SetTime(0.3);
+         const int n = ref.Height(), no = ref.NumOwnedFaultDOFs();
+         MFEM_VERIFY(n == op.NumU(), "U2-4: the two operators differ in size");
+         Vector xu(n), vu(n), vw(n), w0(n), d(3 * no);
+         xu.Randomize(11 + g_rank);
+         vu.Randomize(23 + g_rank);
+         vw.Randomize(29 + g_rank);
+         d.Randomize(37 + g_rank);
+         xu *= 1e-3;
+         vu *= 1e-2;
+         vw *= 1e-2;
+         w0 = 0.0;
+         const Vector x = Join(xu, w0), v = Join(vu, vw);
+         Vector Fref, F;
+         ref.Force(xu, &vu, &d, Fref);
+         op.Force(x, &v, &d, F);
+         Vector Fu(F, 0, n);
+         const long b1 = LSum(BitDiff(Fu, Fref), MPI_COMM_WORLD);
+         // Kelvin-Voigt needs the velocity (NitscheWaveOperator refuses null).
+         ref.Force(xu, kv ? &vu : nullptr, nullptr, Fref);
+         op.Force(x, kv ? &v : nullptr, nullptr, F);
+         Vector Fu2(F, 0, n);
+         const long b2 = LSum(BitDiff(Fu2, Fref), MPI_COMM_WORLD);
+         // HasDamping is per rank: some ranks hold no absorbing face.
+         const long damped = LSum(ref.HasDamping() ? 1 : 0, MPI_COMM_WORLD);
+         const long damped_op = LSum(op.Elastic().HasDamping() ? 1 : 0, MPI_COMM_WORLD);
+         TEST_ASSERT(damped > 0 && damped == damped_op,
+                     P + "both operators have absorbing faces, on the same "
+                     + std::to_string(damped) + " rank(s)");
+         TEST_ASSERT(b1 == 0, P + "with slip d, velocity and w = 0, the u rows of Force equal "
+                     "the elastic Force bit for bit (" + std::to_string(b1) + " differ)");
+         TEST_ASSERT(b2 == 0, P + "without slip" + (kv ? "" : " and velocity")
+                     + ", likewise (" + std::to_string(b2) + " differ)");
+      }
+   }
+}
+
+// ------------------------------------------------------------- U2-5
+
+/// Dense copy of a one-rank HypreParMatrix into K at (r0, c0).
+void AddDense(const HypreParMatrix &A, DenseMatrix &K, int r0, int c0)
+{
+   SparseMatrix D;
+   A.GetDiag(D);
+   const int *I = D.GetI(), *J = D.GetJ();
+   const real_t *a = D.GetData();
+   for (int i = 0; i < D.Height(); i++)
+   {
+      for (int k = I[i]; k < I[i + 1]; k++) { K(r0 + i, c0 + J[k]) += a[k]; }
+   }
+}
+
+/// The fluid penalty kappa_w of (6.5) that U2-5 fixes: half of it must leave K
+/// positive semidefinite (plan section 6.3, a margin of 2).  At 1.0, the
+/// derivation's starting value, half was not enough (first run: lambda_min /
+/// lambda_max = -3.2e-3 to -4.2e-5); K turns semidefinite at 0.953-0.968 for
+/// p = 1, 0.603-0.610 for p = 2 and 0.544-0.546 for p = 3 (bisection on this
+/// box: F-B and F-C, drained and mixed walls; p = 3 on F-B mixed only).
+/// kappa_w = 2 chosen by Chunhui Zhao on 2026-10-21 in the review of step P2.2.
+const real_t kKappaW = 2.0;
+
+void TestU25()
+{
+   if (g_rank == 0)
+   {
+      std::cout << "--- U2-5: coercivity at half the fluid penalty (kappa_w = " << 0.5 * kKappaW
+                << " of " << kKappaW << "): every eigenvalue of K by LAPACK on the 2 x 2 x 1 "
+                   "box (drained walls; mixed walls on F-B)\n";
+   }
+   if (Mpi::WorldSize() != 1)
+   {
+      if (g_rank == 0) { std::cout << "  U2-5 runs on 1 rank only (dense eigenvalues)\n"; }
+      return;
+   }
+#ifndef MFEM_USE_LAPACK
+   TEST_ASSERT(false, "U2-5 needs MFEM built with LAPACK (DenseMatrix::Eigenvalues)");
+   return;
+#else
+   for (int c = 0; c < 3; c++)
+   {
+      // F-B and F-C with drained walls, F-B with mixed walls (the no-flow
+      // faces carry the one-sided penalty).
+      const bool two = (c == 1);
+      const Walls walls = (c == 2) ? Walls::kMixed : Walls::kDrained;
+      for (int p = 1; p <= 3; p++)
+      {
+         const std::string P = "U2-5 " + Box(two) + (c == 2 ? " mixed" : " drained") + " p = "
+                               + std::to_string(p) + ": ";
+         std::unique_ptr<Mesh> m(BoxMesh(2, 2, 1, walls));
+         auto box = MakeBox(*m, MPI_COMM_WORLD, p, two, walls, 0.5 * kKappaW, ZeroG());
+         PoroNitscheOperator &op = *box->op;
+         const int n = op.NumU();
+         const double t0 = MPI_Wtime();
+         DenseMatrix K(2 * n);
+         K = 0.0;
+         AddDense(op.Elastic().Elasticity().ParStiffness(), K, 0, 0);
+         AddDense(op.Zuw(), K, 0, n);
+         AddDense(op.Zwu(), K, n, 0);
+         AddDense(op.Zww(), K, n, n);
+         Vector ev;
+         K.Eigenvalues(ev);
+         const real_t lmax = ev.Max(), lmin = ev.Min();
+         long zeros = 0;
+         real_t first_pos = lmax;
+         for (int i = 0; i < ev.Size(); i++)
+         {
+            if (std::abs(ev(i)) <= 1e-10 * lmax) { zeros++; }
+            else if (ev(i) > 0.0) { first_pos = std::min(first_pos, ev(i)); }
+         }
+         // The zero modes: (0, w) with w in BDM_p (continuous normal
+         // component, w.n = 0 on the no-flow faces) and div w = 0 in each
+         // element; div maps that space onto the discontinuous P_{p-1}
+         // (drained faces leave the total flux free), so their number is
+         // its dimension minus dim P_{p-1}.
+         long Fnf = 0;
+         for (int b = 0; b < box->pm->GetNBE(); b++)
+         {
+            if (box->pbc.no_flow_attrs.count(box->pm->GetBdrAttribute(b))) { Fnf++; }
+         }
+         const long T = box->pm->GetNE(), F = box->pm->GetNumFaces() - Fnf;
+         const long N0 = F * (p + 1) * (p + 2) / 2 + T * (p + 1) * (p + 2) * (p - 1) / 2
+                         - T * p * (p + 1) * (p + 2) / 6;
+         if (g_rank == 0)
+         {
+            std::cout << "  " << P << 2 * n << " unknowns, " << T << " tets, " << F
+                      << " faces without no-flow: lambda_min = " << Fmt(lmin) << ", lambda_max = " << Fmt(lmax)
+                      << ", smallest positive above the zeros " << Fmt(first_pos) << " ("
+                      << Fmt(first_pos / lmax) << " lambda_max); " << Fmt(MPI_Wtime() - t0)
+                      << " s\n";
+         }
+         TEST_ASSERT(lmin >= -1e-10 * lmax, P + "no eigenvalue below -1e-10 lambda_max "
+                     "(lambda_min / lambda_max = " + Fmt(lmin / lmax) + ")");
+         TEST_ASSERT(zeros == N0, P + std::to_string(zeros) + " eigenvalues within 1e-10 "
+                     "lambda_max of zero, the dimension of the divergence-free BDM_p fields ("
+                     + std::to_string(N0) + ")");
+      }
+   }
+#endif
+}
+
+// ------------------------------------------------------------- U2-6, U2-7
+
+/// Residual of the force F against the parts it sums (loads L and K x), in
+/// rows [lo, hi): max |F| / max(max |L|, max |K x|).
+real_t ResidualR(const Vector &F, const Vector &L, const Vector &Kx, int lo, int hi)
+{
+   const real_t s = std::max(MaxAbs(L, lo, hi, MPI_COMM_WORLD), MaxAbs(Kx, lo, hi, MPI_COMM_WORLD));
+   return MaxAbs(F, lo, hi, MPI_COMM_WORLD) / s;
+}
+
+void TestU26U27a()
+{
+   if (g_rank == 0)
+   {
+      std::cout << "--- U2-6, U2-7(a): patch tests PT-1 and PT-2 on F-C (exact u on every "
+                   "outer face, drained), residual of the interpolated exact solution\n";
+   }
+   {
+      // The revision 2.2 jump [[(alpha u + w).n]] = (alpha_A - alpha_B) u(0).
+      const real_t rho = BulkDensity(kMedA.f);
+      const real_t aA = DeriveBiotConstants(kMedA.lam, kMedA.mu, rho, kMedA.f).alpha;
+      const real_t aB = DeriveBiotConstants(kMedB.lam, kMedB.mu, BulkDensity(kMedB.f),
+                                            kMedB.f).alpha;
+      const real_t j = (aA - aB) * poro_refs::patch_PT1::u_at_interface;
+      const real_t r = std::abs(j - poro_refs::patch_PT1::old_form_jump)
+                       / poro_refs::patch_PT1::old_form_jump;
+      TEST_ASSERT(r <= kR1, "U2-6 the revision 2.2 form would leave [[(alpha u + w).n]] = "
+                  + Fmt(j) + " m on x = 0 (poro_test_refs.hpp " +
+                  Fmt(poro_refs::patch_PT1::old_form_jump) + ", R = " + Fmt(r) + ")");
+   }
+   for (int which = 0; which <= 1; which++)
+   {
+      const real_t duA = which ? poro_refs::patch_PT2::A_du_dx : poro_refs::patch_PT1::A_du_dx;
+      const real_t duB = which ? poro_refs::patch_PT2::B_du_dx : poro_refs::patch_PT1::B_du_dx;
+      const real_t dwA = which ? poro_refs::patch_PT2::A_dw_dx : poro_refs::patch_PT1::A_dw_dx;
+      const real_t dwB = which ? poro_refs::patch_PT2::B_dw_dx : poro_refs::patch_PT1::B_dw_dx;
+      const real_t u0 = poro_refs::patch_PT1::u_at_interface;
+      const real_t V = which ? poro_refs::patch_PT2::V : 0.0;
+      DirichletFunc g = [=](const Vector &x, real_t, Vector &u) {
+         u.SetSize(3);
+         u = 0.0;
+         u(0) = u0 + (x(0) < 0.0 ? duA : duB) * x(0);
+      };
+      NodeFn fu = [=](const Vector &cen, const Vector &x, Vector &v) {
+         v = 0.0;
+         v(0) = u0 + (cen(0) < 0.0 ? duA : duB) * x(0);
+      };
+      NodeFn fw = [=](const Vector &cen, const Vector &x, Vector &v) {
+         v = 0.0;
+         v(0) = (cen(0) < 0.0 ? dwA : dwB) * x(0);
+      };
+      for (int p = 1; p <= 3; p++)
+      {
+         const std::string P = std::string(which ? "U2-7(a) PT-2" : "U2-6 PT-1") + " p = "
+                               + std::to_string(p) + ": ";
+         std::unique_ptr<Mesh> m(BoxMesh(4, 4, 2, Walls::kClamped));
+         auto box = MakeBox(*m, MPI_COMM_WORLD, p, true, Walls::kClamped, 1.0, g);
+         PoroNitscheOperator &op = *box->op;
+         ConstantCoefficient Vc(V);
+         if (which) { op.SetInjectedVolume(&Vc); }
+         op.SetTime(0.0);
+         ParFiniteElementSpace &fes = Space(*box);
+         const Vector x = Join(ProjectNodes(fes, fu), ProjectNodes(fes, fw));
+         Vector zero(x.Size()), F, L, Kx;
+         zero = 0.0;
+         op.Force(x, nullptr, nullptr, F);
+         op.Force(zero, nullptr, nullptr, L);
+         op.ApplyStiffness(x, Kx);
+         const int n = op.NumU();
+         const real_t ru = ResidualR(F, L, Kx, 0, n), rw = ResidualR(F, L, Kx, n, 2 * n);
+         TEST_ASSERT(ru <= kRV, P + "u rows: the force of the exact solution is zero (R = "
+                     + Fmt(ru) + " of max(|loads|, |K x|))");
+         TEST_ASSERT(rw <= kRV, P + "w rows: likewise (R = " + Fmt(rw) + ")");
+      }
+   }
+}
+
+/// int over the local elements of f(x) . phi_k (component c) and, on the
+/// boundary faces with an attribute in `faces`, of h(x) phi_k n_c, into the
+/// rows [off, off + n) of E (the rule has order 2p + 4).
+void AssembleExpected(ParFiniteElementSpace &fes, int off,
+                      const std::function<void(const Vector &, Vector &)> &f,
+                      const std::set<int> &faces,
+                      const std::function<void(const Vector &, const Vector &, Vector &)> &h,
+                      Vector &E)
+{
+   ParMesh &m = *fes.GetParMesh();
+   Array<int> vd;
+   Vector shape, x(3), val(3), nor(3);
+   for (int e = 0; e < m.GetNE(); e++)
+   {
+      const FiniteElement &fe = *fes.GetFE(e);
+      const int nd = fe.GetDof();
+      shape.SetSize(nd);
+      ElementTransformation *T = m.GetElementTransformation(e);
+      const IntegrationRule &ir = IntRules.Get(Geometry::TETRAHEDRON, 2 * fe.GetOrder() + 4);
+      fes.GetElementVDofs(e, vd);
+      for (int q = 0; q < ir.GetNPoints(); q++)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         T->SetIntPoint(&ip);
+         T->Transform(ip, x);
+         fe.CalcShape(ip, shape);
+         f(x, val);
+         const real_t w = ip.weight * T->Weight();
+         for (int c = 0; c < 3; c++)
+            for (int k = 0; k < nd; k++) { E(off + vd[c * nd + k]) += w * shape(k) * val(c); }
+      }
+   }
+   for (int b = 0; b < m.GetNBE(); b++)
+   {
+      if (!faces.count(m.GetBdrAttribute(b))) { continue; }
+      FaceElementTransformations *FT = m.GetBdrFaceTransformations(b);
+      if (!FT) { continue; }
+      const FiniteElement &fe = *fes.GetFE(FT->Elem1No);
+      const int nd = fe.GetDof();
+      shape.SetSize(nd);
+      fes.GetElementVDofs(FT->Elem1No, vd);
+      const IntegrationRule &ir = IntRules.Get(FT->GetGeometryType(), 2 * fe.GetOrder() + 4);
+      for (int q = 0; q < ir.GetNPoints(); q++)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         FT->SetAllIntPoints(&ip);
+         const IntegrationPoint &eip = FT->GetElement1IntPoint();
+         FT->Elem1->Transform(eip, x);
+         fe.CalcShape(eip, shape);
+         CalcOrtho(FT->Jacobian(), nor);
+         const real_t nl = nor.Norml2();
+         Vector nhat(nor);
+         nhat /= nl;
+         h(x, nhat, val);
+         const real_t w = ip.weight * nl;
+         for (int c = 0; c < 3; c++)
+            for (int k = 0; k < nd; k++) { E(off + vd[c * nd + k]) += w * shape(k) * val(c); }
+      }
+   }
+}
+
+void TestU27bc()
+{
+   if (g_rank == 0)
+   {
+      std::cout << "--- U2-7(b, c): the source loads on F-B with mixed walls against their "
+                   "integrated-by-parts forms\n";
+   }
+   const real_t rho = BulkDensity(kMedA.f);
+   const BiotConstants c = DeriveBiotConstants(kMedA.lam, kMedA.mu, rho, kMedA.f);
+   const real_t aM = c.alpha * c.M, M = c.M;
+   // A quadratic starting pressure and a linear injected volume.
+   const real_t P0 = 1e7, V0 = 1e-4;
+   auto pinit = [=](const Vector &x) {
+      const real_t a = x(0) / kL, b = x(1) / kL, z = x(2) / kL;
+      return P0 * (1.0 + 0.4 * a - 0.3 * b + 0.2 * z + 0.5 * a * b - 0.25 * z * z + 0.3 * a * a);
+   };
+   auto gradp = [=](const Vector &x, Vector &g) {
+      const real_t a = x(0) / kL, b = x(1) / kL, z = x(2) / kL;
+      g.SetSize(3);
+      g(0) = P0 * (0.4 + 0.5 * b + 0.6 * a) / kL;
+      g(1) = P0 * (-0.3 + 0.5 * a) / kL;
+      g(2) = P0 * (0.2 - 0.5 * z) / kL;
+   };
+   auto vol = [=](const Vector &x) {
+      return V0 * (1.0 + 0.3 * x(0) / kL - 0.2 * x(1) / kL + 0.1 * x(2) / kL);
+   };
+   const real_t gradV[3] = {0.3 * V0 / kL, -0.2 * V0 / kL, 0.1 * V0 / kL};
+   for (int p = 1; p <= 3; p++)
+   {
+      const std::string P = "U2-7 p = " + std::to_string(p) + ": ";
+      std::unique_ptr<Mesh> m(BoxMesh(4, 4, 2, Walls::kMixed));
+      auto box = MakeBox(*m, MPI_COMM_WORLD, p, false, Walls::kMixed, 1.0, ZeroG());
+      PoroNitscheOperator &op = *box->op;
+      ParFiniteElementSpace &fes = Space(*box);
+      const int n = op.NumU();
+      Vector zero(2 * n), F, E(2 * n);
+      zero = 0.0;
+
+      // (b) F_init: -int grad p_init . q + int_drained p_init (q.n); the
+      // no-flow faces 6, 7 carry none.
+      FunctionCoefficient pc(pinit);
+      op.SetInitialPressure(pc);
+      op.SetTime(0.0);
+      op.Force(zero, nullptr, nullptr, F);
+      E = 0.0;
+      AssembleExpected(fes, n, [&](const Vector &x, Vector &v) { gradp(x, v); v.Neg(); },
+                       {1, 5}, [&](const Vector &x, const Vector &nh, Vector &v)
+      { v = nh; v *= pinit(x); }, E);
+      real_t rb = 0.0, sb = 0.0;
+      for (int i = n; i < 2 * n; i++) { rb = std::max(rb, std::abs(F(i) - E(i))); }
+      sb = std::max(MaxAbs(F, n, 2 * n, MPI_COMM_WORLD), MaxAbs(E, n, 2 * n, MPI_COMM_WORLD));
+      rb = RMax(rb, MPI_COMM_WORLD) / sb;
+      TEST_ASSERT(rb <= kRV, P + "F_init of a quadratic p_init equals -int grad p_init . q + "
+                  "int p_init q.n on the drained faces (R = " + Fmt(rb) + ")");
+
+      // (c) F_V of a linear V: solid rows -int alpha M grad V . v + int alpha M V
+      // v.n on the faces that are not Dirichlet (1, 7); fluid rows
+      // -int M grad V . q + int M V q.n on the drained faces (1, 5).
+      auto box2 = MakeBox(*m, MPI_COMM_WORLD, p, false, Walls::kMixed, 1.0, ZeroG());
+      FunctionCoefficient Vc(vol);
+      box2->op->SetInjectedVolume(&Vc);
+      box2->op->SetTime(0.0);
+      box2->op->Force(zero, nullptr, nullptr, F);
+      ParFiniteElementSpace &fes2 = Space(*box2);
+      E = 0.0;
+      AssembleExpected(fes2, 0, [&](const Vector &, Vector &v)
+      { for (int k = 0; k < 3; k++) { v(k) = -aM * gradV[k]; } },
+      {1, 7}, [&](const Vector &x, const Vector &nh, Vector &v) { v = nh; v *= aM * vol(x); }, E);
+      AssembleExpected(fes2, n, [&](const Vector &, Vector &v)
+      { for (int k = 0; k < 3; k++) { v(k) = -M * gradV[k]; } },
+      {1, 5}, [&](const Vector &x, const Vector &nh, Vector &v) { v = nh; v *= M * vol(x); }, E);
+      for (int half = 0; half <= 1; half++)
+      {
+         const int lo = half * n, hi = lo + n;
+         real_t r = 0.0;
+         for (int i = lo; i < hi; i++) { r = std::max(r, std::abs(F(i) - E(i))); }
+         const real_t s = std::max(MaxAbs(F, lo, hi, MPI_COMM_WORLD), MaxAbs(E, lo, hi, MPI_COMM_WORLD));
+         r = RMax(r, MPI_COMM_WORLD) / s;
+         TEST_ASSERT(r <= kRV, P + (half ? "fluid" : "solid") + " rows of F_V for a linear V "
+                     "equal their integrated-by-parts form (R = " + Fmt(r) + ")");
+      }
+   }
+}
+
+// ------------------------------------------------------------- U2-8
+
+/// A scalar polynomial in (x, y, z) / kL.
+struct SPoly
+{
+   std::map<std::array<int, 3>, real_t> t;
+   real_t Eval(const Vector &x) const
+   {
+      real_t s = 0.0;
+      for (const auto &kv : t)
+      {
+         s += kv.second * Poly::Pow(x(0) / kL, kv.first[0]) * Poly::Pow(x(1) / kL, kv.first[1])
+              * Poly::Pow(x(2) / kL, kv.first[2]);
+      }
+      return s;
+   }
+   /// d/dx_d in physical units.
+   SPoly D(int d) const
+   {
+      SPoly r;
+      for (const auto &kv : t)
+      {
+         if (kv.first[d] == 0) { continue; }
+         std::array<int, 3> e = kv.first;
+         e[d]--;
+         r.t[e] += kv.second * kv.first[d] / kL;
+      }
+      return r;
+   }
+   void Add(const SPoly &o, real_t s)
+   {
+      for (const auto &kv : o.t) { t[kv.first] += s * kv.second; }
+   }
+};
+
+/// Three random polynomials of total degree deg (coefficients in [-1, 1]).
+std::array<SPoly, 3> RandomField(int deg, uint32_t seed)
+{
+   std::array<SPoly, 3> f;
+   uint32_t st = seed;
+   for (int c = 0; c < 3; c++)
+      for (int i = 0; i <= deg; i++)
+         for (int j = 0; i + j <= deg; j++)
+            for (int k = 0; i + j + k <= deg; k++)
+            {
+               st = 1664525u * st + 1013904223u;
+               f[c].t[{i, j, k}] = 2.0 * ((st >> 8) / 16777216.0) - 1.0;
+            }
+   return f;
+}
+
+SPoly Div(const std::array<SPoly, 3> &f)
+{
+   SPoly d = f[0].D(0);
+   d.Add(f[1].D(1), 1.0);
+   d.Add(f[2].D(2), 1.0);
+   return d;
+}
+
+void TestU28()
+{
+   if (g_rank == 0)
+   {
+      std::cout << "--- U2-8: consistency on F-B (drained walls): for polynomial (u, w) of "
+                   "degree p, the force against the strong form integrated against each "
+                   "test function\n";
+   }
+   const real_t rho = BulkDensity(kMedA.f);
+   const BiotConstants c = DeriveBiotConstants(kMedA.lam, kMedA.mu, rho, kMedA.f);
+   const real_t lu = c.lambda_u, mu = c.mu, aM = c.alpha * c.M, M = c.M, al = c.alpha;
+   for (int p = 1; p <= 3; p++)
+   {
+      const std::string P = "U2-8 p = " + std::to_string(p) + ": ";
+      const std::array<SPoly, 3> u = RandomField(p, 4321u + p), w = RandomField(p, 8765u + p);
+      // r_u = -div sigma = -(mu lap u + (lambda_u + mu) grad div u + alpha M grad div w),
+      // r_w = -grad(M zeta) = -M (alpha grad div u + grad div w), and on the
+      // faces sigma n and M zeta.
+      const SPoly du = Div(u), dw = Div(w);
+      std::array<SPoly, 3> ru, rw;
+      for (int i = 0; i < 3; i++)
+      {
+         for (int j = 0; j < 3; j++) { ru[i].Add(u[i].D(j).D(j), -mu); }
+         ru[i].Add(du.D(i), -(lu + mu));
+         ru[i].Add(dw.D(i), -aM);
+         rw[i].Add(du.D(i), -M * al);
+         rw[i].Add(dw.D(i), -M);
+      }
+      std::array<std::array<SPoly, 3>, 3> grad;
+      for (int i = 0; i < 3; i++)
+         for (int j = 0; j < 3; j++) { grad[i][j] = u[i].D(j); }
+      auto sigma_n = [&](const Vector &x, const Vector &nh, Vector &v) {
+         const real_t dv = du.Eval(x), dww = dw.Eval(x);
+         for (int i = 0; i < 3; i++)
+         {
+            v(i) = (lu * dv + aM * dww) * nh(i);
+            for (int j = 0; j < 3; j++) { v(i) += mu * (grad[i][j].Eval(x) + grad[j][i].Eval(x)) * nh(j); }
+         }
+      };
+      auto Mzeta_n = [&](const Vector &x, const Vector &nh, Vector &v) {
+         v = nh;
+         v *= M * (al * du.Eval(x) + dw.Eval(x));
+      };
+      DirichletFunc g = [&](const Vector &x, real_t, Vector &v) {
+         v.SetSize(3);
+         for (int i = 0; i < 3; i++) { v(i) = u[i].Eval(x); }
+      };
+      std::unique_ptr<Mesh> m(BoxMesh(4, 4, 2, Walls::kDrained));
+      auto box = MakeBox(*m, MPI_COMM_WORLD, p, false, Walls::kDrained, 1.0, g);
+      PoroNitscheOperator &op = *box->op;
+      op.SetTime(0.0);
+      ParFiniteElementSpace &fes = Space(*box);
+      const int n = op.NumU();
+      NodeFn fu = [&](const Vector &, const Vector &x, Vector &v) {
+         for (int i = 0; i < 3; i++) { v(i) = u[i].Eval(x); }
+      };
+      NodeFn fw = [&](const Vector &, const Vector &x, Vector &v) {
+         for (int i = 0; i < 3; i++) { v(i) = w[i].Eval(x); }
+      };
+      const Vector x = Join(ProjectNodes(fes, fu), ProjectNodes(fes, fw));
+      Vector zero(2 * n), F, L, Kx, E(2 * n);
+      zero = 0.0;
+      op.Force(x, nullptr, nullptr, F);
+      op.Force(zero, nullptr, nullptr, L);
+      op.ApplyStiffness(x, Kx);
+      // -F = int r . (v, q) + int_free sigma n . v + int_all M zeta q.n
+      E = 0.0;
+      AssembleExpected(fes, 0, [&](const Vector &y, Vector &v)
+      { for (int i = 0; i < 3; i++) { v(i) = -ru[i].Eval(y); } },
+      {1}, [&](const Vector &y, const Vector &nh, Vector &v) { sigma_n(y, nh, v); v.Neg(); }, E);
+      AssembleExpected(fes, n, [&](const Vector &y, Vector &v)
+      { for (int i = 0; i < 3; i++) { v(i) = -rw[i].Eval(y); } },
+      {1, 5}, [&](const Vector &y, const Vector &nh, Vector &v) { Mzeta_n(y, nh, v); v.Neg(); }, E);
+      for (int half = 0; half <= 1; half++)
+      {
+         const int lo = half * n, hi = lo + n;
+         real_t r = 0.0;
+         for (int i = lo; i < hi; i++) { r = std::max(r, std::abs(F(i) - E(i))); }
+         const real_t s = std::max({MaxAbs(L, lo, hi, MPI_COMM_WORLD),
+                                    MaxAbs(Kx, lo, hi, MPI_COMM_WORLD),
+                                    MaxAbs(E, lo, hi, MPI_COMM_WORLD)});
+         r = RMax(r, MPI_COMM_WORLD) / s;
+         TEST_ASSERT(r <= kRV, P + (half ? "w" : "u") + " rows of the force equal the strong "
+                     "form with its boundary terms (R = " + Fmt(r) + " of max(|loads|, |K x|, "
+                     "|strong form|))");
+      }
+   }
+}
+
+// ------------------------------------------------------------- X2-6 (aborts)
+
+int RunAbortP22(const std::string &mode)
+{
+   if (g_rank == 0) { std::cout << "X2-6 expecting an abort: " << mode << "\n"; }
+   std::unique_ptr<Mesh> m(BoxMesh(2, 2, 1, Walls::kDrained));
+   Tweak tweak;
+   if (mode == "dirichlet-interior")
+   {
+      // attribute 8 on the interior faces of the plane x = 0, made Dirichlet
+      std::vector<std::array<int, 3>> tris;
+      for (int f = 0; f < m->GetNumFaces(); f++)
+      {
+         if (m->GetFaceInformation(f).IsBoundary()) { continue; }
+         Array<int> fv;
+         m->GetFaceVertices(f, fv);
+         bool on = true;
+         for (int i = 0; i < fv.Size(); i++)
+         {
+            if (std::abs(m->GetVertex(fv[i])[0]) > 1e-6 * kL) { on = false; }
+         }
+         if (on) { tris.push_back({fv[0], fv[1], fv[2]}); }
+      }
+      for (const auto &t : tris) { m->AddBdrTriangle(t[0], t[1], t[2], 8); }
+      m->FinalizeTopology();
+      m->Finalize();
+      m->SetAttributes();
+      tweak = [](BoundaryConfig &bc, PoroBoundaryConfig &, real_t &) { bc.dirichlet_attrs = {5, 8}; };
+   }
+   else if (mode == "no-flow-fault")
+   {
+      tweak = [](BoundaryConfig &, PoroBoundaryConfig &pbc, real_t &) { pbc.no_flow_attrs = {3}; };
+   }
+   else if (mode == "kappa-zero")
+   {
+      tweak = [](BoundaryConfig &, PoroBoundaryConfig &, real_t &k) { k = 0.0; };
+   }
+   else
+   {
+      if (g_rank == 0) { std::cout << "FAILED: unknown abort mode " << mode << "\n"; }
+      return 1;
+   }
+   auto box = MakeBox(*m, MPI_COMM_WORLD, 1, false, Walls::kDrained, 1.0, ZeroG(), tweak);
+   if (g_rank == 0) { std::cout << "FAILED: X2-6 " << mode << " did not abort\n"; }
+   return 1;
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -1027,20 +2072,36 @@ int main(int argc, char *argv[])
    Mpi::Init(argc, argv);
    Hypre::Init();
    g_rank = Mpi::WorldRank();
+   std::string only;
    for (int i = 1; i < argc; i++)
    {
-      if (std::string(argv[i]) == "--abort" && i + 1 < argc) { return RunAbort(argv[i + 1]); }
+      const std::string a = argv[i];
+      if (a == "--abort" && i + 1 < argc)
+      {
+         const std::string mode = argv[i + 1];
+         return (mode == "interior-only" || mode == "penalty-one-sided")
+                ? RunAbort(mode) : RunAbortP22(mode);
+      }
+      if (a == "--only" && i + 1 < argc) { only = argv[++i]; }
    }
    if (g_rank == 0)
    {
-      std::cout << "=== Poroelastic P2 (plan rev 3), step P2.1, on " << Mpi::WorldSize()
-                << " rank(s) ===\n";
+      std::cout << "=== Poroelastic P2 (plan rev 3), steps P2.1 and P2.2, on "
+                << Mpi::WorldSize() << " rank(s)" << (only.empty() ? "" : ", only " + only)
+                << " ===\n";
    }
-   TestU21();
-   TestU22();
-   TestX21();
-   TestX22();
-   TestX24();
+   auto run = [&only](const char *id) { return only.empty() || only == id; };
+   if (run("U2-1")) { TestU21(); }
+   if (run("U2-2")) { TestU22(); }
+   if (run("X2-1")) { TestX21(); }
+   if (run("X2-2")) { TestX22(); }
+   if (run("X2-4")) { TestX24(); }
+   if (run("U2-3")) { TestU23(); }
+   if (run("U2-4")) { TestU24(); }
+   if (run("U2-5")) { TestU25(); }
+   if (run("U2-6") || run("U2-7")) { TestU26U27a(); }
+   if (run("U2-7")) { TestU27bc(); }
+   if (run("U2-8")) { TestU28(); }
    int nf = num_failed;
    MPI_Allreduce(MPI_IN_PLACE, &nf, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
    if (g_rank == 0)
