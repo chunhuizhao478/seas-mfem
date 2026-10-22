@@ -15,7 +15,7 @@ are in `miniapps/seas/document/nitsche_profiling_dev/`.
 | `build_lts_vista.sbatch` | Plan item 7, local time stepping (2026-10-19), 1 node. The CLAUDE.md guard; `build_vista.sh`, then `seas_test_nitsche_lts`; the six gate tests and the LTS suite (L-1 to L-10); copies the TPV205 and TPV104 200 m gold meshes from `$WORK/seas-mfem-benchmarks` and checks their sha256 against `meshes.sha256`. |
 | `lts_tpv205_200m_p2.sbatch`, `lts_tpv104_200m_p2.sbatch`, `lts_tpv205_200m_p1.sbatch`, `lts_tpv104_200m_p1.sbatch` | Plan item 7, P5: the four new LTS golds, each with the deck, mesh, order and rank layout of the global-stepping gold it replaces (1075916, 1075917, 1076378, 1075919). Each runs `gts` (the defaults, 0 to 1.0 s, the speed reference at this commit) and `lts` (`--lts rate2`, 0 to 12.0 s, with the driver's default `--lts-fault-buffer 3` from the commit after 2d09c44) through `run_lts_vista.sh`, then compares the stations: `gts` against the first 1.0 s of the gold, `lts` against `gts` over 1.0 s and against the gold over 12 s. |
 | `run_lts_vista.sh` | Shared body of the four LTS jobs. The LTS station comparisons use `--time-tol 2e-9`: the stations print times as `%.10e`, whose quantum at t >= 10 s is 1e-9 s, so the 1e-9 of 2d09c44 stopped the 12 s comparison ("times differ"). |
-| `compare_stations.py` | Station comparison used by the speed jobs (standard library only). `--time-tol` and `--groups` for the LTS jobs. |
+| `compare_stations.py` | Station comparison used by the speed jobs (standard library only). `--time-tol` and `--groups` for the LTS jobs; `--bitwise` (exit status 1 unless every station is bitwise equal) for the mesh setup jobs. |
 | `judge_lts_gold.py` | Item 7 (2026-10-20), run off Vista from `miniapps/seas`: checks an LTS run against the global-stepping gold it sits beside over 12 s with the criteria of the LTS buffer-fix review (SCEC pass and fail as the gold; arrival within 5 ms, peak slip rate within 1 %, final slip within 0.5 %; noise RMS within 10 %; period-2 part within 2x the gold's or below 10 Pa in every 1 s window). Output `plots/lts_vs_gts_gold.txt` of each LTS gold folder. |
 | `plot_lts_gold.py` | Item 7 (2026-10-20): station plots of an LTS run against its global-stepping gold and DRDG3D (one PDF and its page PNGs in each LTS gold folder's `plots/`). |
 | `m0_lts_tpv205_200m_p2.sbatch` | M0 of the speed-next plan (rev 1.1, §6; 2026-10-20): 16 x 144 ranks as LTS gold 1082384. TPV205, 200 m gold mesh, p = 2, `--lts rate2`, 0 to 1.0 s, four variants with existing flags only: `base` (the defaults), `every10` (`--station-every 10`), `first` (`--station-copies first`) and `deflate0` (deck `tpv205/configs/tpv205_nitsche_m0_deflate0.toml`, fault deflate level 0). Measures where the time outside the step goes (stations or not) and the frame cost; `base` and `deflate0` stations are compared with the first 1.0 s of 1082384 (meant to be bitwise equal). |
@@ -29,6 +29,10 @@ are in `miniapps/seas/document/nitsche_profiling_dev/`.
 | `build_speed_next_vista.sbatch` | Speed-next O1, O2 and the setup timers (2026-10-20), 1 node: `build_lts_vista.sbatch` plus `seas_test_station_output` and its test (O2-1 to O2-4 on 1, 2, 3 and 4 ranks). |
 | `v1_lts_tpv205_200m_p1.sbatch` | Speed-next V1: TPV205, 200 m gold mesh, p = 1, `--lts rate2`, 0 to 12.0 s, 4 x 144 ranks as LTS gold 1082586. Variants `o2` (the defaults: copy average over the ranks holding copies, rows flushed every 100) and `o1o2` (the same with `--paraview-fault-deflate-level none`); stations compared with 1082586 over the 12 s (meant to be bitwise equal); wall times against its 359 s. |
 | `v1_lts_tpv205_200m_p2.sbatch` | V1 at p = 2: 16 x 144 ranks as LTS gold 1082384, against its 739 s. |
+| `build_mesh_parts_vista.sbatch` | Mesh setup (partition-memory report rev1 options D and E, speed-next S1; 2026-10-22), 1 node: `build_speed_next_vista.sbatch` plus `seas_test_mesh_parts` and its test (MP-1 to MP-8 on 1, 2, 3 and 4 ranks), then the same test on both 200 m gold meshes on 16 ranks. |
+| `mp_lts_tpv205_200m_p1.sbatch` | Mesh setup check: TPV205, 200 m gold mesh, p = 1, 4 x 144 ranks as LTS gold 1082586. Variants `every` (`--lts rate2 --mesh-setup every-rank`, the path before the change, 0 to 3.0 s, bitwise equal to 1082586), `rank0` (`--lts rate2`, the new default, 0 to 12.0 s against 1082586), `split` (one rank writes the 576 part files), `parts` (`--mesh-parts`, 0 to 3.0 s, bitwise equal to `rank0`) and `gts` (global stepping, 0 to 1.0 s against gold 1076378). Prints each variant's setup times and memory and the first node's peak Committed_AS. |
+| `mp_lts_tpv205_200m_p2.sbatch` | The same at p = 2 on 16 x 144 ranks as LTS gold 1082384 (the layout at which TPV31 p = 2 and p = 3 stopped in setup), 0 to 1.0 s: `every` (bitwise equal to 1082384), `rank0`, `split` (2304 parts) and `parts` (bitwise equal to `rank0`). |
+| `run_mesh_parts_vista.sh` | Shared body of the two mesh setup jobs: the guard, the variants (rank count, flags, end time, reference, bitwise or round-off), the first node's Committed_AS against CommitLimit (Vista's compute nodes refuse allocations past it), the station comparisons. |
 | `meshes.sha256` | sha256 of the TPV205 and TPV104 200 m gold meshes. |
 | `results/` | Job stdout of the runs below, as relayed from Vista. |
 
@@ -66,12 +70,17 @@ sbatch --dependency=afterok:$V v1_lts_tpv205_200m_p2.sbatch
 G=$(sbatch --parsable --dependency=afterok:$V build_map_vista.sbatch | tail -n 1)
 sbatch --dependency=afterok:$G map_lts_tpv205_200m_p1.sbatch
 sbatch --dependency=afterok:$G map_lts_tpv205_200m_p2.sbatch
+# mesh setup checks (partition-memory report rev1, options D and E), at the mesh setup commit:
+# the build and tests, then both runs after it
+P=$(sbatch --parsable build_mesh_parts_vista.sbatch | tail -n 1)
+sbatch --dependency=afterok:$P mp_lts_tpv205_200m_p1.sbatch
+sbatch --dependency=afterok:$P mp_lts_tpv205_200m_p2.sbatch
 ```
 
 Each speed and LTS job stops if the driver was built at another commit (`BUILD_COMMIT_VISTA`)
 or if the mesh sha256 differs from `meshes.sha256`.
 
-## Results (18 to 21 Oct 2026)
+## Results (18 to 22 Oct 2026)
 
 Clone `$WORK/seas-mfem-profiling`, modules gcc/14.2.0, cuda/12.6, openmpi/5.0.5,
 hypre/2.31.0, metis/5.1.0.3, phdf5/1.14.6.
@@ -105,6 +114,15 @@ hypre/2.31.0, metis/5.1.0.3, phdf5/1.14.6.
 | 1087793 | 08ec423 | `build_speed_next_vista.sbatch` | Build, the six gate test sets (74, 22, 49, 13, 9, 42 passed), the LTS suite (24 of 24) and the station output test (168 checks) pass; both 200 m meshes match `meshes.sha256`. 7:32 on 1 node. |
 | 1087795 | 08ec423 | `build_map_vista.sbatch` | `seas_nitsche_dyn_driver_g` built, 8 debug sections; without them every section has the size and the disassembly of the production object. |
 | 1087796 | 08ec423 | `map_lts_tpv205_200m_p1.sbatch` | No profile: MAP refused both routes at its argument check, "--nodes can only be specified with --queue" (`--profile` runs without the queue; fixed at the next commit). The perf fallback ran 0 to 3.0 s (wall 132.3 s; `ode.Step` at most 60.3 s), with stations bitwise equal to the first 3.0 s of 1082586 (16 of 16). Setup, max over ranks: 76.4 s, of which the mesh read 54.7 s, the partition 7.6 s and the LTS clusters 5.5 s. The job exited 1. |
+| 1087797 | 08ec423 | `map_lts_tpv205_200m_p2.sbatch` | Cancelled before it started (Chunhui Zhao, 2026-10-21), since it would have stopped at the same argument check as 1087796. |
+| 1087834 | 623945c | `build_speed_next_vista.sbatch` | Build, the six gate test sets (74, 22, 49, 13, 9, 42 passed), the LTS suite (24 of 24) and the station output test (168 checks) pass; both 200 m meshes match `meshes.sha256`. 7:39 on 1 node. |
+| 1087835 | 623945c | `build_map_vista.sbatch` | `seas_nitsche_dyn_driver_g` built; without its debug sections every section has the size and the disassembly of the production object. |
+| 1087836 | 623945c | `map_lts_tpv205_200m_p1.sbatch` | No profile. The ibrun route started MAP's backends, then every rank stopped with "MAP: warning: ptrace: Operation not permitted" and "MAP: During startup program exited with code 127": MAP traces the program through ptrace, which Vista does not allow (`/proc/sys/kernel/yama/ptrace_scope` is 2 on the login node). The srun route also went through ibrun (MAP's system configuration), whose mpirun refused `--cpu-bind=cores`. The perf fallback ran 0 to 3.0 s (wall 126.6 s, 10,408 ticks; `ode.Step` at most 55.4 s, 5.33 ms per tick), with stations bitwise equal to the first 3.0 s of 1082586 (16 of 16). Setup, max over ranks: 75.5 s, of which the mesh read 54.6 s, the partition 7.6 s, ParMesh 5.4 s and the LTS clusters 4.7 s. The job exited 1. |
+| 1087837 | 623945c | `map_lts_tpv205_200m_p2.sbatch` | As 1087836 at p = 2 (16 x 144 ranks, 0 to 2.0 s): the same two MAP stops. The perf fallback ran (wall 197.7 s, 14,792 ticks; `ode.Step` at most 102.7 s, 6.95 ms per tick), with stations bitwise equal to the first 2.0 s of 1082384 (16 of 16). Setup, max over ranks: 98.9 s, of which the mesh read 54.3 s and the partition 27.3 s (on rank 0 alone; it grows with the rank count). The job exited 1. |
+
+MAP is dropped (Chunhui Zhao, 2026-10-22): it needs ptrace, which Vista's nodes do not allow.
+The time breakdowns use perf (`perf_wrap.sh`) and the driver's own timers (setup phases,
+`ode.Step`, halo waits, fault frames); the MAP jobs and files stay as the record of the attempt.
 
 The run outputs (fault files, stations, driver logs) stayed on Vista in
 `$SCRATCH/nitsche_profiling/tpv205_200m_p2_speed_1078825/{off,on,weighted}` and
