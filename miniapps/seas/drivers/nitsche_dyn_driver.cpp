@@ -58,7 +58,24 @@
 //
 // Setup phases (speed-next S1, Chunhui Zhao 2026-10-20): before step 1 the
 // log prints the wall time of each setup phase, max and mean over the ranks
-// (SetupTimer; one reduction, no barrier).
+// (SetupTimer; one reduction, no barrier), and (2026-10-22) each rank's
+// VmData at the end of each phase, max and mean over the ranks: the private
+// writable memory that a node with strict overcommit (Vista) charges against
+// its commit limit, and does not give back when the heap shrinks.  Where
+// /proc/self/status is absent (macOS) that line is left out.
+//
+// Mesh setup (Chunhui Zhao 2026-10-22: partition-memory report rev1, option
+// D; speed-next S1): with --mesh-setup rank0 (default) only rank 0 reads the
+// serial mesh; it computes the partition (the same calls as before: the LTS
+// multi-constraint cut, the --fault-weight cut, or MFEM's default METIS cut
+// that ParMesh made on every rank), cuts the mesh into one part per rank and
+// sends each rank its part with the LTS clusters of its elements
+// (dynamic/mesh_parts.hpp).  The other ranks never hold the serial mesh, so
+// a rank needs memory for its own part only.  The parallel mesh has the same
+// elements, vertices, faces and DOF numbers as before; its shared faces are
+// listed in another order, which can change sums over them in the last bit.
+// --mesh-setup every-rank is the code before: every rank reads the serial
+// mesh and builds its ParMesh from it.  On one rank both are the same.
 //
 // Station columns (SCEC map, plan "The SCEC conventions, mapped"):
 //   slip1 = delta.dhat (v-slip), slip2 = delta.shat (h-slip),
@@ -143,6 +160,7 @@
 #include "../dynamic/fault_station_file.hpp"
 #include "../dynamic/station_copy_average.hpp"
 #include "../dynamic/lts_partition.hpp"   // METIS with element weights (plan item 6)
+#include "../dynamic/mesh_parts.hpp"      // --mesh-setup rank0 (header, "Mesh setup")
 #include "../solver/nitsche_lts_setup.hpp"   // --lts-report (plan item 7, P0)
 #include "../solver/nitsche_lts_run.hpp"     // --lts rate2 (plan item 7, P3/P4)
 #ifdef MFEM_USE_HDF5
@@ -320,6 +338,17 @@ void MakeDirs(const std::string &d)
    MPI_Barrier(MPI_COMM_WORLD);
 }
 
+/// This process's VmData in MiB (header, "Setup phases"); -1 without /proc.
+double VmDataMiB()
+{
+   std::ifstream f("/proc/self/status");
+   for (std::string line; std::getline(f, line);)
+   {
+      if (line.compare(0, 7, "VmData:") == 0) { return std::atof(line.c_str() + 7) / 1024.0; }
+   }
+   return -1.0;
+}
+
 /// Wall time of each setup phase on this rank (header, "Setup phases").
 class SetupTimer
 {
@@ -331,15 +360,19 @@ public:
       const auto t1 = std::chrono::steady_clock::now();
       names_.push_back(name);
       sec_.push_back(std::chrono::duration<double>(t1 - t0_).count());
+      vm_.push_back(VmDataMiB());
       t0_ = t1;
    }
    /// Collective: rank 0 prints each phase's max and mean over the ranks.
    void Print() const
    {
       const int n = static_cast<int>(sec_.size());
-      std::vector<double> mx(sec_), sm(sec_);
+      std::vector<double> mx(sec_), sm(sec_), vmx(vm_), vsm(vm_), vmn(vm_);
       MPI_Allreduce(MPI_IN_PLACE, mx.data(), n, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
       MPI_Allreduce(MPI_IN_PLACE, sm.data(), n, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+      MPI_Allreduce(MPI_IN_PLACE, vmx.data(), n, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+      MPI_Allreduce(MPI_IN_PLACE, vsm.data(), n, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+      MPI_Allreduce(MPI_IN_PLACE, vmn.data(), n, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
       if (g_rank != 0) { return; }
       const int nr = Mpi::WorldSize();
       double tmx = 0.0, tsm = 0.0;
@@ -353,6 +386,16 @@ public:
          tsm += sm[i];
       }
       std::cout << "; sum " << tmx << "/" << tsm / nr << "\n";
+      if (n > 0 && *std::min_element(vmn.begin(), vmn.end()) >= 0.0)
+      {
+         std::cout << std::setprecision(0) << "  setup memory (VmData MiB at the end of each phase,"
+                   " max/mean over ranks):";
+         for (int i = 0; i < n; i++)
+         {
+            std::cout << (i ? ", " : " ") << names_[i] << " " << vmx[i] << "/" << vsm[i] / nr;
+         }
+         std::cout << "\n";
+      }
       std::cout.flags(fl);
       std::cout.precision(pr);
    }
@@ -361,6 +404,7 @@ private:
    std::chrono::steady_clock::time_point t0_;
    std::vector<std::string> names_;
    std::vector<double> sec_;
+   std::vector<double> vm_;   // VmData (MiB) at the end of each phase
 };
 
 #ifdef MFEM_USE_HDF5
@@ -630,7 +674,7 @@ int main(int argc, char *argv[])
                       " [--lts-report 0|1]"
                       " [--lts-report-cap n] [--lts-report-ranks a,b,...]"
                       " [--lts off|rate2] [--lts-cap n] [--lts-fault-buffer n]"
-                      " [--lts-same-step 0|1]\n";
+                      " [--lts-same-step 0|1] [--mesh-setup rank0|every-rank]\n";
       }
       return 1;
    }
@@ -702,6 +746,13 @@ int main(int argc, char *argv[])
    const bool lts_same = ArgInt(argc, argv, "--lts-same-step", 0) != 0;
    const int lts_buffer = ArgInt(argc, argv, "--lts-fault-buffer", 3);
    MFEM_VERIFY(lts_buffer >= 0, "--lts-fault-buffer " << lts_buffer << ": expected >= 0");
+   // Mesh setup (header)
+   const std::string mesh_setup = ArgStr(argc, argv, "--mesh-setup", "rank0");
+   MFEM_VERIFY(mesh_setup == "rank0" || mesh_setup == "every-rank", "--mesh-setup "
+               << mesh_setup << ": expected rank0 or every-rank");
+   const bool mesh_rank0 = mesh_setup == "rank0" && nranks > 1;
+   // the ranks that hold the serial mesh
+   const bool smesh_here = !mesh_rank0 || g_rank == 0;
    MFEM_VERIFY(!lts_same || lts_on, "--lts-same-step needs --lts rate2");
    MFEM_VERIFY(station_copies == "average" || station_copies == "first",
                "--station-copies " << station_copies << ": expected average or first");
@@ -794,16 +845,22 @@ int main(int argc, char *argv[])
       cfg.material_fallback.lambda, cfg.material_fallback.mu, cfg.material_fallback.rho);
 
    // ------------------------------------------------------------ mesh
-   std::unique_ptr<Mesh> smesh = std::make_unique<Mesh>(mesh_path.c_str(), 1, 1);
-   MFEM_VERIFY(smesh->Dimension() == 3, "mesh must be 3-D");
-   for (int e = 0; e < smesh->GetNE(); e++)
+   std::unique_ptr<Mesh> smesh;
+   long long ne_global = 0;
+   if (smesh_here)
    {
-      MFEM_VERIFY(smesh->GetElementBaseGeometry(e) == Geometry::TETRAHEDRON,
-                  "Nitsche driver: tetrahedral meshes only; element " << e << " is "
-                  << Geometry::Name[smesh->GetElementBaseGeometry(e)]);
+      smesh = std::make_unique<Mesh>(mesh_path.c_str(), 1, 1);
+      MFEM_VERIFY(smesh->Dimension() == 3, "mesh must be 3-D");
+      for (int e = 0; e < smesh->GetNE(); e++)
+      {
+         MFEM_VERIFY(smesh->GetElementBaseGeometry(e) == Geometry::TETRAHEDRON,
+                     "Nitsche driver: tetrahedral meshes only; element " << e << " is "
+                     << Geometry::Name[smesh->GetElementBaseGeometry(e)]);
+      }
+      ne_global = smesh->GetNE();
    }
+   if (mesh_rank0) { MPI_Bcast(&ne_global, 1, MPI_LONG_LONG, 0, MPI_COMM_WORLD); }
    setup_timer.Mark("mesh read");
-   const long long ne_global = smesh->GetNE();
    if (lts_report)
    {
       MFEM_VERIFY(cfg.boundary.fault_attr > 0, "[boundary] fault_attr is required");
@@ -826,7 +883,7 @@ int main(int argc, char *argv[])
    if (lts_on)
    {
       MFEM_VERIFY(cfg.boundary.fault_attr > 0, "[boundary] fault_attr is required");
-      const int ne = smesh->GetNE();
+      const int ne = static_cast<int>(ne_global);
       int hdr[4] = {0, 0, 0, 0};
       double dt0 = 0.0;
       if (g_rank == 0)
@@ -851,8 +908,11 @@ int main(int argc, char *argv[])
       }
       MPI_Bcast(hdr, 4, MPI_INT, 0, MPI_COMM_WORLD);
       MPI_Bcast(&dt0, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-      lts_asg.cluster.resize(ne);
-      MPI_Bcast(lts_asg.cluster.data(), ne, MPI_INT, 0, MPI_COMM_WORLD);
+      if (!mesh_rank0)   // rank0: each rank gets the clusters of its part
+      {
+         lts_asg.cluster.resize(ne);
+         MPI_Bcast(lts_asg.cluster.data(), ne, MPI_INT, 0, MPI_COMM_WORLD);
+      }
       lts_asg.num_clusters = hdr[0];
       lts_asg.fault_cluster = hdr[1];
       lts_asg.passes = hdr[2];
@@ -867,8 +927,8 @@ int main(int argc, char *argv[])
    std::vector<int> part;
    if (lts_on && Mpi::WorldSize() > 1)
    {
-      const int ne = smesh->GetNE();
-      part.resize(ne);
+      const int ne = static_cast<int>(ne_global);
+      if (smesh_here) { part.resize(ne); }
       if (g_rank == 0)
       {
          std::vector<double> cost;
@@ -906,10 +966,11 @@ int main(int argc, char *argv[])
          for (double x : imb.per_cluster) { std::cout << " " << x; }
          std::cout << ", fault tets " << imb.fault << "\n";
       }
-      MPI_Bcast(part.data(), ne, MPI_INT, 0, MPI_COMM_WORLD);
+      if (!mesh_rank0) { MPI_Bcast(part.data(), ne, MPI_INT, 0, MPI_COMM_WORLD); }
    }
-   else if (fault_weight > 0.0 && Mpi::WorldSize() > 1)
+   else if (fault_weight > 0.0 && Mpi::WorldSize() > 1 && smesh_here)
    {
+      // every rank with the serial mesh computes the same cut
       MFEM_VERIFY(cfg.boundary.fault_attr > 0, "[boundary] fault_attr is required");
       const int ne = smesh->GetNE();
       std::vector<double> cost(ne, 1.0);
@@ -941,14 +1002,43 @@ int main(int argc, char *argv[])
                    << nface << " fault faces); weighted max/mean " << imb.overall << "\n";
       }
    }
+   else if (mesh_rank0 && g_rank == 0)
+   {
+      // the cut ParMesh(comm, serial mesh) makes on every rank
+      int *q = smesh->GeneratePartitioning(nranks, 1);
+      part.assign(q, q + smesh->GetNE());
+      delete [] q;
+   }
    setup_timer.Mark("partition");
-   ParMesh pmesh(MPI_COMM_WORLD, *smesh, part.empty() ? nullptr : part.data());
-   setup_timer.Mark("ParMesh");
    // LTS: the clusters of the local elements (the serial elements of this
-   // rank, in serial order, as ParMesh builds them; checked by centroid) and
-   // of the face-neighbour elements
+   // rank, in serial order, as ParMesh builds them; with every-rank checked
+   // here by centroid, with rank0 by rank 0 vertex by vertex before it sends
+   // the part) and of the face-neighbour elements
    std::vector<int> lts_cl, lts_cl_nbr;
-   if (lts_on)
+   std::unique_ptr<ParMesh> pmesh_owner;
+   if (mesh_rank0)
+   {
+      pmesh_owner = DistributeMeshParts(MPI_COMM_WORLD, smesh.get(), part.data(), lts_on,
+                                        lts_asg.cluster.data(), &lts_cl);
+      smesh.reset();
+      part.clear();
+      part.shrink_to_fit();
+   }
+   else
+   {
+      pmesh_owner = std::make_unique<ParMesh>(MPI_COMM_WORLD, *smesh,
+                                              part.empty() ? nullptr : part.data());
+   }
+   ParMesh &pmesh = *pmesh_owner;
+   if (g_rank == 0)
+   {
+      std::cout << "  mesh setup " << (mesh_rank0 ? "rank0: rank 0 read the mesh and sent each "
+                                       "rank its part\n"
+                                       : nranks == 1 ? "(one rank): ParMesh from the serial mesh\n"
+                                       : "every-rank: every rank read the mesh\n");
+   }
+   setup_timer.Mark("ParMesh");
+   if (lts_on && !mesh_rank0)
    {
       auto centroid = [](const Mesh &m, int e, real_t c[3]) {
          Array<int> v;
@@ -977,6 +1067,9 @@ int main(int argc, char *argv[])
       MFEM_VERIFY(static_cast<int>(lts_cl.size()) == pmesh.GetNE(), "--lts: rank " << g_rank
                   << " has " << pmesh.GetNE() << " local elements but " << lts_cl.size()
                   << " serial elements");
+   }
+   if (lts_on)
+   {
       pmesh.ExchangeFaceNbrData();
       DG_FECollection fec0(0, 3);
       ParFiniteElementSpace fes0(&pmesh, &fec0);

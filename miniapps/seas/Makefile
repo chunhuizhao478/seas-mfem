@@ -3235,6 +3235,30 @@ test-station-output: seas_test_station_output
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_station_output
 	rm -rf test_station_output_out
 
+# The parallel mesh from parts sent by rank 0 (Chunhui Zhao 2026-10-22,
+# partition-memory report rev1 option D, speed-next S1): the same mesh, DOF
+# numbers and element values as ParMesh(comm, serial mesh, partition)
+# (MP-1 .. MP-7).
+TEST_MESH_PARTS_SRC = tests/verification/test_mesh_parts.cpp
+TEST_MESH_PARTS_OBJ = $(TEST_MESH_PARTS_SRC:.cpp=.o)
+$(TEST_MESH_PARTS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             dynamic/mesh_parts.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_mesh_parts: $(TEST_MESH_PARTS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_MESH_PARTS_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-mesh-parts: seas_test_mesh_parts
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_mesh_parts
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_mesh_parts
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 3 ./seas_test_mesh_parts
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_mesh_parts
+
 # Nitsche dynamic rupture P6 (first rupture, TPV102 on the inline mesh; plan
 # N-01 fault path, C-04, N-10 fixture): T-04, T-13(a), T-15, T-20, T-21.
 # The abort modes must exit non-zero (MFEM_USE_EXCEPTIONS=NO: tested by exit
@@ -3438,6 +3462,7 @@ $(NITSCHE_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
                              spatial/code/spatial_friction.hpp \
                              dynamic/fault_station_file.hpp \
                              dynamic/station_copy_average.hpp \
+                             dynamic/mesh_parts.hpp \
                              friction/rate_state_closure.hpp \
                              friction/rate_state_srw_closure.hpp \
                              friction/slip_weakening_closure.hpp \
