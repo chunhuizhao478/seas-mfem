@@ -6,7 +6,7 @@
 #SBATCH -N 1
 #SBATCH -n 144
 #SBATCH -t 02:00:00
-#SBATCH -A ear26024
+#SBATCH -A EAR26024
 
 # GPU plan on Horizon: write the dense Green's-function cache GREEN_CACHE
 # (production mesh, p=1, 37.5 GB) that the G3c gate and the dense-G full

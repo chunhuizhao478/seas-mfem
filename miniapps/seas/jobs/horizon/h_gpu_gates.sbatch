@@ -6,7 +6,7 @@
 #SBATCH -N 1
 #SBATCH -n 2
 #SBATCH -t 08:00:00
-#SBATCH -A ear26024
+#SBATCH -A EAR26024
 
 # GPU plan on Horizon: the G3a, G4 and G3c gates of jobs/vista
 # (g3_gpu_gate, g4_gpu_gate, g3c_gpu_gate), one after the other on one

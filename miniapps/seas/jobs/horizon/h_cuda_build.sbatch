@@ -6,7 +6,7 @@
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH -t 06:00:00
-#SBATCH -A ear26024
+#SBATCH -A EAR26024
 
 # GPU plan on Horizon: the CUDA build on a GB200 node (sm_100), as
 # jobs/vista/g1_cuda_build.sbatch on Vista, with the settings of

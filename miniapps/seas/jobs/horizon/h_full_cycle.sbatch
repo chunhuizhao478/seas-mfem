@@ -6,7 +6,7 @@
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH -t 48:00:00
-#SBATCH -A ear26024
+#SBATCH -A EAR26024
 
 # GPU plan G5 on Horizon: jobs/vista/g5_gpu_full_cycle.sbatch (the
 # 1500 yr BP5 cycle at p=1 on one GPU, deck of the CPU gold 1074099, with

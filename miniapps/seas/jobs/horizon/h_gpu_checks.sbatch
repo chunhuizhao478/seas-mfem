@@ -6,7 +6,7 @@
 #SBATCH -N 1
 #SBATCH -n 2
 #SBATCH -t 01:00:00
-#SBATCH -A ear26024
+#SBATCH -A EAR26024
 
 # GPU plan on Horizon: jobs/vista/g1_gpu_checks.sbatch (ex1p and ex2p on
 # the GPU, a device-buffer MPI_Allreduce on 2 GPUs, ex1p with cuDSS on 1 and
