@@ -77,7 +77,7 @@ esac
 
 # Rebuilds seas_bp5_full if this commit changed it (MFEM, PETSc and cuDSS
 # are the G1 build's, unchanged); after the gate at this commit it is a no-op.
-MODE=cuda GPU_ARCH=90 STAGE="seas" JOBS=72 MODULES=none bash "${SEAS_MFEM_ROOT}/build_horizon.sh" || exit 1
+MODE=cuda GPU_ARCH="${GPU_ARCH:-90}" STAGE="seas" JOBS=72 MODULES=none bash "${SEAS_MFEM_ROOT}/build_horizon.sh" || exit 1
 g0_check_binary
 
 cd "${SEAS_DIR}"

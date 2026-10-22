@@ -59,7 +59,7 @@ if [ ! -s "${GREEN_CACHE}" ]; then
 fi
 echo "Green cache: ${GREEN_CACHE} ($(stat -c '%s bytes, modified %y' "${GREEN_CACHE}"))"
 
-MODE=cuda GPU_ARCH=90 STAGE="seas" JOBS=72 MODULES=none bash "${SEAS_MFEM_ROOT}/build_horizon.sh" || exit 1
+MODE=cuda GPU_ARCH="${GPU_ARCH:-90}" STAGE="seas" JOBS=72 MODULES=none bash "${SEAS_MFEM_ROOT}/build_horizon.sh" || exit 1
 g0_check_binary
 ( cd "${SEAS_DIR}" && rm -f tests/parallel/test_qd_green_device.o &&
   make -j8 seas_test_qd_green_device ) || exit 1
