@@ -14,10 +14,11 @@
 // -(tau_a + tau_b + eta V) / 1e6, theta, from the regime's FillStationFields.
 // The surface values are the displacement field evaluated at the points of
 // each selected boundary face (its vertices at p = 1; p > 1: the face
-// refined p times).  The velocity is U' in the dynamic regime; in the QD
-// regime, which has no velocity, it is the backward difference of the
-// displacement over the last accepted QD step (0 at a run's first snapshot,
-// and from the switch-back balance after a dynamic phase).
+// refined p times).  The velocity is U' in the dynamic regime and the exact
+// quasi-static du/dt in the QD regime (QDPhase::Velocity).  The QD fields
+// arrive through a VolumeFieldsFn that runs only when a surface snapshot is
+// written, so the Green's-function stages (no displacement per stage) need
+// no solve at the other steps.
 //
 // Format: VTKHDF 2.0, a transient UnstructuredGrid whose mesh is written
 // once (ParaView 5.12 or later reads it; a time step per snapshot).  The
@@ -48,8 +49,8 @@
 // continue a snapshot file: the restart refuses.
 //
 // No solver header (rule M4): fault fields arrive through the regime
-// adapters' FillStationFields, the displacement as a true-DOF vector of the
-// QD regime's DG space.
+// adapters' FillStationFields, the displacement and velocity as vectors of
+// the QD regime's DG space.
 
 #ifndef MFEM_SEAS_CYCLE_SNAPSHOTS_HPP
 #define MFEM_SEAS_CYCLE_SNAPSHOTS_HPP
@@ -475,7 +476,7 @@ public:
          Open_(surf_, "surface", restart, commit,
                "fd_cycle free-surface snapshots: displacement [m] and velocity [m/s] in "
                "global XYZ at the points of the selected boundary faces; QD velocity: "
-               "backward difference over the last QD step",
+               "quasi-static du/dt",
                "displacement m, velocity m/s, time s");
       }
    }
@@ -483,32 +484,14 @@ public:
    bool Any() const { return cfg_.Any(); }
 
    /// After each monitored QD step at (t, step) with the QD fields, and at the
-   /// start of a run that starts dynamic (reason Start).  `u`: the QD
-   /// displacement of that state.  reason != Cadence writes regardless of
-   /// the marks.
+   /// start of a run that starts dynamic (reason Start).  `volume`: the QD
+   /// displacement and velocity of that state, asked for (on every rank)
+   /// only when a surface snapshot is written.  reason != Cadence writes
+   /// regardless of the marks.  Collective.
    void QD(real_t t, long long step, int phase, SnapReason reason, const FieldsFn &fill,
-           const Vector &u)
+           const VolumeFieldsFn &volume)
    {
       if (!Any()) { return; }
-      Vector usurf, vsurf;
-      if (cfg_.surface.enabled)
-      {
-         SampleSurface_(u, usurf);
-         vsurf.SetSize(usurf.Size());
-         if (have_prev_ && t > t_prev_)
-         {
-            for (int i = 0; i < usurf.Size(); i++)
-            {
-               vsurf(i) = (usurf(i) - u_prev_(i)) / (t - t_prev_);
-            }
-            v_last_ = vsurf;
-         }
-         else if (have_prev_ && t == t_prev_ && v_last_.Size() == usurf.Size())
-         {
-            vsurf = v_last_;   // the same state again (the end of the run)
-         }
-         else { vsurf = 0.0; }
-      }
       const long long mark_f = Mark_(t, cfg_.fault.dt_qd);
       const long long mark_s = Mark_(t, cfg_.surface.dt_qd);
       const bool forced = (reason != SnapReason::Cadence);
@@ -522,27 +505,16 @@ public:
       if (cfg_.surface.enabled && t > surf_.st.last_t &&
           (forced || mark_s > surf_.st.qd_mark))
       {
+         const Vector *u = nullptr, *v = nullptr;
+         volume(u, v);
+         MFEM_VERIFY(u && v, "snapshots: the QD regime gave no displacement or velocity");
+         Vector usurf, vsurf;
+         SampleSurface_(*u, usurf);
+         SampleSurface_(*v, vsurf);
          WriteSurface_(t, 0, phase, reason, step, usurf, vsurf);
          surf_.st.qd_mark = std::max(surf_.st.qd_mark, mark_s);
       }
       else if (cfg_.surface.enabled && forced) { Relabel_(surf_, t, reason); }
-      if (cfg_.surface.enabled && (!have_prev_ || t > t_prev_))
-      {
-         u_prev_ = usurf;
-         t_prev_ = t;
-         have_prev_ = true;
-      }
-   }
-
-   /// The QD velocity history restarts from the displacement u at t: after
-   /// the switch back (the QD balance) and after a restart.
-   void ResetQDHistory(real_t t, const Vector &u)
-   {
-      if (!cfg_.surface.enabled) { return; }
-      SampleSurface_(u, u_prev_);
-      t_prev_ = t;
-      have_prev_ = true;
-      v_last_.SetSize(0);
    }
 
    /// A dynamic phase starts (its start time already has a snapshot).
@@ -913,10 +885,6 @@ private:
    // Surface points: local element and its reference point.
    std::vector<int> elem_;
    std::vector<IntegrationPoint> eip_;
-   // QD velocity history of the surface samples.
-   Vector u_prev_, v_last_;
-   real_t t_prev_ = 0.0;
-   bool have_prev_ = false;
    long long dyn_mark_f_ = 0, dyn_mark_s_ = 0;
 };
 

@@ -32,6 +32,20 @@ speedup (22 Oct 2026); `cycle-owned-check` diffs against the latest merge base.
 | H3 | `NitscheWaveOperator::SetConstantLoad` (stage B absorbing side walls only) | P5, if stage B |
 | H4 | optional | |
 
+## Trunk functions the p=2 run calls (no new hooks)
+
+The p=2 run's speed-ups and benchmark output need no shared change: they call
+trunk functions as the trunk drivers do, all pinned in
+`tests/cycle/test_cycle_api_pin.cpp` (section "The p=2 run").
+
+| Deck option | Trunk functions | Trunk driver it follows |
+|-------------|-----------------|-------------------------|
+| `[cycle.qd].operators = "matrix"` | `SEASQuasiDynamicOperator::SetQDOperators`, `QDStageOperators::PrintSummary` | `seas_bp5_full --qd-operators matrix` |
+| `[cycle.qd.green]` | `SetQDGreen`, `QDGreenConfig`, `RefreshDisplacement`, `QDGreenActive`, `PrintQDGreenCheckSummary` | `seas_bp5_full --qd-green*` |
+| the FSAL guard (always) | `TSRKGetTableau` | `seas_bp5_full` (QD speed-up v2 item A) |
+| `[cycle.lts] mode = "rate2"` | `BuildNitscheLtsAssignment`, `BuildLtsAwarePartition`, `ComputeLtsPartitionImbalance`, `NitscheLtsRun` | `seas_nitsche_dyn_driver --lts rate2` |
+| `[cycle.benchmark]` | `ElasticityDomainOperator::SolveStage` / `Solve` (QD velocity), `GetFaceQuadrature`, `FaceQuadrature` rules, `ParMesh::FindPoints` | none (new output) |
+
 ## Shared changes merged from other tracks
 
 A change taken whole from another branch is cherry-picked with `-x` and its

@@ -15,7 +15,9 @@
 // (SetInitialFieldsPerDOF), committed on this branch (they are not on the
 // base 010b56e).  P2 calls H2 (NitscheWaveOperator::SetBackgroundTraction),
 // also on this branch, and the operator, energy and QD calls of DynPhase,
-// the driver's first-event path and test_cycle_p2.
+// the driver's first-event path and test_cycle_p2.  The p=2 run adds the
+// trunk's speed-ups (QD stage operators and Green's function, Nitsche LTS)
+// and the benchmark output's mesh, face quadrature and point search.
 //
 // Build and run (from miniapps/seas):
 //   make -f cycle/cycle.mk test-cycle-api-pin
@@ -46,6 +48,16 @@
 #include "../../fault/fault_orientation.hpp"
 #include "../../dynamic/heterogeneous_material.hpp"
 #include "../../spatial/code/spatial_friction.hpp"
+
+// The p=2 run: QD speed-ups, the Nitsche LTS run, the face quadrature.
+#include "../../domain/qd_green_operator.hpp"
+#include "../../domain/qd_stage_operators.hpp"
+#include "../../fault/face_quadrature.hpp"
+#include "../../solver/nitsche_lts_run.hpp"
+#include "../../dynamic/lts_partition.hpp"
+#ifdef MFEM_USE_PETSC
+#include "petsc.h"   // TSRKGetTableau (QDPhase's FSAL guard)
+#endif
 
 #include <functional>
 #include <iostream>
@@ -418,6 +430,84 @@ PIN_TYPE(spatial::SpatialFrictionConfig,
          spatial::LoadSpatialFrictionConfig(CLV<std::string>()));
 #endif
 
+// ===================================================================
+// The p=2 run: speed-ups and benchmark output (cycle/qd_phase.hpp,
+// cycle/dyn_phase.hpp, cycle/bench_output.hpp)
+// ===================================================================
+// QD speed items 1, 3, 4 (seas_bp5_full --qd-operators, --qd-green*).
+PIN_TYPE(void, LV<QDOp>().SetQDOperators(bool()));
+PIN_TYPE(void, LV<QDOp>().SetQDGreen(CLV<QDGreenConfig>(), int()));
+PIN_TYPE(void, CLV<QDOp>().RefreshDisplacement());
+PIN_TYPE(bool, CLV<QDOp>().QDGreenActive());
+PIN_TYPE(void, CLV<QDOp>().PrintQDGreenCheckSummary(LV<std::ostream>()));
+PIN_TYPE(int, LV<QDGreenConfig>().block);
+PIN_TYPE(std::string, LV<QDGreenConfig>().cache_path);
+PIN_TYPE(double, LV<QDGreenConfig>().tol);
+PIN_TYPE(double, LV<QDGreenConfig>().compress);
+PIN_TYPE(int, LV<QDGreenConfig>().leaf);
+PIN_TYPE(double, LV<QDGreenConfig>().eta);
+PIN_TYPE(std::string, LV<QDGreenConfig>().hcache_path);
+PIN_TYPE(double, LV<QDGreenConfig>().compress_mem_gib);
+PIN_TYPE(const QDStageOperators *, CLV<QDDomain>().GetQDStageOperators());
+PIN(CLV<QDStageOperators>().PrintSummary(MPI_Comm(), LV<std::ostream>()));
+// The exact QD velocity (QDPhase::Velocity): a solve at t = 1 with slip V.
+PIN(LV<QDDomain>().SolveStage(real_t(), CLV<Vector>(), LV<QDDomain::GridFuncType>(),
+                              LV<Vector>(), static_cast<Vector *>(nullptr)));
+PIN(LV<QDDomain>().Solve(real_t(), CLV<Vector>(), LV<QDDomain::GridFuncType>()));
+PIN_TYPE(int, CLV<QDDomain>().NumSlipComponents());
+// The benchmark output's fault quadrature (QDPhase::BenchGeometry).
+PIN_TYPE(const FaceQuadrature *, CLV<QDDomain>().GetFaceQuadrature());
+PIN_TYPE(const DenseMatrix &, CLV<FaceQuadrature>().BasisAtQuadPoints());
+PIN_TYPE(const IntegrationRule &, CLV<FaceQuadrature>().GetQuadRule());
+PIN_TYPE(const IntegrationRule &, CLV<FaceQuadrature>().GetNodalRule());
+// Off-fault stations (BenchmarkOutput): the point search, lowest rank owns.
+PIN_TYPE(int, LV<ParMesh>().FindPoints(LV<DenseMatrix>(), LV<Array<int>>(),
+                                       LV<Array<IntegrationPoint>>(), bool()));
+#ifdef MFEM_USE_PETSC
+// The FSAL guard of seas_bp5_full (QD speed-up v2 item A).
+PIN_TYPE(PetscErrorCode, TSRKGetTableau(petsc::TS(), static_cast<PetscInt *>(nullptr),
+                                        static_cast<const PetscReal **>(nullptr),
+                                        static_cast<const PetscReal **>(nullptr),
+                                        static_cast<const PetscReal **>(nullptr),
+                                        static_cast<const PetscReal **>(nullptr),
+                                        static_cast<PetscInt *>(nullptr),
+                                        static_cast<const PetscReal **>(nullptr),
+                                        static_cast<PetscBool *>(nullptr)));
+#endif
+
+// [cycle.lts] rate2 (drivers/nitsche_dyn_driver.cpp --lts rate2).
+PIN_TYPE(NitscheLtsAssignment, BuildNitscheLtsAssignment(LV<Mesh>(), int(), real_t(),
+                                                         real_t(), int(), real_t(), int(),
+                                                         int()));
+PIN_TYPE(std::vector<int>, LV<NitscheLtsAssignment>().cluster);
+PIN_TYPE(int, LV<NitscheLtsAssignment>().num_clusters);
+PIN_TYPE(int, LV<NitscheLtsAssignment>().fault_cluster);
+PIN_TYPE(double, LV<NitscheLtsAssignment>().dt0);
+PIN_TYPE(double, LV<NitscheLtsAssignment>().ideal);
+PIN_TYPE(int, LV<NitscheLtsAssignment>().passes);
+PIN_TYPE(long long, LV<NitscheLtsAssignment>().fault_tets);
+PIN_TYPE(long long, LV<NitscheLtsAssignment>().buffer_tets);
+PIN_TYPE(std::vector<long long>, LV<NitscheLtsAssignment>().cells);
+using FaultPairs = std::vector<std::pair<int, int>>;
+PIN_TYPE(FaultPairs, LV<NitscheLtsAssignment>().fault_pairs);
+PIN_TYPE(bool, BuildLtsAwarePartition(int(), CLV<std::vector<int>>(), CLV<std::vector<int>>(),
+                                      CLV<std::vector<int>>(), int(), int(),
+                                      static_cast<const std::vector<double> *>(nullptr),
+                                      CLV<FaultPairs>(), CLV<LtsPartitionOptions>(),
+                                      LV<std::vector<int>>()));
+PIN_TYPE(LtsPartitionImbalance,
+         ComputeLtsPartitionImbalance(CLV<std::vector<int>>(), int(), CLV<std::vector<int>>(),
+                                      int(), static_cast<const std::vector<double> *>(nullptr),
+                                      CLV<FaultPairs>()));
+PIN_TYPE(double, LV<LtsPartitionImbalance>().overall);
+PIN_TYPE(std::vector<double>, LV<LtsPartitionImbalance>().per_cluster);
+PIN_TYPE(double, LV<LtsPartitionImbalance>().fault);
+PIN_CTOR(NitscheLtsRun, W &, const std::vector<int> &, const std::vector<int> &, int, int,
+         real_t, real_t);
+PIN_TYPE(void, LV<NitscheLtsRun>().Init(CLV<Vector>(), CLV<Vector>(), real_t()));
+PIN_TYPE(bool, LV<NitscheLtsRun>().FaultStep(LV<Vector>(), LV<Vector>(), LV<real_t>()));
+PIN_TYPE(real_t, CLV<NitscheLtsRun>().SyncInterval());
+
 constexpr int kPinCount = __COUNTER__ - kPinBase - 1;
 
 } // namespace
@@ -425,6 +515,6 @@ constexpr int kPinCount = __COUNTER__ - kPinBase - 1;
 int main()
 {
    std::cout << "PASSED: test_cycle_api_pin: " << kPinCount
-             << " API pins compiled (base 010b56e with hooks H1a, H1b, H2 and station fix ef70517)\n";
+             << " API pins compiled (hooks H1a, H1b, H2 on nitsche-dynamic-rupture b1f5446)\n";
    return 0;
 }

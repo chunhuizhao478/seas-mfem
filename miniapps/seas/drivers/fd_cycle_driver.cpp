@@ -44,6 +44,20 @@
 //   rows, at the QD and dynamic marks, at every switch and at the end
 //   --wall-limit S: at the first QD step after S seconds of wall time,
 //   a checkpoint and a clean stop (exit 8), for chained jobs
+//   [cycle.benchmark] (cycle/bench_output.hpp): the SCEC BP5 outputs besides
+//   the station files, from the same steps: source and off-fault rows with
+//   every station row, profiles on their own cadence, the event rows and
+//   rupture times at each event's end (Track at every step, every fault
+//   step under LTS)
+//
+// Speed-ups, all deck options and off by default (each repeats a trunk
+// path; the cycle calls the same functions):
+//   QD regime:  [cycle.qd].operators = "matrix" (stage operators, QD speed
+//               item 1), [cycle.qd.green] (Green's function, dense or
+//               H-matrix, items 3-4; --qd-green-cache / --qd-green-hcache
+//               override its files), the options file (rk 5dp, atol)
+//   dynamic:    [cycle.lts] mode = "rate2" (local time stepping; the mesh
+//               is cut with BuildLtsAwarePartition for both regimes)
 //
 // The per-step work and its order follow seas_bp5_full's TS monitor
 // (tests/verification/bp5_verification_full.cpp:529-718), so with the gold
@@ -62,6 +76,7 @@
 //   mpirun -np N ./seas_fd_cycle_driver --deck config/fd_cycle/bp5_fd_first_event.toml
 //          [--output-dir DIR] [--max-dyn-steps N] [--log-every N]
 //          [--max-steps N] [--checkpoint-every N] [--restart <prefix>]
+//          [--qd-green-cache FILE] [--qd-green-hcache FILE]
 // --max-dyn-steps stops the run in a dynamic phase after N steps (timing and
 // smoke runs); --end-phase-after N ends every dynamic phase after N steps
 // and switches back (smoke runs).  Checkpoints exist only in the QD regime,
@@ -85,6 +100,7 @@
 #include "../cycle/state_bridge.hpp"
 #include "../cycle/dyn_phase.hpp"
 #include "../cycle/snapshots.hpp"
+#include "../cycle/bench_output.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -227,8 +243,9 @@ void PrintDynamicSetup(const MPIContext &mpi, const cycle::CycleConfig &cfg,
 ///
 ///   dyn.Enter(Bridge::ToNitsche(qd), t_s)   # U = u_s, U' = 0, (d, V, psi)
 ///   until the controller ends the phase or T_max:
-///      dyn.Step();  rupture time, peak V per DOF
+///      dyn.Step();  rupture time, peak V per DOF (after every fault step)
 ///      out.UpdateEvents;  out.Write (cadence) and a global row with it
+///      (with LTS a Step ends at a sync point, so all of these act there)
 ///   end of the phase: a station row, the fault table, the switch log, the
 ///      summary; then (plan 6.3, unless it is the deck's last phase)
 ///      (s, psi) = Bridge::ToQD(dyn);  Vqd = qd.Reenter(s, psi, t)
@@ -243,6 +260,7 @@ void PrintDynamicSetup(const MPIContext &mpi, const cycle::CycleConfig &cfg,
 /// reached T_max, 7 the guard.
 PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::QDPhase &qd,
                          cycle::DynPhase &dyn, cycle::FdCycleOutput &out,
+                         cycle::BenchmarkOutput *bench,
                          cycle::Snapshots &snaps, cycle::RegimeController &ctl,
                          const std::string &commit, real_t t_s,
                          real_t Vstart, long max_dyn_steps, long end_phase_after,
@@ -316,21 +334,42 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
 
    const int no = dyn.NumOwnedFaultDOFs();
    const real_t V_rupt = 1.0e-3;   // SCEC: first V >= 1 mm/s (BP5 section 4.6)
-   Vector trupt(no), peakV(no), vabs;
+   Vector trupt(no), peakV(no), vabs, vabs_hook;
    trupt = -1.0;
    peakV = 0.0;
-   auto track = [&](real_t tt)
+   bool phase_over = false;
+   auto track = [&](real_t tt, const Vector &va)
    {
-      dyn.SlipRateMagnitude(vabs);
       for (int j = 0; j < no; j++)
       {
-         if (trupt(j) < 0.0 && vabs(j) >= V_rupt) { trupt(j) = tt; }
-         peakV(j) = std::max(peakV(j), vabs(j));
+         if (trupt(j) < 0.0 && va(j) >= V_rupt) { trupt(j) = tt; }
+         peakV(j) = std::max(peakV(j), va(j));
       }
+      if (bench) { bench->Track(tt, va); }
    };
-   track(t);
+   dyn.SlipRateMagnitude(vabs);
+   track(t, vabs);
+   // After every fault step (every step without LTS), until the deck's
+   // switch: the files stop there even when the probe runs on.
+   struct HookGuard
+   {
+      cycle::DynPhase &d;
+      ~HookGuard() { d.SetFaultStepHook(nullptr); }
+   } hook_guard{dyn};
+   dyn.SetFaultStepHook([&](real_t tt)
+   {
+      if (phase_over) { return; }
+      dyn.SlipRateMagnitude(vabs_hook);
+      track(tt, vabs_hook);
+   });
 
    auto fill_dyn = [&dyn](cycle::StationFields &f) { dyn.FillStationFields(f); };
+   auto speed_dyn = [&dyn](Vector &v) { dyn.SlipRateMagnitude(v); };
+   cycle::VolumeFieldsFn vol_dyn = [&dyn](const Vector *&u, const Vector *&v)
+   {
+      u = &dyn.U();
+      v = &dyn.Ud();
+   };
    if (root)
    {
       if (t == 0.0)
@@ -352,7 +391,7 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
    }
 
    cycle::DynVerdict verdict = cycle::DynVerdict::Stay;
-   bool step_cap = false, phase_over = false;
+   bool step_cap = false;
    double step_s = 0.0, wall0 = MPI_Wtime();
    cycle::DynPhase::StepInfo first{}, worst{};
    worst.min_sigma_eff = std::numeric_limits<real_t>::infinity();
@@ -369,6 +408,11 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
    {
       out.ForceWrite(t, Vmax, fill_dyn);
       out.WriteGlobal(t, Vmax);
+      if (bench)
+      {
+         bench->Rows(t, fill_dyn, vol_dyn);
+         bench->Flush();
+      }
       out.Flush();
       snaps.Dyn(t, dyn.Tau(), dyn.Steps(), phase, fill_dyn, dyn.U(), dyn.Ud(), true);
       out.SwitchLog(t, Vmax, "dynamic", to_qd ? "QD" : "stop", reason);
@@ -412,7 +456,10 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
                    << " summary ===\n"
                    << "  commit: " << commit << "\n"
                    << "  end: " << reason << " at t = " << t << " s (phase length "
-                   << dyn.Tau() << " s, " << dyn.Steps() << " steps of " << dyn.Dt() << " s)"
+                   << dyn.Tau() << " s, " << dyn.Steps() << " steps of " << dyn.StepDt() << " s"
+                   << (dyn.Lts() ? ", LTS sync intervals; " + std::to_string(dyn.FaultSteps()) +
+                       " fault steps of " + std::to_string(dyn.Dt()) + " s" : std::string())
+                   << ")"
                    << (to_qd ? "; back to QD" : "; the run stops") << "\n"
                    << "  max V: at the start (QD balance) " << Vstart << ", after step 1 "
                    << first.max_V << ", over the phase " << worst.max_V << " m/s\n"
@@ -453,9 +500,14 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
       worst.max_sigma_pc = std::max(worst.max_sigma_pc, r.max_sigma_pc);
       if (!phase_over)
       {
-         track(t);
-         out.UpdateEvents(t, Vmax);
-         if (out.Write(t, Vmax, fill_dyn)) { out.WriteGlobal(t, Vmax); }
+         const cycle::EventUpdate ev = out.UpdateEvents(t, Vmax);
+         if (bench) { bench->OnEvents(ev, t, fill_dyn, speed_dyn); }
+         if (out.Write(t, Vmax, fill_dyn))
+         {
+            out.WriteGlobal(t, Vmax);
+            if (bench) { bench->Rows(t, fill_dyn, vol_dyn); }
+         }
+         if (bench) { bench->Profiles(t, Vmax, fill_dyn); }
          snaps.Dyn(t, dyn.Tau(), dyn.Steps(), phase, fill_dyn, dyn.U(), dyn.Ud());
          verdict = ctl.AfterDynStep(Vmax, t, dyn.Tau());
       }
@@ -554,7 +606,6 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
                 << " s): max V dynamic " << snap_Vmax << " m/s, QD balance " << Vqd
                 << " m/s\n" << std::flush;
    }
-   snaps.ResetQDHistory(end.t, qd.Displacement());
    if (!std::isfinite(Vqd))
    {
       if (root) { std::cerr << "ERROR: the QD balance after the switch back is not finite.\n"; }
@@ -597,6 +648,8 @@ int main(int argc, char *argv[])
    int end_phase_after = -1;
    int log_every = 1000;
    double wall_limit = -1.0;
+   const char *green_cache = "";
+   const char *green_hcache = "";
 
    OptionsParser args(argc, argv);
    args.AddOption(&deck, "-d", "--deck", "Cycle deck (TOML): [cycle] and the shared sections.");
@@ -624,6 +677,10 @@ int main(int argc, char *argv[])
    args.AddOption(&wall_limit, "-wl", "--wall-limit",
                   "Stop with a checkpoint (exit 8) at the first QD step after this many "
                   "seconds of wall time since the start (-1 = off; needs checkpoints).");
+   args.AddOption(&green_cache, "-gc", "--qd-green-cache",
+                  "[cycle.qd.green]: the dense G file (overrides the deck's cache).");
+   args.AddOption(&green_hcache, "-ghc", "--qd-green-hcache",
+                  "[cycle.qd.green]: the H-matrix file (overrides the deck's hcache).");
    args.Parse();
    if (!args.Good())
    {
@@ -637,6 +694,18 @@ int main(int argc, char *argv[])
    // Run-time overrides: where the files go and how often to checkpoint.
    if (output_dir[0] != '\0') { cfg.output.dir = output_dir; }
    if (checkpoint_every >= 0) { cfg.checkpoint_every = checkpoint_every; }
+   if (green_cache[0] != '\0' || green_hcache[0] != '\0')
+   {
+      MFEM_VERIFY(cfg.qd.green.enabled, "--qd-green-cache / --qd-green-hcache need "
+                  "[cycle.qd.green] in the deck");
+      if (green_cache[0] != '\0') { cfg.qd.green.cache = green_cache; }
+      if (green_hcache[0] != '\0')
+      {
+         MFEM_VERIFY(cfg.qd.green.compress > 0.0, "--qd-green-hcache needs "
+                     "[cycle.qd.green].compress > 0");
+         cfg.qd.green.hcache = green_hcache;
+      }
+   }
    MFEM_VERIFY(wall_limit < 0.0 || cfg.checkpoint_every > 0,
                "--wall-limit needs checkpoints ([cycle.checkpoint].every_qd_steps or "
                "--checkpoint-every > 0): the stop writes one to continue from");
@@ -659,7 +728,23 @@ int main(int argc, char *argv[])
                 << "  mesh: " << cfg.shared.mesh.path << " x " << cfg.mesh_scale
                 << ", p = " << cfg.shared.mesh.order << "\n"
                 << "  QD solver: " << cfg.qd.solver << ", PETSc options: "
-                << cfg.qd.petsc_options << "\n"
+                << cfg.qd.petsc_options << " (atol " << cfg.qd.ts_atol << ")\n"
+                << "  QD stages: " << cfg.qd.operators;
+      if (cfg.qd.green.enabled)
+      {
+         const cycle::QDGreenDeck &g = cfg.qd.green;
+         std::cout << ", Green's function " << (g.compress > 0.0 ? "H-matrix eps " +
+                   std::to_string(g.compress) : std::string("dense")) << " (cache '"
+                   << g.cache << "', hcache '" << g.hcache << "', check every "
+                   << g.check_every << " stages)";
+      }
+      std::cout << "\n  dynamic stepping: " << (cfg.lts.On() ? "LTS rate2, cluster cap " +
+                std::to_string(cfg.lts.cluster_cap) + ", fault buffer " +
+                std::to_string(cfg.lts.fault_buffer) : std::string("global (central difference)"))
+                << "\n  benchmark output: " << (cfg.bench.enabled ? std::to_string(
+                cfg.bench.volume_stations.size()) + " off-fault stations, " +
+                std::to_string(cfg.bench.profiles.size()) + " profiles" : std::string("off"))
+                << "\n"
                 << "  t_final: " << cfg.t_final << " s, dt_init: " << cfg.dt_init << " s\n"
                 << "  output: " << ckpt_prefix << "_*\n"
                 << "  checkpoint every: " << cfg.checkpoint_every << " QD steps"
@@ -705,7 +790,11 @@ int main(int argc, char *argv[])
          std::cout << "  elements: " << smesh->GetNE() << ", vertices: " << smesh->GetNV()
                    << ", boundary faces: " << smesh->GetNBE() << "\n";
       }
-      ParMesh pmesh(mpi.GetComm(), *smesh);
+      // [cycle.lts] rate2: clusters and the LTS-aware cut, then the ParMesh.
+      cycle::LtsLayout lts = cycle::DynPhase::PlanLts(*smesh, cfg, mpi.GetComm());
+      ParMesh pmesh(mpi.GetComm(), *smesh, lts.part.empty() ? nullptr : lts.part.data());
+      cycle::DynPhase::MapLts(lts, *smesh, pmesh);
+      if (root && lts.on) { std::cout << "  LTS: " << lts.report << "\n"; }
       smesh.reset();
 
       // ---- QD regime ----
@@ -746,6 +835,8 @@ int main(int argc, char *argv[])
       cycle::RegimeController ctl(cfg.switch_cfg);
       std::unique_ptr<cycle::FdCycleOutput> out;
       std::vector<cycle::SnapshotFileState> snap_restart;
+      cycle::BenchmarkOutput::State bench_restart;
+      bool have_bench_restart = false;
       const std::vector<cycle::StationLocation> locs = qd.LocateStations(cfg.output);
       qd.InitTS(dt);
       if (!restart_prefix.empty())
@@ -766,8 +857,21 @@ int main(int argc, char *argv[])
          rejections_before = info.rejections;
          ctl.Restore(info.dyn_phases);
          qd.RestoreTS(info.step);
+         MFEM_VERIFY(info.bench == cfg.bench.enabled, "restart: the checkpoint was written "
+                     "with [cycle.benchmark] " << (info.bench ? "on" : "off") << ", the deck "
+                     "has it " << (cfg.bench.enabled ? "on" : "off"));
+         if (!std::isnan(info.fault_digest))
+         {
+            const real_t dg = cycle::FaultDigest(qd.Table().coords);
+            MFEM_VERIFY(std::abs(dg - info.fault_digest) <= 1e-12 * (std::abs(dg) + 1.0),
+                        "restart: rank " << mpi.Rank() << " owns other fault DOFs than when "
+                        "the checkpoint was written (digest " << dg << " vs "
+                        << info.fault_digest << "): the partition differs");
+         }
          out = std::make_unique<cycle::FdCycleOutput>(cfg.output, mpi.GetComm(), locs,
                                                       commit, &info.out);
+         bench_restart = info.bench_state;
+         have_bench_restart = info.bench;
          snap_restart = info.snapshots;
          if (root)
          {
@@ -781,10 +885,28 @@ int main(int argc, char *argv[])
          out = std::make_unique<cycle::FdCycleOutput>(cfg.output, mpi.GetComm(), locs, commit);
       }
       if (cfg.switching) { out->OpenSwitchLog(commit); }
+      std::unique_ptr<cycle::BenchmarkOutput> bench;
+      if (cfg.bench.enabled)
+      {
+         const cycle::BenchFaultGeometry bg = qd.BenchGeometry(cfg);
+         bench = std::make_unique<cycle::BenchmarkOutput>(
+            cfg, mpi.GetComm(), pmesh, qd.Domain().GetFESpace(), bg, commit,
+            have_bench_restart ? &bench_restart : nullptr);
+         if (root)
+         {
+            std::cout << "  benchmark output: fault area " << bench->FaultArea()
+                      << " m^2, domain A " << bench->AreaA() << " m^2; off-fault stations";
+            for (int s = 0; s < bench->NumVolumeStations(); s++)
+            {
+               std::cout << " " << cfg.bench.volume_stations[s].name << " (rank "
+                         << bench->VolumeOwner(s) << ")";
+            }
+            std::cout << "\n";
+         }
+      }
       cycle::Snapshots snaps(cfg, mpi.GetComm(), pmesh, qd.Domain().GetFESpace(), qd.Table(),
                              qd.Domain().GetNbfPerFace(), commit,
                              restart_prefix.empty() ? nullptr : &snap_restart);
-      if (!restart_prefix.empty()) { snaps.ResetQDHistory(t, qd.Displacement()); }
       if (root && snaps.Any())
       {
          if (cfg.snapshots.fault.enabled)
@@ -812,9 +934,12 @@ int main(int argc, char *argv[])
          info.dyn_phases = ctl.Phases();
          info.out = out->GetState();
          info.snapshots = snaps.GetState();
+         info.fault_digest = cycle::FaultDigest(qd.Table().coords);
+         info.bench = (bench != nullptr);
+         if (bench) { info.bench_state = bench->GetState(); }
          cycle::CheckpointData d;
          d.state = qd.State();
-         d.displacement = qd.Operator().GetDisplacement();
+         d.displacement = qd.Displacement();   // solved here with the Green's function
          d.traction = qd.Operator().GetTraction();
          d.slip_rate = qd.Fault().GetSlipRate();
          cycle::WriteCycleCheckpoint(ckpt_prefix, info, d, mpi);
@@ -825,15 +950,33 @@ int main(int argc, char *argv[])
       if (cfg.switching)
       {
          const double w = MPI_Wtime();
-         dyn = std::make_unique<cycle::DynPhase>(pmesh, cfg, qd.Table(), par, pre);
+         dyn = std::make_unique<cycle::DynPhase>(pmesh, cfg, qd.Table(), par, pre, 1.0,
+                                                 lts.on ? &lts : nullptr);
          PrintDynamicSetup(mpi, cfg, *dyn, MPI_Wtime() - w);
       }
       auto dynamic_phase = [&](real_t ts, real_t Vs)
       {
-         return RunDynamicPhase(mpi, cfg, qd, *dyn, *out, snaps, ctl, commit, ts, Vs,
+         return RunDynamicPhase(mpi, cfg, qd, *dyn, *out, bench.get(), snaps, ctl, commit, ts, Vs,
                                 max_dyn_steps, end_phase_after, log_every, rejections_before,
                                 checkpoint);
       };
+
+      // The QD regime's volume fields for the snapshots and the off-fault
+      // rows: the velocity is a solve, done at most once per monitored state
+      // (qd_vel_ok is cleared whenever the state changes).
+      Vector qd_vel;
+      bool qd_vel_ok = false;
+      cycle::VolumeFieldsFn vol_qd = [&](const Vector *&u, const Vector *&v)
+      {
+         if (!qd_vel_ok)
+         {
+            qd.Velocity(qd_vel);
+            qd_vel_ok = true;
+         }
+         u = &qd.Displacement();
+         v = &qd_vel;
+      };
+      auto speed_qd = [&qd](Vector &v) { qd.SlipRateMagnitude(v); };
 
       // A fresh switched run starts from the QD balance at t = 0: dynamic if
       // its max V is above V_on (the BP5-FD first event), else in QD.  P1
@@ -846,10 +989,14 @@ int main(int argc, char *argv[])
          {
             // The rows at t = 0 from the QD fields (as the P1 monitor's start step).
             auto fill0 = [&qd](cycle::StationFields &f) { qd.FillStationFields(f); };
-            out->UpdateEvents(t, Vstart);
-            out->Write(t, Vstart, fill0);
+            qd_vel_ok = false;
+            const cycle::EventUpdate ev = out->UpdateEvents(t, Vstart);
+            if (bench) { bench->OnEvents(ev, t, fill0, speed_qd); }
+            const bool row = out->Write(t, Vstart, fill0);
             out->WriteGlobal(t, Vstart);
-            snaps.QD(t, qd.StepNumber(), 0, cycle::SnapReason::Start, fill0, qd.Displacement());
+            if (row && bench) { bench->Rows(t, fill0, vol_qd); }
+            if (bench) { bench->Profiles(t, Vstart, fill0); }
+            snaps.QD(t, qd.StepNumber(), 0, cycle::SnapReason::Start, fill0, vol_qd);
             const PhaseEnd end = dynamic_phase(t, Vstart);
             rc = end.rc;
             run_qd = end.back_to_qd;
@@ -889,13 +1036,17 @@ int main(int argc, char *argv[])
             diverged = true;
             return false;
          }
-         out->UpdateEvents(tt, Vmax);
-         out->Write(tt, Vmax, fill);
+         qd_vel_ok = false;
+         const cycle::EventUpdate ev = out->UpdateEvents(tt, Vmax);
+         if (bench) { bench->OnEvents(ev, tt, fill, speed_qd); }
+         const bool row = out->Write(tt, Vmax, fill);
          out->WriteGlobal(tt, Vmax);
+         if (row && bench) { bench->Rows(tt, fill, vol_qd); }
+         if (bench) { bench->Profiles(tt, Vmax, fill); }
          const bool go = cfg.switching && ctl.GoDynamic(Vmax);
          snaps.QD(tt, step, ctl.Phases(),
                   go ? cycle::SnapReason::ToDynamic : cycle::SnapReason::Cadence, fill,
-                  qd.Displacement());
+                  vol_qd);
          if (go)
          {
             // A new event: the dynamic regime takes over at this step (P4).
@@ -967,10 +1118,19 @@ int main(int argc, char *argv[])
          if (qd_done)
          {
             if (cfg.checkpoint_every > 0) { checkpoint(steps, t); }
-            out->ForceWrite(t, qd.MaxV(), fill);
-            snaps.QD(t, steps, ctl.Phases(), cycle::SnapReason::End, fill, qd.Displacement());
+            qd_vel_ok = false;
+            const real_t Vend = qd.MaxV();
+            out->ForceWrite(t, Vend, fill);
+            if (bench)
+            {
+               bench->Rows(t, fill, vol_qd);
+               bench->Profiles(t, Vend, fill, true);
+            }
+            snaps.QD(t, steps, ctl.Phases(), cycle::SnapReason::End, fill, vol_qd);
          }
          out->Flush();
+         if (bench) { bench->Flush(); }
+         qd.Operator().PrintQDGreenCheckSummary(std::cout);
          if (root)
          {
             // rc 7 (the guard) and 3 (a non-finite balance) stop at the switch back.

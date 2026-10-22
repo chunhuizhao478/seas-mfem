@@ -35,7 +35,22 @@
 //   penalty_factor       IP penalty scale of BOTH regimes' K (one value,
 //                        so the two stiffness matrices agree, plan 6.1) [1.0]
 //   [cycle.qd]      solver ("mumps" | "mumps_blr"), blr_tol,
-//                   petsc_options (PETSc TS options file), ts_atol, ts_rtol
+//                   petsc_options (PETSc TS options file; it must pick an RK
+//                   tableau with the FSAL property, see qd_phase.hpp),
+//                   ts_atol, ts_rtol,
+//                   operators ["loops"]: "matrix" runs each stage through
+//                   the domain's prebuilt stage operators (seas_bp5_full
+//                   --qd-operators matrix, QD speed item 1)
+//   [cycle.qd.green] the discrete Green's function stage (seas_bp5_full
+//                   --qd-green, items 3 and 4); present means on unless
+//                   enabled = false, and it needs operators = "matrix".
+//                   Linear elastic bulk and loading g(t) = t g only, so it
+//                   is never on by default.  compress [0 = dense G; eps in
+//                   (0, 1): the H-matrix], cache, hcache (files read when
+//                   they fit, else written; the driver's --qd-green-cache
+//                   and --qd-green-hcache override them), block [64],
+//                   tol [1e-8], leaf [64], eta [2], compress_mem_gib [64],
+//                   check_every [0 = off]: seas_bp5_full's --qd-green-* values
 //   [cycle.switch]  V_on [1e-2], V_off [1e-3], T_dwell [10], T_min [0],
 //                   T_max [1200], max_dynamic_phases [0 = no limit; N > 0:
 //                   the run stops at the end of the N-th dynamic phase,
@@ -84,6 +99,34 @@
 //                   vertices lie on the plane (attribute 1 also holds the
 //                   bottom of the BP5 mesh).
 //   [cycle.snapshots.volume]  only enabled = false (not implemented)
+//   [cycle.benchmark]  the SCEC BP5 outputs beyond the on-fault stations
+//                   (BP5 description section 4; cycle/bench_output.hpp),
+//                   present means on unless enabled = false.  Plane
+//                   coordinates (x2, x3) are those of [cycle.output]:
+//                   (x - plane_origin) . plane_axis1 and . plane_axis2.
+//                   region_x2, region_x3: [min, max] of the domain A of the
+//                   source time series (max |V| and moment rate over A)
+//                                                                [required]
+//                   rupture_V: the rupture time is the first time |V| >=
+//                   rupture_V in an event, and the rupture area of the
+//                   catalog holds the DOFs that reached it        [event_V]
+//                   profile_dt_slow, profile_dt_fast: the profile row
+//                   cadence, dt_fast while max V > fast_V   [5 yr, 1 s]
+//                   volume_axes: 3 unit vectors e1, e2, e3 (global XYZ);
+//                   an off-fault row holds u . e_i and v . e_i
+//                                          [required with volume stations]
+//                   [[cycle.benchmark.volume_station]] name, x (global XYZ)
+//                   [[cycle.benchmark.profile]] name, from, to (plane
+//                   coordinates [x2, x3]), points (>= 2), coordinate ("x2"
+//                   or "x3": the one the first row lists)
+//   [cycle.lts]     local time stepping of the dynamic regime (the Nitsche
+//                   driver's --lts rate2, solver/nitsche_lts_run.hpp):
+//                   mode ["off" | "rate2"], cluster_cap [4], fault_buffer
+//                   [3] (layers of tets around the fault in its cluster),
+//                   fault_weight [0] (METIS weight per fault-face side).
+//                   rate2 needs [numerics] cfl <= 0.6 and kv_scale = "node",
+//                   and partitions the mesh with BuildLtsAwarePartition
+//                   (both regimes then use that partition)
 //
 // The dynamic regime reads the keys the Nitsche driver reads, from the same
 // shared sections (drivers/nitsche_dyn_driver.cpp:616-648, 708-736,
@@ -176,6 +219,21 @@ struct SnapshotConfig
    bool Any() const { return fault.enabled || surface.enabled; }
 };
 
+/// [cycle.qd.green]: the Green's-function stage (seas_bp5_full --qd-green-*).
+struct QDGreenDeck
+{
+   bool enabled = false;
+   real_t compress = 0.0;        ///< 0: dense G; (0, 1): H-matrix tolerance
+   std::string cache;            ///< dense G file (read if it fits, else written)
+   std::string hcache;           ///< H-matrix file (likewise)
+   int block = 64;
+   real_t tol = 1e-8;
+   int leaf = 64;
+   real_t eta = 2.0;
+   real_t compress_mem_gib = 64.0;
+   int check_every = 0;
+};
+
 /// [cycle.qd]
 struct QDConfig
 {
@@ -187,6 +245,44 @@ struct QDConfig
    std::string petsc_options = "tests/verification/petsc_ts_rk45_tandem.cfg";
    real_t ts_atol = 1e-7;
    real_t ts_rtol = 1e-50;
+   std::string operators = "loops";   ///< "loops" or "matrix"
+   QDGreenDeck green;
+};
+
+/// One [[cycle.benchmark.profile]]: points evenly spaced from `from` to `to`
+/// (plane coordinates x2, x3) [m].
+struct ProfileSpec
+{
+   std::string name;
+   std::array<real_t, 2> from = {{0.0, 0.0}};
+   std::array<real_t, 2> to = {{0.0, 0.0}};
+   int points = 2;
+   int coordinate = 0;   ///< 0: the first row lists x2; 1: x3
+};
+
+/// [cycle.benchmark]: the SCEC BP5 outputs of section 4 besides the on-fault
+/// stations (see the file comment).
+struct BenchmarkConfig
+{
+   bool enabled = false;
+   std::array<real_t, 2> region_x2 = {{0.0, 0.0}};
+   std::array<real_t, 2> region_x3 = {{0.0, 0.0}};
+   real_t rupture_V = -1.0;   ///< < 0: [cycle.output].event_V
+   real_t profile_dt_slow = 5.0 * 365.25 * 24.0 * 3600.0;
+   real_t profile_dt_fast = 1.0;
+   std::array<std::array<real_t, 3>, 3> volume_axes = {};
+   std::vector<StationSpec> volume_stations;
+   std::vector<ProfileSpec> profiles;
+};
+
+/// [cycle.lts]: local time stepping of the dynamic regime.
+struct LtsConfig
+{
+   std::string mode = "off";   ///< "off" or "rate2"
+   int cluster_cap = 4;
+   int fault_buffer = 3;
+   real_t fault_weight = 0.0;
+   bool On() const { return mode == "rate2"; }
 };
 
 /// [cycle.switch]: the regime controller (plan 3.3 g).  Defaults: Thrase's
@@ -249,6 +345,8 @@ struct CycleConfig
    FaultFieldsConfig fields;
    OutputConfig output;
    SnapshotConfig snapshots;
+   BenchmarkConfig bench;
+   LtsConfig lts;
    int checkpoint_every = 0;
 
    // Shortcuts into `shared`, checked by Load.
@@ -494,7 +592,8 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
    const toml::value &cy = root.at("cycle");
    OnlyKeys(cy, "cycle", {"ic", "switching", "qd_radiation_damping", "mesh_scale",
                           "plate_rate", "penalty_factor", "qd", "switch", "probe",
-                          "prestress", "fields", "output", "checkpoint", "snapshots"});
+                          "prestress", "fields", "output", "checkpoint", "snapshots",
+                          "benchmark", "lts"});
    c.ic = Str(cy, "cycle", "ic", "", true);
    MFEM_VERIFY(c.ic == "gold" || c.ic == "scec_fd",
                "[cycle].ic must be \"gold\" or \"scec_fd\"; got \"" << c.ic << "\"");
@@ -521,15 +620,49 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       const toml::value &q = cy.at("qd");
       MFEM_VERIFY(!q.contains("penalty_factor"), "[cycle.qd].penalty_factor is now "
                   "[cycle].penalty_factor: one value for both regimes' stiffness");
-      OnlyKeys(q, "cycle.qd", {"solver", "blr_tol", "petsc_options", "ts_atol", "ts_rtol"});
+      OnlyKeys(q, "cycle.qd", {"solver", "blr_tol", "petsc_options", "ts_atol", "ts_rtol",
+                               "operators", "green"});
       c.qd.solver = Str(q, "cycle.qd", "solver", c.qd.solver);
       c.qd.blr_tol = Real(q, "cycle.qd", "blr_tol", c.qd.blr_tol);
       c.qd.petsc_options = Str(q, "cycle.qd", "petsc_options", c.qd.petsc_options);
       c.qd.ts_atol = Real(q, "cycle.qd", "ts_atol", c.qd.ts_atol);
       c.qd.ts_rtol = Real(q, "cycle.qd", "ts_rtol", c.qd.ts_rtol);
+      c.qd.operators = Str(q, "cycle.qd", "operators", c.qd.operators);
+      if (q.contains("green"))
+      {
+         const std::string sec = "cycle.qd.green";
+         const toml::value &g = q.at("green");
+         OnlyKeys(g, sec, {"enabled", "compress", "cache", "hcache", "block", "tol",
+                           "leaf", "eta", "compress_mem_gib", "check_every"});
+         QDGreenDeck &gr = c.qd.green;
+         gr.enabled = Bool(g, sec, "enabled", true);
+         gr.compress = Real(g, sec, "compress", gr.compress);
+         gr.cache = Str(g, sec, "cache", gr.cache);
+         gr.hcache = Str(g, sec, "hcache", gr.hcache);
+         gr.block = Int(g, sec, "block", gr.block);
+         gr.tol = Real(g, sec, "tol", gr.tol);
+         gr.leaf = Int(g, sec, "leaf", gr.leaf);
+         gr.eta = Real(g, sec, "eta", gr.eta);
+         gr.compress_mem_gib = Real(g, sec, "compress_mem_gib", gr.compress_mem_gib);
+         gr.check_every = Int(g, sec, "check_every", gr.check_every);
+         // seas_bp5_full's checks of the same values
+         MFEM_VERIFY(gr.compress == 0.0 || (gr.compress > 0.0 && gr.compress < 1.0),
+                     "[" << sec << "].compress must be 0 (dense G) or in (0, 1)");
+         MFEM_VERIFY(gr.hcache.empty() || gr.compress > 0.0,
+                     "[" << sec << "].hcache needs compress > 0");
+         MFEM_VERIFY(gr.block >= 1 && gr.leaf >= 1 && gr.tol > 0.0 && gr.eta > 0.0 &&
+                     gr.compress_mem_gib > 0.0 && gr.check_every >= 0,
+                     "[" << sec << "] block, leaf, tol, eta and compress_mem_gib must be "
+                     "> 0, check_every >= 0");
+      }
    }
    MFEM_VERIFY(c.qd.solver == "mumps" || c.qd.solver == "mumps_blr",
                "[cycle.qd].solver must be \"mumps\" or \"mumps_blr\"");
+   MFEM_VERIFY(c.qd.operators == "loops" || c.qd.operators == "matrix",
+               "[cycle.qd].operators must be \"loops\" or \"matrix\"");
+   MFEM_VERIFY(!c.qd.green.enabled || c.qd.operators == "matrix",
+               "[cycle.qd.green] needs [cycle.qd].operators = \"matrix\" (the Green's "
+               "function is built from the stage operators)");
 
    if (cy.contains("switch"))
    {
@@ -673,6 +806,149 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       }
    }
 
+   if (cy.contains("benchmark"))
+   {
+      const std::string sec = "cycle.benchmark";
+      const toml::value &b = cy.at("benchmark");
+      OnlyKeys(b, sec, {"enabled", "region_x2", "region_x3", "rupture_V", "profile_dt_slow",
+                        "profile_dt_fast", "volume_axes", "volume_station", "profile"});
+      BenchmarkConfig &bc = c.bench;
+      bc.enabled = Bool(b, sec, "enabled", true);
+      auto range = [&](const std::string &key)
+      {
+         MFEM_VERIFY(b.contains(key), "[" << sec << "]." << key << " is required");
+         const toml::value &v = b.at(key);
+         MFEM_VERIFY(v.is_array() && v.as_array().size() == 2,
+                     "[" << sec << "]." << key << " must be [min, max]");
+         std::array<real_t, 2> r;
+         for (int i = 0; i < 2; i++)
+         {
+            const toml::value &e = v.as_array()[i];
+            MFEM_VERIFY(e.is_floating() || e.is_integer(),
+                        "[" << sec << "]." << key << " must hold numbers");
+            r[i] = e.is_floating() ? static_cast<real_t>(e.as_floating())
+                                   : static_cast<real_t>(e.as_integer());
+         }
+         MFEM_VERIFY(r[0] < r[1], "[" << sec << "]." << key << " needs min < max");
+         return r;
+      };
+      bc.region_x2 = range("region_x2");
+      bc.region_x3 = range("region_x3");
+      bc.rupture_V = Real(b, sec, "rupture_V", c.output.event_V);
+      bc.profile_dt_slow = Real(b, sec, "profile_dt_slow", bc.profile_dt_slow);
+      bc.profile_dt_fast = Real(b, sec, "profile_dt_fast", bc.profile_dt_fast);
+      MFEM_VERIFY(bc.rupture_V > 0.0 && bc.profile_dt_slow > 0.0 && bc.profile_dt_fast > 0.0,
+                  "[" << sec << "] rupture_V, profile_dt_slow, profile_dt_fast must be > 0");
+      if (b.contains("volume_station"))
+      {
+         MFEM_VERIFY(b.at("volume_station").is_array(),
+                     "[[" << sec << ".volume_station]] must be an array of tables");
+         for (const toml::value &st : b.at("volume_station").as_array())
+         {
+            const std::string ssec = sec + ".volume_station";
+            OnlyKeys(st, ssec, {"name", "x"});
+            StationSpec sp;
+            sp.name = Str(st, ssec, "name", "", true);
+            sp.x = Vec3(st, ssec, "x", sp.x, true);
+            bc.volume_stations.push_back(sp);
+         }
+      }
+      if (!bc.volume_stations.empty())
+      {
+         MFEM_VERIFY(b.contains("volume_axes") && b.at("volume_axes").is_array() &&
+                     b.at("volume_axes").as_array().size() == 3,
+                     "[" << sec << "].volume_axes (3 unit vectors) is required with "
+                     "volume stations");
+         const auto &ax = b.at("volume_axes").as_array();
+         for (int i = 0; i < 3; i++)
+         {
+            MFEM_VERIFY(ax[i].is_array() && ax[i].as_array().size() == 3,
+                        "[" << sec << "].volume_axes[" << i << "] must be 3 numbers");
+            for (int d = 0; d < 3; d++)
+            {
+               const toml::value &e = ax[i].as_array()[d];
+               MFEM_VERIFY(e.is_floating() || e.is_integer(),
+                           "[" << sec << "].volume_axes must hold numbers");
+               bc.volume_axes[i][d] = e.is_floating() ? static_cast<real_t>(e.as_floating())
+                                                      : static_cast<real_t>(e.as_integer());
+            }
+         }
+         for (int i = 0; i < 3; i++)
+         {
+            for (int j = 0; j < 3; j++)
+            {
+               const real_t d = bc.volume_axes[i][0] * bc.volume_axes[j][0] +
+                                bc.volume_axes[i][1] * bc.volume_axes[j][1] +
+                                bc.volume_axes[i][2] * bc.volume_axes[j][2];
+               MFEM_VERIFY(std::abs(d - (i == j ? 1.0 : 0.0)) < 1e-12,
+                           "[" << sec << "].volume_axes must be orthonormal");
+            }
+         }
+      }
+      else
+      {
+         MFEM_VERIFY(!b.contains("volume_axes"), "[" << sec << "].volume_axes without "
+                     "any [[" << sec << ".volume_station]]");
+      }
+      if (b.contains("profile"))
+      {
+         MFEM_VERIFY(b.at("profile").is_array(),
+                     "[[" << sec << ".profile]] must be an array of tables");
+         for (const toml::value &pt : b.at("profile").as_array())
+         {
+            const std::string psec = sec + ".profile";
+            OnlyKeys(pt, psec, {"name", "from", "to", "points", "coordinate"});
+            ProfileSpec ps;
+            ps.name = Str(pt, psec, "name", "", true);
+            for (int k = 0; k < 2; k++)
+            {
+               const std::string key = k == 0 ? "from" : "to";
+               MFEM_VERIFY(pt.contains(key) && pt.at(key).is_array() &&
+                           pt.at(key).as_array().size() == 2,
+                           "[" << psec << "]." << key << " must be [x2, x3]");
+               std::array<real_t, 2> &dst = k == 0 ? ps.from : ps.to;
+               for (int i = 0; i < 2; i++)
+               {
+                  const toml::value &e = pt.at(key).as_array()[i];
+                  MFEM_VERIFY(e.is_floating() || e.is_integer(),
+                              "[" << psec << "]." << key << " must hold numbers");
+                  dst[i] = e.is_floating() ? static_cast<real_t>(e.as_floating())
+                                           : static_cast<real_t>(e.as_integer());
+               }
+            }
+            ps.points = Int(pt, psec, "points", 0);
+            MFEM_VERIFY(ps.points >= 2, "[" << psec << "].points must be >= 2");
+            const std::string coord = Str(pt, psec, "coordinate", "", true);
+            MFEM_VERIFY(coord == "x2" || coord == "x3",
+                        "[" << psec << "].coordinate must be \"x2\" or \"x3\"");
+            ps.coordinate = coord == "x2" ? 0 : 1;
+            for (const ProfileSpec &o : bc.profiles)
+            {
+               MFEM_VERIFY(o.name != ps.name, "[" << psec << "]: name '" << ps.name
+                           << "' given twice");
+            }
+            bc.profiles.push_back(ps);
+         }
+      }
+   }
+
+   if (cy.contains("lts"))
+   {
+      const std::string sec = "cycle.lts";
+      const toml::value &l = cy.at("lts");
+      OnlyKeys(l, sec, {"mode", "cluster_cap", "fault_buffer", "fault_weight"});
+      LtsConfig &lc = c.lts;
+      lc.mode = Str(l, sec, "mode", lc.mode);
+      lc.cluster_cap = Int(l, sec, "cluster_cap", lc.cluster_cap);
+      lc.fault_buffer = Int(l, sec, "fault_buffer", lc.fault_buffer);
+      lc.fault_weight = Real(l, sec, "fault_weight", lc.fault_weight);
+      MFEM_VERIFY(lc.mode == "off" || lc.mode == "rate2",
+                  "[" << sec << "].mode must be \"off\" or \"rate2\"");
+      MFEM_VERIFY(lc.cluster_cap >= 1 && lc.fault_buffer >= 0 && lc.fault_weight >= 0.0,
+                  "[" << sec << "] needs cluster_cap >= 1, fault_buffer >= 0, "
+                  "fault_weight >= 0");
+   }
+
    // ---- the dynamic regime's numerics (shared sections, Nitsche keys) ----
    {
       DynamicConfig &d = c.dyn;
@@ -739,6 +1015,14 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
          }
       }
       d.sigma_min = s.stress.pore_pressure.min_sigma_n_pa;
+   }
+   if (c.lts.On())
+   {
+      // The Nitsche driver's --lts rate2 conditions (nitsche_lts_run.hpp)
+      MFEM_VERIFY(c.dyn.cfl <= 0.6, "[cycle.lts] mode = \"rate2\" needs [numerics].cfl "
+                  "<= 0.6 (the rate-2 clusters' stability margin); got " << c.dyn.cfl);
+      MFEM_VERIFY(c.dyn.kv_scale == "node", "[cycle.lts] mode = \"rate2\" needs "
+                  "[numerics].kv_scale = \"node\" (a dt-scaled KV would differ per cluster)");
    }
    return c;
 #endif

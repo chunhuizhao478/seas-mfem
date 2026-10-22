@@ -19,8 +19,13 @@
 //     fault = RateStateFaultOperator(geom, friction, aging, seed)   # caches them
 //     fault.SetScecPsiInit(ic == "scec_fd")
 //     op    = SEASQuasiDynamicOperator(dom, fault), elastic sigma_n on
+//     [cycle.qd].operators = "matrix": op.SetQDOperators(true)  (QD speed item 1)
+//     [cycle.qd.green]: op.SetQDGreen(config, check_every)      (items 3, 4)
 //     op.SetInitialCondition(state)
-//   InitTS(dt0): PETSc TS (rk 5dp from the options file), adaptive, dt0
+//   InitTS(dt0): PETSc TS (rk 5dp from the options file), adaptive, dt0;
+//     refuses a TS that is not RK with the FSAL property (seas_bp5_full's
+//     check, QD speed-up v2 item A): the monitor reads the caches of the
+//     last stage, which is the accepted state only for an FSAL tableau
 //   Run(t, dt, t_final, max_steps, monitor): TSSolve; `monitor` runs at the
 //     start step and after each accepted step, as seas_bp5_full's monitor,
 //     and `false` stops the run at that step.  It runs from TS's post-step
@@ -31,6 +36,14 @@
 //   Solve(t): one right-hand side at (t, state) for the switch to the
 //     dynamic regime (plan 6.2); Displacement, Slip, SlipRate, Psi, SigmaN
 //     then hand the static state to the bridge (cycle/state_bridge.hpp).
+//     With the Green's function a stage solves no displacement:
+//     Displacement() solves it for the last stage when it is stale
+//     (RefreshDisplacement), so ask for it only where it is used.
+//   Velocity(v): the quasi-static velocity du/dt of the last evaluation.
+//     K u = B s + D g(t) with g(t) = t g_hat (checked once), so du/dt
+//     solves K du/dt = B V + D g_hat: the displacement at t = 1 with the
+//     slip rate V as slip.  One solve (the face loops or the stage
+//     operators, as the stages); the state and the caches are untouched.
 //   Reenter(s, psi, t, step, dt0): the switch back (plan 6.3): the state
 //     from the bridge, one Solve(t) (static u and V from the balance with
 //     eta), then a new TS at t with first step dt0 whose step counter
@@ -66,6 +79,7 @@
 #include "fault_fields.hpp"
 #include "prestress.hpp"
 #include "fd_cycle_output.hpp"
+#include "bench_output.hpp"
 
 #include "../solver/seas_operator.hpp"
 #include "../domain/elasticity_operator.hpp"
@@ -182,6 +196,28 @@ public:
 
       op_ = std::make_unique<PBP5SEASOp>(dom_.get(), fault_.get(), &mpi_);
       op_->SetElasticSigmaN(true);
+      // QD speed items 1, 3, 4 (seas_bp5_full --qd-operators, --qd-green*):
+      // after SetElasticSigmaN, which they build N_u, N_delta for.
+      matrix_ = (cfg_.qd.operators == "matrix");
+      if (matrix_)
+      {
+         op_->SetQDOperators(true);
+         dom_->GetQDStageOperators()->PrintSummary(mpi_.GetComm(), std::cout);
+      }
+      if (cfg_.qd.green.enabled)
+      {
+         const QDGreenDeck &g = cfg_.qd.green;
+         QDGreenConfig gc;
+         gc.block = g.block;
+         gc.cache_path = g.cache;
+         gc.tol = g.tol;
+         gc.compress = g.compress;
+         gc.leaf = g.leaf;
+         gc.eta = g.eta;
+         gc.hcache_path = g.hcache;
+         gc.compress_mem_gib = g.compress_mem_gib;
+         op_->SetQDGreen(gc, g.check_every);
+      }
 
       // R-003 of seas_bp5_full: allocate at least one entry so PETSc's
       // PlaceMemory/ResetMemory never sees an empty Memory on a rank without
@@ -224,8 +260,47 @@ public:
       return op_->GetMaxSlipRate();
    }
    /// What the last evaluation left, for the bridge (owned fault DOFs; slip
-   /// and slip rate as kernel (dip, strike) pairs, 2 N values).
-   const Vector &Displacement() const { return op_->GetDisplacement(); }
+   /// and slip rate as kernel (dip, strike) pairs, 2 N values).  The
+   /// displacement is solved here when the Green's function left it stale
+   /// (collective then; every rank must ask).
+   const Vector &Displacement() const
+   {
+      op_->RefreshDisplacement();
+      return op_->GetDisplacement();
+   }
+   bool GreenActive() const { return op_->QDGreenActive(); }
+   bool MatrixStages() const { return matrix_; }
+
+   /// The quasi-static velocity du/dt of the last evaluation (see the file
+   /// comment): a vector of the displacement space.  One solve; collective.
+   void Velocity(Vector &v)
+   {
+      if (!loading_checked_) { CheckLinearLoading_(); }
+      const Vector &V = fault_->GetSlipRate();
+      if (!vel_gf_) { vel_gf_ = std::make_unique<ParGridFunction>(&dom_->GetFESpace()); }
+      if (matrix_)
+      {
+         Vector T(V.Size());
+         dom_->SolveStage(1.0, V, *vel_gf_, T, nullptr);
+      }
+      else
+      {
+         Vector local;
+         dom_->ExpandOwnedToLocalFault(V, local, dom_->NumSlipComponents());
+         dom_->Solve(1.0, local, *vel_gf_);
+      }
+      v = *vel_gf_;
+   }
+
+   /// |V| on the owned fault DOFs from the kernel's slip rate of the last
+   /// evaluation (the one max V comes from).
+   void SlipRateMagnitude(Vector &s) const
+   {
+      const Vector &V = fault_->GetSlipRate();
+      const int N = fault_->NumNodes();
+      s.SetSize(N);
+      for (int i = 0; i < N; i++) { s(i) = std::hypot(V(2 * i), V(2 * i + 1)); }
+   }
    void Slip(Vector &s) const { fault_->GetSlip(state_, s); }
    const Vector &SlipRate() const { return fault_->GetSlipRate(); }
    void Psi(Vector &psi) const
@@ -291,6 +366,19 @@ public:
    /// nearest DOF).
    std::vector<StationLocation> LocateStations(const OutputConfig &oc) const
    {
+      std::vector<std::array<real_t, 2>> pts;
+      for (const StationSpec &s : oc.stations)
+      {
+         pts.push_back({Project_(s.x.data(), oc.plane_origin, oc.plane_axis1),
+                        Project_(s.x.data(), oc.plane_origin, oc.plane_axis2)});
+      }
+      return LocatePlanePoints(oc, pts);
+   }
+
+   /// Points given in plane coordinates (x2, x3), located as the stations.
+   std::vector<StationLocation> LocatePlanePoints(
+      const OutputConfig &oc, const std::vector<std::array<real_t, 2>> &pts) const
+   {
       const int N = table_.Size();
       Vector x2(N), x3(N);
       for (int i = 0; i < N; i++)
@@ -300,10 +388,9 @@ public:
          x3(i) = Project_(x, oc.plane_origin, oc.plane_axis2);
       }
       std::vector<Probe2DInterpolator::Station> st;
-      for (const StationSpec &s : oc.stations)
+      for (size_t i = 0; i < pts.size(); i++)
       {
-         st.push_back({s.name, Project_(s.x.data(), oc.plane_origin, oc.plane_axis1),
-                       Project_(s.x.data(), oc.plane_origin, oc.plane_axis2)});
+         st.push_back({"p" + std::to_string(i), pts[i][0], pts[i][1]});
       }
       Probe2DInterpolator interp(x2, x3, st, dom_->GetNbfPerFace(),
                                  BasisType::GaussLobatto, false);
@@ -328,6 +415,125 @@ public:
       return out;
    }
 
+   /// The fault data of BenchmarkOutput (bench_output.hpp) on the owned
+   /// DOFs: positions, plane coordinates, the face quadrature of the
+   /// traction (FaceQuadrature: basis at the points, w_q |J_q| and the
+   /// points' plane coordinates per owned face) and the profile points.
+   /// Each owned DOF must sit at its face's node (checked), so the owned
+   /// DOFs are grouped by face as the face basis numbers them.
+   BenchFaultGeometry BenchGeometry(const CycleConfig &c) const
+   {
+      const OutputConfig &oc = c.output;
+      BenchFaultGeometry g;
+      const int N = table_.Size();
+      g.X = table_.coords;
+      g.x2.SetSize(N);
+      g.x3.SetSize(N);
+      for (int i = 0; i < N; i++)
+      {
+         const real_t *x = table_.coords.GetData() + 3 * i;
+         g.x2(i) = Project_(x, oc.plane_origin, oc.plane_axis1);
+         g.x3(i) = Project_(x, oc.plane_origin, oc.plane_axis2);
+      }
+      const FaceQuadrature *fq = dom_->GetFaceQuadrature();
+      MFEM_VERIFY(fq, "QDPhase::BenchGeometry: the domain has no fault face quadrature");
+      const int nbf = dom_->GetNbfPerFace();
+      const DenseMatrix &e_q = fq->BasisAtQuadPoints();
+      const IntegrationRule &ir = fq->GetQuadRule();
+      const IntegrationRule &nodes = fq->GetNodalRule();
+      const int nq = ir.GetNPoints();
+      MFEM_VERIFY(e_q.Height() == nbf && e_q.Width() == nq && nodes.GetNPoints() == nbf,
+                  "QDPhase::BenchGeometry: face basis " << e_q.Height() << " x " << e_q.Width()
+                  << ", " << nodes.GetNPoints() << " nodes, " << nbf << " DOFs per face");
+      g.nbf = nbf;
+      g.e_q = e_q;
+      // Per local fault face (interior, then shared): w_q |J_q|, x2_q, x3_q,
+      // and the face's nodes; copied to each of its DOFs and restricted to
+      // owned like any fault field.
+      const Array<int> &fint = dom_->GetFaultInteriorFaces();
+      const Array<int> &fsh = dom_->GetFaultSharedFaces();
+      const int nf = fint.Size() + fsh.Size();
+      const int per = 3 * nq + 3;
+      Vector loc(per * nbf * nf);
+      Vector nor(3), x(3);
+      for (int f = 0; f < nf; f++)
+      {
+         FaceElementTransformations *T = (f < fint.Size())
+            ? pmesh_.GetInteriorFaceTransformations(fint[f])
+            : pmesh_.GetSharedFaceTransformations(fsh[f - fint.Size()]);
+         MFEM_VERIFY(T, "QDPhase::BenchGeometry: fault face " << f << " has no transformation");
+         std::vector<real_t> fd(3 * nq);
+         for (int q = 0; q < nq; q++)
+         {
+            const IntegrationPoint &ip = ir.IntPoint(q);
+            T->SetAllIntPoints(&ip);
+            CalcOrtho(T->Jacobian(), nor);
+            T->Transform(ip, x);
+            fd[q] = ip.weight * nor.Norml2();
+            fd[nq + q] = Project_(x.GetData(), oc.plane_origin, oc.plane_axis1);
+            fd[2 * nq + q] = Project_(x.GetData(), oc.plane_origin, oc.plane_axis2);
+         }
+         for (int k = 0; k < nbf; k++)
+         {
+            real_t *r = &loc(per * (f * nbf + k));
+            for (int i = 0; i < 3 * nq; i++) { r[i] = fd[i]; }
+            const IntegrationPoint &np = nodes.IntPoint(k);
+            T->SetAllIntPoints(&np);
+            T->Transform(np, x);
+            for (int d = 0; d < 3; d++) { r[3 * nq + d] = x(d); }
+         }
+      }
+      Vector own;
+      dom_->RestrictToOwnedFault(loc, own, per);
+      MFEM_VERIFY(own.Size() == per * N && N % nbf == 0, "QDPhase::BenchGeometry: "
+                  << own.Size() / per << " owned values for " << N << " owned DOFs");
+      const int nfo = N / nbf;
+      g.wJ.SetSize(nfo * nq);
+      g.q2.SetSize(nfo * nq);
+      g.q3.SetSize(nfo * nq);
+      real_t scale = 1.0, worst = 0.0;
+      for (int i = 0; i < 3 * N; i++) { scale = std::max(scale, std::abs(table_.coords(i))); }
+      for (int f = 0; f < nfo; f++)
+      {
+         const real_t *r0 = &own(per * f * nbf);
+         for (int q = 0; q < nq; q++)
+         {
+            g.wJ(f * nq + q) = r0[q];
+            g.q2(f * nq + q) = r0[nq + q];
+            g.q3(f * nq + q) = r0[2 * nq + q];
+         }
+         for (int k = 0; k < nbf; k++)
+         {
+            const int j = f * nbf + k;
+            const real_t *r = &own(per * j);
+            for (int i = 0; i < 3 * nq; i++)
+            {
+               MFEM_VERIFY(r[i] == r0[i], "QDPhase::BenchGeometry: owned DOFs " << f * nbf
+                           << " and " << j << " are not on one face (DOFs not grouped by face)");
+            }
+            for (int d = 0; d < 3; d++)
+            {
+               worst = std::max(worst, std::abs(r[3 * nq + d] - table_.coords(3 * j + d)));
+            }
+         }
+      }
+      worst = mpi_.GlobalMax(worst);
+      MFEM_VERIFY(worst <= 1e-9 * scale, "QDPhase::BenchGeometry: an owned fault DOF is "
+                  << worst << " m from its face node (face basis order != DOF order)");
+      std::vector<std::array<real_t, 2>> pts;
+      for (const ProfileSpec &p : c.bench.profiles)
+      {
+         for (int i = 0; i < p.points; i++)
+         {
+            const real_t s = static_cast<real_t>(i) / (p.points - 1);
+            pts.push_back({p.from[0] + s * (p.to[0] - p.from[0]),
+                           p.from[1] + s * (p.to[1] - p.from[1])});
+         }
+      }
+      g.profile_locs = LocatePlanePoints(oc, pts);
+      return g;
+   }
+
 #ifdef MFEM_USE_PETSC
    /// PETSc TS as seas_bp5_full --petsc-ts sets it up.  The options file
    /// (cfg.qd.petsc_options) must already be loaded by MFEMInitializePetsc.
@@ -344,6 +550,27 @@ public:
       MFEM_VERIFY(TSAdaptSetType(adapt, TSADAPTBASIC) == PETSC_SUCCESS,
                   "TSAdaptSetType(BASIC) failed");
       MFEM_VERIFY(TSSetFromOptions(ts) == PETSC_SUCCESS, "TSSetFromOptions failed");
+      {
+         // seas_bp5_full's check (QD speed-up v2 item A): the monitor reads
+         // the operator's caches from the last stage of each step, the
+         // accepted state only for an RK tableau with the FSAL property.
+         TSType type = nullptr;
+         MFEM_VERIFY(TSGetType(ts, &type) == PETSC_SUCCESS, "TSGetType failed");
+         PetscBool is_rk = PETSC_FALSE, fsal = PETSC_FALSE;
+         MFEM_VERIFY(PetscStrcmp(type, TSRK, &is_rk) == PETSC_SUCCESS, "PetscStrcmp failed");
+         TSRKType rk = nullptr;
+         if (is_rk)
+         {
+            MFEM_VERIFY(TSRKGetType(ts, &rk) == PETSC_SUCCESS, "TSRKGetType failed");
+            MFEM_VERIFY(TSRKGetTableau(ts, nullptr, nullptr, nullptr, nullptr, nullptr,
+                                       nullptr, nullptr, &fsal) == PETSC_SUCCESS,
+                        "TSRKGetTableau failed");
+         }
+         MFEM_VERIFY(is_rk && fsal, "QDPhase: PETSc TS " << type << (is_rk ? " " : "")
+                     << (is_rk ? rk : "") << " from " << cfg_.qd.petsc_options << ": the "
+                     "monitor needs an RK tableau with the FSAL property (3bs, 5dp, 5bs, "
+                     "6vr), because it reads the operator's caches from the last stage");
+      }
       MFEM_VERIFY(TSSetTimeStep(ts, dt0) == PETSC_SUCCESS, "TSSetTimeStep failed");
       MFEM_VERIFY(TSSetApplicationContext(ts, this) == PETSC_SUCCESS,
                   "TSSetApplicationContext failed");
@@ -473,6 +700,24 @@ private:
       }
    }
 
+   /// Velocity's premise: the Dirichlet loading is g(t) = t g_hat
+   /// (the --qd-green build's check, here on the assembled right-hand side).
+   void CheckLinearLoading_()
+   {
+      Vector r0, r1, r2;
+      dom_->AssembleDirichletOnlyRHS(r0, 0.0);
+      dom_->AssembleDirichletOnlyRHS(r1, 1.0);
+      dom_->AssembleDirichletOnlyRHS(r2, 2.0);
+      real_t loc[3] = {r0.Normlinf(), 0.0, r1.Normlinf()}, glob[3];
+      for (int i = 0; i < r1.Size(); i++) { loc[1] = std::max(loc[1], std::abs(r2(i) - 2.0 * r1(i))); }
+      MPI_Allreduce(loc, glob, 3, MPITypeMap<real_t>::mpi_type, MPI_MAX, mpi_.GetComm());
+      MFEM_VERIFY(glob[0] == 0.0 && glob[1] <= 1e-12 * glob[2],
+                  "QDPhase::Velocity needs Dirichlet loading g(t) = t g_hat: max|b(0)| = "
+                  << glob[0] << ", max|b(2) - 2 b(1)| = " << glob[1] << " (max|b(1)| = "
+                  << glob[2] << ")");
+      loading_checked_ = true;
+   }
+
    static real_t Project_(const real_t *x, const std::array<real_t, 3> &o,
                           const std::array<real_t, 3> &e)
    {
@@ -554,6 +799,9 @@ private:
    std::unique_ptr<PBP5SEASOp> op_;
    Vector state_;
    real_t eta_ = 0.0;
+   bool matrix_ = false;
+   bool loading_checked_ = false;
+   std::unique_ptr<ParGridFunction> vel_gf_;
    Monitor monitor_;
    bool stopped_ = false;
    int skip_monitor_step_ = -1;

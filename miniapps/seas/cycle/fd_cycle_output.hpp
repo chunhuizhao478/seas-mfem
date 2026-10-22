@@ -15,7 +15,9 @@
 //   _switch.txt      OpenSwitchLog / SwitchLog (root, switching on): one
 //                    line per regime change or stop
 // Sample returns the station rows Write would write, without writing (the
-// switch probe of plan P3).
+// switch probe of plan P3).  The SCEC outputs besides the station files
+// ([cycle.benchmark]) are BenchmarkOutput's (bench_output.hpp); it follows
+// this writer's events through the EventUpdate UpdateEvents returns.
 // The station and global files have the format of seas_bp5_full
 // (io/bp5_parallel_output.hpp, io/probe_output.hpp): two '#' header lines,
 // then rows of std::scientific, uppercase, 12 digits, space separated.  The
@@ -88,6 +90,32 @@ struct StationFields
    Vector theta;                     ///< state variable theta [s]
    Vector sigma_n;                   ///< sigma_n_eff, compression positive [Pa]
    real_t eta = 0.0;                 ///< multiplies E(V) in tau
+};
+
+/// The regime's displacement u and velocity v, vectors of the QD regime's
+/// displacement space (both regimes use it).  Collective: the QD velocity
+/// is a solve (QDPhase::Velocity).
+using VolumeFieldsFn = std::function<void(const Vector *&u, const Vector *&v)>;
+
+/// What one UpdateEvents call changed.
+enum class EventChange
+{
+   None,      ///< nothing (inside or outside an event)
+   Started,   ///< max V passed event_V: a new event
+   Below,     ///< in an event, the first time below event_V since the last above
+   Above,     ///< in an event, above event_V again after Below
+   Ended      ///< event_dwell s below: the event ended (its catalog row is written)
+};
+
+/// UpdateEvents' result: the change, the event number (1, 2, ...; the open
+/// or just ended event) and its start and end times (t_end: the first time
+/// below, valid with Ended).
+struct EventUpdate
+{
+   EventChange change = EventChange::None;
+   int event = 0;
+   real_t t_start = 0.0;
+   real_t t_end = 0.0;
 };
 
 /// What a checkpoint keeps of one snapshot file (cycle/snapshots.hpp).
@@ -350,11 +378,11 @@ public:
       switch_->Flush();
    }
 
-   /// A station row now, whatever the cadence; collective.
-   void ForceWrite(real_t t, real_t Vmax, const FieldsFn &fill)
+   /// A station row now, whatever the cadence; collective.  True (a row).
+   bool ForceWrite(real_t t, real_t Vmax, const FieldsFn &fill)
    {
       state_.last_write_time = -1e30;
-      Write(t, Vmax, fill);
+      return Write(t, Vmax, fill);
    }
 
    /// One global row (root writes; others return).
@@ -368,10 +396,11 @@ public:
    /// t_end is the first time below event_V.  The dwell counts from the last
    /// time at or above it, as RegimeController's does from the same t, so a
    /// dynamic phase that ends on the same threshold and dwell closes the
-   /// event on the same step.
-   void UpdateEvents(real_t t, real_t Vmax)
+   /// event on the same step.  Returns what changed (EventUpdate).
+   EventUpdate UpdateEvents(real_t t, real_t Vmax)
    {
       State &s = state_;
+      EventUpdate u;
       if (!s.in_event)
       {
          if (Vmax > cfg_.event_V)
@@ -382,17 +411,27 @@ public:
             s.event_peak_V = Vmax;
             s.below_since = -1.0;
             s.last_above = t;
+            u.change = EventChange::Started;
          }
-         return;
+         u.event = s.num_events;
+         u.t_start = s.event_start;
+         return u;
       }
+      u.event = s.num_events;
+      u.t_start = s.event_start;
       s.event_peak_V = std::max(s.event_peak_V, Vmax);
       if (Vmax >= cfg_.event_V)
       {
+         if (s.below_since >= 0.0) { u.change = EventChange::Above; }
          s.below_since = -1.0;
          s.last_above = t;
-         return;
+         return u;
       }
-      if (s.below_since < 0.0) { s.below_since = t; }
+      if (s.below_since < 0.0)
+      {
+         s.below_since = t;
+         u.change = EventChange::Below;
+      }
       if (t - s.last_above >= cfg_.event_dwell)
       {
          if (catalog_)
@@ -401,9 +440,14 @@ public:
                            s.below_since, s.event_peak_V});
             catalog_->Flush();
          }
+         // Below and Ended on one step (event_dwell 0): the end fields are
+         // this step's, which BenchmarkOutput takes with Ended too.
+         if (u.change == EventChange::Below) { u.change = EventChange::Ended; u.t_end = t; }
+         else { u.change = EventChange::Ended; u.t_end = s.below_since; }
          s.in_event = false;
          s.below_since = -1.0;
       }
+      return u;
    }
 
    void Flush()

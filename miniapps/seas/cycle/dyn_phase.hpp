@@ -27,6 +27,21 @@
 //     U = u_s; U' = 0; a fresh CentralDifferenceSolver, Init(W)
 //   Step(): one central-difference step; W.ImplicitSolve advances the fault
 //
+// Local time stepping ([cycle.lts] mode = "rate2"; the Nitsche driver's
+// --lts rate2, solver/nitsche_lts_run.hpp): PlanLts, before the ParMesh,
+// clusters the serial mesh on rank 0 (BuildNitscheLtsAssignment: rate-2
+// clusters, cluster cap, the fault and fault_buffer layers of tets in one
+// cluster c_F) and cuts it with BuildLtsAwarePartition; MapLts gives the
+// clusters of the local and face-neighbour elements.  Both regimes run on
+// that partition.  The operator's step is then dt_F = dt0 2^c_F (dt0 <= the
+// global CFL step), Enter calls NitscheLtsRun::Init instead of the central
+// difference solver, and Step() runs fault steps (NitscheLtsRun::FaultStep)
+// up to the next sync point, where every cluster has ended a step and the
+// record (max V, sigma ranges) is reduced over the ranks: the controller,
+// the event catalog and the output act at sync points.  The fault-step
+// hook (SetFaultStepHook) runs after every fault step (every step without
+// LTS), for the per-DOF rupture times and peak V.
+//
 // The wall and creep loads are evaluated at t0 + tau, never at tau alone:
 // W's clock stays the stepper clock tau, so a large t0 does not round the
 // step (plan J3).  The Kelvin-Voigt term sees v_D = 0 on the Dirichlet
@@ -55,6 +70,8 @@
 #include "../domain/boundary_config.hpp"
 #include "../domain/domain_config.hpp"
 #include "../solver/nitsche_cfl.hpp"
+#include "../solver/nitsche_lts_run.hpp"
+#include "../dynamic/lts_partition.hpp"
 #include "../friction/rate_state_closure.hpp"
 #include "../friction/dieterich_ruina.hpp"
 #include "../fault/fault_frame.hpp"
@@ -63,9 +80,15 @@
 
 #include <array>
 #include <cmath>
+#include <functional>
+#include <iomanip>
+#include <limits>
 #include <map>
 #include <memory>
+#include <sstream>
+#include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace mfem
 {
@@ -73,6 +96,20 @@ namespace seas
 {
 namespace cycle
 {
+
+/// [cycle.lts] rate2: the clusters and the partition (DynPhase::PlanLts,
+/// DynPhase::MapLts).
+struct LtsLayout
+{
+   bool on = false;
+   int num_clusters = 1;
+   int fault_cluster = 0;        ///< c_F
+   real_t dt0 = 0.0;             ///< cluster 0's step [s]
+   std::vector<int> part;        ///< serial element -> rank (empty: MFEM's cut)
+   std::vector<int> cluster;     ///< per serial element (cleared by MapLts)
+   std::vector<int> cl, cl_nbr;  ///< local and face-neighbour elements
+   std::string report;           ///< the summary (rank 0)
+};
 
 class DynPhase
 {
@@ -82,9 +119,11 @@ public:
    static constexpr real_t kCeig[5] = {0.0, 0.113, 0.212, 0.282, 0.332};
 
    /// `table`, `par` and `pre` are the QD regime's, on the same owned fault
-   /// DOFs.  `dt_scale` multiplies the CFL step (tests only).
+   /// DOFs.  `dt_scale` multiplies the CFL step (tests only).  `lts`: the
+   /// layout of MapLts with [cycle.lts] rate2 (null or off: global stepping).
    DynPhase(ParMesh &pmesh, const CycleConfig &cfg, const FaultDOFTable &table,
-            const FaultParams &par, const Prestress &pre, real_t dt_scale = 1.0)
+            const FaultParams &par, const Prestress &pre, real_t dt_scale = 1.0,
+            const LtsLayout *lts = nullptr)
       : pmesh_(pmesh), cfg_(cfg), t0_(std::make_shared<real_t>(0.0))
    {
       const spatial::SpatialFrictionConfig &s = cfg.shared;
@@ -170,7 +209,17 @@ public:
       W_->SetBackgroundTraction(S0);   // hook H2
 
       dt_cfl_ = ComputeMaxDt(W_->Sample(), pmesh, p, dc.cfl * kCeig[p]);
-      dt_ = dt_scale * dt_cfl_;
+      const bool lts_on = (lts != nullptr && lts->on);
+      MFEM_VERIFY(lts_on == cfg.lts.On(), "DynPhase: [cycle.lts] is " << cfg.lts.mode
+                  << " but the layout says " << (lts_on ? "rate2" : "off"));
+      if (lts_on)
+      {
+         MFEM_VERIFY(dt_scale == 1.0, "DynPhase: dt_scale with local time stepping");
+         MFEM_VERIFY(lts->dt0 <= dt_cfl_ * (1.0 + 1e-12), "DynPhase: the LTS step dt0 = "
+                     << lts->dt0 << " s is above the global CFL step " << dt_cfl_ << " s");
+         dt_ = std::ldexp(lts->dt0, lts->fault_cluster);   // the fault cluster's step
+      }
+      else { dt_ = dt_scale * dt_cfl_; }
       W_->SetTimeStep(dt_);
 
       if (dc.kv_eta > 0.0)
@@ -183,6 +232,13 @@ public:
                                                    : NitscheWaveOperator::KVLength::Inscribed);
       }
       if (dc.pc) { W_->SetPrakashClifton(dc.pc_v_star, dc.pc_length); }
+      if (lts_on)
+      {
+         // After Kelvin-Voigt: its blocks hold K_eta (collective).
+         lts_ = std::make_unique<NitscheLtsRun>(*W_, lts->cl, lts->cl_nbr, lts->num_clusters,
+                                                lts->fault_cluster, lts->dt0,
+                                                cfg.penalty_factor);
+      }
 
       const int n = W_->Height();
       U_.SetSize(n);
@@ -207,18 +263,202 @@ public:
       if (W_->HasPrakashClifton()) { W_->SetPrakashCliftonState(sigma_n); }
       U_ = u_s;
       Ud_ = 0.0;
-      ode_ = std::make_unique<CentralDifferenceSolver>();
-      ode_->Init(*W_);
+      if (lts_) { lts_->Init(U_, Ud_, 0.0); }
+      else
+      {
+         ode_ = std::make_unique<CentralDifferenceSolver>();
+         ode_->Init(*W_);
+      }
+      entered_ = true;
       steps_ = 0;
+      fault_steps_ = 0;
    }
 
-   /// One central-difference step: tau += dt.
+   /// One central-difference step (tau += dt), or with local time stepping
+   /// the fault steps to the next sync point (tau += SyncDt()).  The
+   /// fault-step hook runs after each fault step.
    void Step()
    {
-      MFEM_VERIFY(ode_, "DynPhase::Step before Enter");
-      real_t h = dt_;
-      ode_->Step(U_, Ud_, tau_, h);
+      MFEM_VERIFY(entered_, "DynPhase::Step before Enter");
+      if (lts_)
+      {
+         bool sync = false;
+         while (!sync)
+         {
+            sync = lts_->FaultStep(U_, Ud_, tau_);
+            W_->SetTime(tau_);
+            fault_steps_++;
+            if (fault_hook_) { fault_hook_(*t0_ + tau_); }
+         }
+      }
+      else
+      {
+         real_t h = dt_;
+         ode_->Step(U_, Ud_, tau_, h);
+         fault_steps_++;
+         if (fault_hook_) { fault_hook_(*t0_ + tau_); }
+      }
       steps_++;
+   }
+
+   /// Runs after every fault step with t = t0 + tau (local per-DOF work only:
+   /// between sync points the record is not reduced).
+   void SetFaultStepHook(std::function<void(real_t)> hook) { fault_hook_ = std::move(hook); }
+
+   bool Lts() const { return lts_ != nullptr; }
+   /// The time one Step() advances: dt, or the LTS sync interval.
+   real_t StepDt() const { return lts_ ? lts_->SyncInterval() : dt_; }
+   long FaultSteps() const { return fault_steps_; }
+   const NitscheLtsRun *LtsRun() const { return lts_.get(); }
+
+   /// [cycle.lts] rate2, before the ParMesh: the clusters of the serial mesh
+   /// (rank 0, broadcast) and, on more than one rank, the LTS-aware cut
+   /// (drivers/nitsche_dyn_driver.cpp:881-959).  `smesh`: the serial mesh
+   /// in metres, on every rank.  Collective.
+   static LtsLayout PlanLts(Mesh &smesh, const CycleConfig &cfg, MPI_Comm comm)
+   {
+      LtsLayout L;
+      if (!cfg.lts.On()) { return L; }
+      L.on = true;
+      int rank = 0, nranks = 1;
+      MPI_Comm_rank(comm, &rank);
+      MPI_Comm_size(comm, &nranks);
+      const int p = cfg.shared.mesh.order;
+      const int ne = smesh.GetNE();
+      int hdr[4] = {0, 0, 0, 0};
+      double dt0 = 0.0;
+      NitscheLtsAssignment asg;
+      std::ostringstream rep;
+      if (rank == 0)
+      {
+         const auto &mf = cfg.shared.material_fallback;
+         const real_t cp = std::sqrt((mf.lambda + 2.0 * mf.mu) / mf.rho);
+         asg = BuildNitscheLtsAssignment(smesh, p, cfg.dyn.cfl * kCeig[p], cp, cfg.fault_attr,
+                                         std::numeric_limits<real_t>::infinity(),
+                                         cfg.lts.cluster_cap, cfg.lts.fault_buffer);
+         hdr[0] = asg.num_clusters;
+         hdr[1] = asg.fault_cluster;
+         hdr[2] = asg.passes;
+         hdr[3] = static_cast<int>(asg.fault_pairs.size());
+         dt0 = asg.dt0;
+         rep << std::setprecision(6) << "rate2, " << asg.num_clusters << " clusters (cap "
+             << cfg.lts.cluster_cap << "), dt0 = " << dt0 << " s; tets per cluster";
+         for (long long c : asg.cells) { rep << " " << c; }
+         rep << "; ideal " << asg.ideal << "x; fault (" << asg.fault_tets << " tets, "
+             << asg.buffer_tets << " buffer tets in " << cfg.lts.fault_buffer
+             << " layer(s)) in cluster " << asg.fault_cluster << " after " << asg.passes
+             << " clustering(s)";
+      }
+      MPI_Bcast(hdr, 4, MPI_INT, 0, comm);
+      MPI_Bcast(&dt0, 1, MPI_DOUBLE, 0, comm);
+      L.cluster.resize(ne);
+      if (rank == 0) { L.cluster = asg.cluster; }
+      MPI_Bcast(L.cluster.data(), ne, MPI_INT, 0, comm);
+      L.num_clusters = hdr[0];
+      L.fault_cluster = hdr[1];
+      L.dt0 = static_cast<real_t>(dt0);
+      MFEM_VERIFY(hdr[3] > 0, "[cycle.lts] rate2: the mesh has no fault faces (attribute "
+                  << cfg.fault_attr << ")");
+      if (nranks > 1)
+      {
+         L.part.resize(ne);
+         if (rank == 0)
+         {
+            std::vector<double> cost;
+            if (cfg.lts.fault_weight > 0.0)
+            {
+               // integer METIS weights: 100 per tet + 100 w per fault-face side
+               cost.assign(ne, 100.0);
+               for (const auto &pr : asg.fault_pairs)
+               {
+                  cost[pr.first] += 100.0 * cfg.lts.fault_weight;
+                  cost[pr.second] += 100.0 * cfg.lts.fault_weight;
+               }
+            }
+            const Table &e2e = smesh.ElementToElementTable();
+            std::vector<int> xadj(e2e.GetI(), e2e.GetI() + ne + 1);
+            std::vector<int> adj(e2e.GetJ(), e2e.GetJ() + e2e.Size_of_connections());
+            LtsPartitionOptions popt;
+            try
+            {
+               BuildLtsAwarePartition(ne, xadj, adj, asg.cluster, asg.num_clusters, nranks,
+                                      cost.empty() ? nullptr : &cost, asg.fault_pairs, popt,
+                                      L.part);
+            }
+            catch (const std::exception &ex)
+            {
+               MFEM_ABORT("[cycle.lts] rate2: BuildLtsAwarePartition failed on " << nranks
+                          << " ranks: " << ex.what());
+            }
+            const LtsPartitionImbalance imb = ComputeLtsPartitionImbalance(
+               asg.cluster, asg.num_clusters, L.part, nranks, cost.empty() ? nullptr : &cost,
+               asg.fault_pairs);
+            rep << std::setprecision(4) << "; partition BuildLtsAwarePartition (fault weight "
+                << cfg.lts.fault_weight << "), max/mean overall " << imb.overall
+                << ", per cluster";
+            for (double x : imb.per_cluster) { rep << " " << x; }
+            rep << ", fault tets " << imb.fault;
+         }
+         MPI_Bcast(L.part.data(), ne, MPI_INT, 0, comm);
+      }
+      L.report = rep.str();
+      return L;
+   }
+
+   /// After ParMesh(comm, smesh, L.part): the clusters of the local elements
+   /// (serial order, checked by centroid) and of the face-neighbour elements
+   /// (drivers/nitsche_dyn_driver.cpp:1003-1052).  Collective.
+   static void MapLts(LtsLayout &L, const Mesh &smesh, ParMesh &pmesh)
+   {
+      if (!L.on) { return; }
+      int rank = 0;
+      MPI_Comm_rank(pmesh.GetComm(), &rank);
+      auto centroid = [](const Mesh &m, int e, real_t c[3])
+      {
+         Array<int> v;
+         m.GetElementVertices(e, v);
+         c[0] = c[1] = c[2] = 0.0;
+         for (int k = 0; k < v.Size(); k++)
+            for (int d = 0; d < 3; d++) { c[d] += m.GetVertex(v[k])[d] / v.Size(); }
+      };
+      L.cl.clear();
+      for (int i = 0; i < smesh.GetNE(); i++)
+      {
+         if (!L.part.empty() && L.part[i] != rank) { continue; }
+         const int k = static_cast<int>(L.cl.size());
+         MFEM_VERIFY(k < pmesh.GetNE(), "[cycle.lts]: more serial elements on rank " << rank
+                     << " than its " << pmesh.GetNE() << " local elements");
+         real_t a[3], b[3];
+         centroid(smesh, i, a);
+         centroid(pmesh, k, b);
+         const real_t dd = std::hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+         MFEM_VERIFY(dd <= 1e-9 * (1.0 + std::hypot(a[0], a[1], a[2])), "[cycle.lts]: local "
+                     "element " << k << " of rank " << rank << " is not serial element " << i
+                     << " (centroids " << dd << " m apart)");
+         L.cl.push_back(L.cluster[i]);
+      }
+      MFEM_VERIFY(static_cast<int>(L.cl.size()) == pmesh.GetNE(), "[cycle.lts]: rank " << rank
+                  << " has " << pmesh.GetNE() << " local elements but " << L.cl.size()
+                  << " serial elements");
+      pmesh.ExchangeFaceNbrData();
+      DG_FECollection fec0(0, pmesh.Dimension());
+      ParFiniteElementSpace fes0(&pmesh, &fec0);
+      ParGridFunction g0(&fes0);
+      Array<int> d0;
+      for (int e = 0; e < pmesh.GetNE(); e++)
+      {
+         fes0.GetElementDofs(e, d0);
+         g0(d0[0]) = L.cl[e];
+      }
+      g0.ExchangeFaceNbrData();
+      L.cl_nbr.resize(pmesh.GetNFaceNeighborElements());
+      for (int j = 0; j < pmesh.GetNFaceNeighborElements(); j++)
+      {
+         fes0.GetFaceNbrElementVDofs(j, d0);
+         L.cl_nbr[j] = static_cast<int>(std::lround(g0.FaceNbrData()(d0[0])));
+      }
+      L.cluster.clear();
+      L.cluster.shrink_to_fit();
    }
 
    real_t Tau() const { return tau_; }
@@ -407,6 +647,10 @@ private:
    std::unique_ptr<RateStateClosure> closure_;
    std::unique_ptr<NitscheWaveOperator> W_;
    std::unique_ptr<CentralDifferenceSolver> ode_;
+   std::unique_ptr<NitscheLtsRun> lts_;
+   std::function<void(real_t)> fault_hook_;
+   bool entered_ = false;
+   long fault_steps_ = 0;
    FrameMap frames_;
    Vector U_, Ud_;
    real_t tau_ = 0.0;

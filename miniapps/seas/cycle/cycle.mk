@@ -11,6 +11,8 @@
 #   make -f cycle/cycle.mk test-cycle-p3          # P3, the switch back to QD
 #   make -f cycle/cycle.mk test-cycle-p4          # P4, QD -> dynamic at t > 0
 #   make -f cycle/cycle.mk test-cycle-snapshots   # the snapshot files, 7 runs
+#   make -f cycle/cycle.mk test-cycle-bench       # the SCEC benchmark writer
+#   make -f cycle/cycle.mk test-cycle-bench-run   # the p = 2 deck's options, driver runs
 #   make -f cycle/cycle.mk cycle-owned-check      # rule M1, owned paths only
 #   make -f cycle/cycle.mk cycle-all              # all builds and checks (default)
 # Without the conda HDF5 (CONDA_PREFIX), point HDF5_INCFLAGS and HDF5_LIBS at
@@ -47,17 +49,23 @@ CYCLE_HEADERS = $(wildcard cycle/*.hpp)
 CYCLE_CXXFLAGS = $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) $(TOML_FLAGS) \
                  -DSEAS_USE_MPI $(CYCLE_COMMIT_FLAG)
 # Shared headers the cycle includes (QD stack, deck loader, material field,
-# and the Nitsche dynamic stack that dyn_phase.hpp includes).
+# and the Nitsche dynamic stack that dyn_phase.hpp includes, with the LTS
+# run of [cycle.lts]).
 CYCLE_DYN_HEADERS = domain/nitsche_wave_operator.hpp domain/nitsche_material_sample.hpp \
                     domain/nitsche_mass.hpp domain/nitsche_energy.hpp solver/nitsche_cfl.hpp \
-                    friction/rate_state_closure.hpp friction/fault_closure.hpp
+                    friction/rate_state_closure.hpp friction/fault_closure.hpp \
+                    solver/nitsche_lts_run.hpp solver/nitsche_lts_setup.hpp \
+                    dynamic/lts_partition.hpp dynamic/lts_clustering.hpp \
+                    integrator/dg_elasticity_ip_combined_integrator.hpp
 CYCLE_SHARED_HEADERS = $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(PARALLEL_IO_HEADERS) \
                        spatial/code/spatial_friction.hpp dynamic/heterogeneous_material.hpp \
                        $(CYCLE_DYN_HEADERS)
 # Shared objects: the deck loader and resolver (spatial_friction) and what it
-# links (material field, coefficients, HDF5 data fields).
+# links (material field, coefficients, HDF5 data fields), and the LTS
+# partition and clustering of [cycle.lts] (as seas_nitsche_dyn_driver).
 CYCLE_LINK_OBJS = $(SPATIAL_FRICTION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
-                  $(MATERIAL_COEFFICIENTS_OBJ) $(DATA_FIELD_3D_OBJ)
+                  $(MATERIAL_COEFFICIENTS_OBJ) $(DATA_FIELD_3D_OBJ) \
+                  $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ)
 CYCLE_LIBS = $(MFEM_LIBS) $(HDF5_LIBS) $(SEAS_FS_LIB)
 
 # The driver (plan item j).
@@ -193,6 +201,37 @@ test-cycle-snapshots: seas_fd_cycle_driver
 	MPIRUN="$(MFEM_MPIEXEC) $(CYCLE_P2_MPIFLAGS)" \
 	   tests/cycle/test_cycle_snapshots.sh $(CYCLE_SNAP_WORK) $(CYCLE_SNAP_NP)
 
+# The SCEC benchmark writer (cycle/bench_output.hpp) and the event updates
+# it follows, on made-up fields with known answers; 1 and 2 ranks, no solve.
+CYCLE_BENCH_SRC = tests/cycle/test_cycle_bench.cpp
+CYCLE_BENCH_OBJ = $(CYCLE_BENCH_SRC:.cpp=.o)
+$(CYCLE_BENCH_OBJ): %.o: $(SRC)%.cpp $(CYCLE_HEADERS) $(CYCLE_STAMP) \
+                    $(CYCLE_SHARED_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
+
+seas_test_cycle_bench: $(CYCLE_BENCH_OBJ) $(CYCLE_LINK_OBJS)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(CYCLE_BENCH_OBJ) $(CYCLE_LINK_OBJS) \
+	    $(CYCLE_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+CYCLE_BENCH_WORK ?= ../../../runs_test_cycle_bench
+test-cycle-bench: seas_test_cycle_bench
+	@for n in 1 2; do \
+	   $(MFEM_MPIEXEC) $(CYCLE_P2_MPIFLAGS) $(MFEM_MPIEXEC_NP) $$n ./seas_test_cycle_bench \
+	      $(CYCLE_BENCH_WORK)_np$$n || exit 1; \
+	done
+
+# The p = 2 deck's options in short driver runs at p = 1
+# (tests/cycle/test_cycle_bench_run.sh): restart with the benchmark files,
+# the QD velocity against the displacement rows, the stage operators, LTS
+# against global stepping on CYCLE_BENCH_RUN_NP ranks.
+CYCLE_BENCH_RUN_NP ?= 2
+CYCLE_BENCH_RUN_WORK ?= ../../../runs_test_cycle_bench_run
+test-cycle-bench-run: seas_fd_cycle_driver
+	MPIRUN="$(MFEM_MPIEXEC) $(CYCLE_P2_MPIFLAGS)" \
+	   tests/cycle/test_cycle_bench_run.sh $(CYCLE_BENCH_RUN_WORK) 10 $(CYCLE_BENCH_RUN_NP)
+
 # Rule M1: the branch changes only its own paths, plus the shared files that
 # hold its hooks (document/fd_cycle_dev/HOOKS.md), and those by additions
 # only.  CYCLE_BASE is the shared branch this one merges from (M7); the check
@@ -230,14 +269,15 @@ cycle-owned-check:
 	echo "PASSED: every changed file is under an owned path, a hook file changed by additions only, or an import (rule M1)"
 
 cycle-all: seas_fd_cycle_driver seas_test_cycle_params_parity seas_test_cycle_p2 \
-           seas_test_cycle_p3 seas_test_cycle_p4 test-cycle-api-pin cycle-owned-check
+           seas_test_cycle_p3 seas_test_cycle_p4 seas_test_cycle_bench test-cycle-api-pin \
+           cycle-owned-check
 
 cycle-clean:
 	rm -f $(FD_CYCLE_DRIVER_OBJ) $(CYCLE_API_PIN_OBJ) $(CYCLE_PARITY_OBJ) $(CYCLE_P2_OBJ) \
-	      $(CYCLE_P3_OBJ) $(CYCLE_P4_OBJ) seas_fd_cycle_driver seas_test_cycle_api_pin \
-	      seas_test_cycle_params_parity seas_test_cycle_p2 seas_test_cycle_p3 \
-	      seas_test_cycle_p4 $(CYCLE_STAMP)
+	      $(CYCLE_P3_OBJ) $(CYCLE_P4_OBJ) $(CYCLE_BENCH_OBJ) seas_fd_cycle_driver \
+	      seas_test_cycle_api_pin seas_test_cycle_params_parity seas_test_cycle_p2 \
+	      seas_test_cycle_p3 seas_test_cycle_p4 seas_test_cycle_bench $(CYCLE_STAMP)
 
 .PHONY: cycle-all cycle-clean cycle-owned-check test-cycle-api-pin \
         test-cycle-params-parity test-cycle-p2 test-cycle-p3 test-cycle-p4 \
-        test-cycle-snapshots
+        test-cycle-snapshots test-cycle-bench test-cycle-bench-run
