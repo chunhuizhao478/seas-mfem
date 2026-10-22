@@ -58,8 +58,9 @@ struct PoroInitialPressure
    real_t width_per_m2 = 0.0;
 };
 
-/// The injection rate Q(x, t) = rate g(x) f(t) (derivation (4.3), F1).
-struct PoroSource
+/// The injection rate Q(x, t) = rate g(x) f(t) (derivation (4.3), F1), as
+/// read from the deck; PoroSource (poro_source.hpp) evaluates it.
+struct PoroSourceConfig
 {
    bool on = false;
    std::string shape;            ///< "gaussian" or "well"
@@ -88,7 +89,7 @@ struct PoroConfig
    std::string drag_gamma;          ///< "fitted" or "half" (test U2-15 only)
    std::string velocity_coupling;   ///< "momentum" (Gamma_mom, F3) or "diagonal"
    PoroInitialPressure initial_pressure;
-   PoroSource source;
+   PoroSourceConfig source;
    /// Set when the table is present but the option is off: the driver logs it.
    std::string warning;
 

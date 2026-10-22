@@ -74,13 +74,34 @@
 // U2-6 to U2-8 are measured against the largest of max |loads|, max |K x|
 // (and max |strong form| in U2-8) over the rows of one field.
 //
-// Usage: mpirun -np 1|2|4 ./seas_test_poro_p2 [--only U2-3|...|U2-8]
+// Step P2.3: PoroSource (poro_source.hpp), the fluid source of (4.3) and its
+// loads (6.6).
+//   U2-9  V(t) = rate F(t) for step, ramp and smooth_step against
+//         Gauss-Legendre integrals of the plan's f at six times; the
+//         trapezoid V of the smooth step at T/2 converges at second order
+//         (dt = T/8 to T/64, ratios in [3.5, 4.5]) and is exact for step and
+//         ramp on a grid through T; a well inside one element (F-B, and F-C
+//         on both sides of x = 0, p = 1-3) loads only that element's rows,
+//         b^T L = M (alpha div u + div w)(x_w) for polynomial (u, w) of
+//         degree p, and Force adds rate F(t) L bit for bit.  R(1e-15); the
+//         well's b^T L against the sum of the |terms| (Chunhui Zhao,
+//         2026-10-21, see TestU29).  (Makefile) --abort well-face |
+//         well-vertex abort.
+//   X2-7  (extra) a gaussian source through SetSource gives the F_V of
+//         rate g(x) F(t) set directly (R(1e-12), mixed walls, p = 1, 2);
+//         InitialPressure at quadrature points; (Makefile) --abort
+//         well-outside | source-time (Force with the source behind the
+//         operator's time) abort.
+//
+// Usage: mpirun -np 1|2|4 ./seas_test_poro_p2 [--only U2-3|...|U2-9|X2-7]
 //        [--abort interior-only|penalty-one-sided|dirichlet-interior|
-//                 no-flow-fault|kappa-zero]
+//                 no-flow-fault|kappa-zero|well-face|well-vertex|
+//                 well-outside|source-time]
 
 #include "mfem.hpp"
 #include "../dg_poro_div_integrator.hpp"
 #include "../poro_nitsche_operator.hpp"
+#include "../poro_source.hpp"
 #include "../../../friction/rate_state_closure.hpp"
 #include "../../../config/tpv102_params.hpp"
 #include "poro_fixtures.hpp"
@@ -2065,6 +2086,355 @@ int RunAbortP22(const std::string &mode)
    return 1;
 }
 
+// ------------------------------------------------------------- U2-9, X2-7
+
+using mfem::seas::poro::InitialPressure;
+using mfem::seas::poro::PoroInitialPressure;
+using mfem::seas::poro::PoroSource;
+using mfem::seas::poro::PoroSourceConfig;
+using mfem::seas::poro::SourceIntegration;
+
+const real_t kRS = 1e-15;     // R of U2-9 (plan section 6.4)
+const real_t kRise = 0.125;   // s, a power of two, so the trapezoid grids are exact
+
+/// The plan's time functions, written here independently of poro_source.hpp.
+real_t RefRate(const std::string &kind, real_t t)
+{
+   if (t < 0.0) { return 0.0; }
+   if (kind == "step" || t >= kRise) { return 1.0; }
+   const real_t s = t / kRise;
+   if (kind == "ramp") { return s; }
+   return 10.0 * s * s * s - 15.0 * s * s * s * s + 6.0 * s * s * s * s * s;
+}
+
+/// int_0^t RefRate by Gauss-Legendre on [0, min(t, T)] and [T, t], exact for
+/// these polynomials.
+real_t RefIntegral(const std::string &kind, real_t t)
+{
+   const IntegrationRule &ir = IntRules.Get(Geometry::SEGMENT, 11);
+   auto gauss = [&](real_t a, real_t b) {
+      real_t q = 0.0;
+      for (int i = 0; i < ir.GetNPoints(); i++)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(i);
+         q += ip.weight * RefRate(kind, a + (b - a) * ip.x);
+      }
+      return (b - a) * q;
+   };
+   if (t <= 0.0) { return 0.0; }
+   if (kind == "step") { return gauss(0.0, t); }
+   return t <= kRise ? gauss(0.0, t) : gauss(0.0, kRise) + gauss(kRise, t);
+}
+
+PoroSourceConfig SourceCfg(const std::string &shape, const std::string &kind, real_t rate,
+                           const real_t x0[3])
+{
+   PoroSourceConfig c;
+   c.on = true;
+   c.shape = shape;
+   for (int d = 0; d < 3; d++) { c.origin_m[d] = x0[d]; }
+   c.width_per_m2 = shape == "gaussian" ? 1.0 / (0.4 * kL * 0.4 * kL) : 0.0;
+   c.rate = rate;
+   c.time_function = kind;
+   c.rise_time_s = kind == "step" ? 0.0 : kRise;
+   return c;
+}
+
+void TestU29()
+{
+   if (g_rank == 0)
+   {
+      std::cout << "--- U2-9: PoroSource: V(t) for each time function, the trapezoid "
+                   "rule's order, and a well's point load\n";
+   }
+   const real_t origin[3] = {0.0, 0.0, -0.5 * kL};
+   const char *kinds[3] = {"step", "ramp", "smooth_step"};
+
+   // V(t) exact: the closed form against Gauss-Legendre of the plan's f.
+   const real_t times[6] = {0.0, 0.013, 0.05, kRise, 0.1371, 0.25};
+   for (const char *kind : kinds)
+   {
+      PoroSource src(SourceCfg("gaussian", kind, 1.0, origin));
+      real_t rv = 0.0, rf = 0.0;
+      bool zero = true;
+      for (real_t t : times)
+      {
+         src.Advance(t);
+         const real_t ref = RefIntegral(kind, t);
+         if (t == 0.0) { zero = src.VolumeFactor() == 0.0; }
+         else { rv = std::max(rv, std::abs(src.VolumeFactor() - ref) / std::abs(ref)); }
+         rf = std::max(rf, std::abs(src.TimeFunction().Rate(t) - RefRate(kind, t)));
+      }
+      TEST_ASSERT(zero && rv <= kRS && rf <= kRS,
+                  std::string("U2-9 ") + kind + ": V(t) = rate F(t) equals the integral of "
+                  "the plan's f at 6 times, 0 at t = 0 (R = " + Fmt(rv) + "; f within "
+                  + Fmt(rf) + ")");
+   }
+
+   // The trapezoid rule: second order where F is not piecewise linear (the
+   // smooth step during its rise), exact on the grid otherwise.
+   {
+      real_t err[4];
+      const real_t tstar = 0.5 * kRise;
+      for (int k = 0; k < 4; k++)
+      {
+         const int nsteps = 4 << k;   // dt = T/8 ... T/64
+         const real_t dt = tstar / nsteps;
+         PoroSource src(SourceCfg("gaussian", "smooth_step", 1.0, origin),
+                        SourceIntegration::kTrapezoid);
+         for (int i = 1; i <= nsteps; i++) { src.Advance(i * dt); }
+         err[k] = std::abs(src.VolumeFactor() - RefIntegral("smooth_step", tstar));
+      }
+      bool ok = true;
+      std::string rs;
+      for (int k = 0; k < 3; k++)
+      {
+         const real_t r = err[k] / err[k + 1];
+         ok = ok && r >= 3.5 && r <= 4.5;
+         rs += (k ? ", " : "") + Fmt(r);
+      }
+      TEST_ASSERT(ok, "U2-9 smooth_step: the trapezoid V at T/2 converges at second order "
+                  "(dt = T/8 to T/64: errors " + Fmt(err[0]) + " to " + Fmt(err[3])
+                  + ", ratios " + rs + " in [3.5, 4.5])");
+      for (const char *kind : {"step", "ramp"})
+      {
+         PoroSource src(SourceCfg("gaussian", kind, 1.0, origin),
+                        SourceIntegration::kTrapezoid);
+         const real_t dt = kRise / 8.0;
+         for (int i = 1; i <= 16; i++) { src.Advance(i * dt); }
+         const real_t ref = RefIntegral(kind, 2.0 * kRise);
+         const real_t r = std::abs(src.VolumeFactor() - ref) / ref;
+         TEST_ASSERT(r <= kRS, std::string("U2-9 ") + kind + ": the trapezoid V is exact on "
+                     "a grid through T (f is linear between grid times; R = " + Fmt(r) + ")");
+      }
+   }
+
+   // A well: the load is M V_w zeta(v, q)(x_w) on its element's rows only.
+   const real_t wells[2][3] = {{-0.613 * kL, 0.287 * kL, -0.391 * kL},
+                               {0.442 * kL, -0.533 * kL, -0.718 * kL}};
+   for (int fc = 0; fc <= 1; fc++)
+   {
+      for (int p = 1; p <= 3; p++)
+      {
+         std::unique_ptr<Mesh> m(BoxMesh(2, 2, 1, Walls::kDrained));
+         auto box = MakeBox(*m, MPI_COMM_WORLD, p, fc == 1, Walls::kDrained, kKappaW, ZeroG());
+         PoroNitscheOperator &op = *box->op;
+         ParFiniteElementSpace &fes = Space(*box);
+         const int n = op.NumU();
+         for (int wi = 0; wi <= fc; wi++)
+         {
+            const real_t *xw = wells[wi];
+            const std::string P = "U2-9 " + Box(fc == 1) + " p = " + std::to_string(p)
+                                  + ", well at x " + (xw[0] < 0 ? "< 0" : "> 0") + ": ";
+            const Medium &md = xw[0] > 0.0 && fc == 1 ? kMedB : kMedA;
+            const BiotConstants c = DeriveBiotConstants(md.lam, md.mu, BulkDensity(md.f), md.f);
+            PoroSource well(SourceCfg("well", "smooth_step", 3.0e-3, xw),
+                            SourceIntegration::kExact, &fes, box->sample.get());
+            const Vector &L = well.WellLoad();
+            const int e = well.WellElement();
+            const long holders = LSum(e >= 0 ? 1 : 0, MPI_COMM_WORLD);
+            // nonzeros outside the element's rows
+            std::vector<char> mine(2 * n, 0);
+            if (e >= 0)
+            {
+               Array<int> vd;
+               fes.GetElementVDofs(e, vd);
+               for (int i = 0; i < vd.Size(); i++) { mine[vd[i]] = mine[n + vd[i]] = 1; }
+            }
+            long outside = 0;
+            for (int i = 0; i < 2 * n; i++) { if (!mine[i] && L(i) != 0.0) { outside++; } }
+            outside = LSum(outside, MPI_COMM_WORLD);
+            TEST_ASSERT(holders == 1 && outside == 0 && L.Size() == 2 * n,
+                        P + "one element on one rank holds it, and every other entry of "
+                        "the load is zero (no face terms; " + std::to_string(outside)
+                        + " nonzero outside)");
+
+            // b^T L for polynomial (u, w) of degree p = M (alpha div u + div w)(x_w).
+            const std::array<SPoly, 3> u = RandomField(p, 2468u + p), w = RandomField(p, 1357u + p);
+            NodeFn fu = [&](const Vector &, const Vector &x, Vector &v) {
+               for (int i = 0; i < 3; i++) { v(i) = u[i].Eval(x); }
+            };
+            NodeFn fw = [&](const Vector &, const Vector &x, Vector &v) {
+               for (int i = 0; i < 3; i++) { v(i) = w[i].Eval(x); }
+            };
+            // Measured against the sum of the |terms| x_i L_i, chosen by Chunhui
+            // Zhao on 2026-10-21 in the review of step P2.3: on the first run
+            // p = 3 was 4.0e-15 to 4.8e-15 of the largest term, from the round-off
+            // of MFEM's p = 3 basis gradients at x_w (their sum, zero in exact
+            // arithmetic, is 21 eps of the largest one), and 3.6e-16 to 4.6e-16
+            // of the sum.
+            const Vector x = Join(ProjectNodes(fes, fu), ProjectNodes(fes, fw));
+            real_t sums[2] = {0.0, 0.0};   // b^T L, sum |b_i L_i|
+            for (int i = 0; i < 2 * n; i++)
+            {
+               sums[0] += x(i) * L(i);
+               sums[1] += std::abs(x(i) * L(i));
+            }
+            MPI_Allreduce(MPI_IN_PLACE, sums, 2, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+            Vector X(const_cast<real_t *>(xw), 3);
+            const real_t exact = c.M * (c.alpha * Div(u).Eval(X) + Div(w).Eval(X));
+            const real_t r = std::abs(sums[0] - exact) / std::max(sums[1], std::abs(exact));
+            TEST_ASSERT(r <= kRS, P + "for polynomial (u, w) of degree p the load times "
+                        "their DOFs is M (alpha div u + div w)(x_w) (R = " + Fmt(r)
+                        + " of the sum of |terms|)");
+
+            // Through the operator: Force adds rate F(t) times that load.
+            const real_t t1 = 0.0731;
+            well.Advance(t1);
+            op.SetTime(t1);
+            Vector F1, F0;
+            op.SetSource(&well);
+            op.Force(x, nullptr, nullptr, F1);
+            op.SetSource(nullptr);
+            op.Force(x, nullptr, nullptr, F0);
+            well.AddWellLoad(F0);
+            long diff = 0;
+            for (int i = 0; i < 2 * n; i++) { if (F1(i) != F0(i)) { diff++; } }
+            diff = LSum(diff, MPI_COMM_WORLD);
+            TEST_ASSERT(diff == 0, P + "Force with the well equals Force without it plus "
+                        "rate F(t) times the load, bit for bit");
+         }
+      }
+   }
+}
+
+/// X2-7: the gaussian source and p_init reach the operator.
+void TestX27()
+{
+   if (g_rank == 0)
+   {
+      std::cout << "--- X2-7 (extra): a gaussian PoroSource through SetSource, and "
+                   "InitialPressure\n";
+   }
+   const real_t x0[3] = {-0.21 * kL, 0.13 * kL, -0.47 * kL};
+   for (int p = 1; p <= 2; p++)
+   {
+      const std::string P = "X2-7 F-B p = " + std::to_string(p) + ": ";
+      std::unique_ptr<Mesh> m(BoxMesh(2, 2, 1, Walls::kMixed));
+      auto box = MakeBox(*m, MPI_COMM_WORLD, p, false, Walls::kMixed, kKappaW, ZeroG());
+      PoroNitscheOperator &op = *box->op;
+      const int n = op.NumU();
+      const PoroSourceConfig cfg = SourceCfg("gaussian", "ramp", 2.0e-6, x0);
+      PoroSource src(cfg);
+      const real_t t1 = 0.0917;
+      src.Advance(t1);
+      op.SetTime(t1);
+      FunctionCoefficient Vref([&](const Vector &x) {
+         real_t r2 = 0.0;
+         for (int d = 0; d < 3; d++) { r2 += (x(d) - x0[d]) * (x(d) - x0[d]); }
+         return cfg.rate * RefIntegral("ramp", t1) * std::exp(-cfg.width_per_m2 * r2);
+      });
+      Vector zero(2 * n), F1, F0;
+      zero = 0.0;
+      op.SetSource(&src);
+      op.Force(zero, nullptr, nullptr, F1);
+      op.SetSource(nullptr);
+      op.SetInjectedVolume(&Vref);
+      op.Force(zero, nullptr, nullptr, F0);
+      op.SetInjectedVolume(nullptr);
+      for (int half = 0; half <= 1; half++)
+      {
+         const int lo = half * n, hi = lo + n;
+         real_t r = 0.0;
+         for (int i = lo; i < hi; i++) { r = std::max(r, std::abs(F1(i) - F0(i))); }
+         r = RMax(r, MPI_COMM_WORLD) / MaxAbs(F0, lo, hi, MPI_COMM_WORLD);
+         TEST_ASSERT(r <= kRV, P + (half ? "fluid" : "solid") + " rows: F_V from the "
+                     "source equals F_V of rate g(x) F(t) given directly (R = " + Fmt(r) + ")");
+      }
+   }
+   // p_init at points.
+   PoroInitialPressure ip;
+   ip.on = true;
+   ip.origin_m[0] = 0.0; ip.origin_m[1] = -1000.0; ip.origin_m[2] = -7500.0;
+   ip.magnitude_pa = 5.0e7;
+   ip.width_per_m2 = 1.0e-7;
+   std::unique_ptr<Coefficient> pc = InitialPressure(ip);
+   std::unique_ptr<Mesh> m(BoxMesh(2, 2, 1, Walls::kDrained));
+   IsoparametricTransformation T;
+   real_t r = 0.0;
+   const IntegrationRule &ir = IntRules.Get(Geometry::TETRAHEDRON, 4);
+   for (int e = 0; e < m->GetNE(); e += 7)
+   {
+      m->GetElementTransformation(e, &T);
+      for (int k = 0; k < ir.GetNPoints(); k++)
+      {
+         Vector x;
+         T.SetIntPoint(&ir.IntPoint(k));
+         T.Transform(ir.IntPoint(k), x);
+         real_t r2 = 0.0;
+         for (int d = 0; d < 3; d++) { r2 += (x(d) - ip.origin_m[d]) * (x(d) - ip.origin_m[d]); }
+         const real_t ref = ip.magnitude_pa * std::exp(-ip.width_per_m2 * r2);
+         if (ref > 0.0) { r = std::max(r, std::abs(pc->Eval(T, ir.IntPoint(k)) - ref) / ref); }
+      }
+   }
+   TEST_ASSERT(r <= kRS, "X2-7 InitialPressure is magnitude exp(-width |x - x0|^2) at the "
+               "quadrature points (R = " + Fmt(r) + ")");
+}
+
+/// U2-9 and X2-7 aborts.
+int RunAbortP23(const std::string &mode)
+{
+   if (g_rank == 0) { std::cout << "expecting an abort: " << mode << "\n"; }
+   std::unique_ptr<Mesh> m(BoxMesh(2, 2, 1, Walls::kDrained));
+   real_t xw[3] = {2.0 * kL, 0.0, -0.5 * kL};   // well-outside
+   if (mode == "well-face")
+   {
+      // the centroid of the first interior face that is not on the fault plane
+      for (int f = 0; f < m->GetNumFaces(); f++)
+      {
+         if (m->GetFaceInformation(f).IsBoundary()) { continue; }
+         Array<int> fv;
+         m->GetFaceVertices(f, fv);
+         real_t c[3] = {0.0, 0.0, 0.0};
+         for (int i = 0; i < 3; i++)
+            for (int d = 0; d < 3; d++) { c[d] += m->GetVertex(fv[i])[d] / 3.0; }
+         if (std::abs(c[1]) < 1e-6 * kL) { continue; }
+         for (int d = 0; d < 3; d++) { xw[d] = c[d]; }
+         break;
+      }
+   }
+   else if (mode == "well-vertex")
+   {
+      // the first vertex strictly inside the box
+      for (int v = 0; v < m->GetNV(); v++)
+      {
+         const real_t *c = m->GetVertex(v);
+         if (std::abs(c[0]) < 0.99 * kL && std::abs(c[1]) < 0.99 * kL && c[2] < -0.01 * kL
+             && c[2] > -0.99 * kL && std::abs(c[1]) > 1e-6 * kL)
+         {
+            for (int d = 0; d < 3; d++) { xw[d] = c[d]; }
+            break;
+         }
+      }
+   }
+   else if (mode != "well-outside" && mode != "source-time")
+   {
+      if (g_rank == 0) { std::cout << "FAILED: unknown abort mode " << mode << "\n"; }
+      return 1;
+   }
+   auto box = MakeBox(*m, MPI_COMM_WORLD, 1, false, Walls::kDrained, kKappaW, ZeroG());
+   if (mode == "source-time")
+   {
+      PoroSource src(SourceCfg("gaussian", "step", 1.0e-6, xw));
+      box->op->SetSource(&src);
+      box->op->SetTime(0.25);
+      Vector x(2 * box->op->NumU()), F;
+      x = 0.0;
+      box->op->Force(x, nullptr, nullptr, F);
+   }
+   else
+   {
+      if (g_rank == 0)
+      {
+         std::cout << "  well at (" << xw[0] << ", " << xw[1] << ", " << xw[2] << ")\n";
+      }
+      PoroSource well(SourceCfg("well", "step", 1.0e-3, xw), SourceIntegration::kExact,
+                      &Space(*box), box->sample.get());
+   }
+   if (g_rank == 0) { std::cout << "FAILED: " << mode << " did not abort\n"; }
+   return 1;
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -2079,14 +2449,15 @@ int main(int argc, char *argv[])
       if (a == "--abort" && i + 1 < argc)
       {
          const std::string mode = argv[i + 1];
-         return (mode == "interior-only" || mode == "penalty-one-sided")
-                ? RunAbort(mode) : RunAbortP22(mode);
+         if (mode == "interior-only" || mode == "penalty-one-sided") { return RunAbort(mode); }
+         if (mode.rfind("well-", 0) == 0 || mode == "source-time") { return RunAbortP23(mode); }
+         return RunAbortP22(mode);
       }
       if (a == "--only" && i + 1 < argc) { only = argv[++i]; }
    }
    if (g_rank == 0)
    {
-      std::cout << "=== Poroelastic P2 (plan rev 3), steps P2.1 and P2.2, on "
+      std::cout << "=== Poroelastic P2 (plan rev 3), steps P2.1 to P2.3, on "
                 << Mpi::WorldSize() << " rank(s)" << (only.empty() ? "" : ", only " + only)
                 << " ===\n";
    }
@@ -2102,6 +2473,8 @@ int main(int argc, char *argv[])
    if (run("U2-6") || run("U2-7")) { TestU26U27a(); }
    if (run("U2-7")) { TestU27bc(); }
    if (run("U2-8")) { TestU28(); }
+   if (run("U2-9")) { TestU29(); }
+   if (run("X2-7")) { TestX27(); }
    int nf = num_failed;
    MPI_Allreduce(MPI_IN_PLACE, &nf, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
    if (g_rank == 0)

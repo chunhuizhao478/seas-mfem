@@ -36,9 +36,12 @@
 //   F_D,w  the Dirichlet load of the kTrialNormal rows, -int alpha M (div q)
 //          (g.n) on Dirichlet-u faces, with the elastic operator's own
 //          DirichletFunc per attribute, at t = GetTime() in every call;
-//   F_V    (6.6) for an injected volume V(x, t) (SetInjectedVolume; P2.3's
-//          PoroSource supplies it): c = alpha M on the solid rows, with the
-//          Dirichlet faces; c = M on the fluid rows, with the no-flow faces;
+//   F_V    (6.6) for an injected volume V(x, t) (SetInjectedVolume, or
+//          SetSource with a gaussian PoroSource): c = alpha M on the solid
+//          rows, with the Dirichlet faces; c = M on the fluid rows, with the
+//          no-flow faces; a well PoroSource adds its point load instead
+//          (poro_source.hpp), at the source's own time, which must be the
+//          operator's;
 //   F_init (6.6) for a starting pressure (SetInitialPressure), c = 1 on the
 //          fluid rows, with the no-flow faces; assembled once.
 // The drag b M_e v*_w is element-local: M_e is the scalar DG mass of
@@ -62,7 +65,10 @@
 #include "../../domain/nitsche_wave_operator.hpp"
 #include "dg_poro_div_integrator.hpp"
 #include "poro_material.hpp"
+#include "poro_source.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <memory>
 #include <set>
 #include <vector>
@@ -291,6 +297,16 @@ public:
       }
    }
 
+   /// The fluid source of step P2.3, or null for none: a gaussian through
+   /// SetInjectedVolume, a well through its point load.  Kept, not owned; the
+   /// caller advances it, and every Force call checks that its Time() is
+   /// GetTime() (to 1e-12 relative).
+   void SetSource(PoroSource *src)
+   {
+      src_ = src;
+      SetInjectedVolume(src && !src->IsWell() ? &src->InjectedVolume() : nullptr);
+   }
+
    /// The starting pressure p_init(x) (derivation section 4.2): F_init of
    /// (6.6), fluid rows, assembled once here.
    void SetInitialPressure(Coefficient &p_init)
@@ -341,6 +357,13 @@ public:
       if (v) { Halves_(*v, vu, vw); }
       Fu.MakeRef(F, 0, n_);
       Fw.MakeRef(F, n_, n_);
+      if (src_)
+      {
+         MFEM_VERIFY(std::abs(src_->Time() - t) <= 1e-12 * std::max(real_t(1.0), std::abs(t)),
+                     "PoroNitscheOperator::Force: the source is at t = " << src_->Time()
+                     << " and the operator at t = " << t << "; advance the source "
+                     "first (step 2b of plan section 5.2).");
+      }
       if (V_)
       {
          V_->SetTime(t);
@@ -373,6 +396,7 @@ public:
          ApplyDrag(vw, tmp_);
          Fw -= tmp_;
       }
+      if (src_ && src_->IsWell()) { src_->AddWellLoad(F); }
    }
 
    /// Dv = b_e M_e v per element and component (the w rows of D v, 8.2).
@@ -462,6 +486,7 @@ private:
    std::unique_ptr<ParLinearForm> fdw_;
 
    Coefficient *V_ = nullptr;
+   PoroSource *src_ = nullptr;
    std::unique_ptr<ParLinearForm> fvu_, fvw_;
    Vector finit_;
    bool has_init_ = false;

@@ -113,7 +113,7 @@ std::string ParseInitialPressure(const toml::value &t, PoroInitialPressure &ip)
    return "";
 }
 
-std::string ParseSource(const toml::value &t, PoroSource &s)
+std::string ParseSource(const toml::value &t, PoroSourceConfig &s)
 {
    std::string err;
    if (!t.is_table()) { return std::string(kSrc) + " must be a table"; }
