@@ -77,6 +77,19 @@
 // --mesh-setup every-rank is the code before: every rank reads the serial
 // mesh and builds its ParMesh from it.  On one rank both are the same.
 //
+// Mesh part files (speed-next S1 step 2, Chunhui Zhao 2026-10-22): run on
+// one rank, --mesh-parts-out d --mesh-parts-n N reads the deck and the
+// mesh, computes the partition into N parts as a run on N ranks would (LTS
+// clusters included), writes the N parts, their LTS clusters and
+// d/mesh_parts.txt (the mesh's size and FNV-1a hash, the options the
+// partition depends on, the LTS header) and stops.  A run on N ranks with
+// --mesh-parts d then reads its own part; no rank reads the serial mesh.
+// The run refuses parts cut for another rank count, from another mesh, or
+// with other values of the options the partition depends on (the fault
+// weight and attribute; with LTS also the order, cfl, the LTS cap and fault
+// buffer, dt_max and the material).  The parts are the ones --mesh-setup
+// rank0 sends, so the results are the same bit for bit.
+//
 // Station columns (SCEC map, plan "The SCEC conventions, mapped"):
 //   slip1 = delta.dhat (v-slip), slip2 = delta.shat (h-slip),
 //   V1 = V.dhat, V2 = V.shat,
@@ -177,11 +190,13 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <set>
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
+#include <utility>
 #include <vector>
 
 using namespace mfem;
@@ -674,7 +689,8 @@ int main(int argc, char *argv[])
                       " [--lts-report 0|1]"
                       " [--lts-report-cap n] [--lts-report-ranks a,b,...]"
                       " [--lts off|rate2] [--lts-cap n] [--lts-fault-buffer n]"
-                      " [--lts-same-step 0|1] [--mesh-setup rank0|every-rank]\n";
+                      " [--lts-same-step 0|1] [--mesh-setup rank0|every-rank]"
+                      " [--mesh-parts-out d --mesh-parts-n N] [--mesh-parts d]\n";
       }
       return 1;
    }
@@ -750,9 +766,23 @@ int main(int argc, char *argv[])
    const std::string mesh_setup = ArgStr(argc, argv, "--mesh-setup", "rank0");
    MFEM_VERIFY(mesh_setup == "rank0" || mesh_setup == "every-rank", "--mesh-setup "
                << mesh_setup << ": expected rank0 or every-rank");
-   const bool mesh_rank0 = mesh_setup == "rank0" && nranks > 1;
+   // Mesh part files (header)
+   const std::string parts_out = ArgStr(argc, argv, "--mesh-parts-out", "");
+   const int parts_n = ArgInt(argc, argv, "--mesh-parts-n", 0);
+   const std::string parts_in = ArgStr(argc, argv, "--mesh-parts", "");
+   const bool parts_split = !parts_out.empty();
+   const bool parts_load = !parts_in.empty();
+   MFEM_VERIFY(!parts_split || (nranks == 1 && parts_n >= 1), "--mesh-parts-out writes the "
+               "parts on one rank: run it on 1 rank with --mesh-parts-n N (N >= 1)");
+   MFEM_VERIFY(parts_n == 0 || parts_split, "--mesh-parts-n needs --mesh-parts-out");
+   MFEM_VERIFY(!(parts_split && parts_load), "--mesh-parts-out and --mesh-parts exclude each other");
+   MFEM_VERIFY(!lts_report || (!parts_split && !parts_load), "--lts-report reads the serial "
+               "mesh; not with --mesh-parts-out or --mesh-parts");
+   // the number of parts of the partition
+   const int nparts = parts_split ? parts_n : nranks;
+   const bool mesh_rank0 = mesh_setup == "rank0" && nranks > 1 && !parts_load;
    // the ranks that hold the serial mesh
-   const bool smesh_here = !mesh_rank0 || g_rank == 0;
+   const bool smesh_here = !parts_load && (!mesh_rank0 || g_rank == 0);
    MFEM_VERIFY(!lts_same || lts_on, "--lts-same-step needs --lts rate2");
    MFEM_VERIFY(station_copies == "average" || station_copies == "first",
                "--station-copies " << station_copies << ": expected average or first");
@@ -782,6 +812,20 @@ int main(int argc, char *argv[])
                "needs cfl <= 0.6 (the accepted multirate step limit; undamped resonance bands "
                "start near 0.65)");
    MakeDirs(out_dir);
+   // Mesh part files (header): the options the partition depends on, as
+   // mesh_parts.txt records them; with LTS off only the first three matter
+   auto exact = [](real_t x) {
+      std::ostringstream o;
+      o << std::setprecision(17) << x;
+      return o.str();
+   };
+   const std::vector<std::pair<std::string, std::string>> parts_opts = {
+      {"lts", lts_mode}, {"fault_weight", exact(fault_weight)},
+      {"fault_attr", std::to_string(cfg.boundary.fault_attr)},
+      {"order", std::to_string(p)}, {"cfl", exact(cfl)}, {"lts_cap", std::to_string(lts_cap)},
+      {"lts_fault_buffer", std::to_string(lts_buffer)}, {"dt_max", exact(cfg.time.dt_max)},
+      {"lambda", exact(cfg.material_fallback.lambda)}, {"mu", exact(cfg.material_fallback.mu)},
+      {"rho", exact(cfg.material_fallback.rho)}};
 
    // [output] ParaView keys, SAFS semantics (spatial_dyn_driver): the master
    // gate paraview_enabled switches the ParaView collections; the fault
@@ -847,7 +891,37 @@ int main(int argc, char *argv[])
    // ------------------------------------------------------------ mesh
    std::unique_ptr<Mesh> smesh;
    long long ne_global = 0;
-   if (smesh_here)
+   std::map<std::string, std::string> parts_info;
+   auto info = [&](const std::string &k) {
+      const auto it = parts_info.find(k);
+      MFEM_VERIFY(it != parts_info.end(), "--mesh-parts: " << parts_in
+                  << "/mesh_parts.txt has no " << k);
+      return it->second;
+   };
+   if (parts_load)
+   {
+      parts_info = ReadMeshPartsInfo(MPI_COMM_WORLD, parts_in);
+      MFEM_VERIFY(info("format") == "seas-mesh-parts 1", "--mesh-parts: " << parts_in
+                  << "/mesh_parts.txt: format '" << info("format") << "'");
+      MFEM_VERIFY(std::stoi(info("parts")) == nranks, "--mesh-parts: the parts in " << parts_in
+                  << " are for " << info("parts") << " ranks; this run has " << nranks);
+      for (size_t i = 0; i < parts_opts.size(); i++)
+      {
+         if (i >= 3 && !lts_on) { break; }
+         MFEM_VERIFY(info(parts_opts[i].first) == parts_opts[i].second, "--mesh-parts: the "
+                     "parts in " << parts_in << " were cut with " << parts_opts[i].first << " = "
+                     << info(parts_opts[i].first) << "; this run has " << parts_opts[i].second);
+      }
+      if (g_rank == 0)
+      {
+         const std::string h = FileFnv1a64(mesh_path);
+         MFEM_VERIFY(h == info("mesh_fnv1a64"), "--mesh-parts: the parts in " << parts_in
+                     << " were cut from " << info("mesh") << " (FNV-1a " << info("mesh_fnv1a64")
+                     << "); this run's mesh " << mesh_path << " has FNV-1a " << h);
+      }
+      ne_global = std::stoll(info("tets"));
+   }
+   else if (smesh_here)
    {
       smesh = std::make_unique<Mesh>(mesh_path.c_str(), 1, 1);
       MFEM_VERIFY(smesh->Dimension() == 3, "mesh must be 3-D");
@@ -886,7 +960,23 @@ int main(int argc, char *argv[])
       const int ne = static_cast<int>(ne_global);
       int hdr[4] = {0, 0, 0, 0};
       double dt0 = 0.0;
-      if (g_rank == 0)
+      if (parts_load)
+      {
+         hdr[0] = std::stoi(info("lts_num_clusters"));
+         hdr[1] = std::stoi(info("lts_fault_cluster"));
+         hdr[2] = std::stoi(info("lts_passes"));
+         hdr[3] = std::stoi(info("lts_fault_pairs"));
+         dt0 = std::stod(info("lts_dt0"));
+         if (g_rank == 0)
+         {
+            std::cout << std::setprecision(6) << "  LTS (plan item 7): rate2" << (lts_same
+                      ? " with --lts-same-step (every cluster at dt0; test)" : "") << ", "
+                      << hdr[0] << " clusters (hard cap " << lts_cap << "), dt0 = " << dt0
+                      << " s; fault in cluster " << hdr[1] << " (from the mesh parts in "
+                      << parts_in << ")\n";
+         }
+      }
+      else if (g_rank == 0)
       {
          const auto &mf = cfg.material_fallback;
          const real_t cp = std::sqrt((mf.lambda + 2.0 * mf.mu) / mf.rho);
@@ -908,7 +998,7 @@ int main(int argc, char *argv[])
       }
       MPI_Bcast(hdr, 4, MPI_INT, 0, MPI_COMM_WORLD);
       MPI_Bcast(&dt0, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-      if (!mesh_rank0)   // rank0: each rank gets the clusters of its part
+      if (!mesh_rank0 && !parts_load)   // rank0, parts: the clusters of the rank's part
       {
          lts_asg.cluster.resize(ne);
          MPI_Bcast(lts_asg.cluster.data(), ne, MPI_INT, 0, MPI_COMM_WORLD);
@@ -925,7 +1015,7 @@ int main(int argc, char *argv[])
    // so ranks that own fault faces get fewer tets (w = 0: MFEM's default cut).
    // With LTS (plan item 7) the same weight goes to the multi-constraint cut.
    std::vector<int> part;
-   if (lts_on && Mpi::WorldSize() > 1)
+   if (lts_on && nparts > 1 && !parts_load)
    {
       const int ne = static_cast<int>(ne_global);
       if (smesh_here) { part.resize(ne); }
@@ -949,16 +1039,16 @@ int main(int argc, char *argv[])
          try
          {
             BuildLtsAwarePartition(ne, xadj, adj, lts_asg.cluster, lts_asg.num_clusters,
-                                   Mpi::WorldSize(), cost.empty() ? nullptr : &cost,
+                                   nparts, cost.empty() ? nullptr : &cost,
                                    lts_asg.fault_pairs, popt, part);
          }
          catch (const std::exception &ex)
          {
-            MFEM_ABORT("--lts rate2: BuildLtsAwarePartition failed on " << Mpi::WorldSize()
+            MFEM_ABORT("--lts rate2: BuildLtsAwarePartition failed on " << nparts
                        << " ranks: " << ex.what());
          }
          const LtsPartitionImbalance imb = ComputeLtsPartitionImbalance(
-            lts_asg.cluster, lts_asg.num_clusters, part, Mpi::WorldSize(),
+            lts_asg.cluster, lts_asg.num_clusters, part, nparts,
             cost.empty() ? nullptr : &cost, lts_asg.fault_pairs);
          std::cout << std::setprecision(4) << "  partition: multi-constraint (BuildLtsAwarePartition, "
                    << "fault weight w = " << fault_weight << "); max/mean overall " << imb.overall
@@ -968,7 +1058,7 @@ int main(int argc, char *argv[])
       }
       if (!mesh_rank0) { MPI_Bcast(part.data(), ne, MPI_INT, 0, MPI_COMM_WORLD); }
    }
-   else if (fault_weight > 0.0 && Mpi::WorldSize() > 1 && smesh_here)
+   else if (fault_weight > 0.0 && nparts > 1 && smesh_here)
    {
       // every rank with the serial mesh computes the same cut
       MFEM_VERIFY(cfg.boundary.fault_attr > 0, "[boundary] fault_attr is required");
@@ -993,30 +1083,62 @@ int main(int argc, char *argv[])
       std::vector<int> cluster(ne, 0);
       LtsPartitionOptions popt;
       popt.imbalance = 1.03;   // METIS's default for k-way, as MFEM's cut
-      BuildLtsAwarePartition(ne, xadj, adj, cluster, 1, Mpi::WorldSize(), &cost, {}, popt, part);
+      BuildLtsAwarePartition(ne, xadj, adj, cluster, 1, nparts, &cost, {}, popt, part);
       const LtsPartitionImbalance imb =
-         ComputeLtsPartitionImbalance(cluster, 1, part, Mpi::WorldSize(), &cost, {});
+         ComputeLtsPartitionImbalance(cluster, 1, part, nparts, &cost, {});
       if (g_rank == 0)
       {
          std::cout << "  partition: METIS with fault weight w = " << fault_weight << " ("
                    << nface << " fault faces); weighted max/mean " << imb.overall << "\n";
       }
    }
-   else if (mesh_rank0 && g_rank == 0)
+   else if ((mesh_rank0 || parts_split) && g_rank == 0)
    {
       // the cut ParMesh(comm, serial mesh) makes on every rank
-      int *q = smesh->GeneratePartitioning(nranks, 1);
+      int *q = smesh->GeneratePartitioning(nparts, 1);
       part.assign(q, q + smesh->GetNE());
       delete [] q;
    }
    setup_timer.Mark("partition");
+   if (parts_split)
+   {
+      const auto t0 = std::chrono::steady_clock::now();
+      MakeDirs(parts_out);
+      if (part.empty()) { part.assign(smesh->GetNE(), 0); }   // N = 1
+      WriteMeshParts(parts_out, *smesh, part.data(), nparts, lts_on, lts_asg.cluster.data());
+      std::ifstream mf(mesh_path, std::ios::binary | std::ios::ate);
+      std::vector<std::pair<std::string, std::string>> kv = {
+         {"format", "seas-mesh-parts 1"}, {"parts", std::to_string(nparts)}, {"mesh", mesh_path},
+         {"mesh_bytes", std::to_string(static_cast<long long>(mf.tellg()))},
+         {"mesh_fnv1a64", FileFnv1a64(mesh_path)}, {"tets", std::to_string(ne_global)},
+         {"partition", lts_on ? "BuildLtsAwarePartition (LTS)" : fault_weight > 0.0
+                       ? "BuildLtsAwarePartition (fault weight)" : "Mesh::GeneratePartitioning (METIS)"}};
+      kv.insert(kv.end(), parts_opts.begin(), parts_opts.end());
+      if (lts_on)
+      {
+         kv.push_back({"lts_num_clusters", std::to_string(lts_asg.num_clusters)});
+         kv.push_back({"lts_fault_cluster", std::to_string(lts_asg.fault_cluster)});
+         kv.push_back({"lts_passes", std::to_string(lts_asg.passes)});
+         kv.push_back({"lts_fault_pairs", std::to_string(lts_asg.fault_pairs.size())});
+         kv.push_back({"lts_dt0", exact(lts_asg.dt0)});
+      }
+      WriteMeshPartsInfo(parts_out, kv);
+      std::cout << "  mesh parts: " << nparts << " parts of " << mesh_path << " written to "
+                << parts_out << " in " << std::chrono::duration<double>(
+                   std::chrono::steady_clock::now() - t0).count() << " s\n" << std::flush;
+      return 0;
+   }
    // LTS: the clusters of the local elements (the serial elements of this
    // rank, in serial order, as ParMesh builds them; with every-rank checked
    // here by centroid, with rank0 by rank 0 vertex by vertex before it sends
    // the part) and of the face-neighbour elements
    std::vector<int> lts_cl, lts_cl_nbr;
    std::unique_ptr<ParMesh> pmesh_owner;
-   if (mesh_rank0)
+   if (parts_load)
+   {
+      pmesh_owner = ReadMeshPart(MPI_COMM_WORLD, parts_in, lts_on, &lts_cl);
+   }
+   else if (mesh_rank0)
    {
       pmesh_owner = DistributeMeshParts(MPI_COMM_WORLD, smesh.get(), part.data(), lts_on,
                                         lts_asg.cluster.data(), &lts_cl);
@@ -1032,13 +1154,21 @@ int main(int argc, char *argv[])
    ParMesh &pmesh = *pmesh_owner;
    if (g_rank == 0)
    {
-      std::cout << "  mesh setup " << (mesh_rank0 ? "rank0: rank 0 read the mesh and sent each "
-                                       "rank its part\n"
-                                       : nranks == 1 ? "(one rank): ParMesh from the serial mesh\n"
-                                       : "every-rank: every rank read the mesh\n");
+      if (parts_load)
+      {
+         std::cout << "  mesh setup: every rank read its part from " << parts_in << " (cut from "
+                   << info("mesh") << ", " << info("partition") << ")\n";
+      }
+      else
+      {
+         std::cout << "  mesh setup " << (mesh_rank0 ? "rank0: rank 0 read the mesh and sent "
+                                          "each rank its part\n"
+                                          : nranks == 1 ? "(one rank): ParMesh from the serial "
+                                          "mesh\n" : "every-rank: every rank read the mesh\n");
+      }
    }
    setup_timer.Mark("ParMesh");
-   if (lts_on && !mesh_rank0)
+   if (lts_on && !mesh_rank0 && !parts_load)
    {
       auto centroid = [](const Mesh &m, int e, real_t c[3]) {
          Array<int> v;

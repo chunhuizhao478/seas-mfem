@@ -20,12 +20,16 @@
 //   MP-6  the element values sent with the parts are those of the local
 //         elements of ParMesh(comm, serial mesh, partition);
 //   MP-7  an interior-penalty DG operator applied to the same vector agrees
-//         to round-off (the shared-face order changes the order of the sum).
+//         to round-off (the shared-face order changes the order of the sum);
+//   MP-8  the part files (WriteMeshParts on rank 0, ReadMeshPart on every
+//         rank) give the ParMesh and the element values DistributeMeshParts
+//         gives, bit for bit (ParPrint), and mesh_parts.txt reads back.
 //
 // Two partitions: METIS (Mesh::GeneratePartitioning, what the driver uses
 // without LTS) and stripes that cut every fault face (the fault is an
 // interior boundary, attribute 7, at x = 1 of the built-in mesh).  Run on
-// 1-4 ranks (make test-mesh-parts).  --mesh m.msh tests a Gmsh mesh instead
+// 1-4 ranks (make test-mesh-parts, which then removes the part files in
+// test_mesh_parts_out/).  --mesh m.msh tests a Gmsh mesh instead
 // (METIS partition only; --fault-attr a counts its fault faces, default 7).
 
 #include "mfem.hpp"
@@ -39,8 +43,11 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <sstream>
 #include <string>
 #include <vector>
+
+#include <sys/stat.h>
 
 using namespace mfem;
 using namespace mfem::seas;
@@ -159,7 +166,18 @@ SharedSet(const ParMesh &m, int kind)
    return s;
 }
 
-static void Compare(Mesh &smesh, const std::vector<int> &part, const char *name)
+static const std::string kOut = "test_mesh_parts_out";
+
+static std::string ParText(const ParMesh &m)
+{
+   std::ostringstream os;
+   os.precision(17);
+   m.ParPrint(os);
+   return os.str();
+}
+
+static void Compare(Mesh &smesh, const std::vector<int> &part, const char *name,
+                    const std::string &tag)
 {
    if (g_rank == 0)
    {
@@ -326,6 +344,27 @@ static void Compare(Mesh &smesh, const std::vector<int> &part, const char *name)
    }
    TEST_ASSERT(ra.Size() == rb.Size() && gm[0] <= 1e-12 * gm[1],
                "MP-7 interior-penalty DG operator: same result to round-off");
+
+   // MP-8
+   const std::string dir = kOut + "/" + tag;
+   if (g_rank == 0)
+   {
+      ::mkdir(kOut.c_str(), 0755);
+      ::mkdir(dir.c_str(), 0755);
+      WriteMeshParts(dir, smesh, part.data(), g_size, true, values.data());
+      WriteMeshPartsInfo(dir, {{"format", "test 1"}, {"name", name}});
+   }
+   MPI_Barrier(MPI_COMM_WORLD);
+   std::vector<int> vc;
+   std::unique_ptr<ParMesh> cp = ReadMeshPart(MPI_COMM_WORLD, dir, true, &vc);
+   std::unique_ptr<ParMesh> bq = DistributeMeshParts(
+      MPI_COMM_WORLD, g_rank == 0 ? &smesh : nullptr, g_rank == 0 ? part.data() : nullptr,
+      true, g_rank == 0 ? values.data() : nullptr, &vb);
+   TEST_ASSERT(ParText(*cp) == ParText(*bq) && vc == vb,
+               "MP-8 part files: the same ParMesh (ParPrint) and element values as the sent parts");
+   const std::map<std::string, std::string> kv = ReadMeshPartsInfo(MPI_COMM_WORLD, dir);
+   TEST_ASSERT(kv.size() == 2 && kv.at("format") == "test 1" && kv.at("name") == name,
+               "MP-8 mesh_parts.txt: the entries read back");
 }
 
 int main(int argc, char *argv[])
@@ -348,7 +387,7 @@ int main(int argc, char *argv[])
       int *p = smesh.GeneratePartitioning(g_size, 1);
       std::vector<int> part(p, p + ne);
       delete [] p;
-      Compare(smesh, part, "METIS partition");
+      Compare(smesh, part, "METIS partition", "metis");
    }
    if (mesh_file.empty())
    {
@@ -359,7 +398,7 @@ int main(int argc, char *argv[])
          const std::array<real_t, 3> c = Centroid(smesh, e);
          part[e] = (2 * static_cast<int>(c[1] * g_size) + (c[0] < 1.0 ? 0 : 1)) % g_size;
       }
-      Compare(smesh, part, "stripes across the fault");
+      Compare(smesh, part, "stripes across the fault", "stripes");
    }
 
    if (g_rank == 0)

@@ -27,9 +27,13 @@
 #include "mfem.hpp"
 
 #include <climits>
+#include <fstream>
+#include <iomanip>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace mfem
@@ -175,6 +179,143 @@ inline std::unique_ptr<ParMesh> DistributeMeshParts(MPI_Comm comm, Mesh *smesh,
       local_values->swap(mine_values);
    }
    return pmesh;
+}
+
+// ---------------------------------------------------------------- part files
+// (speed-next S1 step 2, Chunhui Zhao 2026-10-22).  A directory of part
+// files holds, for parts r = 0 .. N-1, mesh.<r> (MakeParFilename: six
+// digits; the text DistributeMeshParts sends), values.<r> (the element
+// values, one per line, when there are any) and mesh_parts.txt, one
+// "key value" line per key, which the caller fills (what the parts were cut
+// from and with which options) and checks when it reads them.
+
+/// Rank 0 alone, no communication: cut `smesh` into the `nparts` parts of
+/// `part` and write them to `dir`, with the element values when
+/// `with_values`; every part is checked as in DistributeMeshParts.
+inline void WriteMeshParts(const std::string &dir, Mesh &smesh, const int *part, int nparts,
+                           bool with_values, const int *values)
+{
+   std::vector<int> off, ids;
+   MeshPartElements(smesh.GetNE(), part, nparts, off, ids);
+   MeshPartitioner partitioner(smesh, nparts, part);
+   MeshPart mp;
+   for (int r = 0; r < nparts; r++)
+   {
+      const int n = off[r + 1] - off[r];
+      partitioner.ExtractPart(r, mp);
+      CheckMeshPart(smesh, mp, ids.data() + off[r], n, r);
+      const std::string f = MakeParFilename(dir + "/mesh.", r);
+      std::ofstream os(f);
+      os.precision(17);
+      mp.Print(os);
+      os.close();
+      MFEM_VERIFY(os, "mesh parts: cannot write " << f);
+      if (with_values)
+      {
+         const std::string fv = MakeParFilename(dir + "/values.", r);
+         std::ofstream ov(fv);
+         ov << n << "\n";
+         for (int k = 0; k < n; k++) { ov << values[ids[off[r] + k]] << "\n"; }
+         ov.close();
+         MFEM_VERIFY(ov, "mesh parts: cannot write " << fv);
+      }
+   }
+}
+
+/// Collective over `comm`: every rank builds its ParMesh from its own part
+/// file in `dir` (refine = false, fix_orientation = false, as
+/// DistributeMeshParts) and, with `with_values`, reads its element values.
+inline std::unique_ptr<ParMesh> ReadMeshPart(MPI_Comm comm, const std::string &dir,
+                                            bool with_values, std::vector<int> *local_values)
+{
+   int rank;
+   MPI_Comm_rank(comm, &rank);
+   const std::string f = MakeParFilename(dir + "/mesh.", rank);
+   std::ifstream is(f);
+   MFEM_VERIFY(is, "mesh parts: rank " << rank << " cannot open " << f);
+   auto pmesh = std::make_unique<ParMesh>(comm, is, /*refine=*/false, /*generate_edges=*/1,
+                                          /*fix_orientation=*/false);
+   if (with_values)
+   {
+      const std::string fv = MakeParFilename(dir + "/values.", rank);
+      std::ifstream iv(fv);
+      int n = -1;
+      iv >> n;
+      MFEM_VERIFY(iv && n == pmesh->GetNE(), "mesh parts: " << fv << " holds " << n
+                  << " element values; rank " << rank << " has " << pmesh->GetNE()
+                  << " elements");
+      local_values->resize(n);
+      for (int k = 0; k < n; k++) { iv >> (*local_values)[k]; }
+      MFEM_VERIFY(iv, "mesh parts: cannot read the " << n << " values of " << fv);
+   }
+   return pmesh;
+}
+
+/// mesh_parts.txt in `dir`: one "key value" line per entry, in order.
+inline void WriteMeshPartsInfo(const std::string &dir,
+                               const std::vector<std::pair<std::string, std::string>> &kv)
+{
+   const std::string f = dir + "/mesh_parts.txt";
+   std::ofstream os(f);
+   for (const auto &e : kv) { os << e.first << " " << e.second << "\n"; }
+   os.close();
+   MFEM_VERIFY(os, "mesh parts: cannot write " << f);
+}
+
+/// Collective over `comm`: rank 0 reads mesh_parts.txt in `dir` and every
+/// rank gets its entries (key, rest of the line).
+inline std::map<std::string, std::string> ReadMeshPartsInfo(MPI_Comm comm,
+                                                            const std::string &dir)
+{
+   int rank;
+   MPI_Comm_rank(comm, &rank);
+   std::string text;
+   int n = 0;
+   if (rank == 0)
+   {
+      const std::string f = dir + "/mesh_parts.txt";
+      std::ifstream is(f);
+      MFEM_VERIFY(is, "mesh parts: cannot open " << f);
+      std::ostringstream ss;
+      ss << is.rdbuf();
+      text = ss.str();
+      n = static_cast<int>(text.size());
+   }
+   MPI_Bcast(&n, 1, MPI_INT, 0, comm);
+   text.resize(n);
+   MPI_Bcast(&text[0], n, MPI_CHAR, 0, comm);
+   std::map<std::string, std::string> kv;
+   std::istringstream is(text);
+   for (std::string line; std::getline(is, line);)
+   {
+      const size_t sp = line.find(' ');
+      if (line.empty() || sp == std::string::npos) { continue; }
+      kv[line.substr(0, sp)] = line.substr(sp + 1);
+   }
+   return kv;
+}
+
+/// 64-bit FNV-1a of a file's bytes, as 16 hex digits: names the mesh the
+/// parts were cut from.
+inline std::string FileFnv1a64(const std::string &path)
+{
+   std::ifstream is(path, std::ios::binary);
+   MFEM_VERIFY(is, "mesh parts: cannot open " << path);
+   unsigned long long h = 1469598103934665603ULL;
+   std::vector<char> buf(1 << 20);
+   while (is)
+   {
+      is.read(buf.data(), static_cast<std::streamsize>(buf.size()));
+      const std::streamsize got = is.gcount();
+      for (std::streamsize i = 0; i < got; i++)
+      {
+         h ^= static_cast<unsigned char>(buf[i]);
+         h *= 1099511628211ULL;
+      }
+   }
+   std::ostringstream os;
+   os << std::hex << std::setw(16) << std::setfill('0') << h;
+   return os.str();
 }
 
 } // namespace seas
