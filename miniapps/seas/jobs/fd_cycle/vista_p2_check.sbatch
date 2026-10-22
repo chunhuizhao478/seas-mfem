@@ -36,6 +36,8 @@
 #              stations --tol 5e-2 (test_cycle_bench_run.sh's measures).
 #              That comparison counts only when the deck runs LTS; with
 #              global stepping it is printed for the record.
+# The runs start with TACC's ibrun; every node's committed memory goes to
+# memlog.txt every 2 s (vista_memlog.sh), and each run prints its peak.
 # Logs and runs in <checkout>-runs/p2check_<jobid>; the summary at the end.
 # Exits non-zero when a run or a comparison fails.
 # Cost: 4 nodes x <= 5 h on gg = <= 6.7 SU (EAR20006).
@@ -85,16 +87,33 @@ grep -q '^V_on               = 1.0e2$' "$RUNS/qd_green.toml" && grep -q '^enable
 GATE_LTS=0
 grep -q '^mode         = "rate2"$' "$DECK" && GATE_LTS=1
 
+# Every node's committed memory every 2 s, in the background (vista_memlog.sh);
+# each run prints its peak per node.
+srun --overlap -N "$SLURM_NNODES" -n "$SLURM_NNODES" --ntasks-per-node=1 \
+   "$ROOT/miniapps/seas/jobs/fd_cycle/vista_memlog.sh" 2 > "$RUNS/memlog.txt" 2>&1 &
+MEMLOG=$!
+trap 'kill $MEMLOG 2>/dev/null' EXIT
+
 fails=0
 run() {   # name, ranks, deck, driver options...
    local n=$1 np=$2 deck=$3; shift 3
    mkdir -p "$RUNS/$n"
    local s=$(date +%s)
-   mpirun -np "$np" --map-by ppr:144:node --bind-to core ./seas_fd_cycle_driver \
+   # TACC's ibrun, as the QD thread's 576-rank p = 2 runs (jobs/vista_qd_speed):
+   # with a bare mpirun -np 576 --map-by ppr:144:node --bind-to core (1089963)
+   # every 576-rank run died in its first MUMPS factorization ("Error
+   # allocating RECV buffers for matrix distribution"), while 144 ranks on one
+   # node ran.  ibrun -n N -o 0: N ranks from the first node on, 144 per node.
+   ibrun -n "$np" -o 0 ./seas_fd_cycle_driver \
       --deck "$deck" --output-dir "$RUNS/$n" --log-every 100 "$@" \
       > "$RUNS/$n/run.log" 2>&1
    local rc=$?
-   echo "$n: exit $rc in $(( $(date +%s) - s )) s on $np ranks"
+   local e=$(date +%s)
+   echo "$n: exit $rc in $(( e - s )) s on $np ranks"
+   awk -v s="$s" -v e="$e" '$2 >= s && $2 <= e + 2 && $3 == "limit" {
+         if ($6 > m[$1]) m[$1] = $6; L = $4 }
+      END { for (h in m) printf "    %s: peak committed %.1f of %.1f GiB\n", h, m[h], L }' \
+      "$RUNS/memlog.txt" | sort
    grep -E "QD stages|\[QD-GREEN\]|LTS:|benchmark output|profile points|=== fd_cycle summary" \
       -A3 "$RUNS/$n/run.log" | head -40
    [ $rc -eq 0 ] || fails=$((fails + 1))

@@ -24,6 +24,10 @@
 # running; a finished job soon drops out of Slurm and can no longer be a
 # dependency) instead of submitting one; the jobs/ and config/ files may
 # have changed since, the code not (the tests and check refuse it).
+# FDC_FROM=check: the build and the tests already passed for this code
+# (1089961 and 1089962 for a59731bf): submit only the check and the links,
+# the first link after the check.  The check and the run refuse binaries
+# built from other code, as above.
 # Cost: build <= 1 SU, tests <= 1.7 SU, check <= 6.7 SU, <= 64 SU per link
 # (EAR20006, gg, 0.33 SU per node-hour).
 # Submit only on Chunhui Zhao's typed go for these jobs.
@@ -47,6 +51,22 @@ sub() {   # sbatch arguments...; prints the job id
    echo "$id"
 }
 DEP="--kill-on-invalid-dep=yes --dependency"
+if [ "${FDC_FROM:-build}" = check ]; then
+   [ -z "$FDC_BUILD_JOB" ] || { echo "ERROR: FDC_FROM=check takes no FDC_BUILD_JOB"; exit 2; }
+   jc=$(sub vista_p2_check.sbatch) || exit 1
+   echo "check  $jc  (FDC_FROM=check: the build and the tests are not resubmitted)"
+   j1=$(sub $DEP=afterok:$jc vista_p2_1800yr.sbatch) || exit 1
+   RUN=$ROOT-runs/p2_1800_$j1
+   echo "link 1 $j1  (after $jc), run folder $RUN"
+   prev=$j1
+   for ((k = 2; k <= LINKS; k++)); do
+      j=$(sub $DEP=afterok:$prev vista_p2_1800yr.sbatch "$RUN") || exit 1
+      echo "link $k $j  (after $prev)"
+      prev=$j
+   done
+   exit 0
+fi
+[ "${FDC_FROM:-build}" = build ] || { echo "ERROR: FDC_FROM '$FDC_FROM' (build or check)"; exit 2; }
 if [ -n "$FDC_BUILD_JOB" ]; then                # a build job already submitted at HEAD
    [[ $FDC_BUILD_JOB =~ ^[0-9]+$ ]] || { echo "ERROR: FDC_BUILD_JOB '$FDC_BUILD_JOB' is not a job id"; exit 2; }
    jb=$FDC_BUILD_JOB
