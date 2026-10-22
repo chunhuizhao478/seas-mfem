@@ -38,11 +38,19 @@ for step in ${H_CHAIN}; do
       *) echo "ERROR: unknown step '${step}' in H_CHAIN." >&2; exit 1 ;;
    esac
    cmd=(sbatch --parsable)
-   [ -n "${dep}" ] && cmd+=(--dependency=afterok:"${dep}")
+   [ -n "${dep}" ] && cmd+=(--dependency=afterok:"${dep}" --kill-on-invalid-dep=yes)
    cmd+=("${extra[@]}" "jobs/horizon/${script}")
    if [ "${SUBMIT:-0}" = 1 ]; then
-      id="$("${cmd[@]}")"
+      # TACC's sbatch prints a banner on stdout even with --parsable; the
+      # job id ("id" or "id;cluster") is the last line.
+      out="$("${cmd[@]}")"
+      id="$(printf '%s\n' "${out}" | tail -n 1)"
       id="${id%%;*}"
+      if ! [[ "${id}" =~ ^[0-9]+$ ]]; then
+         echo "ERROR: ${step}: no job id in sbatch output:" >&2
+         printf '%s\n' "${out}" >&2
+         exit 1
+      fi
       echo "${step}: ${id}  (${cmd[*]})" | tee -a "${log}"
       dep="${id}"
    else
