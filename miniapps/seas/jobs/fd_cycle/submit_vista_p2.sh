@@ -20,6 +20,10 @@
 # Every dependency is afterok with --kill-on-invalid-dep=yes: a job that
 # fails cancels the jobs waiting on it, so the run starts only when the
 # build, every test and every check pass.  Prints the job ids.
+# FDC_BUILD_JOB=<id>: use a build job already submitted (pending or
+# running; a finished job soon drops out of Slurm and can no longer be a
+# dependency) instead of submitting one; the jobs/ and config/ files may
+# have changed since, the code not (the tests and check refuse it).
 # Cost: build <= 1 SU, tests <= 1.7 SU, check <= 6.7 SU, <= 64 SU per link
 # (EAR20006, gg, 0.33 SU per node-hour).
 # Submit only on Chunhui Zhao's typed go for these jobs.
@@ -33,13 +37,24 @@ LINKS=${FDC_LINKS:-3}
 echo "commit $(git -C "$ROOT" rev-parse HEAD)"
 
 sub() {   # sbatch arguments...; prints the job id
-   local id
-   id=$(sbatch --parsable "$@") || { echo "ERROR: sbatch $* failed" >&2; exit 1; }
-   echo "${id%%;*}"
+   # TACC's sbatch prints its welcome banner on stdout before the id, even
+   # with --parsable: the id is the last line ("<id>" or "<id>;<cluster>").
+   local out id
+   out=$(sbatch --parsable "$@") || { echo "ERROR: sbatch $* failed:" >&2; echo "$out" >&2; exit 1; }
+   id=$(printf '%s\n' "$out" | tail -1)
+   id=${id%%;*}
+   [[ $id =~ ^[0-9]+$ ]] || { echo "ERROR: no job id from sbatch $*:" >&2; echo "$out" >&2; exit 1; }
+   echo "$id"
 }
 DEP="--kill-on-invalid-dep=yes --dependency"
-jb=$(sub -t 03:00:00 --export=ALL,FDC_PART=build vista_build.sbatch) || exit 1
-echo "build  $jb"
+if [ -n "$FDC_BUILD_JOB" ]; then                # a build job already submitted at HEAD
+   [[ $FDC_BUILD_JOB =~ ^[0-9]+$ ]] || { echo "ERROR: FDC_BUILD_JOB '$FDC_BUILD_JOB' is not a job id"; exit 2; }
+   jb=$FDC_BUILD_JOB
+   echo "build  $jb  (FDC_BUILD_JOB, not resubmitted)"
+else
+   jb=$(sub -t 03:00:00 --export=ALL,FDC_PART=build vista_build.sbatch) || exit 1
+   echo "build  $jb"
+fi
 jt=$(sub -J fdc_tests -o fdc_tests_%j.out -e fdc_tests_%j.err -t 05:00:00 \
          $DEP=afterok:$jb --export=ALL,FDC_PART=tests vista_build.sbatch) || exit 1
 echo "tests  $jt  (after $jb)"

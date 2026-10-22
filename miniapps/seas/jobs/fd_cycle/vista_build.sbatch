@@ -56,13 +56,21 @@ echo "part: $PART"
 echo "host $(hostname)  cpu $(lscpu | grep -m1 'Model name' | xargs)  logs $RUNS"
 T0=$(date +%s)
 
-# 0. The tests' python (Vista's default python3 has no numpy; the
-# python3/3.11.8 module's interpreter, called by path as the QD jobs do).
-# The build keeps the default python3 for PETSc's configure, as the QD build.
-CYCLE_PY=${CYCLE_PY:-/opt/apps/gcc14/cuda12/python3/3.11.8/bin/python3}
-"$CYCLE_PY" -c "import numpy, h5py, tomllib; print('python', __import__('sys').version.split()[0], 'numpy', numpy.__version__, 'h5py', h5py.__version__)" \
-   || { echo "ERROR: $CYCLE_PY cannot import numpy, h5py and tomllib; set CYCLE_PY"; exit 2; }
-mkdir -p "$RUNS/pybin" && ln -sf "$CYCLE_PY" "$RUNS/pybin/python3" || exit 2
+# 0. The tests' python, with numpy, h5py and tomllib.  Vista's default
+# python3 has no numpy, and the python3/3.11.8 module's interpreter has no
+# h5py; the default is the SeisSol post-processing venv on that interpreter
+# (numpy 1.26.4, h5py 3.14.0 on 2026-10-22).  Called by path without its
+# module, the interpreter cannot find libpython3.11.so.1.0 (build 1089926):
+# $RUNS/pybin/python3 runs CYCLE_PY with the module's lib (CYCLE_PY_LIB) on
+# LD_LIBRARY_PATH, for the tests' python only.  The build keeps the default
+# python3 for PETSc's configure, as the QD build.
+CYCLE_PY=${CYCLE_PY:-${WORK:?}/seissol/venv-post/bin/python3}
+CYCLE_PY_LIB=${CYCLE_PY_LIB:-/opt/apps/gcc14/cuda12/python3/3.11.8/lib}
+mkdir -p "$RUNS/pybin" || exit 2
+printf '#!/bin/bash\nexport LD_LIBRARY_PATH="%s${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\nexec "%s" "$@"\n' \
+   "$CYCLE_PY_LIB" "$CYCLE_PY" > "$RUNS/pybin/python3" && chmod +x "$RUNS/pybin/python3" || exit 2
+"$RUNS/pybin/python3" -c "import numpy, h5py, tomllib; print('python', __import__('sys').version.split()[0], 'numpy', numpy.__version__, 'h5py', h5py.__version__)" \
+   || { echo "ERROR: $CYCLE_PY (lib $CYCLE_PY_LIB) cannot import numpy, h5py and tomllib; set CYCLE_PY"; exit 2; }
 
 # 1. build (the GitHub-first guard runs inside, before anything is built)
 if [ "$PART" != tests ]; then
@@ -73,15 +81,18 @@ if [ "$PART" != tests ]; then
    echo "commit $(git -C "$ROOT" rev-parse HEAD)"
    [ "$PART" = build ] && { echo "build only (FDC_PART=build): the tests run in their own job"; exit 0; }
 else
-   # The tests only: the GitHub-first guard, and binaries built at HEAD
+   # The tests only: the GitHub-first guard, and binaries built from this
+   # code (only jobs/ and config/ files may differ, as in the check and run)
    [ -z "$(git -C "$ROOT" status --porcelain --untracked-files=no)" ] \
       || { echo "ERROR: uncommitted changes in $ROOT"; git -C "$ROOT" status --short; exit 2; }
    [ -n "$(git -C "$ROOT" branch -r --contains HEAD)" ] \
       || { echo "ERROR: HEAD $(git -C "$ROOT" rev-parse --short HEAD) is not on GitHub"; exit 2; }
    BUILT=$(cat "$ROOT/miniapps/seas/BUILD_COMMIT_VISTA" 2>/dev/null)
-   [ "$BUILT" = "$(git -C "$ROOT" rev-parse HEAD)" ] \
-      || { echo "ERROR: binaries built at '$BUILT', HEAD is $(git -C "$ROOT" rev-parse HEAD); run FDC_PART=build first"; exit 2; }
-   echo "commit $BUILT, binaries from the build job"
+   git -C "$ROOT" cat-file -e "$BUILT^{commit}" 2>/dev/null \
+      || { echo "ERROR: binaries built at '$BUILT', not a commit here; run FDC_PART=build first"; exit 2; }
+   CODE=$(git -C "$ROOT" diff --name-only "$BUILT" HEAD | grep -v -E '^miniapps/seas/(config|jobs)/fd_cycle/')
+   [ -z "$CODE" ] || { echo "ERROR: code changed since the build at $BUILT:"; echo "$CODE"; exit 2; }
+   echo "commit $(git -C "$ROOT" rev-parse HEAD), binaries from the build job at $BUILT"
 fi
 
 # The same modules for the tests, and CYCLE_PY as their python3.
