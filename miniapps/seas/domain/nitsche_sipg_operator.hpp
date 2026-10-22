@@ -55,12 +55,17 @@
 // Each kernel has two layouts (SetLayout) with the same terms, which agree
 // to round-off (the team forms each side's sigma n separately):
 //   element  a thread per element, its rows in registers (FaceSide); the
-//            host default.  On a GH200 at p = 2 it needs more than 255
-//            registers and spills (nvcc -Xptxas -v).
+//            host default, and the device default at p = 1.  On a GH200 at
+//            p = 2 it needs more than 255 registers and spills (nvcc
+//            -Xptxas -v).
 //   team     a team of threads per element, 2 to 8 elements per block
 //            (TeamElement): the values staged in shared memory, a thread per
 //            quadrature point and side, then a thread per row; 52 to 78
-//            registers, no spills.  The device default.
+//            registers, no spills.  The device default at p = 2, with 2
+//            elements per block.
+// The device defaults are the faster layouts of the D2 microbenchmark on a
+// GH200 (job 1084877, TPV205 1000 m): at p = 1 the element layout, at p = 2
+// the team with 2 elements per block.
 // The halo is u (and v) on the DOFs of the face-neighbour elements, packed
 // together in one message per neighbour rank (MFEM's face-neighbour tables,
 // as ParGridFunction::ExchangeFaceNbrData), device buffers when MPI is GPU
@@ -477,9 +482,9 @@ public:
    /// microbenchmark times them apart; one pass alone is not a product).
    enum Pass { kVolume = 1, kFaces = 2, kAll = 3 };
    /// Kernel layout: a thread per element (registers), or a team of threads
-   /// per element (shared memory, TeamElement).  kAuto: the team on a
-   /// device, a thread per element on the host.  Same terms, sums in another
-   /// order (round-off).
+   /// per element (shared memory, TeamElement).  kAuto: on a device the team
+   /// at p = 2 and a thread per element at p = 1 (header), a thread per
+   /// element on the host.  Same terms, sums in another order (round-off).
    enum Layout { kAuto = 0, kElement = 1, kTeam = 2 };
 
    /// fes: the DG space of K (ElasticityDomainOperator::GetFESpace; vdim 3,
@@ -552,6 +557,12 @@ public:
                   && (!kv_ || (kv_lambda->ParFESpace() == &mfes && kv_mu->ParFESpace() == &mfes)),
                   "NitscheSipgOperator: the material must be order-0 L2 (one value per element), "
                   "all fields on one space");
+      // read on the host below; with a device the fields and their
+      // face-neighbour data may hold their valid copy there
+      for (const ParGridFunction *g : {&lambda, &mu, kv_lambda, kv_mu})
+      {
+         if (g) { g->HostRead(); g->FaceNbrData().HostRead(); }
+      }
       auto material = [&](int el, bool ghost, real_t m[4]) {
          // lambda, mu, lambda_eta, mu_eta; a face-neighbour element reads the
          // GFs' face-neighbour data (as GridFunctionCoefficient::Eval does)
@@ -789,7 +800,7 @@ public:
    }
    /// Kernel layout, and the elements per thread block of the team layout
    /// (2, 4 or 8; see TeamBatchFits).
-   void SetLayout(Layout layout, int team_batch = 4)
+   void SetLayout(Layout layout, int team_batch = 2)
    {
       MFEM_VERIFY(team_batch == 2 || team_batch == 4 || team_batch == 8,
                   "NitscheSipgOperator::SetLayout: team batch " << team_batch
@@ -964,7 +975,7 @@ public:
       const int nsc = nsc_;
       const real_t eps = eps_;
       const bool do_vol = (pass & kVolume) != 0, do_faces = (pass & kFaces) != 0;
-      const bool team = (layout_ == kTeam) || (layout_ == kAuto && use_dev);
+      const bool team = (layout_ == kTeam) || (layout_ == kAuto && use_dev && P == 2);
       if (team)
       {
          KernelData kd{du, dv, nullptr, geo, sd, vw, vdphi, fw, fphi, fdphi, si, nullptr,
@@ -1118,7 +1129,7 @@ private:
    mutable std::vector<MPI_Request> reqs_;
    StageTimers *timers_ = nullptr;
    Layout layout_ = kAuto;
-   int team_batch_ = 4;
+   int team_batch_ = 2;
 };
 
 #endif // MFEM_USE_MPI

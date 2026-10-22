@@ -91,6 +91,13 @@
 // the elastic energy has for (u, d)), so it does not resist slip itself.
 // eta_bar = 0 (never calling SetKelvinVoigt) leaves every bit unchanged.
 //
+// The product K x (+ K_eta v) has four sources, which agree to round-off:
+// the matrix-free kernels of NitscheSipgOperator (SetMatrixFree; GPU
+// dynamic-rupture plan D2, off by default), the dense element and face
+// blocks (SetDenseBlocks, item 8a, the default), the fused CSR sweep
+// (SetFusedStiffness, item 4) and the two hypre products.  The first one
+// takes precedence; with it K and K_eta are never assembled.
+//
 // NitscheMaterialSample lives in nitsche_material_sample.hpp (moved there in
 // P3 to break an include cycle with nitsche_mass.hpp); it is re-exported here.
 //
@@ -105,6 +112,7 @@
 #include "elasticity_operator.hpp"
 #include "fused_stiffness_pair.hpp"
 #include "dense_block_stiffness.hpp"
+#include "nitsche_sipg_operator.hpp"
 #include "../common/stage_timers.hpp"
 #include "../common/seas_device.hpp"
 #include "../integrator/dg_absorbing_bc_integrator.hpp"
@@ -757,6 +765,26 @@ public:
    /// the CSR products; when the blocks cannot be built (DenseBlockStiffness
    /// ::Init) the operator falls back to them.  Call before the first step.
    void SetDenseBlocks(bool on) { dense_enabled_ = on; dense_state_ = 0; }
+   /// GPU dynamic-rupture plan D2: K x (+ K_eta v) matrix-free
+   /// (NitscheSipgOperator; default off).  It takes precedence over the
+   /// dense blocks and the fused sweep, and K and K_eta are then never
+   /// assembled: ApplyStiffness and ApplyKVStiffness use it too.  layout and
+   /// team_batch as NitscheSipgOperator::SetLayout.  Call before the first
+   /// step; the operator is built (collectively) on first use and refuses a
+   /// mesh, order or material its kernels do not cover.
+   void SetMatrixFree(bool on, NitscheSipgOperator::Layout layout = NitscheSipgOperator::kAuto,
+                      int team_batch = 2)
+   {
+      mf_enabled_ = on;
+      mf_layout_ = layout;
+      mf_batch_ = team_batch;
+      mf_.reset();
+   }
+   /// True once the matrix-free product is in use (after the first product).
+   bool MatrixFreeActive() const { return static_cast<bool>(mf_); }
+   /// Bytes of the matrix-free operator's data summed over the ranks (0 when
+   /// not in use).
+   long long MatrixFreeBytes() const { return mf_bytes_; }
    /// GPU dynamic-rupture plan D0: time the parts of each step into
    /// @a timers (StageTimers::Dyn*; null = no timing).  The timers only
    /// read clocks, so the results are the same bits with and without them.
@@ -765,6 +793,7 @@ public:
       timers_ = timers;
       dense_.SetStageTimers(timers);
       fused_.SetStageTimers(timers);
+      if (mf_) { mf_->SetStageTimers(timers); }
    }
    /// True once the dense blocks are in use (after the first acceleration).
    bool DenseBlocksActive() const { return dense_state_ == 1; }
@@ -827,12 +856,27 @@ public:
    real_t KelvinVoigtBetaMin() const { return kv_beta_min_; }
    real_t KelvinVoigtBetaMax() const { return kv_beta_max_; }
    long long KelvinVoigtLayerElements() const { return kv_layer_elems_; }
+   /// K u: the matrix-free product with SetMatrixFree, else the assembled K
+   /// (assembled on first use).  Collective.
+   void ApplyStiffness(const Vector &u, Vector &Ku) const
+   {
+      if (UseMatrixFree_()) { mf_->Mult(u, Ku); }
+      else { elast_->ApplyStiffness(u, Ku); }
+   }
    /// K_eta v (zero without the layer).
    void ApplyKVStiffness(const Vector &v, Vector &Kv) const
    {
       Kv.SetSize(height);
       if (!kv_) { Kv = 0.0; return; }
-      kv_->ApplyStiffness(v, Kv);
+      if (UseMatrixFree_())
+      {
+         // the product at u = 0 (z = beta v)
+         Vector zero(v.Size());
+         zero.UseDevice(v.UseDevice());
+         zero = 0.0;
+         mf_->Mult(zero, v, Kv);
+      }
+      else { kv_->ApplyStiffness(v, Kv); }
    }
    /// G_eta V for V on owned DOFs.
    void KVSlipLoad(const Vector &V, Vector &GV) const
@@ -883,11 +927,21 @@ private:
                       const NitscheMass &Minv, Vector &a) const
    {
       ScopedStageTimer acc_timer(timers_, StageTimers::DynAcceleration);
-      const bool dense = UseDense_();
-      const bool fuse = !dense && kv_ && v && UseFused_();
+      const bool mf = UseMatrixFree_();
+      const bool dense = !mf && UseDense_();
+      const bool fuse = !mf && !dense && kv_ && v && UseFused_();
       {
          ScopedStageTimer timer(timers_, StageTimers::DynStiffness);
-         if (dense)
+         if (mf)
+         {
+            if (kv_)
+            {
+               MFEM_VERIFY(v, "NitscheWaveOperator: Kelvin-Voigt needs the velocity");
+               mf_->Mult(x, *v, Kx_);   // K x + K_eta v
+            }
+            else { mf_->Mult(x, Kx_); }
+         }
+         else if (dense)
          {
             if (kv_)
             {
@@ -930,7 +984,7 @@ private:
       {
          // Kelvin-Voigt: -(K_eta v - G_eta V) with the stored slip rate V
          // (V^{n+1} in ImplicitSolve, after the fault advance)
-         if (!fuse && !dense)
+         if (!fuse && !dense && !mf)
          {
             ScopedStageTimer timer(timers_, StageTimers::DynStiffness);
             kv_->ApplyStiffness(*v, Kv_v_);
@@ -981,6 +1035,38 @@ private:
       // SetKelvinVoigt after the first build (kv_ is a global property)
       if (fast_fault_state_ == 1 && kv_ && !kv_->HasFaultFaceOps()) { kv_->BuildFaultFaceOps(); }
       return fast_fault_state_ == 1;
+   }
+
+   /// Collective on the first call: build the matrix-free operator from the
+   /// material sample (and the Kelvin-Voigt moduli), on K's space with its
+   /// Dirichlet faces and penalty.  Built again when the Kelvin-Voigt layer
+   /// was set after the first build (kv_ is a global property).
+   bool UseMatrixFree_() const
+   {
+      if (!mf_enabled_) { return false; }
+      if (mf_ && mf_->HasKelvinVoigt() != static_cast<bool>(kv_)) { mf_.reset(); }
+      if (!mf_)
+      {
+         // K's Dirichlet faces (ElasticityDomainOperator::SetupBoundaryMarkers)
+         Array<int> dmark(mesh_.bdr_attributes.Size() ? mesh_.bdr_attributes.Max() : 0);
+         dmark = 0;
+         for (int a : bc_.dirichlet_attrs) { dmark[a - 1] = 1; }
+         mf_ = std::make_unique<NitscheSipgOperator>(
+                  elast_->GetFESpace(), sample_->LambdaGF(), sample_->MuGF(),
+                  kv_ ? kv_lam_gf_.get() : nullptr, kv_ ? kv_mu_gf_.get() : nullptr, dmark,
+                  config_.penalty_factor);
+         MFEM_VERIFY(mf_layout_ != NitscheSipgOperator::kTeam
+                     || mf_->TeamBatchFits(mf_batch_, static_cast<bool>(kv_)),
+                     "NitscheWaveOperator: the matrix-free team layout with " << mf_batch_
+                     << " elements per block does not fit in a block's shared memory at p = "
+                     << order_ << (kv_ ? " with Kelvin-Voigt" : "") << "; use 2 or 4");
+         mf_->SetLayout(mf_layout_, mf_batch_);
+         mf_->SetStageTimers(timers_);
+         long long b = mf_->Bytes();
+         MPI_Allreduce(MPI_IN_PLACE, &b, 1, MPI_LONG_LONG, MPI_SUM, mesh_.GetComm());
+         mf_bytes_ = b;
+      }
+      return true;
    }
 
    /// Collective on the first call: read K (and K_eta) into dense blocks
@@ -1481,6 +1567,11 @@ private:
    mutable int dense_state_ = 0;   ///< 0 not tried, 1 dense blocks, -1 fused or CSR
    mutable DenseBlockStiffness dense_;
    mutable long long dense_bytes_ = 0;
+   bool mf_enabled_ = false;
+   NitscheSipgOperator::Layout mf_layout_ = NitscheSipgOperator::kAuto;
+   int mf_batch_ = 2;
+   mutable std::unique_ptr<NitscheSipgOperator> mf_;   ///< built on first use
+   mutable long long mf_bytes_ = 0;
    mutable double fault_sec_ = 0.0;
    StageTimers *timers_ = nullptr;   ///< D0 step-part timers (null: off)
 };

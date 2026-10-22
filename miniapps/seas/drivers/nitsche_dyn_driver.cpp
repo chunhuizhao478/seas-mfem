@@ -57,6 +57,19 @@
 //   --device-id N      GPU for this rank (default: node-local rank modulo
 //                      the number of visible GPUs; common/seas_device.hpp).
 //
+// Matrix-free product (GPU dynamic-rupture plan D2):
+//   --matrix-free 0|1  K u + K_eta v from the matrix-free kernels of
+//                      NitscheSipgOperator instead of the dense blocks, the
+//                      fused sweep or the CSR products (default 0).  With 1
+//                      K and K_eta are never assembled, and the energy
+//                      monitor uses the same product.  Tetrahedra of order 1
+//                      or 2 only; the operator refuses anything else.
+//   --mf-layout L      its kernel layout: auto (default: on a device the
+//                      element layout at p = 1 and team2 at p = 2, the
+//                      faster ones of the D2 bench; on the host the element
+//                      layout), element, team2, team4 or team8 (a team of
+//                      threads per element, 2, 4 or 8 elements per block).
+//
 // Station copies (Chunhui Zhao, 2026-10-14): a station sits on a fault point
 // that carries one DOF per adjacent fault face (DG copies).  With
 // --station-copies average (default) the station files hold the face-area-
@@ -800,7 +813,8 @@ int main(int argc, char *argv[])
                       " [--fused-spmv 0|1] [--dense-blocks 0|1] [--fault-weight w]"
                       " [--fast-fault-output 0|1] [--stage-timers n] [--max-steps n]"
                       " [--perturb-initial-state seed] [--device cpu|cuda|debug]"
-                      " [--device-id n]\n";
+                      " [--device-id n] [--matrix-free 0|1]"
+                      " [--mf-layout auto|element|team2|team4|team8]\n";
       }
       return 1;
    }
@@ -838,6 +852,25 @@ int main(int argc, char *argv[])
    // blocks; takes precedence over --fused-spmv, which applies when it is 0
    const int dense_blocks = ArgInt(argc, argv, "--dense-blocks", 1);
    const int fast_fault_output = ArgInt(argc, argv, "--fast-fault-output", 1);
+   // GPU dynamic-rupture plan D2 (header): the matrix-free product and its
+   // kernel layout
+   const int matrix_free = ArgInt(argc, argv, "--matrix-free", 0);
+   const std::string mf_layout_s = ArgStr(argc, argv, "--mf-layout", "auto");
+   MFEM_VERIFY(matrix_free == 0 || matrix_free == 1, "--matrix-free " << matrix_free
+               << ": expected 0 or 1");
+   NitscheSipgOperator::Layout mf_layout = NitscheSipgOperator::kAuto;
+   int mf_batch = 2;
+   if (mf_layout_s == "element") { mf_layout = NitscheSipgOperator::kElement; }
+   else if (mf_layout_s == "team2" || mf_layout_s == "team4" || mf_layout_s == "team8")
+   {
+      mf_layout = NitscheSipgOperator::kTeam;
+      mf_batch = mf_layout_s[4] - '0';
+   }
+   else
+   {
+      MFEM_VERIFY(mf_layout_s == "auto", "--mf-layout " << mf_layout_s
+                  << ": expected auto, element, team2, team4 or team8");
+   }
    const real_t fault_weight = ArgReal(argc, argv, "--fault-weight", kDefaultFaultWeight);
    // GPU dynamic-rupture plan D0 (header): step-part timers, a step limit,
    // and the test-only round-off perturbation of the prestress
@@ -1241,6 +1274,15 @@ int main(int argc, char *argv[])
                       << op.KelvinVoigtLayerElements() << " of " << ne_global << " elements\n";
          }
       }
+   }
+
+   // --matrix-free 1 (plan D2): set before anything takes a product (the
+   // energy monitor's first record), so K and K_eta are never assembled
+   op.SetMatrixFree(matrix_free != 0, mf_layout, mf_batch);
+   if (matrix_free && g_rank == 0)
+   {
+      std::cout << "  matrix-free K u + K_eta v (NitscheSipgOperator), layout " << mf_layout_s
+                << "; K and K_eta are not assembled\n";
    }
 
    // --perturb-initial-state (test only): perturb the prestress the initial
@@ -1842,6 +1884,12 @@ int main(int argc, char *argv[])
          if (op.DenseBlocksActive())
          {
             std::cout << " (" << op.DenseBlockBytes() / 1e6 << " MB over all ranks)";
+         }
+         std::cout << ", matrix-free " << (op.MatrixFreeActive() ? "on" : "off");
+         if (op.MatrixFreeActive())
+         {
+            std::cout << " (" << op.MatrixFreeBytes() / 1e6 << " MB over all ranks, layout "
+                      << mf_layout_s << ")";
          }
          std::cout << "\n";
       }
