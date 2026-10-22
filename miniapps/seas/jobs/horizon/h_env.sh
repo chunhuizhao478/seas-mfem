@@ -7,8 +7,12 @@
 #   - 4 GB200 GPUs per node (sm_100, about 186 GB HBM each), 144 Grace
 #     cores; partitions debug and debug-shared only (Oct 2026);
 #   - no gcc 13.2, cmake 3.31 or cuda 13.0 modules, so the build uses
-#     gcc 15.3, cmake 4.4 and cuda 13.3 with the same pinned PETSc 3.24.6,
-#     MUMPS, hypre and cuDSS 0.7.1.6 (built from source, build_horizon.sh);
+#     gcc 15.3, cmake 4.4 and cuda 13.1 with the same pinned PETSc 3.24.6,
+#     MUMPS, hypre and cuDSS 0.7.1.6 (built from source, build_horizon.sh).
+#     Not cuda 13.2 or 13.3: their Thrust (CCCL 3.2 and later) no longer
+#     brings thrust::pair, and in 13.3 thrust::tuple and make_tuple, in
+#     through the headers hypre 3.0.0 includes, so hypre's CUDA build stops
+#     at src/utilities/device_utils.c (job 65658, cuda/13.3);
 #   - no $WORK for early users: the dependencies, the goldens and the
 #     Green's-function cache live under $SCRATCH (purged when unused).
 #
@@ -24,7 +28,7 @@ if ! command -v ibrun >/dev/null 2>&1; then
    return 1
 fi
 
-export CUDA_MODULE="${CUDA_MODULE:-cuda/13.3}"
+export CUDA_MODULE="${CUDA_MODULE:-cuda/13.1}"
 # Read by g0_env.sh (module load) and by build_horizon.sh (MODULES).
 export G0_MODULES="${G0_MODULES:-gcc/15.3.0 ${CUDA_MODULE} openmpi/5.0.11 nvpl/26.9 cmake/4.4.0}"
 export MODULES="${G0_MODULES}"
