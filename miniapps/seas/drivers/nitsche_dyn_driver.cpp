@@ -35,6 +35,61 @@
 // weighted average over those copies (summed on rank 0 in face-centroid
 // order); --station-copies first keeps the writer's single nearest copy.
 //
+// Station output cost (speed-next O2, Chunhui Zhao 2026-10-20; the files are
+// the same bit for bit): --station-comm sub (default) averages the copies
+// over the ranks that hold them, in their own communicator, with the order
+// of the sum computed once (dynamic/station_copy_average.hpp); world is the
+// code before O2, a collective of every rank each station step.  The
+// station and envelope rows reach the files every --station-flush-every n
+// rows (default 100; 1 = every row, as before) and at the end; SIGTERM (the
+// wall-time limit), SIGINT or SIGUSR1 makes every rank flush its files at
+// the end of its step and write every row from there on, until the job is
+// killed (a second SIGTERM or SIGINT ends it at once).  An abort inside the
+// run (MFEM_VERIFY) loses up to n - 1 rows per file; --station-flush-every
+// 1 keeps them.  Only the DOFs the stations read get their station data
+// each station step.
+//
+// Fault frame filter (speed-next O1, Chunhui Zhao 2026-10-20):
+// --paraview-fault-deflate-level n (0..9) sets the deflate level of
+// fault.vtkhdf in place of the deck's [output] paraview_fault_deflate_level;
+// none writes its datasets with no filter at all (no compression work on
+// rank 0, a larger file).  Deflate is lossless, so the values are the same
+// either way.  Not with [output] paraview_fault_zfp_tol.  Absent = the deck.
+//
+// Setup phases (speed-next S1, Chunhui Zhao 2026-10-20): before step 1 the
+// log prints the wall time of each setup phase, max and mean over the ranks
+// (SetupTimer; one reduction, no barrier), and (2026-10-22) each rank's
+// VmData at the end of each phase, max and mean over the ranks: the private
+// writable memory that a node with strict overcommit (Vista) charges against
+// its commit limit, and does not give back when the heap shrinks.  Where
+// /proc/self/status is absent (macOS) that line is left out.
+//
+// Mesh setup (Chunhui Zhao 2026-10-22: partition-memory report rev1, option
+// D; speed-next S1): with --mesh-setup rank0 (default) only rank 0 reads the
+// serial mesh; it computes the partition (the same calls as before: the LTS
+// multi-constraint cut, the --fault-weight cut, or MFEM's default METIS cut
+// that ParMesh made on every rank), cuts the mesh into one part per rank and
+// sends each rank its part with the LTS clusters of its elements
+// (dynamic/mesh_parts.hpp).  The other ranks never hold the serial mesh, so
+// a rank needs memory for its own part only.  The parallel mesh has the same
+// elements, vertices, faces and DOF numbers as before; its shared faces are
+// listed in another order, which can change sums over them in the last bit.
+// --mesh-setup every-rank is the code before: every rank reads the serial
+// mesh and builds its ParMesh from it.  On one rank both are the same.
+//
+// Mesh part files (speed-next S1 step 2, Chunhui Zhao 2026-10-22): run on
+// one rank, --mesh-parts-out d --mesh-parts-n N reads the deck and the
+// mesh, computes the partition into N parts as a run on N ranks would (LTS
+// clusters included), writes the N parts, their LTS clusters and
+// d/mesh_parts.txt (the mesh's size and FNV-1a hash, the options the
+// partition depends on, the LTS header) and stops.  A run on N ranks with
+// --mesh-parts d then reads its own part; no rank reads the serial mesh.
+// The run refuses parts cut for another rank count, from another mesh, or
+// with other values of the options the partition depends on (the fault
+// weight and attribute; with LTS also the order, cfl, the LTS cap and fault
+// buffer, dt_max and the material).  The parts are the ones --mesh-setup
+// rank0 sends, so the results are the same bit for bit.
+//
 // Station columns (SCEC map, plan "The SCEC conventions, mapped"):
 //   slip1 = delta.dhat (v-slip), slip2 = delta.shat (h-slip),
 //   V1 = V.dhat, V2 = V.shat,
@@ -116,7 +171,9 @@
 #include "../spatial/code/spatial_friction.hpp"
 #include "../dynamic/spatial_nucleation.hpp"
 #include "../dynamic/fault_station_file.hpp"
+#include "../dynamic/station_copy_average.hpp"
 #include "../dynamic/lts_partition.hpp"   // METIS with element weights (plan item 6)
+#include "../dynamic/mesh_parts.hpp"      // --mesh-setup rank0 (header, "Mesh setup")
 #include "../solver/nitsche_lts_setup.hpp"   // --lts-report (plan item 7, P0)
 #include "../solver/nitsche_lts_run.hpp"     // --lts rate2 (plan item 7, P3/P4)
 #ifdef MFEM_USE_HDF5
@@ -133,11 +190,13 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <set>
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
+#include <utility>
 #include <vector>
 
 using namespace mfem;
@@ -196,181 +255,38 @@ bool TomlBool(const toml::value *t, const char *key, bool def)
    return t->at(key).as_boolean();
 }
 
-/// Station copy average (header, "Station copies").  Every owned DOF within
-/// kTie of the globally nearest station distance (3-D, the snapping metric)
-/// gets the face-area-weighted average over all DOFs at the station point P
-/// (P = the lexicographically smallest such position, copies within kTie of
-/// P); rank 0 sums in face-centroid order, so the sum does not depend on the
-/// partition, and writes the envelope (min/max over copies).  Collective.
-class StationCopyAverage
+/// The station copy average's face data (StationCopyAverage): per owned
+/// fault DOF, the centroid and the area of its face, vertices in a canonical
+/// order.
+Vector StationCopyGeometry(NitscheWaveOperator &op)
 {
-public:
-   static constexpr real_t kTie = 1e-6;   // m
-   StationCopyAverage(NitscheWaveOperator &op, const std::vector<FaultStation> &st,
-                      const std::string &dir, const std::string &prefix)
-      : ns_(static_cast<int>(st.size()))
+   ElasticityDomainOperator<ParMesh> &E = op.Elasticity();
+   const int nd = E.GetNumFaultDOFs(), nbf = E.GetNbfPerFace();
+   // face centroid and area per local DOF, vertices in a canonical order
+   Vector cl(4 * nd);
+   for (int k = 0; k < nd; k++)
    {
-      ElasticityDomainOperator<ParMesh> &E = op.Elasticity();
-      const int nd = E.GetNumFaultDOFs(), nbf = E.GetNbfPerFace();
-      const int no = op.NumOwnedFaultDOFs();
-      // face centroid and area per local DOF, vertices in a canonical order
-      Vector cl(4 * nd);
-      for (int k = 0; k < nd; k++)
+      long long key[3];
+      real_t xv[3][3];
+      op.Orientation().FaceVertexData(k / nbf, key, xv);
+      std::array<std::array<real_t, 3>, 3> v;
+      for (int i = 0; i < 3; i++) { for (int c = 0; c < 3; c++) { v[i][c] = xv[i][c]; } }
+      std::sort(v.begin(), v.end());
+      real_t e1[3], e2[3];
+      for (int c = 0; c < 3; c++)
       {
-         long long key[3];
-         real_t xv[3][3];
-         op.Orientation().FaceVertexData(k / nbf, key, xv);
-         std::array<std::array<real_t, 3>, 3> v;
-         for (int i = 0; i < 3; i++) { for (int c = 0; c < 3; c++) { v[i][c] = xv[i][c]; } }
-         std::sort(v.begin(), v.end());
-         real_t e1[3], e2[3];
-         for (int c = 0; c < 3; c++)
-         {
-            cl(4 * k + c) = (v[0][c] + v[1][c] + v[2][c]) / 3.0;
-            e1[c] = v[1][c] - v[0][c];
-            e2[c] = v[2][c] - v[0][c];
-         }
-         const real_t cx = e1[1] * e2[2] - e1[2] * e2[1], cy = e1[2] * e2[0] - e1[0] * e2[2],
-                      cz = e1[0] * e2[1] - e1[1] * e2[0];
-         cl(4 * k + 3) = 0.5 * std::sqrt(cx * cx + cy * cy + cz * cz);
+         cl(4 * k + c) = (v[0][c] + v[1][c] + v[2][c]) / 3.0;
+         e1[c] = v[1][c] - v[0][c];
+         e2[c] = v[2][c] - v[0][c];
       }
-      E.RestrictToOwnedFault(cl, ca_, 4);
-      const Vector &X = op.FaultPositions();
-      auto dist = [&](int s, int j) { return FaultStationDistance(st[s], &X(3 * j)); };
-      std::vector<real_t> dmin(ns_, std::numeric_limits<real_t>::max());
-      for (int s = 0; s < ns_; s++)
-      {
-         for (int j = 0; j < no; j++) { dmin[s] = std::min(dmin[s], dist(s, j)); }
-      }
-      MPI_Allreduce(MPI_IN_PLACE, dmin.data(), ns_, MPITypeMap<real_t>::mpi_type, MPI_MIN,
-                    MPI_COMM_WORLD);
-      cand_.assign(ns_, {});
-      copy_.assign(ns_, {});
-      for (int s = 0; s < ns_; s++)
-      {
-         // P: the lexicographically smallest candidate position over all ranks
-         real_t P[3] = {std::numeric_limits<real_t>::max(), 0.0, 0.0};
-         for (int j = 0; j < no; j++)
-         {
-            if (dist(s, j) > dmin[s] + kTie) { continue; }
-            cand_[s].push_back(j);
-            const real_t *x = &X(3 * j);
-            if (std::lexicographical_compare(x, x + 3, P, P + 3)) { for (int c = 0; c < 3; c++) { P[c] = x[c]; } }
-         }
-         int nr = 0;
-         MPI_Comm_size(MPI_COMM_WORLD, &nr);
-         std::vector<real_t> all(3 * nr);
-         MPI_Allgather(P, 3, MPITypeMap<real_t>::mpi_type, all.data(), 3,
-                       MPITypeMap<real_t>::mpi_type, MPI_COMM_WORLD);
-         for (int r = 0; r < nr; r++)
-         {
-            if (std::lexicographical_compare(&all[3 * r], &all[3 * r] + 3, P, P + 3))
-            {
-               for (int c = 0; c < 3; c++) { P[c] = all[3 * r + c]; }
-            }
-         }
-         for (int j = 0; j < no; j++)
-         {
-            const real_t *x = &X(3 * j);
-            if (std::hypot(x[0] - P[0], x[1] - P[1], x[2] - P[2]) <= kTie) { copy_[s].push_back(j); }
-         }
-         int nc = static_cast<int>(copy_[s].size());
-         MPI_Allreduce(MPI_IN_PLACE, &nc, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-         MFEM_VERIFY(nc > 0, "station copy average: no DOF at the point of station " << st[s].name);
-         if (g_rank == 0)
-         {
-            env_.emplace_back(dir + "/" + prefix + "_station_" + st[s].name + "_copies.dat");
-            env_.back() << "# station " << st[s].name << ": " << nc << " DG copies at ("
-                        << std::setprecision(12) << P[0] << ", " << P[1] << ", " << P[2]
-                        << "); the station file holds their face-area-weighted average\n"
-                        << "# t ncopies sigma_n_min sigma_n_max tau1_min tau1_max tau2_min tau2_max"
-                        << " V1_min V1_max V2_min V2_max  (station columns' units and signs)\n";
-         }
-      }
+      const real_t cx = e1[1] * e2[2] - e1[2] * e2[1], cy = e1[2] * e2[0] - e1[0] * e2[2],
+                   cz = e1[0] * e2[1] - e1[1] * e2[0];
+      cl(4 * k + 3) = 0.5 * std::sqrt(cx * cx + cy * cy + cz * cz);
    }
-
-   /// Replace the station DOFs' data by the copy average; write the envelope.
-   void Apply(real_t t, std::vector<DOFData> &dd)
-   {
-      constexpr int nf = 8;   // slip1 slip2 V1 V2 tau1 tau2 sigma_n psi
-      std::vector<real_t> loc;
-      for (int s = 0; s < ns_; s++)
-      {
-         for (int j : copy_[s])
-         {
-            const DOFData &q = dd[j];
-            const real_t row[5 + nf] = {real_t(s), ca_(4 * j), ca_(4 * j + 1), ca_(4 * j + 2),
-                                        ca_(4 * j + 3), q.slip1, q.slip2, q.V1, q.V2,
-                                        q.tau1_corr, q.tau2_corr, q.sigma_n_corr, q.psi};
-            loc.insert(loc.end(), row, row + 5 + nf);
-         }
-      }
-      int nr = 0, n = static_cast<int>(loc.size());
-      MPI_Comm_size(MPI_COMM_WORLD, &nr);
-      std::vector<int> cnt(nr), dsp(nr, 0);
-      MPI_Gather(&n, 1, MPI_INT, cnt.data(), 1, MPI_INT, 0, MPI_COMM_WORLD);
-      std::vector<real_t> all;
-      if (g_rank == 0)
-      {
-         for (int r = 1; r < nr; r++) { dsp[r] = dsp[r - 1] + cnt[r - 1]; }
-         all.resize(dsp[nr - 1] + cnt[nr - 1]);
-      }
-      MPI_Gatherv(loc.data(), n, MPITypeMap<real_t>::mpi_type, all.data(), cnt.data(), dsp.data(),
-                  MPITypeMap<real_t>::mpi_type, 0, MPI_COMM_WORLD);
-      std::vector<real_t> avg(ns_ * nf, 0.0);
-      if (g_rank == 0)
-      {
-         const int w = 5 + nf, nrow = static_cast<int>(all.size()) / w;
-         std::vector<int> ord(nrow);
-         for (int i = 0; i < nrow; i++) { ord[i] = i; }
-         std::sort(ord.begin(), ord.end(), [&](int a, int b) {
-            return std::lexicographical_compare(&all[w * a], &all[w * a] + 4, &all[w * b], &all[w * b] + 4);
-         });
-         for (int s = 0; s < ns_; s++)
-         {
-            real_t wsum = 0.0, lo[nf], hi[nf];
-            for (int f = 0; f < nf; f++) { lo[f] = std::numeric_limits<real_t>::max(); hi[f] = -lo[f]; }
-            int nc = 0;
-            for (int i : ord)
-            {
-               const real_t *r = &all[w * i];
-               if (static_cast<int>(r[0]) != s) { continue; }
-               nc++;
-               wsum += r[4];
-               for (int f = 0; f < nf; f++)
-               {
-                  avg[s * nf + f] += r[4] * r[5 + f];
-                  lo[f] = std::min(lo[f], r[5 + f]);
-                  hi[f] = std::max(hi[f], r[5 + f]);
-               }
-            }
-            for (int f = 0; f < nf; f++) { avg[s * nf + f] /= wsum; }
-            env_[s] << std::scientific << std::setprecision(10) << t << " " << nc << " "
-                    << lo[6] << " " << hi[6] << " " << lo[4] << " " << hi[4] << " " << lo[5] << " "
-                    << hi[5] << " " << lo[2] << " " << hi[2] << " " << lo[3] << " " << hi[3] << "\n";
-            env_[s].flush();
-         }
-      }
-      MPI_Bcast(avg.data(), ns_ * nf, MPITypeMap<real_t>::mpi_type, 0, MPI_COMM_WORLD);
-      for (int s = 0; s < ns_; s++)
-      {
-         const real_t *a = &avg[s * nf];
-         for (int j : cand_[s])
-         {
-            DOFData &q = dd[j];
-            q.slip1 = a[0]; q.slip2 = a[1]; q.V1 = a[2]; q.V2 = a[3];
-            q.tau1_corr = a[4]; q.tau2_corr = a[5]; q.sigma_n_corr = a[6]; q.psi = a[7];
-            q.slip_rate = std::hypot(a[2], a[3]);
-         }
-      }
-   }
-
-private:
-   int ns_;
-   Vector ca_;                                   // owned: centroid (3) + area
-   std::vector<std::vector<int>> cand_, copy_;   // owned DOFs overwritten / averaged
-   std::vector<std::ofstream> env_;              // rank 0
-};
+   Vector ca;
+   E.RestrictToOwnedFault(cl, ca, 4);
+   return ca;
+}
 
 /// Friction-law factory keyed on [meta] law and [friction.rate_state]
 /// state_evolution (plan N-07, Generality; benchmark plan rev 1.3, 4.5).
@@ -436,6 +352,75 @@ void MakeDirs(const std::string &d)
    if (g_rank == 0) { ::mkdir(d.c_str(), 0755); }
    MPI_Barrier(MPI_COMM_WORLD);
 }
+
+/// This process's VmData in MiB (header, "Setup phases"); -1 without /proc.
+double VmDataMiB()
+{
+   std::ifstream f("/proc/self/status");
+   for (std::string line; std::getline(f, line);)
+   {
+      if (line.compare(0, 7, "VmData:") == 0) { return std::atof(line.c_str() + 7) / 1024.0; }
+   }
+   return -1.0;
+}
+
+/// Wall time of each setup phase on this rank (header, "Setup phases").
+class SetupTimer
+{
+public:
+   explicit SetupTimer(std::chrono::steady_clock::time_point start) : t0_(start) {}
+   /// The phase that ends now.
+   void Mark(const char *name)
+   {
+      const auto t1 = std::chrono::steady_clock::now();
+      names_.push_back(name);
+      sec_.push_back(std::chrono::duration<double>(t1 - t0_).count());
+      vm_.push_back(VmDataMiB());
+      t0_ = t1;
+   }
+   /// Collective: rank 0 prints each phase's max and mean over the ranks.
+   void Print() const
+   {
+      const int n = static_cast<int>(sec_.size());
+      std::vector<double> mx(sec_), sm(sec_), vmx(vm_), vsm(vm_), vmn(vm_);
+      MPI_Allreduce(MPI_IN_PLACE, mx.data(), n, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+      MPI_Allreduce(MPI_IN_PLACE, sm.data(), n, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+      MPI_Allreduce(MPI_IN_PLACE, vmx.data(), n, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+      MPI_Allreduce(MPI_IN_PLACE, vsm.data(), n, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+      MPI_Allreduce(MPI_IN_PLACE, vmn.data(), n, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
+      if (g_rank != 0) { return; }
+      const int nr = Mpi::WorldSize();
+      double tmx = 0.0, tsm = 0.0;
+      const std::ios::fmtflags fl = std::cout.flags();
+      const std::streamsize pr = std::cout.precision();
+      std::cout << std::fixed << std::setprecision(2) << "  setup (wall s, max/mean over ranks):";
+      for (int i = 0; i < n; i++)
+      {
+         std::cout << (i ? ", " : " ") << names_[i] << " " << mx[i] << "/" << sm[i] / nr;
+         tmx += mx[i];
+         tsm += sm[i];
+      }
+      std::cout << "; sum " << tmx << "/" << tsm / nr << "\n";
+      if (n > 0 && *std::min_element(vmn.begin(), vmn.end()) >= 0.0)
+      {
+         std::cout << std::setprecision(0) << "  setup memory (VmData MiB at the end of each phase,"
+                   " max/mean over ranks):";
+         for (int i = 0; i < n; i++)
+         {
+            std::cout << (i ? ", " : " ") << names_[i] << " " << vmx[i] << "/" << vsm[i] / nr;
+         }
+         std::cout << "\n";
+      }
+      std::cout.flags(fl);
+      std::cout.precision(pr);
+   }
+
+private:
+   std::chrono::steady_clock::time_point t0_;
+   std::vector<std::string> names_;
+   std::vector<double> sec_;
+   std::vector<double> vm_;   // VmData (MiB) at the end of each phase
+};
 
 #ifdef MFEM_USE_HDF5
 /// Fault ParaView output, [output] paraview_fault = "hdf5": ONE
@@ -687,6 +672,7 @@ int main(int argc, char *argv[])
    g_rank = Mpi::WorldRank();
    const int nranks = Mpi::WorldSize();
    auto wall0 = std::chrono::steady_clock::now();
+   SetupTimer setup_timer(wall0);
 
    const std::string cfg_path = ArgStr(argc, argv, "--config", "");
    if (cfg_path.empty())
@@ -696,12 +682,15 @@ int main(int argc, char *argv[])
          std::cerr << "usage: seas_nitsche_dyn_driver --config deck.toml [--mesh m.msh]"
                       " [--order p] [--tfinal s] [--output-dir d] [--prefix name]"
                       " [--station-every n] [--dump-every n] [--log-every n]"
-                      " [--station-copies average|first] [--fast-fault 0|1]"
+                      " [--station-copies average|first] [--station-comm sub|world]"
+                      " [--station-flush-every n] [--fast-fault 0|1]"
                       " [--fused-spmv 0|1] [--dense-blocks 0|1] [--fault-weight w]"
-                      " [--fast-fault-output 0|1] [--lts-report 0|1]"
+                      " [--fast-fault-output 0|1] [--paraview-fault-deflate-level n|none]"
+                      " [--lts-report 0|1]"
                       " [--lts-report-cap n] [--lts-report-ranks a,b,...]"
                       " [--lts off|rate2] [--lts-cap n] [--lts-fault-buffer n]"
-                      " [--lts-same-step 0|1]\n";
+                      " [--lts-same-step 0|1] [--mesh-setup rank0|every-rank]"
+                      " [--mesh-parts-out d --mesh-parts-n N] [--mesh-parts d]\n";
       }
       return 1;
    }
@@ -731,6 +720,9 @@ int main(int argc, char *argv[])
    const int dump_every = ArgInt(argc, argv, "--dump-every", 0);
    const int log_every = ArgInt(argc, argv, "--log-every", 100);
    const std::string station_copies = ArgStr(argc, argv, "--station-copies", "average");
+   // speed-next O2 (header, "Station output cost")
+   const std::string station_comm = ArgStr(argc, argv, "--station-comm", "sub");
+   const int station_flush_every = ArgInt(argc, argv, "--station-flush-every", 100);
    // Profiling plan (Chunhui Zhao, 2026-10-17) items 3, 4, 6: precomputed fault
    // face operators, fused K u + K_eta v, fault-weighted partition.  1 = on.
    const int fast_fault = ArgInt(argc, argv, "--fast-fault", 1);
@@ -739,6 +731,11 @@ int main(int argc, char *argv[])
    // blocks; takes precedence over --fused-spmv, which applies when it is 0
    const int dense_blocks = ArgInt(argc, argv, "--dense-blocks", 1);
    const int fast_fault_output = ArgInt(argc, argv, "--fast-fault-output", 1);
+   // speed-next O1 (header, "Fault frame filter"): "" = the deck
+   const std::string fault_deflate = ArgStr(argc, argv, "--paraview-fault-deflate-level", "");
+   MFEM_VERIFY(fault_deflate.empty() || fault_deflate == "none"
+               || (fault_deflate.size() == 1 && fault_deflate[0] >= '0' && fault_deflate[0] <= '9'),
+               "--paraview-fault-deflate-level " << fault_deflate << ": expected 0..9 or none");
    const real_t fault_weight = ArgReal(argc, argv, "--fault-weight", kDefaultFaultWeight);
    const int lts_report = ArgInt(argc, argv, "--lts-report", 0);
    const int lts_report_cap = ArgInt(argc, argv, "--lts-report-cap", 4);
@@ -765,9 +762,34 @@ int main(int argc, char *argv[])
    const bool lts_same = ArgInt(argc, argv, "--lts-same-step", 0) != 0;
    const int lts_buffer = ArgInt(argc, argv, "--lts-fault-buffer", 3);
    MFEM_VERIFY(lts_buffer >= 0, "--lts-fault-buffer " << lts_buffer << ": expected >= 0");
+   // Mesh setup (header)
+   const std::string mesh_setup = ArgStr(argc, argv, "--mesh-setup", "rank0");
+   MFEM_VERIFY(mesh_setup == "rank0" || mesh_setup == "every-rank", "--mesh-setup "
+               << mesh_setup << ": expected rank0 or every-rank");
+   // Mesh part files (header)
+   const std::string parts_out = ArgStr(argc, argv, "--mesh-parts-out", "");
+   const int parts_n = ArgInt(argc, argv, "--mesh-parts-n", 0);
+   const std::string parts_in = ArgStr(argc, argv, "--mesh-parts", "");
+   const bool parts_split = !parts_out.empty();
+   const bool parts_load = !parts_in.empty();
+   MFEM_VERIFY(!parts_split || (nranks == 1 && parts_n >= 1), "--mesh-parts-out writes the "
+               "parts on one rank: run it on 1 rank with --mesh-parts-n N (N >= 1)");
+   MFEM_VERIFY(parts_n == 0 || parts_split, "--mesh-parts-n needs --mesh-parts-out");
+   MFEM_VERIFY(!(parts_split && parts_load), "--mesh-parts-out and --mesh-parts exclude each other");
+   MFEM_VERIFY(!lts_report || (!parts_split && !parts_load), "--lts-report reads the serial "
+               "mesh; not with --mesh-parts-out or --mesh-parts");
+   // the number of parts of the partition
+   const int nparts = parts_split ? parts_n : nranks;
+   const bool mesh_rank0 = mesh_setup == "rank0" && nranks > 1 && !parts_load;
+   // the ranks that hold the serial mesh
+   const bool smesh_here = !parts_load && (!mesh_rank0 || g_rank == 0);
    MFEM_VERIFY(!lts_same || lts_on, "--lts-same-step needs --lts rate2");
    MFEM_VERIFY(station_copies == "average" || station_copies == "first",
                "--station-copies " << station_copies << ": expected average or first");
+   MFEM_VERIFY(station_comm == "sub" || station_comm == "world",
+               "--station-comm " << station_comm << ": expected sub or world");
+   MFEM_VERIFY(station_flush_every >= 1, "--station-flush-every " << station_flush_every
+               << ": expected >= 1");
    const real_t cfl = cfg.numerics.cfl;
    const real_t penalty_factor = TomlReal(t_num, "penalty_factor", 1.0);
    const bool energy_on = TomlBool(t_diag, "energy_balance", false);
@@ -790,6 +812,20 @@ int main(int argc, char *argv[])
                "needs cfl <= 0.6 (the accepted multirate step limit; undamped resonance bands "
                "start near 0.65)");
    MakeDirs(out_dir);
+   // Mesh part files (header): the options the partition depends on, as
+   // mesh_parts.txt records them; with LTS off only the first three matter
+   auto exact = [](real_t x) {
+      std::ostringstream o;
+      o << std::setprecision(17) << x;
+      return o.str();
+   };
+   const std::vector<std::pair<std::string, std::string>> parts_opts = {
+      {"lts", lts_mode}, {"fault_weight", exact(fault_weight)},
+      {"fault_attr", std::to_string(cfg.boundary.fault_attr)},
+      {"order", std::to_string(p)}, {"cfl", exact(cfl)}, {"lts_cap", std::to_string(lts_cap)},
+      {"lts_fault_buffer", std::to_string(lts_buffer)}, {"dt_max", exact(cfg.time.dt_max)},
+      {"lambda", exact(cfg.material_fallback.lambda)}, {"mu", exact(cfg.material_fallback.mu)},
+      {"rho", exact(cfg.material_fallback.rho)}};
 
    // [output] ParaView keys, SAFS semantics (spatial_dyn_driver): the master
    // gate paraview_enabled switches the ParaView collections; the fault
@@ -842,6 +878,8 @@ int main(int argc, char *argv[])
       if (!ign.empty()) { std::cout << "  ignored [numerics] keys (velocity-stress path):" << ign << "\n"; }
    }
 
+   setup_timer.Mark("deck");
+
    // ------------------------------------------------------------ material
    MFEM_VERIFY(cfg.material.kind == spatial::MaterialKind::Constant && !cfg.velocity.use_sidecar,
                "Nitsche driver (P7): only the constant material "
@@ -851,15 +889,52 @@ int main(int argc, char *argv[])
       cfg.material_fallback.lambda, cfg.material_fallback.mu, cfg.material_fallback.rho);
 
    // ------------------------------------------------------------ mesh
-   std::unique_ptr<Mesh> smesh = std::make_unique<Mesh>(mesh_path.c_str(), 1, 1);
-   MFEM_VERIFY(smesh->Dimension() == 3, "mesh must be 3-D");
-   for (int e = 0; e < smesh->GetNE(); e++)
+   std::unique_ptr<Mesh> smesh;
+   long long ne_global = 0;
+   std::map<std::string, std::string> parts_info;
+   auto info = [&](const std::string &k) {
+      const auto it = parts_info.find(k);
+      MFEM_VERIFY(it != parts_info.end(), "--mesh-parts: " << parts_in
+                  << "/mesh_parts.txt has no " << k);
+      return it->second;
+   };
+   if (parts_load)
    {
-      MFEM_VERIFY(smesh->GetElementBaseGeometry(e) == Geometry::TETRAHEDRON,
-                  "Nitsche driver: tetrahedral meshes only; element " << e << " is "
-                  << Geometry::Name[smesh->GetElementBaseGeometry(e)]);
+      parts_info = ReadMeshPartsInfo(MPI_COMM_WORLD, parts_in);
+      MFEM_VERIFY(info("format") == "seas-mesh-parts 1", "--mesh-parts: " << parts_in
+                  << "/mesh_parts.txt: format '" << info("format") << "'");
+      MFEM_VERIFY(std::stoi(info("parts")) == nranks, "--mesh-parts: the parts in " << parts_in
+                  << " are for " << info("parts") << " ranks; this run has " << nranks);
+      for (size_t i = 0; i < parts_opts.size(); i++)
+      {
+         if (i >= 3 && !lts_on) { break; }
+         MFEM_VERIFY(info(parts_opts[i].first) == parts_opts[i].second, "--mesh-parts: the "
+                     "parts in " << parts_in << " were cut with " << parts_opts[i].first << " = "
+                     << info(parts_opts[i].first) << "; this run has " << parts_opts[i].second);
+      }
+      if (g_rank == 0)
+      {
+         const std::string h = FileFnv1a64(mesh_path);
+         MFEM_VERIFY(h == info("mesh_fnv1a64"), "--mesh-parts: the parts in " << parts_in
+                     << " were cut from " << info("mesh") << " (FNV-1a " << info("mesh_fnv1a64")
+                     << "); this run's mesh " << mesh_path << " has FNV-1a " << h);
+      }
+      ne_global = std::stoll(info("tets"));
    }
-   const long long ne_global = smesh->GetNE();
+   else if (smesh_here)
+   {
+      smesh = std::make_unique<Mesh>(mesh_path.c_str(), 1, 1);
+      MFEM_VERIFY(smesh->Dimension() == 3, "mesh must be 3-D");
+      for (int e = 0; e < smesh->GetNE(); e++)
+      {
+         MFEM_VERIFY(smesh->GetElementBaseGeometry(e) == Geometry::TETRAHEDRON,
+                     "Nitsche driver: tetrahedral meshes only; element " << e << " is "
+                     << Geometry::Name[smesh->GetElementBaseGeometry(e)]);
+      }
+      ne_global = smesh->GetNE();
+   }
+   if (mesh_rank0) { MPI_Bcast(&ne_global, 1, MPI_LONG_LONG, 0, MPI_COMM_WORLD); }
+   setup_timer.Mark("mesh read");
    if (lts_report)
    {
       MFEM_VERIFY(cfg.boundary.fault_attr > 0, "[boundary] fault_attr is required");
@@ -882,10 +957,26 @@ int main(int argc, char *argv[])
    if (lts_on)
    {
       MFEM_VERIFY(cfg.boundary.fault_attr > 0, "[boundary] fault_attr is required");
-      const int ne = smesh->GetNE();
+      const int ne = static_cast<int>(ne_global);
       int hdr[4] = {0, 0, 0, 0};
       double dt0 = 0.0;
-      if (g_rank == 0)
+      if (parts_load)
+      {
+         hdr[0] = std::stoi(info("lts_num_clusters"));
+         hdr[1] = std::stoi(info("lts_fault_cluster"));
+         hdr[2] = std::stoi(info("lts_passes"));
+         hdr[3] = std::stoi(info("lts_fault_pairs"));
+         dt0 = std::stod(info("lts_dt0"));
+         if (g_rank == 0)
+         {
+            std::cout << std::setprecision(6) << "  LTS (plan item 7): rate2" << (lts_same
+                      ? " with --lts-same-step (every cluster at dt0; test)" : "") << ", "
+                      << hdr[0] << " clusters (hard cap " << lts_cap << "), dt0 = " << dt0
+                      << " s; fault in cluster " << hdr[1] << " (from the mesh parts in "
+                      << parts_in << ")\n";
+         }
+      }
+      else if (g_rank == 0)
       {
          const auto &mf = cfg.material_fallback;
          const real_t cp = std::sqrt((mf.lambda + 2.0 * mf.mu) / mf.rho);
@@ -907,8 +998,11 @@ int main(int argc, char *argv[])
       }
       MPI_Bcast(hdr, 4, MPI_INT, 0, MPI_COMM_WORLD);
       MPI_Bcast(&dt0, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-      lts_asg.cluster.resize(ne);
-      MPI_Bcast(lts_asg.cluster.data(), ne, MPI_INT, 0, MPI_COMM_WORLD);
+      if (!mesh_rank0 && !parts_load)   // rank0, parts: the clusters of the rank's part
+      {
+         lts_asg.cluster.resize(ne);
+         MPI_Bcast(lts_asg.cluster.data(), ne, MPI_INT, 0, MPI_COMM_WORLD);
+      }
       lts_asg.num_clusters = hdr[0];
       lts_asg.fault_cluster = hdr[1];
       lts_asg.passes = hdr[2];
@@ -916,14 +1010,15 @@ int main(int argc, char *argv[])
       MFEM_VERIFY(hdr[3] > 0, "--lts rate2: the mesh has no fault faces (attr "
                   << cfg.boundary.fault_attr << ")");
    }
+   setup_timer.Mark("LTS clusters");
    // Plan item 6: METIS weight per element 1 + w (number of its fault faces),
    // so ranks that own fault faces get fewer tets (w = 0: MFEM's default cut).
    // With LTS (plan item 7) the same weight goes to the multi-constraint cut.
    std::vector<int> part;
-   if (lts_on && Mpi::WorldSize() > 1)
+   if (lts_on && nparts > 1 && !parts_load)
    {
-      const int ne = smesh->GetNE();
-      part.resize(ne);
+      const int ne = static_cast<int>(ne_global);
+      if (smesh_here) { part.resize(ne); }
       if (g_rank == 0)
       {
          std::vector<double> cost;
@@ -944,16 +1039,16 @@ int main(int argc, char *argv[])
          try
          {
             BuildLtsAwarePartition(ne, xadj, adj, lts_asg.cluster, lts_asg.num_clusters,
-                                   Mpi::WorldSize(), cost.empty() ? nullptr : &cost,
+                                   nparts, cost.empty() ? nullptr : &cost,
                                    lts_asg.fault_pairs, popt, part);
          }
          catch (const std::exception &ex)
          {
-            MFEM_ABORT("--lts rate2: BuildLtsAwarePartition failed on " << Mpi::WorldSize()
+            MFEM_ABORT("--lts rate2: BuildLtsAwarePartition failed on " << nparts
                        << " ranks: " << ex.what());
          }
          const LtsPartitionImbalance imb = ComputeLtsPartitionImbalance(
-            lts_asg.cluster, lts_asg.num_clusters, part, Mpi::WorldSize(),
+            lts_asg.cluster, lts_asg.num_clusters, part, nparts,
             cost.empty() ? nullptr : &cost, lts_asg.fault_pairs);
          std::cout << std::setprecision(4) << "  partition: multi-constraint (BuildLtsAwarePartition, "
                    << "fault weight w = " << fault_weight << "); max/mean overall " << imb.overall
@@ -961,10 +1056,11 @@ int main(int argc, char *argv[])
          for (double x : imb.per_cluster) { std::cout << " " << x; }
          std::cout << ", fault tets " << imb.fault << "\n";
       }
-      MPI_Bcast(part.data(), ne, MPI_INT, 0, MPI_COMM_WORLD);
+      if (!mesh_rank0) { MPI_Bcast(part.data(), ne, MPI_INT, 0, MPI_COMM_WORLD); }
    }
-   else if (fault_weight > 0.0 && Mpi::WorldSize() > 1)
+   else if (fault_weight > 0.0 && nparts > 1 && smesh_here)
    {
+      // every rank with the serial mesh computes the same cut
       MFEM_VERIFY(cfg.boundary.fault_attr > 0, "[boundary] fault_attr is required");
       const int ne = smesh->GetNE();
       std::vector<double> cost(ne, 1.0);
@@ -987,21 +1083,92 @@ int main(int argc, char *argv[])
       std::vector<int> cluster(ne, 0);
       LtsPartitionOptions popt;
       popt.imbalance = 1.03;   // METIS's default for k-way, as MFEM's cut
-      BuildLtsAwarePartition(ne, xadj, adj, cluster, 1, Mpi::WorldSize(), &cost, {}, popt, part);
+      BuildLtsAwarePartition(ne, xadj, adj, cluster, 1, nparts, &cost, {}, popt, part);
       const LtsPartitionImbalance imb =
-         ComputeLtsPartitionImbalance(cluster, 1, part, Mpi::WorldSize(), &cost, {});
+         ComputeLtsPartitionImbalance(cluster, 1, part, nparts, &cost, {});
       if (g_rank == 0)
       {
          std::cout << "  partition: METIS with fault weight w = " << fault_weight << " ("
                    << nface << " fault faces); weighted max/mean " << imb.overall << "\n";
       }
    }
-   ParMesh pmesh(MPI_COMM_WORLD, *smesh, part.empty() ? nullptr : part.data());
+   else if ((mesh_rank0 || parts_split) && g_rank == 0)
+   {
+      // the cut ParMesh(comm, serial mesh) makes on every rank
+      int *q = smesh->GeneratePartitioning(nparts, 1);
+      part.assign(q, q + smesh->GetNE());
+      delete [] q;
+   }
+   setup_timer.Mark("partition");
+   if (parts_split)
+   {
+      const auto t0 = std::chrono::steady_clock::now();
+      MakeDirs(parts_out);
+      if (part.empty()) { part.assign(smesh->GetNE(), 0); }   // N = 1
+      WriteMeshParts(parts_out, *smesh, part.data(), nparts, lts_on, lts_asg.cluster.data());
+      std::ifstream mf(mesh_path, std::ios::binary | std::ios::ate);
+      std::vector<std::pair<std::string, std::string>> kv = {
+         {"format", "seas-mesh-parts 1"}, {"parts", std::to_string(nparts)}, {"mesh", mesh_path},
+         {"mesh_bytes", std::to_string(static_cast<long long>(mf.tellg()))},
+         {"mesh_fnv1a64", FileFnv1a64(mesh_path)}, {"tets", std::to_string(ne_global)},
+         {"partition", lts_on ? "BuildLtsAwarePartition (LTS)" : fault_weight > 0.0
+                       ? "BuildLtsAwarePartition (fault weight)" : "Mesh::GeneratePartitioning (METIS)"}};
+      kv.insert(kv.end(), parts_opts.begin(), parts_opts.end());
+      if (lts_on)
+      {
+         kv.push_back({"lts_num_clusters", std::to_string(lts_asg.num_clusters)});
+         kv.push_back({"lts_fault_cluster", std::to_string(lts_asg.fault_cluster)});
+         kv.push_back({"lts_passes", std::to_string(lts_asg.passes)});
+         kv.push_back({"lts_fault_pairs", std::to_string(lts_asg.fault_pairs.size())});
+         kv.push_back({"lts_dt0", exact(lts_asg.dt0)});
+      }
+      WriteMeshPartsInfo(parts_out, kv);
+      std::cout << "  mesh parts: " << nparts << " parts of " << mesh_path << " written to "
+                << parts_out << " in " << std::chrono::duration<double>(
+                   std::chrono::steady_clock::now() - t0).count() << " s\n" << std::flush;
+      return 0;
+   }
    // LTS: the clusters of the local elements (the serial elements of this
-   // rank, in serial order, as ParMesh builds them; checked by centroid) and
-   // of the face-neighbour elements
+   // rank, in serial order, as ParMesh builds them; with every-rank checked
+   // here by centroid, with rank0 by rank 0 vertex by vertex before it sends
+   // the part) and of the face-neighbour elements
    std::vector<int> lts_cl, lts_cl_nbr;
-   if (lts_on)
+   std::unique_ptr<ParMesh> pmesh_owner;
+   if (parts_load)
+   {
+      pmesh_owner = ReadMeshPart(MPI_COMM_WORLD, parts_in, lts_on, &lts_cl);
+   }
+   else if (mesh_rank0)
+   {
+      pmesh_owner = DistributeMeshParts(MPI_COMM_WORLD, smesh.get(), part.data(), lts_on,
+                                        lts_asg.cluster.data(), &lts_cl);
+      smesh.reset();
+      part.clear();
+      part.shrink_to_fit();
+   }
+   else
+   {
+      pmesh_owner = std::make_unique<ParMesh>(MPI_COMM_WORLD, *smesh,
+                                              part.empty() ? nullptr : part.data());
+   }
+   ParMesh &pmesh = *pmesh_owner;
+   if (g_rank == 0)
+   {
+      if (parts_load)
+      {
+         std::cout << "  mesh setup: every rank read its part from " << parts_in << " (cut from "
+                   << info("mesh") << ", " << info("partition") << ")\n";
+      }
+      else
+      {
+         std::cout << "  mesh setup " << (mesh_rank0 ? "rank0: rank 0 read the mesh and sent "
+                                          "each rank its part\n"
+                                          : nranks == 1 ? "(one rank): ParMesh from the serial "
+                                          "mesh\n" : "every-rank: every rank read the mesh\n");
+      }
+   }
+   setup_timer.Mark("ParMesh");
+   if (lts_on && !mesh_rank0 && !parts_load)
    {
       auto centroid = [](const Mesh &m, int e, real_t c[3]) {
          Array<int> v;
@@ -1030,6 +1197,9 @@ int main(int argc, char *argv[])
       MFEM_VERIFY(static_cast<int>(lts_cl.size()) == pmesh.GetNE(), "--lts: rank " << g_rank
                   << " has " << pmesh.GetNE() << " local elements but " << lts_cl.size()
                   << " serial elements");
+   }
+   if (lts_on)
+   {
       pmesh.ExchangeFaceNbrData();
       DG_FECollection fec0(0, 3);
       ParFiniteElementSpace fes0(&pmesh, &fec0);
@@ -1051,6 +1221,7 @@ int main(int argc, char *argv[])
       lts_asg.cluster.shrink_to_fit();
    }
    smesh.reset();
+   setup_timer.Mark("LTS cluster map");
 
    // ------------------------------------------------------------ boundary
    MFEM_VERIFY(cfg.boundary.fault_attr > 0, "[boundary] fault_attr is required");
@@ -1266,6 +1437,8 @@ int main(int argc, char *argv[])
       };
    }
 
+   setup_timer.Mark("fault setup");
+
    // ------------------------------------------------------------ operator
    DomainConfig dcfg;
    dcfg.penalty_factor = penalty_factor;
@@ -1328,6 +1501,8 @@ int main(int argc, char *argv[])
          }
       }
    }
+
+   setup_timer.Mark("operator");
 
    // initial fault state: d = 0, psi from the continuous friction condition
    // at the projected prestress, V = V_init along -X_tan (C-07)
@@ -1482,10 +1657,13 @@ int main(int argc, char *argv[])
       MPI_Barrier(MPI_COMM_WORLD);
    }
 
+   setup_timer.Mark("initial state");
+
    // ------------------------------------------------------------ outputs
    // stations from the station file the deck names (header, "Stations")
    std::unique_ptr<FaultStationWriter> stations;
    std::unique_ptr<StationCopyAverage> station_avg;
+   std::vector<int> station_dofs;   // the owned DOFs the stations read (sorted)
    std::string state_label = "log10_theta";
    if (t_st)
    {
@@ -1540,10 +1718,39 @@ int main(int argc, char *argv[])
          state_fn = [](const DOFData &d) { return d.psi; };
       }
       stations = std::make_unique<FaultStationWriter>();
-      stations->Open(out_dir, prefix, st_list, snap, state_label, state_fn);
+      stations->Open(out_dir, prefix, st_list, snap, state_label, state_fn, station_flush_every);
       if (station_copies == "average")
       {
-         station_avg = std::make_unique<StationCopyAverage>(op, st_list, out_dir, prefix);
+         station_avg = std::make_unique<StationCopyAverage>(
+            StationCopyGeometry(op), op.FaultPositions(), st_list, out_dir, prefix,
+            station_comm == "sub", station_flush_every);
+      }
+      station_dofs = stations->Dofs();
+      if (station_avg)
+      {
+         const std::vector<int> d = station_avg->Dofs();
+         station_dofs.insert(station_dofs.end(), d.begin(), d.end());
+      }
+      std::sort(station_dofs.begin(), station_dofs.end());
+      station_dofs.erase(std::unique(station_dofs.begin(), station_dofs.end()), station_dofs.end());
+      if (station_flush_every > 1) { InstallStationSignalHandlers(); }
+      int nmem = station_avg ? station_avg->Members() : 0, nown = static_cast<int>(stations->Dofs().size());
+      int root = (station_avg && station_avg->Root()) ? g_rank : -1;
+      MPI_Allreduce(MPI_IN_PLACE, &nown, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+      MPI_Allreduce(MPI_IN_PLACE, &root, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+      MPI_Allreduce(MPI_IN_PLACE, &nmem, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+      if (g_rank == 0)
+      {
+         std::cout << "  station output: rows flushed every " << station_flush_every << " row(s)"
+                   << (station_flush_every > 1 ? " and on SIGTERM/SIGINT/SIGUSR1" : "") << "; ";
+         if (station_avg)
+         {
+            std::cout << "copy average over " << (station_comm == "sub" ? "the " : "all ") << nmem
+                      << " rank(s) " << (station_comm == "sub" ? "holding copies" : "(world)")
+                      << ", envelope files on rank " << root;
+         }
+         else { std::cout << "nearest copy only"; }
+         std::cout << "; " << nown << " station file(s)\n";
       }
       if (g_rank == 0)
       {
@@ -1573,24 +1780,25 @@ int main(int argc, char *argv[])
    std::vector<DOFData> dofdata(no);
    auto fill_dofdata = [&]() {
       const Vector &d = op.Slip(), &V = op.SlipRate(), &psi = op.State();
-      Vector Xs = op.LastShear(), sg = op.LastSigmaEff();
-      const bool have_x = Xs.Size() == 2 * no;
+      const bool have_x = op.LastShear().Size() == 2 * no;
+      Vector Xb, sgb;
       if (!have_x)
       {
          // before the first step: no bulk traction yet, the total traction
          // is the projected background (prestress + nucleation at t)
          Vector S;
          op.BackgroundTraction(op.GetTime(), S);
-         Xs.SetSize(2 * no);
-         sg.SetSize(no);
+         Xb.SetSize(2 * no);
+         sgb.SetSize(no);
          for (int j = 0; j < no; j++)
          {
             const real_t *n = &op.FaultFrames()(9 * j), *dd = &op.FaultFrames()(9 * j + 3),
                           *ss = &op.FaultFrames()(9 * j + 6);
-            ff::ToLocal(&S(3 * j), 0.0, n, dd, ss, Xs(2 * j), Xs(2 * j + 1), sg(j));
+            ff::ToLocal(&S(3 * j), 0.0, n, dd, ss, Xb(2 * j), Xb(2 * j + 1), sgb(j));
          }
       }
-      for (int j = 0; j < no; j++)
+      const Vector &Xs = have_x ? op.LastShear() : Xb, &sg = have_x ? op.LastSigmaEff() : sgb;
+      for (int j : station_dofs)
       {
          const real_t *dd = &op.FaultFrames()(9 * j + 3), *ss = &op.FaultFrames()(9 * j + 6);
          DOFData &q = dofdata[j];
@@ -1646,12 +1854,17 @@ int main(int argc, char *argv[])
                  : std::max(1, static_cast<int>(std::lround(ocfg.paraview_fault_dt / dt)));
       auto alg = ParaViewHDFDataCollection::HDFCompression::Deflate;
       double param = 6.0;   // the writer's default (lossless deflate level 6)
+      MFEM_VERIFY(fault_deflate.empty() || ocfg.paraview_fault_zfp_tol <= 0.0,
+                  "--paraview-fault-deflate-level " << fault_deflate << " with [output] "
+                  "paraview_fault_zfp_tol = " << ocfg.paraview_fault_zfp_tol << ": choose one filter");
       if (ocfg.paraview_fault_zfp_tol > 0.0)
       {
          ParaViewOutput<ParMesh>::ProbeH5ZZfpPluginOrAbort();
          alg = ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy;
          param = ocfg.paraview_fault_zfp_tol;
       }
+      else if (fault_deflate == "none") { param = -1.0; }   // no filter (both writers)
+      else if (!fault_deflate.empty()) { param = fault_deflate[0] - '0'; }
       else if (ocfg.paraview_fault_deflate_level >= 0)
       {
          param = ocfg.paraview_fault_deflate_level;
@@ -1661,9 +1874,14 @@ int main(int argc, char *argv[])
       if (g_rank == 0)
       {
          std::cout << "  fault ParaView output every " << pv_every << " steps (" << pv_every * dt
-                   << " s), " << (alg == ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy
-                                  ? "ZFP accuracy " : "deflate level ") << param
-                   << ", at most " << ocfg.max_snapshots << " snapshots\n";
+                   << " s), ";
+         if (param < 0.0) { std::cout << "no filter"; }
+         else
+         {
+            std::cout << (alg == ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy
+                          ? "ZFP accuracy " : "deflate level ") << param;
+         }
+         std::cout << ", at most " << ocfg.max_snapshots << " snapshots\n";
       }
 #endif
    }
@@ -1754,6 +1972,7 @@ int main(int argc, char *argv[])
       }
       return 0;
    }
+   setup_timer.Mark("outputs");
    op.SetFastFaultKernels(fast_fault != 0);
    op.SetFusedStiffness(fused_spmv != 0);
    op.SetDenseBlocks(dense_blocks != 0);
@@ -1778,6 +1997,8 @@ int main(int argc, char *argv[])
       }
    }
    else { ode.Init(op); }
+   setup_timer.Mark(lts_on ? "LTS blocks" : "solver init");
+   setup_timer.Print();
    Vector lts_zero_acc;
    if (lts_on && mon) { lts_zero_acc.SetSize(n); lts_zero_acc = 0.0; }
    if (stations)
@@ -1792,6 +2013,7 @@ int main(int argc, char *argv[])
    // assembles K, K_eta, the fused pattern and the fault face operators
    double step_sec = 0.0, step1_sec = 0.0, fault_sec1 = 0.0;
    long lts_next_log = log_every;   // LTS: log at the first sync point from here
+   bool station_signal_seen = false;
    for (long s = 1; s <= nsteps; s++)
    {
       real_t h = dt;
@@ -1842,6 +2064,19 @@ int main(int argc, char *argv[])
          fill_dofdata();
          if (station_avg) { station_avg->Apply(t, dofdata); }
          stations->WriteStep(t, dofdata);
+      }
+      if (stations && !station_signal_seen && StationSignal() != 0)
+      {
+         // header, "Station output cost": this rank's files, from here every row
+         station_signal_seen = true;
+         stations->SetFlushEvery(1);
+         stations->Flush();
+         if (station_avg) { station_avg->SetFlushEvery(1); station_avg->Flush(); }
+         if (g_rank == 0)
+         {
+            std::cout << "  signal " << StationSignal() << " at step " << s << " (t = " << t
+                      << " s): station files flushed; every row is flushed from here\n" << std::flush;
+         }
       }
       if (dump && s % dump_every == 0)
       {
