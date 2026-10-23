@@ -38,14 +38,22 @@
 //      block is cut by an exact SVD (LAPACK dgesdd) to the smallest rank k
 //      with ||A - A_k||_F <= eps·||A||_F, and kept dense when k·(m + n) >=
 //      m·n.  Hence ||G - G_H||_F <= eps·||G||_F.
-//   4. Layout: the rows stay where QDGreenOperator puts them (an even split
-//      of the fault DOFs, in its global order g, over all ranks).  A rank
-//      holds the rows of every block that fall in its range: dense rows,
-//      or rows of U·Σ.  Vᵀ of a low-rank block is held by one rank on each
-//      node that holds rows of the block, and the short vector w = Vᵀ·x
-//      goes from there only to the ranks of that node (no w crosses nodes).
-//   5. Product: x = δ_all in tree order; w = Vᵀ·x for the held Vᵀ; w to the
-//      node's row ranks; y = dense rows·x + U rows·w.
+//   4. Layout: a rank holds the rows of every block that fall in its range
+//      of fault DOFs (global order g): dense rows, or rows of U·Σ.  Each
+//      node that holds rows of a low-rank block keeps one copy of its Vᵀ,
+//      and the short vector w = Vᵀ·x goes only to the ranks of that node
+//      (no w crosses nodes).  Two layouts (--qd-green-layout):
+//      count: the ranges of QDGreenOperator (an even split of the fault
+//             DOFs over all ranks); each Vᵀ whole on one rank per node.
+//      bytes: (QD speed item C, qd-c-design-rev1, the default) PlanLayout
+//             cuts the fault DOFs into ranges of about equal bytes (rows
+//             plus a share of the Vᵀ they use), and each Vᵀ by its rows
+//             into pieces spread over all ranks of the node, largest first
+//             on the least loaded rank.  Only a read from the file uses it.
+//      Each w entry and each y row adds the same values in the same order
+//      in both layouts, so the product is bitwise the same.
+//   5. Product: x = δ_all in tree order; w = Vᵀ·x for the held Vᵀ rows; w
+//      to the node's row ranks; y = dense rows·x + U rows·w.
 //
 // Cache file (SEAS-QD-HMAT-1), in tree order, so any rank count reads it:
 // a 512 B header, the keys, the cluster ranges, T_D, the block table, then
@@ -69,8 +77,10 @@
 #include <cstdlib>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <iomanip>
 #include <numeric>
+#include <queue>
 #include <sstream>
 #include <string>
 #include <type_traits>
@@ -102,8 +112,9 @@ public:
 
    /// @a nf fault DOFs with @a ncomp traction rows each; rank r holds the
    /// rows of fault DOFs [row_lo[r], row_lo[r + 1]) (QDGreenOperator's
-   /// layout).  @a keys_all: 6 position keys per fault DOF in global order
-   /// g, on every rank.  Builds the cluster and block trees.  Collective.
+   /// layout, until PlanLayout).  @a keys_all: 6 position keys per fault
+   /// DOF in global order g, on every rank.  Builds the cluster and block
+   /// trees.  Collective.
    QDHMatrix(MPI_Comm comm, long long nf, int ncomp,
              const std::vector<long long> &row_lo,
              const std::vector<real_t> &keys_all, int leaf, double eta)
@@ -150,6 +161,8 @@ public:
 #endif
       MFEM_VERIFY(eps > 0.0 && eps < 1.0, "--qd-green-compress: eps "
                   << eps << " outside (0, 1)");
+      MFEM_VERIFY(!planned_, "QD H-matrix: Compress runs in the count "
+                  "layout only");
       eps_ = eps;
       kept_ = keep;
       const double t0 = MPI_Wtime();
@@ -168,6 +181,7 @@ public:
       }
       compress_seconds_ = MPI_Wtime() - t0;
       nrounds_ = static_cast<int>(rounds.size());
+      have_k_ = true;
       FinishLayout();
    }
 
@@ -182,7 +196,7 @@ public:
          xt_[2 * p] = delta_all[2 * g];
          xt_[2 * p + 1] = delta_all[2 * g + 1];
       }
-      // w = Vᵀ·x for the Vᵀ held here
+      // w = Vᵀ·x for the rows of Vᵀ held here
       for (const VPart &v : vparts_)
       {
          const real_t *x = xt_.data() + 2 * clusters_[blocks_[v.b].s].lo;
@@ -297,12 +311,26 @@ public:
    }
 
    /// Read the H-matrix from @a path and this rank's rows of T_D into
-   /// @a td_rows (nb·ncomp).  Returns false when the file does not exist;
-   /// aborts when it was made for another mesh or other settings.
-   /// Collective.
+   /// @a td_rows (nb·ncomp), in the count layout.  Returns false when the
+   /// file does not exist; aborts when it was made for another mesh or
+   /// other settings.  Collective.
    bool ReadFile(const std::string &path, double eps, double mem_node,
                  real_t *td_rows, std::string &info)
    {
+      if (!ReadHeader(path, eps, info)) { return false; }
+      ReadData(path, mem_node, td_rows);
+      return true;
+   }
+
+   /// First part of a read: check the header, keys, clusters and block
+   /// table of @a path against this run, and take every block's k and T_D
+   /// (in tree order) from it.  Returns false when the file does not
+   /// exist; aborts when it was made for another mesh or other settings.
+   /// Collective.
+   bool ReadHeader(const std::string &path, double eps, std::string &info)
+   {
+      MFEM_VERIFY(rparts_.empty() && vparts_.empty(), "QD H-matrix: "
+                  "ReadHeader on an operator that already holds data");
       MPI_File fh;
       int err = MPI_File_open(comm_, path.c_str(), MPI_MODE_RDONLY,
                               MPI_INFO_NULL, &fh);
@@ -373,14 +401,7 @@ public:
                      "--qd-green-hcache.");
       }
       const real_t *ftd = fk + kKey * nf_ + 2 * clusters_.size();
-      for (int i = 0; i < nb_; i++)
-      {
-         const long long p = tree_pos_[row_lo_[rank_] + i];
-         for (int c = 0; c < ncomp_; c++)
-         {
-            td_rows[ncomp_ * i + c] = ftd[ncomp_ * p + c];
-         }
-      }
+      td_tree_.assign(ftd, ftd + ncomp_ * nf_);
       const long long *fb = reinterpret_cast<const long long *>(
                                ftd + ncomp_ * nf_);
       for (size_t b = 0; b < blocks_.size(); b++)
@@ -406,6 +427,36 @@ public:
       MFEM_VERIFY(size == DataOffsets(off), "QD H-matrix: '" << path
                   << "' has " << size << " bytes, expected "
                   << DataOffsets(off) << " (incomplete write?)");
+      MPI_File_close(&fh);
+      have_k_ = true;
+      return true;
+   }
+
+   /// Second part of a read (after ReadHeader, and PlanLayout for the
+   /// bytes layout): read the blocks of @a path into this rank's layout,
+   /// and this rank's rows of T_D into @a td_rows (nb·ncomp).
+   /// Collective.
+   void ReadData(const std::string &path, double mem_node, real_t *td_rows)
+   {
+      MFEM_VERIFY(have_k_ && td_tree_.size() ==
+                  static_cast<size_t>(ncomp_ * nf_) && rparts_.empty() &&
+                  vparts_.empty(), "QD H-matrix: ReadData needs ReadHeader "
+                  "first, once");
+      for (int i = 0; i < nb_; i++)
+      {
+         const long long p = tree_pos_[row_lo_[rank_] + i];
+         for (int c = 0; c < ncomp_; c++)
+         {
+            td_rows[ncomp_ * i + c] = td_tree_[ncomp_ * p + c];
+         }
+      }
+      td_tree_.clear();
+      td_tree_.shrink_to_fit();
+      MPI_File fh;
+      CheckIO(MPI_File_open(comm_, path.c_str(), MPI_MODE_RDONLY,
+                            MPI_INFO_NULL, &fh), path, "open");
+      std::vector<long long> off;
+      DataOffsets(off);
       // Each worker reads its blocks whole and hands them out
       const double t0 = MPI_Wtime();
       std::vector<int> order(blocks_.size());
@@ -424,8 +475,148 @@ public:
       compress_seconds_ = MPI_Wtime() - t0;
       nrounds_ = static_cast<int>(rounds.size());
       FinishLayout();
-      return true;
    }
+
+   /// QD speed item C (--qd-green-layout bytes), between ReadHeader and
+   /// ReadData: cut the fault DOFs, in order g, into ranges of about equal
+   /// bytes, and each Vᵀ by its rows into pieces over the ranks of each
+   /// node that needs it (qd-c-design-rev1 §3.2, Appendix A).  The same on
+   /// every rank, from the block table alone; no messages.  Returns the new
+   /// row ranges, which QDGreenOperator::SetRowLayout must adopt too.
+   const std::vector<long long> &PlanLayout()
+   {
+      MFEM_VERIFY(have_k_ && rparts_.empty() && vparts_.empty() && !planned_,
+                  "QD H-matrix: PlanLayout goes between ReadHeader and "
+                  "ReadData, once");
+      // Bytes of each fault DOF's rows (c), and its share of the Vᵀ of the
+      // blocks it has rows in (v): Vᵀ spread evenly over the block's rows.
+      std::vector<double> c(nf_, 0.0), v(nf_, 0.0);
+      for (size_t b = 0; b < blocks_.size(); b++)
+      {
+         const Block &bk = blocks_[b];
+         const Cluster &t = clusters_[bk.t];
+         const double n = double(Cols(static_cast<int>(b)));
+         const double row = 8.0 * ncomp_ * (bk.k < 0 ? n : double(bk.k));
+         const double vsh = bk.k < 0 ? 0.0 :
+                            8.0 * double(bk.k) * n / double(t.hi - t.lo);
+         for (long long p = t.lo; p < t.hi; p++)
+         {
+            c[perm_[p]] += row;
+            v[perm_[p]] += vsh;
+         }
+      }
+      // Rank r starts at the first DOF whose middle reaches r·C/P.
+      double total = 0.0;
+      for (long long g = 0; g < nf_; g++) { total += c[g] + v[g]; }
+      std::vector<long long> lo(nranks_ + 1, nf_);
+      lo[0] = 0;
+      double run = 0.0;
+      int r = 1;
+      for (long long g = 0; g < nf_; g++)
+      {
+         const double mid = run + 0.5 * (c[g] + v[g]);
+         while (r < nranks_ && mid >= total * r / nranks_) { lo[r++] = g; }
+         run += c[g] + v[g];
+      }
+      SetRowLayout(lo);
+      // Row bytes of each rank, to which the pieces are added
+      std::vector<double> load(nranks_, 0.0);
+      for (int q = 0; q < nranks_; q++)
+      {
+         for (long long g = row_lo_[q]; g < row_lo_[q + 1]; g++)
+         {
+            load[q] += c[g];
+         }
+      }
+      // Low-rank blocks (k > 0) with rows on each node
+      std::vector<std::vector<int>> need(nnodes_);
+      std::vector<int> seen(nnodes_, -1);
+      for (size_t b = 0; b < blocks_.size(); b++)
+      {
+         if (blocks_[b].k <= 0) { continue; }
+         for (int q : block_ranks_[b])
+         {
+            const int nd = node_of_[q];
+            if (seen[nd] != static_cast<int>(b))
+            {
+               seen[nd] = static_cast<int>(b);
+               need[nd].push_back(static_cast<int>(b));
+            }
+         }
+      }
+      const int div = PieceDiv();
+      vpieces_.assign(blocks_.size(), {});
+      struct Cut { double bytes; int b, l0, l1; };
+      for (int nd = 0; nd < nnodes_; nd++)
+      {
+         const std::vector<int> &ranks = node_ranks_[nd];
+         double node_bytes = 0.0;
+         for (int q : ranks) { node_bytes += load[q]; }
+         for (int b : need[nd]) { node_bytes += 8.0 * blocks_[b].k * Cols(b); }
+         const double cap = node_bytes / (double(div) * ranks.size());
+         // Each Vᵀ in ceil(bytes / cap) ranges of near-equal whole rows
+         std::vector<Cut> cuts;
+         for (int b : need[nd])
+         {
+            const int k = blocks_[b].k;
+            const double vb = 8.0 * k * Cols(b);
+            long long np = cap > 0.0 ? static_cast<long long>(
+                              std::ceil(vb / cap)) : 1;
+            np = std::max(1LL, std::min<long long>(np, k));
+            for (long long j = 0; j < np; j++)
+            {
+               const int l0 = static_cast<int>(k * j / np);
+               const int l1 = static_cast<int>(k * (j + 1) / np);
+               cuts.push_back({8.0 * (l1 - l0) * Cols(b), b, l0, l1});
+            }
+         }
+         // Largest first (ties: block, then first row), each on the least
+         // loaded rank of the node (ties: lowest rank)
+         std::sort(cuts.begin(), cuts.end(), [](const Cut &x, const Cut &y)
+         {
+            if (x.bytes != y.bytes) { return x.bytes > y.bytes; }
+            if (x.b != y.b) { return x.b < y.b; }
+            return x.l0 < y.l0;
+         });
+         std::priority_queue<std::pair<double, int>,
+             std::vector<std::pair<double, int>>,
+             std::greater<std::pair<double, int>>> least;
+         for (int q : ranks) { least.push({load[q], q}); }
+         for (const Cut &cut : cuts)
+         {
+            const int q = least.top().second;
+            least.pop();
+            vpieces_[cut.b].push_back({q, cut.l0, cut.l1});
+            load[q] += cut.bytes;
+            least.push({load[q], q});
+         }
+      }
+      for (auto &pcs : vpieces_)
+      {
+         std::sort(pcs.begin(), pcs.end(), [&](const Piece &x, const Piece &y)
+         {
+            if (node_of_[x.owner] != node_of_[y.owner])
+            {
+               return node_of_[x.owner] < node_of_[y.owner];
+            }
+            return x.l0 < y.l0;
+         });
+      }
+      planned_bytes_ = load[rank_];
+      planned_ = true;
+      return row_lo_;
+   }
+
+   /// Fault DOFs whose rows rank r holds: [RowLo()[r], RowLo()[r + 1]).
+   const std::vector<long long> &RowLo() const { return row_lo_; }
+   /// "bytes" after PlanLayout, else "count".
+   const char *Layout() const { return planned_ ? "bytes" : "count"; }
+   /// Bytes of rows and Vᵀ held on this rank.
+   double HeldBytes() const { return near_bytes_ + u_bytes_ + v_bytes_; }
+   /// What PlanLayout planned for this rank (0 in the count layout).
+   double PlannedBytes() const { return planned_bytes_; }
+   /// Vᵀ pieces on all nodes (count layout: one per node and block).
+   long long NumPieces() const { return npieces_; }
 
    /// Bytes of the operator on this rank (rows, Vᵀ, w buffers).
    double LocalBytes() const { return local_bytes_; }
@@ -439,6 +630,10 @@ public:
       MPI_Reduce(loc, mx, 4, MPI_DOUBLE, MPI_MAX, 0, comm_);
       double tot_max = 0.0;
       MPI_Reduce(&local_bytes_, &tot_max, 1, MPI_DOUBLE, MPI_MAX, 0, comm_);
+      // Dense rows, U rows and Vᵀ of every rank, for the layout line
+      double part[3] = {near_bytes_, u_bytes_, v_bytes_};
+      std::vector<double> parts(rank_ == 0 ? 3 * nranks_ : 0);
+      MPI_Gather(part, 3, MPI_DOUBLE, parts.data(), 3, MPI_DOUBLE, 0, comm_);
       std::ostringstream o;
       if (rank_ != 0) { return o.str(); }
       long long nadm = 0, nlow = 0, ndense = 0;
@@ -479,7 +674,32 @@ public:
            / stored << "%); largest rank " << std::setprecision(3)
         << tot_max / gib << " GiB, mean " << (sum[0] + sum[1] + sum[2]) /
            nranks_ / gib << " GiB; w received per stage max "
-        << static_cast<long long>(mx[3]) << " values\n"
+        << static_cast<long long>(mx[3]) << " values\n";
+      // Layout: per-rank max and mean of each part, and the largest rank
+      double pmax[3] = {0.0, 0.0, 0.0}, big = -1.0;
+      int rbig = 0;
+      for (int r = 0; r < nranks_; r++)
+      {
+         const double *pr = &parts[3 * r];
+         for (int i = 0; i < 3; i++) { pmax[i] = std::max(pmax[i], pr[i]); }
+         if (pr[0] + pr[1] + pr[2] > big)
+         {
+            big = pr[0] + pr[1] + pr[2];
+            rbig = r;
+         }
+      }
+      const double *pb = &parts[3 * rbig];
+      o << "[QD-HMAT] layout " << Layout() << " ("
+        << (planned_ ? "rows cut by bytes, V^T in " + std::to_string(npieces_)
+            + " pieces" : std::string("rows cut by count, each V^T whole on "
+                                      "one rank per node")) << "): per rank "
+        << "max/mean GiB dense rows " << pmax[0] / gib << "/"
+        << sum[0] / nranks_ / gib << ", U rows " << pmax[1] / gib << "/"
+        << sum[1] / nranks_ / gib << ", V^T " << pmax[2] / gib << "/"
+        << sum[2] / nranks_ / gib << "; largest rank " << rbig << " (node "
+        << node_of_[rbig] << "): " << pb[0] / gib << " + " << pb[1] / gib
+        << " + " << pb[2] / gib << " GiB, " << std::setprecision(2)
+        << big / ((sum[0] + sum[1] + sum[2]) / nranks_) << "x the mean\n"
         << "[QD-HMAT] " << nrounds_ << " rounds, " << std::setprecision(1)
         << compress_seconds_ << " s\n";
       return o.str();
@@ -507,12 +727,20 @@ private:
       std::vector<int> rows;   ///< local row index in y
       std::vector<real_t> a;
    };
-   /// Vᵀ (k × n, row-major) of a block whose w this rank computes.
+   /// Rows [l0, l0 + k) of Vᵀ (k × n, row-major) of a block, whose entries
+   /// of w this rank computes; w = offset of w[l0] in wbuf_.
    struct VPart
    {
-      int b, k, n;
+      int b, l0, k, n;
       long long w;
       std::vector<real_t> vt;
+   };
+   /// Rows [l0, l1) of a block's Vᵀ, held by rank @a owner.  The pieces on
+   /// each node that holds rows of the block cover [0, k) (count layout:
+   /// one piece per node).
+   struct Piece
+   {
+      int owner, l0, l1;
    };
    struct Kept
    {
@@ -556,10 +784,16 @@ private:
    // operator
    std::vector<RowPart> rparts_;
    std::vector<VPart> vparts_;
-   std::vector<std::vector<int>> vown_;  ///< per block, V rank per node
+   /// Per block, its Vᵀ pieces, by node then l0
+   std::vector<std::vector<Piece>> vpieces_;
    bool kept_ = false;
    std::vector<Kept> kept_blocks_;
    std::vector<double> v_load_;          ///< V values per rank so far
+   bool have_k_ = false;                 ///< every block's k known
+   std::vector<real_t> td_tree_;         ///< T_D from ReadHeader, tree order
+   bool planned_ = false;                ///< bytes layout (PlanLayout)
+   double planned_bytes_ = 0.0;
+   long long npieces_ = 0;
    // product buffers
    mutable std::vector<real_t> xt_, wbuf_, wsend_, wrecv_;
    std::vector<long long> wsend_idx_, wrecv_idx_;
@@ -797,7 +1031,12 @@ private:
    {
       blocks_.clear();
       Walk(0, 0);
-      // Ranks that hold rows of each block's row cluster
+      ComputeBlockRanks();
+   }
+
+   /// Ranks that hold rows of each block's row cluster (from row_lo_).
+   void ComputeBlockRanks()
+   {
       std::vector<std::vector<int>> cl_ranks(clusters_.size());
       for (size_t c = 0; c < clusters_.size(); c++)
       {
@@ -814,6 +1053,29 @@ private:
       {
          block_ranks_[b] = cl_ranks[blocks_[b].t];
       }
+   }
+
+   /// Rank r holds the rows of fault DOFs [row_lo[r], row_lo[r + 1]).
+   void SetRowLayout(const std::vector<long long> &row_lo)
+   {
+      bool ok = static_cast<int>(row_lo.size()) == nranks_ + 1 &&
+                row_lo[0] == 0 && row_lo[nranks_] == nf_;
+      for (int r = 0; ok && r < nranks_; r++)
+      {
+         ok = row_lo[r] <= row_lo[r + 1];
+      }
+      MFEM_VERIFY(ok, "QD H-matrix: bad row layout");
+      row_lo_ = row_lo;
+      nb_ = static_cast<int>(row_lo_[rank_ + 1] - row_lo_[rank_]);
+      ComputeBlockRanks();
+   }
+
+   /// Piece cap = bytes of the node / (div · its ranks); test hook
+   /// SEAS_QD_HMAT_PIECE_DIV=div (default 4) makes smaller pieces.
+   static int PieceDiv()
+   {
+      const char *e = std::getenv("SEAS_QD_HMAT_PIECE_DIV");
+      return (e && std::atoi(e) > 0) ? std::atoi(e) : 4;
    }
 
    void Walk(int t, int s)
@@ -960,8 +1222,8 @@ private:
       {
          if (round[r] >= 0) { blocks_[round[r]].k = kr[r]; }
       }
-      AssignV(round);
-      // Results: rows to their ranks, Vᵀ to each node's V rank
+      if (!planned_) { AssignV(round); }
+      // Results: rows to their ranks, Vᵀ pieces to their owners
       std::vector<int> scount(nranks_, 0), sdispl(nranks_, 0),
           rcount(nranks_, 0), rdispl(nranks_, 0);
       std::vector<real_t> send;
@@ -984,10 +1246,11 @@ private:
                const real_t *src = full.data() + ncomp_ * (p - t.lo) * w;
                send.insert(send.end(), src, src + ncomp_ * w);
             }
-            if (bk.k >= 0 && IsVRank(mine, r))
+            for (const Piece &pc : vpieces_[mine])
             {
+               if (pc.owner != r) { continue; }
                const real_t *vt = full.data() + m * bk.k;
-               send.insert(send.end(), vt, vt + bk.k * n);
+               send.insert(send.end(), vt + pc.l0 * n, vt + pc.l1 * n);
             }
             scount[r] = static_cast<int>(send.size()) - sdispl[r];
          }
@@ -1009,9 +1272,12 @@ private:
             const long long n = Cols(b);
             const long long w = bk.k < 0 ? n : bk.k;
             rcount[r] = static_cast<int>(ncomp_ * MyRowsOf(bk.t) * w);
-            if (bk.k >= 0 && IsVRank(b, rank_))
+            for (const Piece &pc : vpieces_[b])
             {
-               rcount[r] += static_cast<int>(bk.k * n);
+               if (pc.owner == rank_)
+               {
+                  rcount[r] += static_cast<int>((pc.l1 - pc.l0) * n);
+               }
             }
          }
          tot += rcount[r];
@@ -1052,14 +1318,17 @@ private:
             (bk.k < 0 ? near_bytes_ : u_bytes_) += 8.0 * rp.a.size();
             rparts_.push_back(std::move(rp));
          }
-         if (bk.k >= 0 && IsVRank(b, rank_))
+         for (const Piece &pc : vpieces_[b])
          {
+            if (pc.owner != rank_) { continue; }
             VPart vp;
             vp.b = b;
-            vp.k = bk.k;
+            vp.l0 = pc.l0;
+            vp.k = pc.l1 - pc.l0;
             vp.n = n;
             vp.w = -1;
-            vp.vt.assign(src, src + static_cast<size_t>(bk.k) * n);
+            vp.vt.assign(src, src + static_cast<size_t>(vp.k) * n);
+            src += vp.vt.size();
             v_bytes_ += 8.0 * vp.vt.size();
             vparts_.push_back(std::move(vp));
          }
@@ -1169,41 +1438,37 @@ private:
 #endif
    }
 
-   /// The rank on each node that holds Vᵀ of the low-rank blocks of
-   /// @a round: among the node's ranks with rows of the block, the one
-   /// with the fewest V values so far.  Same on every rank.
+   /// Count layout: the rank on each node that holds Vᵀ (one whole piece)
+   /// of the low-rank blocks of @a round: among the node's ranks with rows
+   /// of the block, the one with the fewest V values so far.  Same on
+   /// every rank.
    void AssignV(const std::vector<int> &round)
    {
-      if (vown_.empty())
+      if (vpieces_.empty())
       {
-         vown_.assign(blocks_.size(), {});
+         vpieces_.assign(blocks_.size(), {});
          v_load_.assign(nranks_, 0.0);
       }
       for (int r = 0; r < nranks_; r++)
       {
          const int b = round[r];
-         if (b < 0 || blocks_[b].k < 0) { continue; }
-         std::vector<int> &vo = vown_[b];
-         vo.assign(nnodes_, -1);
+         if (b < 0 || blocks_[b].k <= 0) { continue; }
+         std::vector<int> vo(nnodes_, -1);
          for (int q : block_ranks_[b])
          {
             const int nd = node_of_[q];
             if (vo[nd] < 0 || v_load_[q] < v_load_[vo[nd]]) { vo[nd] = q; }
          }
+         vpieces_[b].clear();
          for (int nd = 0; nd < nnodes_; nd++)
          {
             if (vo[nd] >= 0)
             {
                v_load_[vo[nd]] += double(blocks_[b].k) * Cols(b);
+               vpieces_[b].push_back({vo[nd], 0, blocks_[b].k});
             }
          }
       }
-   }
-
-   bool IsVRank(int b, int r) const
-   {
-      return !vown_.empty() && !vown_[b].empty() &&
-             vown_[b][node_of_[r]] == r;
    }
 
    /// w offsets and the node exchange of w, after all rounds.
@@ -1217,15 +1482,25 @@ private:
          if (wpos[b] < 0) { wpos[b] = nw; nw += blocks_[b].k; }
          return wpos[b];
       };
+      if (vpieces_.empty()) { vpieces_.assign(blocks_.size(), {}); }
+      npieces_ = 0;
+      for (const auto &pcs : vpieces_)
+      {
+         npieces_ += static_cast<long long>(pcs.size());
+      }
       std::sort(rparts_.begin(), rparts_.end(),
                 [](const RowPart &x, const RowPart &y) { return x.b < y.b; });
       std::sort(vparts_.begin(), vparts_.end(),
-                [](const VPart &x, const VPart &y) { return x.b < y.b; });
-      for (VPart &v : vparts_) { v.w = slot(v.b); }
+                [](const VPart &x, const VPart &y)
+      {
+         return x.b != y.b ? x.b < y.b : x.l0 < y.l0;
+      });
+      for (VPart &v : vparts_) { v.w = slot(v.b) + v.l0; }
       for (RowPart &r : rparts_) { if (r.k >= 0) { r.w = slot(r.b); } }
       wbuf_.assign(static_cast<size_t>(nw), 0.0);
-      // Send: for each node rank d (≠ me), the blocks whose V I hold and
-      // d holds rows of, by block; receive likewise from each V rank.
+      // Send: for each node rank d (≠ me), my Vᵀ pieces of the blocks d
+      // holds rows of, by block then first row; receive likewise, for my
+      // row parts by block, the pieces d holds, by first row.
       const std::vector<int> &mates = node_ranks_[node_of_[rank_]];
       const int nn = static_cast<int>(mates.size());
       wscount_.assign(nn, 0);
@@ -1259,9 +1534,14 @@ private:
          {
             for (const RowPart &r : rparts_)
             {
-               if (r.k >= 0 && vown_[r.b][node_of_[rank_]] == rd)
+               if (r.k < 0) { continue; }
+               for (const Piece &pc : vpieces_[r.b])
                {
-                  for (int l = 0; l < r.k; l++) { wrecv_idx_.push_back(r.w + l); }
+                  if (pc.owner != rd) { continue; }
+                  for (int l = pc.l0; l < pc.l1; l++)
+                  {
+                     wrecv_idx_.push_back(r.w + l);
+                  }
                }
             }
          }
@@ -1269,12 +1549,31 @@ private:
       }
       wsend_.assign(wsend_idx_.size(), 0.0);
       wrecv_.assign(wrecv_idx_.size(), 0.0);
-      // Every low-rank block with rows here has its V on this node
+      // Every low-rank block with rows here has all of its Vᵀ on this
+      // node: pieces [0, l1), [l1, l2), ... up to k
+      const int me = node_of_[rank_];
       for (const RowPart &r : rparts_)
       {
-         MFEM_VERIFY(r.k < 0 || vown_[r.b][node_of_[rank_]] >= 0,
-                     "QD H-matrix: block " << r.b << " has no V on node "
-                     << node_of_[rank_]);
+         if (r.k < 0) { continue; }
+         int next = 0;
+         for (const Piece &pc : vpieces_[r.b])
+         {
+            if (node_of_[pc.owner] != me) { continue; }
+            MFEM_VERIFY(pc.l0 == next && pc.l1 > pc.l0, "QD H-matrix: "
+                        "block " << r.b << " has a gap or overlap in its "
+                        "V^T pieces on node " << me);
+            next = pc.l1;
+         }
+         MFEM_VERIFY(next == r.k, "QD H-matrix: block " << r.b << " has "
+                     "rows " << next << " of " << r.k << " of its V^T on "
+                     "node " << me);
+      }
+      if (planned_)
+      {
+         MFEM_VERIFY(near_bytes_ + u_bytes_ + v_bytes_ == planned_bytes_,
+                     "QD H-matrix: rank " << rank_ << " holds "
+                     << near_bytes_ + u_bytes_ + v_bytes_ << " bytes, "
+                     "planned " << planned_bytes_);
       }
       local_bytes_ = near_bytes_ + u_bytes_ + v_bytes_ +
                      8.0 * (wbuf_.size() + xt_.size());

@@ -1066,6 +1066,10 @@ TEST_PARALLEL_ELAST_OBJ = $(TEST_PARALLEL_ELAST_SRC:.cpp=.o)
 TEST_QD_STAGE_OPS_SRC = tests/parallel/test_qd_stage_operators.cpp
 TEST_QD_STAGE_OPS_OBJ = $(TEST_QD_STAGE_OPS_SRC:.cpp=.o)
 
+# QD speed item C: the bytes layout of the compressed G against the count one
+TEST_QD_HMAT_LAYOUT_SRC = tests/parallel/test_qd_hmatrix_layout.cpp
+TEST_QD_HMAT_LAYOUT_OBJ = $(TEST_QD_HMAT_LAYOUT_SRC:.cpp=.o)
+
 # GPU plan G3a: cuDSS against MUMPS on the BP5 stiffness
 TEST_CUDSS_VS_MUMPS_SRC = tests/parallel/test_cudss_vs_mumps.cpp
 TEST_CUDSS_VS_MUMPS_OBJ = $(TEST_CUDSS_VS_MUMPS_SRC:.cpp=.o)
@@ -1119,6 +1123,7 @@ PAR_MINIAPPS = seas_test_mpi_context seas_test_parallel_utils \
                seas_test_br2_consistency \
                seas_test_parallel_elasticity \
                seas_test_qd_stage_operators \
+               seas_test_qd_hmatrix_layout \
                seas_test_bp5_parallel_smoke \
                seas_test_parallel_wave_operator
 # Long-running parallel simulations (built by `make all`, not run by `make test`)
@@ -5862,6 +5867,22 @@ test-qd-stage-operators: seas_test_qd_stage_operators
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_qd_stage_operators --partition fault
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_qd_stage_operators
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_qd_stage_operators --partition fault
+
+# QD speed item C: bytes vs count layout of the compressed G, bitwise, with
+# fake nodes of 1, 2 and 4 ranks and small V^T pieces inside the test
+seas_test_qd_hmatrix_layout: $(TEST_QD_HMAT_LAYOUT_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_QD_HMAT_LAYOUT_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+$(TEST_QD_HMAT_LAYOUT_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+test-qd-hmatrix-layout: seas_test_qd_hmatrix_layout
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_qd_hmatrix_layout
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_qd_hmatrix_layout
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 3 ./seas_test_qd_hmatrix_layout
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 8 ./seas_test_qd_hmatrix_layout
 
 # GPU plan G3a: cuDSS against MUMPS (a GPU build; on 1 and 2 GPUs)
 seas_test_cudss_vs_mumps: $(TEST_CUDSS_VS_MUMPS_OBJ)

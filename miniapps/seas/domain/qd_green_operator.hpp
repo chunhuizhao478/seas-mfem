@@ -25,8 +25,9 @@
 // Row layout: global fault index g in [0, N_f), rows ncomp·g + c with
 // c = 0 dip, 1 strike, 2 normal (with elastic sigma_n).  Rows are split
 // evenly over ALL ranks (not only the ranks that own fault DOFs), so the
-// product does not inherit the fault ranks' load imbalance.  Columns are
-// the global slip index 2·g + c.  A stage:
+// product does not inherit the fault ranks' load imbalance; an H-matrix
+// read in the bytes layout re-cuts them by bytes (SetRowLayout).  Columns
+// are the global slip index 2·g + c.  A stage:
 //   1. all-gather the owned slip into δ_all (2·N_f values),
 //   2. y = G_rows·δ_all + t·T_D,rows on this rank's rows,
 //   3. send each value to the rank that owns its fault DOF.
@@ -63,6 +64,9 @@ struct QDGreenConfig
    double eta = 2.0;         ///< admissibility max(diam) <= eta·dist
    std::string hcache_path;  ///< read the H-matrix here if it fits, else write
    double compress_mem_gib = 64.0;  ///< per node, for gathered blocks + SVDs
+   /// Row layout of the H-matrix (item C): "bytes" (even bytes per rank,
+   /// Vᵀ split; needs hcache_path) or "count" (even fault DOFs per rank).
+   std::string layout = "bytes";
 };
 
 } // namespace seas
@@ -131,21 +135,30 @@ public:
          slip_counts_[r] = static_cast<int>(2 * own_n_[r]);
          slip_displs_[r] = static_cast<int>(2 * own_lo_[r]);
       }
-      // Fault DOFs this rank owns that rank r holds rows of (to_rows_),
-      // and fault DOFs rank r owns that this rank holds rows of
-      // (from_owners_); both contiguous in g.
-      to_rows_lo_.resize(nranks_);
-      to_rows_n_.resize(nranks_);
-      from_own_lo_.resize(nranks_);
-      from_own_n_.resize(nranks_);
-      for (int r = 0; r < nranks_; r++)
-      {
-         Overlap(own_lo_[rank_], own_n_[rank_], row_lo_[r],
-                 row_lo_[r + 1] - row_lo_[r], to_rows_lo_[r], to_rows_n_[r]);
-         Overlap(own_lo_[r], own_n_[r], row_lo_[rank_], nb_,
-                 from_own_lo_[r], from_own_n_[r]);
-      }
+      MapRows();
       delta_all_.SetSize(static_cast<int>(ncols_));
+   }
+
+   /// QD speed item C (--qd-green-layout bytes): hold the rows of fault
+   /// DOFs [row_lo[r], row_lo[r + 1]) on rank r instead of the even split
+   /// (QDHMatrix::PlanLayout).  Only without dense rows, before the
+   /// H-matrix is read; T_D is cleared for its file to fill.
+   void SetRowLayout(const std::vector<long long> &row_lo)
+   {
+      MFEM_VERIFY(G_.empty() && !h_, "QD Green: SetRowLayout needs an "
+                  "operator without dense rows and without an H-matrix");
+      bool ok = static_cast<int>(row_lo.size()) == nranks_ + 1 &&
+                row_lo[0] == 0 && row_lo[nranks_] == nf_;
+      for (int r = 0; ok && r < nranks_; r++)
+      {
+         ok = row_lo[r] <= row_lo[r + 1];
+      }
+      MFEM_VERIFY(ok, "QD Green: bad row layout");
+      row_lo_ = row_lo;
+      nb_ = static_cast<int>(row_lo_[rank_ + 1] - row_lo_[rank_]);
+      TD_.assign(static_cast<size_t>(nb_) * ncomp_, 0.0);
+      have_loading_ = false;
+      MapRows();
    }
 
    int NComp() const { return ncomp_; }
@@ -159,7 +172,8 @@ public:
       return h_ ? h_->LocalBytes() : double(G_.size()) * sizeof(real_t);
    }
 
-   // QD speed item 4: access for QDHMatrix, which keeps this row layout.
+   // QD speed item 4: access for QDHMatrix, which starts from this row
+   // layout.
    /// Fault DOFs whose rows rank r holds: [RowLo()[r], RowLo()[r + 1]).
    const std::vector<long long> &RowLo() const { return row_lo_; }
    /// This rank's dense rows (nb·ncomp × 2·N_f, row-major).
@@ -198,6 +212,12 @@ public:
    {
       MFEM_VERIFY(!h_, "QD Green: G is already compressed");
       G_.assign(static_cast<size_t>(nb_) * ncomp_ * ncols_, 0.0);
+   }
+   /// Free the dense rows (once they are compressed and written).
+   void FreeDense()
+   {
+      G_.clear();
+      G_.shrink_to_fit();
    }
    const QDHMatrix *HMatrix() const { return h_.get(); }
 
@@ -743,6 +763,24 @@ private:
    {
       lo = std::max(a, b);
       n = std::max(0LL, std::min(a + na, b + nb) - lo);
+   }
+
+   /// Fault DOFs this rank owns that rank r holds rows of (to_rows_), and
+   /// fault DOFs rank r owns that this rank holds rows of (from_owners_);
+   /// both contiguous in g.
+   void MapRows()
+   {
+      to_rows_lo_.resize(nranks_);
+      to_rows_n_.resize(nranks_);
+      from_own_lo_.resize(nranks_);
+      from_own_n_.resize(nranks_);
+      for (int r = 0; r < nranks_; r++)
+      {
+         Overlap(own_lo_[rank_], own_n_[rank_], row_lo_[r],
+                 row_lo_[r + 1] - row_lo_[r], to_rows_lo_[r], to_rows_n_[r]);
+         Overlap(own_lo_[r], own_n_[r], row_lo_[rank_], nb_,
+                 from_own_lo_[r], from_own_n_[r]);
+      }
    }
 
    /// Owned tractions of m columns -> this rank's rows.  @a recv holds, for

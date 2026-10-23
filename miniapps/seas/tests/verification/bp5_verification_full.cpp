@@ -97,6 +97,13 @@
 //                              --qd-green-cache if given) and write FILE
 //   --qd-green-compress-mem G  GiB per node for blocks being compressed or
 //                              read at once (default 64)
+//   --qd-green-layout L        Rows of the H-matrix (QD speed item C):
+//                              bytes = about equal bytes per rank, each
+//                              V^T split over the ranks of a node (default;
+//                              planned from the --qd-green-hcache file, so
+//                              a compress run reads its file back);
+//                              count = equal fault DOFs per rank, V^T
+//                              whole.  Results are bitwise the same.
 
 #include "mfem.hpp"
 #ifdef MFEM_USE_PETSC
@@ -1369,6 +1376,10 @@ int main(int argc, char *argv[])
       {
          qd_green_config.compress_mem_gib = std::atof(argv[++i]);
       }
+      if (arg == "--qd-green-layout" && i + 1 < argc)
+      {
+         qd_green_config.layout = argv[++i];
+      }
       if (arg == "--device-id" && i + 1 < argc)
       {
          device_id_override = std::atoi(argv[++i]);
@@ -1720,6 +1731,10 @@ int main(int argc, char *argv[])
       {
          bad = "--qd-green-leaf, --qd-green-eta and --qd-green-compress-mem "
                "must be positive";
+      }
+      else if (c.layout != "bytes" && c.layout != "count")
+      {
+         bad = "--qd-green-layout: bytes or count, got '" + c.layout + "'";
       }
       if (!bad.empty())
       {
@@ -2324,7 +2339,8 @@ int main(int argc, char *argv[])
          {
             std::cout << ", H-matrix eps " << qd_green_config.compress
                       << " leaf " << qd_green_config.leaf << " eta "
-                      << qd_green_config.eta;
+                      << qd_green_config.eta << " layout "
+                      << qd_green_config.layout;
          }
       }
       std::cout << "\n";

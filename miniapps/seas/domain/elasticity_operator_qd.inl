@@ -735,22 +735,35 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
       std::unique_ptr<QDHMatrix> hmat;
       std::string hinfo;
       bool h_loaded = false;
+      // QD speed item C: the bytes layout is planned from the H file's
+      // block table, so it applies to a read (a compress run reads its
+      // file back, below).
+      MFEM_VERIFY(config.layout == "bytes" || config.layout == "count",
+                  "--qd-green-layout: bytes or count, got '" << config.layout
+                  << "'");
+      const bool by_bytes = compress && config.layout == "bytes" &&
+                            !config.hcache_path.empty();
+      std::vector<real_t> keys_all;
+      // Read the H file: header, the bytes layout if asked for, then data
+      auto read_h = [&](QDHMatrix &h, std::string &hi)
+      {
+         if (!h.ReadHeader(config.hcache_path, config.compress, hi))
+         {
+            return false;
+         }
+         if (by_bytes) { green->SetRowLayout(h.PlanLayout()); }
+         h.ReadData(config.hcache_path, mem_node, green->LoadingRowsWrite());
+         return true;
+      };
       if (compress)
       {
-         std::vector<real_t> keys_all;
          green->GatherKeysAll(keys_all);
          hmat.reset(new QDHMatrix(comm, nf_glob, with_normal ? 3 : 2,
                                   green->RowLo(), keys_all, config.leaf,
                                   config.eta));
          if (!config.hcache_path.empty())
          {
-            std::vector<real_t> td(green->NumLocalRows());
-            h_loaded = hmat->ReadFile(config.hcache_path, config.compress,
-                                      mem_node, td.data(), hinfo);
-            if (h_loaded)
-            {
-               std::copy(td.begin(), td.end(), green->LoadingRowsWrite());
-            }
+            h_loaded = read_h(*hmat, hinfo);
          }
          if (!h_loaded) { green->AllocateDense(); }
       }
@@ -839,6 +852,27 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
             hmat->WriteFile(config.hcache_path, o.str(), green->LoadingRows());
          }
          hsummary = hmat->Summary("compressed");
+         if (by_bytes)
+         {
+            // Item C: drop this operator and the dense rows, and read the
+            // file just written back in the bytes layout (qd-c-design-rev1
+            // §3.1); this also reads every block of it back whole.
+            hmat.reset();
+            green->FreeDense();
+            hmat.reset(new QDHMatrix(comm, nf_glob, with_normal ? 3 : 2,
+                                     green->RowLo(), keys_all, config.leaf,
+                                     config.eta));
+            MFEM_VERIFY(read_h(*hmat, hinfo), "--qd-green-hcache: cannot "
+                        "reopen '" << config.hcache_path << "' after "
+                        "writing it");
+            hsummary += hmat->Summary("read back from " + config.hcache_path);
+         }
+         else if (config.layout == "bytes")
+         {
+            hsummary += "[QD-HMAT] layout count: --qd-green-layout bytes is "
+                        "read from an H file, and this run writes none "
+                        "(no --qd-green-hcache)\n";
+         }
          green->SetCompressed(std::move(hmat));
       }
       else if (h_loaded)
