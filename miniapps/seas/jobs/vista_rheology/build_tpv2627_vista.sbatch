@@ -17,15 +17,21 @@
 # Steps:
 #   0. the repo CLAUDE.md guard (GitHub first), plus no untracked sources
 #   1. build_vista.sh (MFEM + seas_nitsche_dyn_driver + six gate tests; writes BUILD_COMMIT_VISTA), then
-#      seas_test_nitsche_lts, the rheology unit tests and the operator tests O1-O7
+#      seas_test_nitsche_lts, the rheology unit tests, the operator tests O1-O7, seas_test_station_output
+#      and seas_test_mesh_parts
 #   2. tests: rheology U1-U11 (make test-rheology: 24, 13, 36 and 25 checks in the cloud), the six
 #      Nitsche gate test sets as build_verify_vista.sbatch runs them, the LTS suite (about 13 min;
-#      the fault closure it calls changed in R1) and O1-O7 (make test-nitsche-rheology: 36 checks per
-#      rank count, 1, 2 and 4 ranks; the operator changed in R3)
+#      the fault closure it calls changed in R1), O1-O7 (make test-nitsche-rheology: 36 checks per
+#      rank count, 1, 2 and 4 ranks; the operator changed in R3), and the station output and mesh parts
+#      tests as jobs/vista_profiling/build_mesh_parts_vista.sbatch runs them (the driver's default mesh
+#      setup is rank0 since the merge of the Nitsche profiling branch, bc91ac9)
 #   3. meshes: TPV26/27 1000 m and 200 m from tpv26/mesh/tpv2627_half.geo with TACC gmsh, sha256 to
 #      miniapps/seas/MESH_SHA256_TPV2627_VISTA (run_nitsche_vista.sh accepts it); the TPV205 and TPV104
 #      200 m gold meshes for the B0 jobs, copied from $WORK/seas-mfem-benchmarks and checked against
 #      jobs/vista_profiling/meshes.sha256, as build_lts_vista.sbatch does
+#   3b. the mesh parts test on the TPV26/27 200 m mirror mesh, 16 ranks, fault attribute 103 (METIS
+#      partition; rank-0 setup and part files against every rank reading the mesh), as
+#      build_mesh_parts_vista.sbatch does for the gold meshes: tpv26_200m_p2.sbatch uses rank-0 setup
 #   4. B1 on Vista: TPV26 1000 m p=1, 0 -> 2.5 s, 8 ranks.  Pass: no abort, and fault nodes farther than
 #      r_crit = 4 km from the hypocenter rupture (scripts/make_cplot.py), so the rupture leaves the forced
 #      zone.  Cloud reference (its own built-in-kernel 1000 m mesh, 3 ranks, 0 -> 2.5 s): 1772 steps, dt
@@ -35,9 +41,13 @@
 #   4b. R3 output check: TPV27 deck as committed, 1000 m p=1, 0 -> 1.0 s, 8 ranks.  Pass: no abort and
 #      <output_dir>/rheology.vtkhdf holds 3 snapshots (output_dt_s = 0.5: t = 0, 0.5, 1.0 s).  The
 #      writer needs parallel HDF5, which the cloud does not have, so this is its first run.
-#   5. 200 m load check: TPV26 200 m, p = 2, all 144 ranks, tfinal 0.003 s; node memory peak, tets,
-#      implied min 6V/A and dt, steps to 13 s, as build_verify_vista.sbatch does for TPV205/TPV104.  It
-#      decides the ranks per node of tpv26_200m_p2.sbatch.
+#   5. 200 m load check: TPV26 200 m, p = 2, all 144 ranks, tfinal 0.003 s; node memory peak (in use and
+#      committed), tets, implied min 6V/A and dt, steps to 13 s, as build_verify_vista.sbatch does for
+#      TPV205/TPV104.  It holds the whole problem on one node, which did not fit in build 1086883 (every
+#      rank read the mesh; killed after 93 s, past the mesh and dt lines), so it reports and does not
+#      gate the build.
+#      Vista compute nodes commit at most 118.8 GiB each (strict overcommit); tpv26_200m_p2.sbatch logs
+#      its own first-node memory.
 # Cost: 1 node x <= 2 h x 0.33 SU = <= 0.66 SU.
 export LC_ALL=C LANG=C
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
@@ -62,7 +72,7 @@ cd miniapps/seas
 MK="make MFEM_DIR=../.. HDF5_DIR=$TACC_PHDF5_DIR SEAS_FS_LIB="
 $MK -j64 seas_test_nitsche_lts seas_test_rheology_pointwise seas_test_rheology_initial_stress \
    seas_test_rheology_config seas_test_rheology_forced_rupture seas_test_nitsche_rheology \
-   > tests_build_$SLURM_JOB_ID.log 2>&1
+   seas_test_station_output seas_test_mesh_parts > tests_build_$SLURM_JOB_ID.log 2>&1
 rc=$?; echo "test build exit $rc"; [ $rc -eq 0 ] || { tail -20 tests_build_$SLURM_JOB_ID.log; exit $rc; }
 fail=0
 echo "=== rheology unit tests U1-U11 ==="
@@ -71,14 +81,15 @@ grep -a "passed, " test-rheology_$SLURM_JOB_ID.log
 nf=$(grep -a "passed, " test-rheology_$SLURM_JOB_ID.log | awk '{s += $5} END {print s + 0}')
 echo "test-rheology exit $rc, failed $nf"
 [ $rc -eq 0 ] && [ $nf -eq 0 ] || fail=1
-echo "=== Nitsche gate tests and LTS suite ==="
-for t in test-nitsche-gates test-nitsche-pf test-nitsche-hook-spy test-nitsche-lsw test-nitsche-srw test-nitsche-lsw-inline test-nitsche-lts test-nitsche-rheology; do
+echo "=== Nitsche gate tests, LTS suite, operator tests, station output and mesh parts tests ==="
+for t in test-nitsche-gates test-nitsche-pf test-nitsche-hook-spy test-nitsche-lsw test-nitsche-srw test-nitsche-lsw-inline test-nitsche-lts test-nitsche-rheology test-station-output test-mesh-parts; do
    s=$(date +%s); $MK $t > ${t}_$SLURM_JOB_ID.log 2>&1; rc=$?
    nf=$(grep -v echo ${t}_$SLURM_JOB_ID.log | grep -c FAILED)
    echo "$t exit $rc in $(( $(date +%s) - s )) s: PASSED $(grep -v echo ${t}_$SLURM_JOB_ID.log | grep -c PASSED), FAILED $nf"
    [ $rc -eq 0 ] && [ $nf -eq 0 ] || fail=1
 done
-grep -a "Summary" test-nitsche-lts_$SLURM_JOB_ID.log
+grep -a "Summary" test-nitsche-lts_$SLURM_JOB_ID.log test-station-output_$SLURM_JOB_ID.log
+grep -a "passed," test-mesh-parts_$SLURM_JOB_ID.log
 echo "=== meshes (gmsh $(gmsh --version 2>&1)) ==="
 s=$(date +%s)
 SHA_FILE=MESH_SHA256_TPV2627_VISTA bash tpv26/mesh/make_tpv2627_meshes.sh 1000 200; rc=$?
@@ -90,6 +101,14 @@ for m in tpv205/mesh/tpv2053d_200m.msh tpv104/mesh/tpv104_200m.msh; do
       && echo "$m: sha256 matches the gold mesh" \
       || { echo "ERROR: $m sha256 $(sha256sum $m | cut -d' ' -f1) is not the gold mesh"; fail=1; }
 done
+echo "=== mesh parts test on the TPV26/27 200 m mirror mesh (16 ranks) ==="
+m=tpv26/mesh/tpv2627_mirror_200m.msh; t=mesh_parts_$(basename $m .msh)
+s=$(date +%s); ibrun -n 16 -o 0 ./seas_test_mesh_parts --mesh $m --fault-attr 103 > ${t}_$SLURM_JOB_ID.log 2>&1; rc=$?
+nf=$(grep -c FAILED ${t}_$SLURM_JOB_ID.log)
+echo "$m (fault attribute 103) exit $rc in $(( $(date +%s) - s )) s: PASSED $(grep -c PASSED ${t}_$SLURM_JOB_ID.log), FAILED $nf"
+grep -a "DG operator\|passed," ${t}_$SLURM_JOB_ID.log
+[ $rc -eq 0 ] && [ $nf -eq 0 ] || fail=1
+rm -rf test_mesh_parts_out
 echo "=== B1: TPV26 1000 m p=1, 0 -> 2.5 s, 8 ranks ==="
 OUT=$SCRATCH/rheology/b1_tpv26_1000m_p1_$SLURM_JOB_ID; mkdir -p $OUT
 s=$(date +%s)
@@ -125,7 +144,7 @@ echo "rheology.vtkhdf: NSteps ${ns:-missing}"
 [ "$ns" = "3" ] || { echo "ERROR: rheology.vtkhdf should hold 3 snapshots"; fail=1; }
 echo "=== 200 m load check: TPV26 p=2, 144 ranks, tfinal 0.003 s ==="
 OUT=$SCRATCH/rheology/loadcheck_tpv26_200m_p2_$SLURM_JOB_ID; mkdir -p $OUT
-( while :; do echo "$(date +%s) $(awk '/^MemTotal|^MemAvailable/{print $2}' /proc/meminfo | tr '\n' ' ')"; sleep 2; done ) > $OUT/meminfo_kB.log &
+( while :; do echo "$(date +%s) $(awk '/^MemTotal|^MemAvailable|^CommitLimit|^Committed_AS/{print $2}' /proc/meminfo | tr '\n' ' ')"; sleep 2; done ) > $OUT/meminfo_kB.log &
 MON=$!
 s=$(date +%s)
 ibrun ./seas_nitsche_dyn_driver --config tpv26/configs/tpv26_nitsche_kv0p1.toml \
@@ -136,8 +155,9 @@ echo "driver exit $rc in $(( $(date +%s) - s )) s"
 grep -a "tets;" $OUT/driver.log | head -1
 grep -a "  dt = " $OUT/driver.log | head -1
 grep -a "  dt = " $OUT/driver.log | head -1 | awk '{for(i=1;i<=NF;i++){if($i=="dt"&&$(i+1)=="=")dt=$(i+2); if($i=="C(p)")C=$(i+1)}} END{h=dt*4*6000/(0.5*C); printf "implied h_min (min 6V/A) %.2f m; steps to 13 s %d\n", h, int(13/dt+0.999)}'
-grep -a "=== done" $OUT/driver.log || tail -15 $OUT/driver.log
-awk '{u=($2-$3)/1048576; if(u>m)m=u; t=$2/1048576} END{printf "node memory: peak in use %.1f GB of %.1f GB (MemTotal - MemAvailable, 2 s samples)\n", m, t}' $OUT/meminfo_kB.log
+grep -a "=== done" $OUT/driver.log \
+   || { tail -15 $OUT/driver.log; echo "load check stopped (driver exit $rc): informational, it does not gate the build"; }
+awk '{u=($2-$3)/1048576; if(u>m)m=u; if($5/1048576>c)c=$5/1048576; t=$2/1048576; l=$4/1048576} END{printf "node memory: peak in use %.1f GiB of %.1f GiB, peak committed %.1f GiB of the %.1f GiB limit (2 s samples)\n", m, t, c, l}' $OUT/meminfo_kB.log
 echo "total $(( $(date +%s) - T0 )) s"
 [ $fail -eq 0 ] || { echo "ERROR: a check failed; do not submit the b0_*.sbatch or tpv26_*.sbatch jobs"; exit 1; }
 echo "all checks passed"

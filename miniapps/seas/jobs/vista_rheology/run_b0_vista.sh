@@ -51,8 +51,11 @@ mkdir -p $OUT
 cp "$DECK" $OUT/
 { echo "commit $HEAD"; echo "mesh $MESH $SHA"; echo "deck $DECK"; echo "job $SLURM_JOB_ID nodes $SLURM_JOB_NUM_NODES ranks $SLURM_NTASKS"; } > $OUT/RUN_INFO.txt
 T0=$(date +%s)
+# --mesh-setup every-rank: the mesh setup of the LTS gold jobs.  The default since the merge of the Nitsche
+# profiling branch (bc91ac9), rank0, differs from it by round-off only (profiling jobs 1090565-66), which
+# would fail the two equality tests below.
 ibrun ./seas_nitsche_dyn_driver --config "$DECK" --mesh "$MESH" --order $ORDER --tfinal 1.0 \
-      --output-dir $OUT --log-every 1000 > $OUT/driver.log 2>&1
+      --mesh-setup every-rank --output-dir $OUT --log-every 1000 > $OUT/driver.log 2>&1
 rc=$?
 echo "driver exit $rc after $(( $(date +%s) - T0 )) s"
 grep -a "time in ode.Step per rank\|=== done" $OUT/driver.log || { tail -20 $OUT/driver.log; exit 1; }
