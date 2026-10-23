@@ -558,7 +558,7 @@ private:
          }
       }
 
-      // Profile points: smallest distance, then lowest rank (the stations' rule).
+      // Profile points: the stations' rule (StationOwners).
       const int np = static_cast<int>(geom_.profile_locs.size());
       int want = 0;
       for (const ProfileSpec &p : cfg_.profiles) { want += p.points; }
@@ -567,18 +567,13 @@ private:
       prof_owner_.assign(np, -1);
       if (np > 0)
       {
-         std::vector<real_t> dist(np), gmin(np);
-         for (int i = 0; i < np; i++) { dist[i] = geom_.profile_locs[i].distance; }
-         MPI_Allreduce(dist.data(), gmin.data(), np, MPITypeMap<real_t>::mpi_type, MPI_MIN,
-                       comm_);
-         std::vector<int> cand(np);
+         std::vector<real_t> gmin;
+         prof_owner_ = StationOwners(geom_.profile_locs, comm_, gmin);
          for (int i = 0; i < np; i++)
          {
             MFEM_VERIFY(gmin[i] < std::numeric_limits<real_t>::max(),
                         "BenchmarkOutput: profile point " << i << " found no fault DOF");
-            cand[i] = (dist[i] == gmin[i]) ? rank_ : std::numeric_limits<int>::max();
          }
-         MPI_Allreduce(cand.data(), prof_owner_.data(), np, MPI_INT, MPI_MIN, comm_);
          if (rank_ == 0)
          {
             real_t worst = 0.0;

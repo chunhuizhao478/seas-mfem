@@ -88,7 +88,6 @@
 #include "../friction/dieterich_ruina.hpp"
 #include "../friction/state_evolution.hpp"
 #include "../config/bp5_params.hpp"
-#include "../io/bp5_benchmark_output.hpp"   // Probe2DInterpolator
 #include "../common/mpi_context.hpp"
 
 #ifdef MFEM_USE_PETSC
@@ -362,8 +361,9 @@ public:
 
    /// Stations on this rank's owned fault DOFs, in the plane frame of the
    /// deck: 2-D coordinates (x - o).e1 and (x - o).e2 for stations and DOFs,
-   /// then seas_bp5_full's Probe2DInterpolator (face-basis match, else the
-   /// nearest DOF).
+   /// then LocateOnFaces (fd_cycle_output.hpp: face-basis match, else the
+   /// nearest DOF, as seas_bp5_full's Probe2DInterpolator, but the face
+   /// chosen where several meet is the same on any partition).
    std::vector<StationLocation> LocateStations(const OutputConfig &oc) const
    {
       std::vector<std::array<real_t, 2>> pts;
@@ -387,32 +387,7 @@ public:
          x2(i) = Project_(x, oc.plane_origin, oc.plane_axis1);
          x3(i) = Project_(x, oc.plane_origin, oc.plane_axis2);
       }
-      std::vector<Probe2DInterpolator::Station> st;
-      for (size_t i = 0; i < pts.size(); i++)
-      {
-         st.push_back({"p" + std::to_string(i), pts[i][0], pts[i][1]});
-      }
-      Probe2DInterpolator interp(x2, x3, st, dom_->GetNbfPerFace(),
-                                 BasisType::GaussLobatto, false);
-      std::vector<StationLocation> out(st.size());
-      for (size_t s = 0; s < st.size(); s++)
-      {
-         StationLocation &L = out[s];
-         const int si = static_cast<int>(s);
-         L.exact = interp.HasExactMatch(si);
-         L.distance = interp.GetMatchDistance(si);
-         if (N == 0 || (interp.GetNearestDOF(si) < 0 && !L.exact))
-         {
-            L.distance = std::numeric_limits<real_t>::max();
-         }
-         if (L.exact)
-         {
-            L.start = interp.GetFaceStart(si);
-            L.weights = interp.GetExactWeights(si);
-         }
-         L.nearest = (N > 0) ? interp.GetNearestDOF(si) : -1;
-      }
-      return out;
+      return LocateOnFaces(x2, x3, dom_->GetNbfPerFace(), pts);
    }
 
    /// The fault data of BenchmarkOutput (bench_output.hpp) on the owned

@@ -17,12 +17,16 @@
 //            max V > fast_V)
 //   off-fault a linear field on a small hex mesh, read at a station and
 //            projected on rotated axes, both regimes' row layout
+//   locate   LocateOnFaces and StationOwners: a point where several faces
+//            meet reads the same face on every layout of the faces (order,
+//            vertex order, ranks)
 //
 //   mpirun -np N ./seas_test_cycle_bench WORK     (N = 1 or 2; WORK replaced)
 
 #include "mfem.hpp"
 #include "../../cycle/bench_output.hpp"
 
+#include <array>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -369,6 +373,85 @@ void WriterCases(const std::string &work)
    }
 }
 
+// Four p = 1 faces around the vertex O = (0, 0) km: T0 = (O, A, B),
+// T1 = (O, B, C), T2 = (O, C, D), T3 = (O, D, A), with A = (2, 0),
+// B = (0, 1), C = (-1, 0), D = (0, -1); vertex centres (2/3, 1/3),
+// (-1/3, 1/3), (-1/3, -1/3), (2/3, -1/3).  The face each point must read on
+// every layout (the nearest centre, then the smaller x2, then x3):
+//   vertex   O, on all four faces: T1 and T2 tie on the centre's distance
+//            and x2, T2 has the smaller x3                        -> T2
+//   edge     (0, 0.25) on T0 and T1: T1's centre is nearer         -> T1
+//   inside   (0.5, 0.2), on T0 only                                -> T0
+//   outside  (-1.5, 0), on no face: the nearest DOF is C, on T1 and T2,
+//            which tie as at O                                     -> T2
+// Layouts: on 1 rank the faces in order, then reversed with each face's
+// vertices rotated; on 2 ranks {T0, T1} | {T2, T3}, then {T2, T0} | {T3, T1}
+// rotated, so T2 changes rank.  The fields read: 100 k on face k, and x2;
+// the owner's key (StationOwners' gkey, the face centre of the run log) is
+// the wanted face's centre.  The first-face rule (Probe2DInterpolator)
+// reads T0 at O on the first 1-rank layout.
+void LocateCases()
+{
+   const double km = 1000.0;
+   const double V[5][2] = {{0, 0}, {2, 0}, {0, 1}, {-1, 0}, {0, -1}};   // O A B C D
+   const int T[4][3] = {{0, 1, 2}, {0, 2, 3}, {0, 3, 4}, {0, 4, 1}};
+   const std::vector<std::array<real_t, 2>> pts = {{{0.0, 0.0}}, {{0.0, 0.25 * km}},
+                                                  {{0.5 * km, 0.2 * km}}, {{-1.5 * km, 0.0}}};
+   const char *names[4] = {"vertex", "edge", "inside", "outside"};
+   const int want[4] = {2, 1, 0, 2};
+   const double want_x2[4] = {0.0, 0.0, 0.5 * km, -1.0 * km};
+   std::vector<std::vector<std::vector<int>>> layouts;   // [layout][rank]: faces
+   if (nranks_ == 1) { layouts = {{{0, 1, 2, 3}}, {{3, 2, 1, 0}}}; }
+   else { layouts = {{{0, 1}, {2, 3}}, {{2, 0}, {3, 1}}}; }
+   for (size_t l = 0; l < layouts.size(); l++)
+   {
+      const std::vector<int> &mine = layouts[l][rank_];
+      const int N = 3 * static_cast<int>(mine.size());
+      Vector x2(N), x3(N), id(N);
+      for (size_t i = 0; i < mine.size(); i++)
+      {
+         for (int k = 0; k < 3; k++)
+         {
+            const int v = T[mine[i]][l == 1 ? (k + 1) % 3 : k];
+            const int d = 3 * static_cast<int>(i) + k;
+            x2(d) = V[v][0] * km;
+            x3(d) = V[v][1] * km;
+            id(d) = 100.0 * mine[i];
+         }
+      }
+      const std::vector<StationLocation> locs = LocateOnFaces(x2, x3, 3, pts);
+      std::vector<real_t> gmin;
+      std::vector<std::array<real_t, 3>> gkey;
+      const std::vector<int> owner = StationOwners(locs, MPI_COMM_WORLD, gmin, &gkey);
+      for (size_t s = 0; s < pts.size(); s++)
+      {
+         double c2 = 0.0, c3 = 0.0;   // the wanted face's centre
+         for (int k = 0; k < 3; k++)
+         {
+            c2 += V[T[want[s]][k]][0] * km / 3.0;
+            c3 += V[T[want[s]][k]][1] * km / 3.0;
+         }
+         double got[4] = {0.0, 0.0, 0.0, 0.0}, sum[4];
+         if (owner[s] == rank_)
+         {
+            got[0] = FdCycleOutput::Eval(id, locs[s]);
+            got[1] = FdCycleOutput::Eval(x2, locs[s]);
+            got[2] = 1.0;
+            got[3] = locs[s].exact ? 1.0 : 0.0;
+         }
+         MPI_Allreduce(got, sum, 4, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+         const bool ok = sum[2] == 1.0 && Near(sum[0], 100.0 * want[s])
+                         && Near(sum[1] / km, want_x2[s] / km) && sum[3] == (s < 3 ? 1.0 : 0.0)
+                         && Near(gkey[s][1] / km, c2 / km) && Near(gkey[s][2] / km, c3 / km);
+         std::ostringstream d;
+         d << "layout " << l << ": face " << sum[0] / 100.0 << " (want " << want[s] << "), x2 "
+           << sum[1] << " m, " << (sum[3] == 1.0 ? "on a face" : "nearest DOF") << ", "
+           << sum[2] << " owner(s), centre (" << gkey[s][1] << ", " << gkey[s][2] << ") m";
+         Check(std::string("location ") + names[s] + " " + std::to_string(l), ok, d.str());
+      }
+   }
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -392,6 +475,7 @@ int main(int argc, char **argv)
    if (rank_ == 0) { std::cout << "test_cycle_bench on " << nranks_ << " rank(s)\n"; }
    EventCases(work);
    WriterCases(work);
+   LocateCases();
    if (rank_ == 0)
    {
       std::cout << "test_cycle_bench: " << (failures_ ? "FAILED" : "PASSED") << " ("

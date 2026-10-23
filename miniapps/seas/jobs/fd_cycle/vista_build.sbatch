@@ -20,7 +20,7 @@
 #   0. python3 with numpy, h5py and tomllib (CYCLE_PY), checked before the
 #      build: the snapshot test reads its files back with it
 #   1. build_vista.sh deps mfem seas: PETSc 3.24.6 with MUMPS and HDF5,
-#      MFEM, cycle-all (driver, tests, 253 API pins, owned-paths check M1)
+#      MFEM, cycle-all (driver, tests, 247 API pins, owned-paths check M1)
 #   2. test-cycle-params-parity: the decks against BP5Params, 1 rank
 #   3. test-cycle-p3 on 1 and 2 ranks (bit for bit on 1 rank)
 #   4. test-cycle-p2 (frame_map on 1, 2, 4, 8 ranks; the rest on 2)

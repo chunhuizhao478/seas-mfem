@@ -32,7 +32,6 @@
 #include "../../friction/dieterich_ruina.hpp"
 #include "../../friction/state_evolution.hpp"
 #include "../../config/bp5_params.hpp"
-#include "../../io/bp5_benchmark_output.hpp"
 #include "../../io/checkpoint.hpp"
 #include "../../io/petsc_ts_checkpoint.hpp"
 #include "../../common/mpi_context.hpp"
@@ -190,15 +189,6 @@ PIN(CLV<QDFault>().RecomputeSlipRate(CLV<Vector>(), CLV<Vector>(), LV<Vector>(),
                                      static_cast<const Vector *>(nullptr)));
 PIN_TYPE(const Vector &, CLV<QDFault>().GetSlipRate());
 PIN(LV<QDFault>().SetSlipRate(CLV<Vector>()));
-
-// Station locator of seas_bp5_full's station writer.
-PIN_CTOR(Probe2DInterpolator, const Vector &, const Vector &,
-         const std::vector<Probe2DInterpolator::Station> &, int, int, bool);
-PIN_TYPE(bool, CLV<Probe2DInterpolator>().HasExactMatch(int()));
-PIN_TYPE(real_t, CLV<Probe2DInterpolator>().GetMatchDistance(int()));
-PIN_TYPE(int, CLV<Probe2DInterpolator>().GetNearestDOF(int()));
-PIN_TYPE(int, CLV<Probe2DInterpolator>().GetFaceStart(int()));
-PIN_TYPE(const Vector &, CLV<Probe2DInterpolator>().GetExactWeights(int()));
 
 // Quasi-dynamic operator.
 PIN_CTOR(QDOp, QDDomain *, QDFault *, MPIContext *);
