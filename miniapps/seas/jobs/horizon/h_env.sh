@@ -30,7 +30,9 @@ fi
 
 export CUDA_MODULE="${CUDA_MODULE:-cuda/13.1}"
 # Read by g0_env.sh (module load) and by build_horizon.sh (MODULES).
-export G0_MODULES="${G0_MODULES:-gcc/15.3.0 ${CUDA_MODULE} openmpi/5.0.11 nvpl/26.9 cmake/4.4.0}"
+# openmpi/5.0.11 links libucc.so.1 but its module does not load ucc: with
+# cuda/13.1 nothing else does, and ompi_info fails to start without it.
+export G0_MODULES="${G0_MODULES:-gcc/15.3.0 ${CUDA_MODULE} ucc/1.9.0 openmpi/5.0.11 nvpl/26.9 cmake/4.4.0}"
 export MODULES="${G0_MODULES}"
 export GPU_ARCH=100
 export DEPS_ROOT="${DEPS_ROOT:-${SCRATCH}/seas-gpu-deps}"
