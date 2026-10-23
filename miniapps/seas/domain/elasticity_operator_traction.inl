@@ -316,6 +316,9 @@ void ElasticityDomainOperator<MeshType>::RestrictToOwnedFault(
                << ", expected " << comps_per_dof * num_fault_dofs_);
 
    owned_data.SetSize(comps_per_dof * num_owned_fault_dofs_);
+   // Host loop (GPU plan G4: host loops say so).
+   local_data.HostRead();
+   owned_data.HostWrite();
    for (int owned_dof = 0; owned_dof < num_owned_fault_dofs_; owned_dof++)
    {
       const int local_dof = owned_fault_dof_to_local_dof_[owned_dof];
@@ -338,6 +341,10 @@ void ElasticityDomainOperator<MeshType>::ExpandOwnedToLocalFault(
 
    local_data.SetSize(comps_per_dof * num_fault_dofs_);
    local_data = 0.0;
+   // Host loop (GPU plan G4: host loops say so; GetSlip may have filled
+   // owned_data on the device).
+   owned_data.HostRead();
+   local_data.HostReadWrite();
 
    for (int owned_dof = 0; owned_dof < num_owned_fault_dofs_; owned_dof++)
    {
@@ -415,58 +422,22 @@ void ElasticityDomainOperator<MeshType>::ApplyStiffness(
    }
 }
 
+// Solve K X_ = B_ (B_ already loaded), run the post-solve checks (residual,
+// NaN, iterative convergence) and copy X_ to displacement.  Shared by Solve
+// (face loops) and SolveStage (stage operators, GPU plan G2).
 template <typename MeshType>
-void ElasticityDomainOperator<MeshType>::Solve(
-   real_t time, const Vector &slip_bc, GridFuncType &displacement)
+void ElasticityDomainOperator<MeshType>::SolveLoadedRHS(
+   GridFuncType &displacement)
 {
-   if (!stiffness_assembled_)
-   {
-      AssembleStiffness();
-   }
-
-   // Build RHS
-   LinFormType b(fes_.get());
-   b.Assemble();
-   Vector &rhs = b;
-
-   const bool debug_first_step = (method_ == DGMethod::IP) &&
-                                 DebugEnabledForTime(time);
-   debug_time_ = time;
-
-   // Production assembly path: same on ALL ranks (MPI-safe).
-   // Debug dumps happen AFTER the solve, gated by rank — no separate
-   // assembly path that could cause MPI divergence.
-   if (method_ == DGMethod::IP)
-   {
-      AssembleSlipContributionIP(rhs, slip_bc);
-      AssembleSlipContributionIPShared(rhs, slip_bc,
-                                       fault_interior_faces_.Size());
-   }
-   else
-   {
-      AssembleSlipContributionBR2(rhs, slip_bc);
-      AssembleSlipContributionBR2Shared(rhs, slip_bc,
-                                        fault_interior_faces_.Size());
-   }
-
-   // Snapshot slip-only RHS before adding Dirichlet.
-   // Taken on ALL ranks when debug is enabled (needed for MPI-collective norms).
-   Vector rhs_slip_snapshot;
-   const bool debug_norm = first_step_debug_.enabled && (time > 0.0);
-   if (debug_first_step || debug_norm)
-   {
-      rhs_slip_snapshot = rhs;  // copy before Dirichlet is added
-   }
-
-   // Add Dirichlet loading
-   AssembleDirichletLoading(rhs, time);
-
    X_ = 0.0;
-   B_ = rhs;
 
    MFEM_VERIFY(solver_, "ElasticityDomainOperator::Solve: built with "
                "SolverType::OperatorOnly (no solver)");
-   solver_->Mult(B_, X_);
+   {
+      ScopedStageTimer timer(stage_timers_, StageTimers::Solve);
+      solver_->Mult(B_, X_);
+   }
+   if (stage_timers_) { stage_timers_->Start(StageTimers::SolvePost); }
 
    // Post-solve residual check: ||K*x - b|| / ||b|| (global norms)
    if (check_residual_)
@@ -533,6 +504,69 @@ void ElasticityDomainOperator<MeshType>::Solve(
    }
 
    displacement = X_;
+   if (stage_timers_) { stage_timers_->Stop(StageTimers::SolvePost); }
+}
+
+template <typename MeshType>
+void ElasticityDomainOperator<MeshType>::Solve(
+   real_t time, const Vector &slip_bc, GridFuncType &displacement)
+{
+   MFEM_VERIFY(!assemble_matrix_only_,
+               "Solve() after AssembleMatrixOnly(): no solver was set up");
+   if (!stiffness_assembled_)
+   {
+      ScopedStageTimer timer(stage_timers_, StageTimers::MatrixSetup);
+      AssembleStiffness();
+   }
+
+   // Build RHS
+   if (stage_timers_) { stage_timers_->Start(StageTimers::SlipRHS); }
+   LinFormType b(fes_.get());
+   b.Assemble();
+   Vector &rhs = b;
+   // A linear form lives on the device; b.Assemble() zeroes it there. The
+   // slip and Dirichlet loops below add to it on the host.
+   rhs.HostReadWrite();
+
+   const bool debug_first_step = (method_ == DGMethod::IP) &&
+                                 DebugEnabledForTime(time);
+   debug_time_ = time;
+
+   // Production assembly path: same on ALL ranks (MPI-safe).
+   // Debug dumps happen AFTER the solve, gated by rank — no separate
+   // assembly path that could cause MPI divergence.
+   if (method_ == DGMethod::IP)
+   {
+      AssembleSlipContributionIP(rhs, slip_bc);
+      AssembleSlipContributionIPShared(rhs, slip_bc,
+                                       fault_interior_faces_.Size());
+   }
+   else
+   {
+      AssembleSlipContributionBR2(rhs, slip_bc);
+      AssembleSlipContributionBR2Shared(rhs, slip_bc,
+                                        fault_interior_faces_.Size());
+   }
+
+   // Snapshot slip-only RHS before adding Dirichlet.
+   // Taken on ALL ranks when debug is enabled (needed for MPI-collective norms).
+   Vector rhs_slip_snapshot;
+   const bool debug_norm = first_step_debug_.enabled && (time > 0.0);
+   if (debug_first_step || debug_norm)
+   {
+      rhs_slip_snapshot = rhs;  // copy before Dirichlet is added
+   }
+
+   if (stage_timers_) { stage_timers_->Stop(StageTimers::SlipRHS); }
+
+   // Add Dirichlet loading
+   {
+      ScopedStageTimer timer(stage_timers_, StageTimers::DirichletRHS);
+      AssembleDirichletLoading(rhs, time);
+   }
+
+   B_ = rhs;
+   SolveLoadedRHS(displacement);
 
    // Debug dumps: rank-local file I/O only, no MPI collectives.
    // Placed AFTER displacement = X_ so the GridFunction has the current solution.
@@ -797,6 +831,31 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                             jump_residual_out ||
                             normal_stress_out || normal_correction_out;
 
+         if (!need_decomp)
+         {
+            // Production path: the face-local function that the QD stage
+            // operators probe (GPU plan G2), so both share its arithmetic.
+            Vector trac_local;
+            ComputeIPFaceTraction(fi, *FTr, *fe1, *fe2, u1_all, u2_all,
+                                  slip_bc.GetData() + 2 * fi * nbf,
+                                  normal_traction != nullptr, trac_local);
+            const int tang_offset = normal_traction ? 1 : 0;
+            for (int kk = 0; kk < nbf; kk++)
+            {
+               int dof_idx = fi * nbf_per_face_ + kk;
+               traction(2 * dof_idx)     = trac_local((tang_offset + 0) * nbf + kk);
+               traction(2 * dof_idx + 1) = trac_local((tang_offset + 1) * nbf + kk);
+               if (normal_traction)
+               {
+                  (*normal_traction)(dof_idx) = -trac_local(0 * nbf + kk);
+               }
+            }
+            continue;
+         }
+
+         // Diagnostic path (decomposition requested): same arithmetic, plus
+         // the stress / correction / jump-residual parts.
+
          // Build sign-corrected slip at quad points (Tandem evaluate_slip).
          // 1. Collect tangential slip components (dip, strike) per DOF
          // 2. Interpolate to quad points using face basis functions e_q
@@ -855,22 +914,13 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             *lambda_ptr_, *mu_ptr_, dim, epsilon_, penalty_factor_);
          Vector T_quad_new, nl_q_vec;
          Vector T_stress_quad_dec, T_corr_quad_dec, R_quad_dec;
-         if (need_decomp)
-         {
-            trac_integ.ComputeTractionAtQuadPointsDecomposed(
-               *fe1, *fe2, *FTr, u1_all, u2_all, delta_u_quad_t,
-               T_quad_new,
-               traction_stress_out ? &T_stress_quad_dec : nullptr,
-               traction_correction_out ? &T_corr_quad_dec : nullptr,
-               jump_residual_out ? &R_quad_dec : nullptr,
-               nullptr, &nl_q_vec);
-         }
-         else
-         {
-            trac_integ.ComputeTractionAtQuadPoints(
-               *fe1, *fe2, *FTr, u1_all, u2_all, delta_u_quad_t,
-               T_quad_new, nullptr, &nl_q_vec);
-         }
+         trac_integ.ComputeTractionAtQuadPointsDecomposed(
+            *fe1, *fe2, *FTr, u1_all, u2_all, delta_u_quad_t,
+            T_quad_new,
+            traction_stress_out ? &T_stress_quad_dec : nullptr,
+            traction_correction_out ? &T_corr_quad_dec : nullptr,
+            jump_residual_out ? &R_quad_dec : nullptr,
+            nullptr, &nl_q_vec);
          int nqp_new = T_quad_new.Size() / dim;
 
          // Step 2: Project to fault DOFs (Tandem evaluate_traction)
@@ -1290,6 +1340,29 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             bool need_decomp_sh = traction_stress_out ||
                                   traction_correction_out || jump_residual_out ||
                                   normal_stress_out || normal_correction_out;
+
+            if (!need_decomp_sh)
+            {
+               // Production path (face-local function, as interior faces).
+               Vector trac_local_sh;
+               ComputeIPFaceTraction(trac_idx, *FTr, *fe1, *fe2, u1_all, u2_all,
+                                     slip_bc.GetData() + 2 * trac_idx * nbf_sh,
+                                     normal_traction != nullptr, trac_local_sh);
+               const int tang_off_sh = normal_traction ? 1 : 0;
+               for (int kk = 0; kk < nbf_sh; kk++)
+               {
+                  int dof_idx = trac_idx * nbf_per_face_ + kk;
+                  traction(2 * dof_idx)     = trac_local_sh((tang_off_sh + 0) * nbf_sh + kk);
+                  traction(2 * dof_idx + 1) = trac_local_sh((tang_off_sh + 1) * nbf_sh + kk);
+                  if (normal_traction)
+                  {
+                     (*normal_traction)(dof_idx) = -trac_local_sh(0 * nbf_sh + kk);
+                  }
+               }
+               continue;
+            }
+
+            // Diagnostic path (decomposition requested).
             const auto &basis_sh = fault_basis_.GetBasis(trac_idx);
 
             // Build sign-corrected slip at quad points (shared faces).
@@ -1343,22 +1416,13 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                *lambda_ptr_, *mu_ptr_, dim, epsilon_, penalty_factor_);
             Vector T_quad_sh, nl_q_sh;
             Vector T_stress_quad_sh, T_corr_quad_sh, R_quad_sh;
-            if (need_decomp_sh)
-            {
-               trac_integ_sh.ComputeTractionAtQuadPointsDecomposed(
-                  *fe1, *fe2, *FTr, u1_all, u2_all, delta_u_quad_sh,
-                  T_quad_sh,
-                  traction_stress_out ? &T_stress_quad_sh : nullptr,
-                  traction_correction_out ? &T_corr_quad_sh : nullptr,
-                  jump_residual_out ? &R_quad_sh : nullptr,
-                  nullptr, &nl_q_sh);
-            }
-            else
-            {
-               trac_integ_sh.ComputeTractionAtQuadPoints(
-                  *fe1, *fe2, *FTr, u1_all, u2_all, delta_u_quad_sh,
-                  T_quad_sh, nullptr, &nl_q_sh);
-            }
+            trac_integ_sh.ComputeTractionAtQuadPointsDecomposed(
+               *fe1, *fe2, *FTr, u1_all, u2_all, delta_u_quad_sh,
+               T_quad_sh,
+               traction_stress_out ? &T_stress_quad_sh : nullptr,
+               traction_correction_out ? &T_corr_quad_sh : nullptr,
+               jump_residual_out ? &R_quad_sh : nullptr,
+               nullptr, &nl_q_sh);
             int nqp_sh = T_quad_sh.Size() / dim;
 
             int quad_order_sh2 = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;

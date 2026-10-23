@@ -989,6 +989,13 @@ public:
       *fault_param_Dc_ = 0.0;
       *fault_coord_x2_ = 0.0;
       *fault_coord_x3_ = 0.0;
+      // GPU plan G4: the fills run where the fields live (the device, when
+      // there is one); the loops below write them on the host.
+      for (GF *gf : {fault_param_a_.get(), fault_param_Dc_.get(),
+                     fault_coord_x2_.get(), fault_coord_x3_.get()})
+      {
+         gf->HostReadWrite();
+      }
 
       const int nbf = nbf_per_face_;
       const int n_int = n_interior_fault_faces_;
@@ -1103,6 +1110,7 @@ public:
          {
             *gf = 0.0;
          }
+         gf->HostReadWrite();  // GPU plan G4: host loops below
 
          // Face-average the per-DOF input onto the L2-p0 GF, same
          // pattern as SetFaultParamsBP5 (Elem1 + Elem2 for interior
@@ -1159,6 +1167,15 @@ public:
       *fault_trac_dip_ = 0.0;        *fault_trac_strike_ = 0.0;
       *fault_state_ = 0.0;
       *fault_normal_stress_ = 0.0;
+      // GPU plan G4: the fills run where the fields live (the device, when
+      // there is one); the loops below write them on the host.
+      for (GF *gf : {fault_slip_dip_.get(), fault_slip_strike_.get(),
+                     fault_slip_rate_dip_.get(), fault_slip_rate_strike_.get(),
+                     fault_trac_dip_.get(), fault_trac_strike_.get(),
+                     fault_state_.get(), fault_normal_stress_.get()})
+      {
+         gf->HostReadWrite();
+      }
       const bool has_normal = (local_normal_stress.Size() > 0);
 
       const int nbf = nbf_per_face_;

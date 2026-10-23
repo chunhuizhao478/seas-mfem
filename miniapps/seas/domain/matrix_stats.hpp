@@ -18,6 +18,7 @@
 
 #include <fstream>
 #include <iomanip>
+#include <cstdint>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -40,6 +41,13 @@ struct MatrixStats
    long long local_rows_min   = 0;
    long long local_rows_max   = 0;
    double    local_rows_mean  = 0.0;
+
+   // Per-rank nnz (diag + offd of the rank's rows).  The max decides
+   // whether a rank's CSR fits 32-bit indices (GPU plan G0).
+   long long local_nnz_min    = 0;
+   long long local_nnz_max    = 0;
+   double    local_nnz_mean   = 0.0;
+   long long local_offd_nnz_max = 0;
 
    // Per-row nnz (full row = diag + offd)
    long long nnz_per_row_min  = 0;
@@ -85,7 +93,9 @@ struct MatrixStats
 /// @param vdim        vector dimension (3 for 3D elasticity)
 /// @param comm        MPI communicator (typically pmesh.GetComm())
 /// @param do_symmetry if true, computes ||A - A^T||_F via Transpose + Add
-///                    (skip on very large matrices if memory is tight)
+///                    and max|Aij - Aji| over each rank's diag block
+///                    (skip on very large matrices if memory is tight;
+///                    both are then reported as -1)
 inline MatrixStats ComputeMatrixStats(const HypreParMatrix &A,
                                       int dofs_per_elem,
                                       int vdim,
@@ -188,7 +198,10 @@ inline MatrixStats ComputeMatrixStats(const HypreParMatrix &A,
 
    // Max |Aij - Aji| over the local diag block (cheap, exact for the
    // rank-owned square — does NOT include inter-rank entries).
-   double sym_max_abs_local = 0.0;
+   // Skipped with do_symmetry = false: the transpose is another copy of
+   // the rank's diag block.
+   double sym_max_abs_local = do_symmetry ? 0.0 : -1.0;
+   if (do_symmetry)
    {
       SparseMatrix *diag_T = Transpose(diag_local);
       MFEM_VERIFY(diag_T->Height() == diag_local.Height(),
@@ -251,6 +264,8 @@ inline MatrixStats ComputeMatrixStats(const HypreParMatrix &A,
    double Kones_n1_g = 0.0, Kones_n2sq_g = 0.0, Kones_ninf_g = 0.0;
    long long lr_min_in = lr_min, lr_max_in = lr_max, lr_sum_in = lr_sum;
    long long diag_local_nnz_in = diag_local_nnz, offd_local_nnz_in = offd_local_nnz;
+   long long lnnz_in = diag_local_nnz + offd_local_nnz;
+   long long lnnz_min = 0, lnnz_max = 0, lnnz_sum = 0, loffd_max = 0;
    long long rnz_min_in = row_nnz_min, rnz_max_in = row_nnz_max;
    long long rnz_sum_in = row_nnz_sum;
    long long bw_min_in = bw_min, bw_max_in = bw_max;
@@ -265,6 +280,11 @@ inline MatrixStats ComputeMatrixStats(const HypreParMatrix &A,
    MPI_Reduce(&lr_sum_in, &lr_sum, 1, MPI_LONG_LONG, MPI_SUM, 0, comm);
    MPI_Reduce(&diag_local_nnz_in, &diag_nnz_global, 1, MPI_LONG_LONG, MPI_SUM, 0, comm);
    MPI_Reduce(&offd_local_nnz_in, &offd_nnz_global, 1, MPI_LONG_LONG, MPI_SUM, 0, comm);
+   MPI_Reduce(&lnnz_in, &lnnz_min, 1, MPI_LONG_LONG, MPI_MIN, 0, comm);
+   MPI_Reduce(&lnnz_in, &lnnz_max, 1, MPI_LONG_LONG, MPI_MAX, 0, comm);
+   MPI_Reduce(&lnnz_in, &lnnz_sum, 1, MPI_LONG_LONG, MPI_SUM, 0, comm);
+   MPI_Reduce(&offd_local_nnz_in, &loffd_max, 1, MPI_LONG_LONG, MPI_MAX, 0,
+              comm);
    MPI_Reduce(&rnz_min_in, &rnz_min_g, 1, MPI_LONG_LONG, MPI_MIN, 0, comm);
    MPI_Reduce(&rnz_max_in, &rnz_max_g, 1, MPI_LONG_LONG, MPI_MAX, 0, comm);
    MPI_Reduce(&rnz_sum_in, &rnz_sum_g, 1, MPI_LONG_LONG, MPI_SUM, 0, comm);
@@ -309,6 +329,10 @@ inline MatrixStats ComputeMatrixStats(const HypreParMatrix &A,
       s.local_rows_min  = lr_min;
       s.local_rows_max  = lr_max;
       s.local_rows_mean = static_cast<double>(lr_sum) / std::max(1, n_ranks);
+      s.local_nnz_min   = lnnz_min;
+      s.local_nnz_max   = lnnz_max;
+      s.local_nnz_mean  = static_cast<double>(lnnz_sum) / std::max(1, n_ranks);
+      s.local_offd_nnz_max = loffd_max;
       s.global_diag_nnz = diag_nnz_global;
       s.global_offd_nnz = offd_nnz_global;
       s.global_nnz      = diag_nnz_global + offd_nnz_global;
@@ -356,6 +380,13 @@ inline void WriteMatrixStatsJson(const MatrixStats &s, const std::string &path)
    f << "  \"local_rows\": { \"min\": " << s.local_rows_min
      << ", \"max\": " << s.local_rows_max
      << ", \"mean\": " << s.local_rows_mean << " },\n";
+   f << "  \"local_nnz\": { \"min\": " << s.local_nnz_min
+     << ", \"max\": " << s.local_nnz_max
+     << ", \"mean\": " << s.local_nnz_mean
+     << ", \"offd_max\": " << s.local_offd_nnz_max
+     << ", \"max_fits_int32\": "
+     << (s.local_nnz_max <= std::numeric_limits<std::int32_t>::max()
+         ? "true" : "false") << " },\n";
    f << "  \"nnz_per_row\": { \"min\": " << s.nnz_per_row_min
      << ", \"max\": " << s.nnz_per_row_max
      << ", \"mean\": " << s.nnz_per_row_mean << " },\n";
@@ -400,6 +431,10 @@ inline void PrintMatrixStatsSummary(const MatrixStats &s)
       << "    local_rows         = [" << s.local_rows_min
       << ", " << s.local_rows_max << "]"
       << "  mean " << fmt(s.local_rows_mean) << "\n"
+      << "    local nnz/rank     = [" << s.local_nnz_min
+      << ", " << s.local_nnz_max << "]"
+      << "  mean " << fmt(s.local_nnz_mean)
+      << "  (offd max " << s.local_offd_nnz_max << ")\n"
       << "    nnz/row            = [" << s.nnz_per_row_min
       << ", " << s.nnz_per_row_max << "]"
       << "  mean " << fmt(s.nnz_per_row_mean) << "\n"

@@ -409,6 +409,18 @@ public:
       const real_t secs_per_yr = 365.25 * 24.0 * 3600.0;
       real_t time_yr = time_s / secs_per_yr;
 
+      // GPU plan G4: RecordMult's copies follow their sources, which may be
+      // valid on the device only (the fault slip rate is a device vector);
+      // the loop below reads them on the host.
+      for (const Vector *v : {&staged_traction_, &staged_stress_,
+                              &staged_corr_, &staged_jump_res_,
+                              &staged_normal_trac_, &staged_normal_stress_,
+                              &staged_normal_corr_, &staged_slip_rate_})
+      {
+         v->HostRead();
+      }
+      state.HostRead();
+
       // State layout for BP5: [slip_dip, slip_strike, psi] per node
       constexpr int spn = 3;
       constexpr int psi_idx = 2;

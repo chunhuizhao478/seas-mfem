@@ -374,6 +374,8 @@ TEST_PARAVIEW_SCHEDULE_CAP_SRC             = tests/unit/test_paraview_schedule_c
 TEST_KINEMATICS_FIELD_SET_SRC              = tests/unit/test_kinematics_field_set.cpp
 # R-003 of REVIEW.md 2026-05-16 — zero-fault-DOF rank PETSc TS lifecycle
 TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_SRC      = tests/unit/test_bp5_petsc_ts_zero_fault_rank.cpp
+# GPU plan G0 — matrix-only assembly (--exit-after-assembly) statistics
+TEST_G0_MATRIX_ONLY_SRC                    = tests/unit/test_g0_matrix_only.cpp
 # Phase 1 of petsc_ts_restart_plan_2026-05-16 — V2 checkpoint round-trip + restart-state restoration
 TEST_BP5_PETSC_TS_RESTART_SRC              = tests/unit/test_bp5_petsc_ts_restart.cpp
 # Phase 4 TPV104 port — V1 checkpoint round-trip
@@ -760,6 +762,7 @@ TEST_VOLUME_HDF_COMPRESSION_OBJ            = $(TEST_VOLUME_HDF_COMPRESSION_SRC:.
 TEST_PARAVIEW_SCHEDULE_CAP_OBJ             = $(TEST_PARAVIEW_SCHEDULE_CAP_SRC:.cpp=.o)
 TEST_KINEMATICS_FIELD_SET_OBJ              = $(TEST_KINEMATICS_FIELD_SET_SRC:.cpp=.o)
 TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_OBJ      = $(TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_SRC:.cpp=.o)
+TEST_G0_MATRIX_ONLY_OBJ                    = $(TEST_G0_MATRIX_ONLY_SRC:.cpp=.o)
 TEST_BP5_PETSC_TS_RESTART_OBJ              = $(TEST_BP5_PETSC_TS_RESTART_SRC:.cpp=.o)
 TEST_TPV104_CHECKPOINT_OBJ                 = $(TEST_TPV104_CHECKPOINT_SRC:.cpp=.o)
 TEST_PARAVIEW_RANK0_WARNING_GATE_OBJ       = $(TEST_PARAVIEW_RANK0_WARNING_GATE_SRC:.cpp=.o)
@@ -858,6 +861,7 @@ FRICTION_HEADERS = friction/friction_law.hpp \
 # Phase 2: Domain operator
 DOMAIN_HEADERS = common/seas_types.hpp \
                  common/mpi_context.hpp \
+                 common/stage_timers.hpp \
                  domain/domain_operator.hpp \
                  domain/antiplane_operator.hpp \
                  domain/antiplane_bdrload_operator.hpp \
@@ -867,6 +871,11 @@ DOMAIN_HEADERS = common/seas_types.hpp \
                  domain/elasticity_operator_setup.inl \
                  domain/elasticity_operator_assembly.inl \
                  domain/elasticity_operator_traction.inl \
+                 domain/elasticity_operator_qd.inl \
+                 domain/qd_stage_operators.hpp \
+                 domain/qd_green_operator.hpp \
+                 domain/qd_hmatrix_operator.hpp \
+                 domain/matrix_stats.hpp \
                  domain/elasticity_operator_fault_ops.inl \
                  domain/fused_stiffness_pair.hpp \
                  domain/dense_block_stiffness.hpp \
@@ -886,7 +895,8 @@ FAULT_HEADERS = fault/fault_geometry.hpp \
 # Phase 4: SEAS operator
 SOLVER_HEADERS = solver/seas_operator.hpp \
                  solver/seas_bdrload_operator.hpp \
-                 solver/time_stepper.hpp
+                 solver/time_stepper.hpp \
+                 solver/qd_linear_solver.hpp
 
 # Phase 5: I/O
 IO_HEADERS = io/probe_output.hpp \
@@ -1052,6 +1062,18 @@ TEST_BR2_CONSISTENCY_OBJ = $(TEST_BR2_CONSISTENCY_SRC:.cpp=.o)
 TEST_PARALLEL_ELAST_SRC = tests/parallel/test_parallel_elasticity.cpp
 TEST_PARALLEL_ELAST_OBJ = $(TEST_PARALLEL_ELAST_SRC:.cpp=.o)
 
+# GPU plan G2: per-stage operators vs the face loops
+TEST_QD_STAGE_OPS_SRC = tests/parallel/test_qd_stage_operators.cpp
+TEST_QD_STAGE_OPS_OBJ = $(TEST_QD_STAGE_OPS_SRC:.cpp=.o)
+
+# GPU plan G3a: cuDSS against MUMPS on the BP5 stiffness
+TEST_CUDSS_VS_MUMPS_SRC = tests/parallel/test_cudss_vs_mumps.cpp
+TEST_CUDSS_VS_MUMPS_OBJ = $(TEST_CUDSS_VS_MUMPS_SRC:.cpp=.o)
+
+# GPU plan G4: the fault kernels against the host friction code
+TEST_DEVICE_FRICTION_SRC = tests/parallel/test_device_friction.cpp
+TEST_DEVICE_FRICTION_OBJ = $(TEST_DEVICE_FRICTION_SRC:.cpp=.o)
+
 # Parallel wave operator tests (dynamic rupture)
 TEST_PARALLEL_WAVE_SRC = tests/parallel/test_parallel_wave_operator.cpp
 TEST_PARALLEL_WAVE_OBJ = $(TEST_PARALLEL_WAVE_SRC:.cpp=.o)
@@ -1096,6 +1118,7 @@ PAR_MINIAPPS = seas_test_mpi_context seas_test_parallel_utils \
                seas_test_scaling \
                seas_test_br2_consistency \
                seas_test_parallel_elasticity \
+               seas_test_qd_stage_operators \
                seas_test_bp5_parallel_smoke \
                seas_test_parallel_wave_operator
 # Long-running parallel simulations (built by `make all`, not run by `make test`)
@@ -2040,6 +2063,11 @@ seas_test_kinematics_field_set: $(TEST_KINEMATICS_FIELD_SET_OBJ)
 # R-003 of REVIEW.md 2026-05-16 — zero-fault-DOF rank padded-shrink invariant
 seas_test_bp5_petsc_ts_zero_fault_rank: $(TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# GPU plan G0 — matrix-only assembly statistics equal the solver path's
+seas_test_g0_matrix_only: $(TEST_G0_MATRIX_ONLY_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_G0_MATRIX_ONLY_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Phase 1 of petsc_ts_restart_plan_2026-05-16 — V2 checkpoint round-trip
@@ -3266,6 +3294,56 @@ test-nitsche-pf: seas_test_nitsche_pf
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_pf
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_pf
 
+# Station output of the Nitsche driver (speed-next O2, Chunhui Zhao
+# 2026-10-20): buffered rows, the members-only copy average against the world
+# version, the signal flag (O2-1 .. O2-4).
+TEST_STATION_OUTPUT_SRC = tests/verification/test_station_output.cpp
+TEST_STATION_OUTPUT_OBJ = $(TEST_STATION_OUTPUT_SRC:.cpp=.o)
+$(TEST_STATION_OUTPUT_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             dynamic/fault_station_file.hpp \
+                             dynamic/station_copy_average.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_station_output: $(TEST_STATION_OUTPUT_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_STATION_OUTPUT_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-station-output: seas_test_station_output
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_station_output
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_station_output
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 3 ./seas_test_station_output
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_station_output
+	rm -rf test_station_output_out
+
+# The parallel mesh from parts sent by rank 0 (Chunhui Zhao 2026-10-22,
+# partition-memory report rev1 option D, speed-next S1): the same mesh, DOF
+# numbers and element values as ParMesh(comm, serial mesh, partition)
+# (MP-1 .. MP-7), and the part files of S1 step 2 (MP-8).
+TEST_MESH_PARTS_SRC = tests/verification/test_mesh_parts.cpp
+TEST_MESH_PARTS_OBJ = $(TEST_MESH_PARTS_SRC:.cpp=.o)
+$(TEST_MESH_PARTS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             dynamic/mesh_parts.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_mesh_parts: $(TEST_MESH_PARTS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_MESH_PARTS_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-mesh-parts: seas_test_mesh_parts
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_mesh_parts
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_mesh_parts
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 3 ./seas_test_mesh_parts
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_mesh_parts
+	rm -rf test_mesh_parts_out
+
 # Nitsche dynamic rupture P6 (first rupture, TPV102 on the inline mesh; plan
 # N-01 fault path, C-04, N-10 fixture): T-04, T-13(a), T-15, T-20, T-21.
 # The abort modes must exit non-zero (MFEM_USE_EXCEPTIONS=NO: tested by exit
@@ -3468,6 +3546,8 @@ $(NITSCHE_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
                              domain/nitsche_energy.hpp \
                              spatial/code/spatial_friction.hpp \
                              dynamic/fault_station_file.hpp \
+                             dynamic/station_copy_average.hpp \
+                             dynamic/mesh_parts.hpp \
                              friction/rate_state_closure.hpp \
                              friction/rate_state_srw_closure.hpp \
                              friction/slip_weakening_closure.hpp \
@@ -3482,6 +3562,24 @@ seas_nitsche_dyn_driver: $(NITSCHE_DYN_DRIVER_OBJ) $(SPATIAL_FRICTION_OBJ) \
                          $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
                          $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(NITSCHE_DYN_DRIVER_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Speed-next profiling (Chunhui Zhao, 2026-10-20): the same driver with debug
+# information (-g) for a sampling profiler (Linaro MAP, perf).  -g does not
+# change the generated code: jobs/vista_profiling/build_map_vista.sbatch
+# checks that its object without the debug sections is byte-identical to
+# drivers/nitsche_dyn_driver.o.
+NITSCHE_DYN_DRIVER_G_OBJ = drivers/nitsche_dyn_driver_g.o
+$(NITSCHE_DYN_DRIVER_G_OBJ): $(SRC)$(NITSCHE_DYN_DRIVER_SRC) $(NITSCHE_DYN_DRIVER_OBJ)
+	$(MFEM_CXX) $(MFEM_FLAGS) -g $(SEAS_INCLUDES) $(HDF5_INCFLAGS) $(TOML_FLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_nitsche_dyn_driver_g: $(NITSCHE_DYN_DRIVER_G_OBJ) $(SPATIAL_FRICTION_OBJ) \
+                           $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+                           $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(NITSCHE_DYN_DRIVER_G_OBJ) \
 	    $(SPATIAL_FRICTION_OBJ) $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
 	    $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
@@ -4500,6 +4598,10 @@ $(TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_OBJ): %.o: $(SRC)%.cpp $(MFEM_LIB_FILE) $(CO
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+$(TEST_G0_MATRIX_ONLY_OBJ): %.o: $(SRC)%.cpp $(DOMAIN_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_USE_MPI -c $< -o $@
+
 $(TEST_BP5_PETSC_TS_RESTART_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
@@ -5038,6 +5140,15 @@ test-elasticity-br2: seas_test_elasticity_br2
 
 test-elasticity-operator: seas_test_elasticity_operator
 	./seas_test_elasticity_operator
+
+# GPU plan G0: the BP5 gate checker (bp5/bp5_gate_check.py), Python only.
+test-bp5-gate-check:
+	python3 tests/unit/test_bp5_gate_check.py
+
+# GPU plan G0: --exit-after-assembly statistics, on 1 and 2 ranks.
+test-g0-matrix-only: seas_test_g0_matrix_only
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_g0_matrix_only
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_g0_matrix_only
 
 test-bp5-fault-operator: seas_test_bp5_fault_operator
 	./seas_test_bp5_fault_operator
@@ -5863,6 +5974,49 @@ $(TEST_PARALLEL_ELAST_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS)
 test-parallel-elasticity: seas_test_parallel_elasticity
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_parallel_elasticity
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_parallel_elasticity
+
+# GPU plan G2: per-stage operators vs the face loops (acceptance tests 1-4)
+seas_test_qd_stage_operators: $(TEST_QD_STAGE_OPS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_QD_STAGE_OPS_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+$(TEST_QD_STAGE_OPS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+test-qd-stage-operators: seas_test_qd_stage_operators
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_qd_stage_operators
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_qd_stage_operators
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_qd_stage_operators --partition fault
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_qd_stage_operators
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_qd_stage_operators --partition fault
+
+# GPU plan G3a: cuDSS against MUMPS (a GPU build; on 1 and 2 GPUs)
+seas_test_cudss_vs_mumps: $(TEST_CUDSS_VS_MUMPS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_CUDSS_VS_MUMPS_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+$(TEST_CUDSS_VS_MUMPS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+test-cudss-vs-mumps: seas_test_cudss_vs_mumps
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_cudss_vs_mumps
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_cudss_vs_mumps
+
+# GPU plan G4: the fault kernels against the host friction code (CPU here;
+# a GPU build runs it again with --device cuda)
+seas_test_device_friction: $(TEST_DEVICE_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_DEVICE_FRICTION_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+$(TEST_DEVICE_FRICTION_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+test-device-friction: seas_test_device_friction
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_device_friction
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_device_friction --device debug --n 100000
 
 # Parallel wave operator tests (dynamic rupture)
 # Match the serial rule (line 847): the test instantiates

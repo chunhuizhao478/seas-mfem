@@ -1,6 +1,6 @@
 """Compare the fault station files of two Nitsche runs (Chunhui Zhao, 2026-10-17).
 
-usage: python3 -I compare_stations.py A B [--tmax T] [--time-tol E] [--groups]
+usage: python3 -I compare_stations.py A B [--tmax T] [--time-tol E] [--groups] [--bitwise]
 
 A and B are folders holding <prob>_station_*.dat (columns: t slip1 slip2 V1 V2 tau1 tau2
 sigma_n slip_path).  Rows are matched by line; with --tmax only the rows with t <= T + 1e-9
@@ -10,7 +10,8 @@ instants per sync interval, so its printed times can differ from global stepping
 last digit).  For each station and quantity (slip = columns 1-2, V = 3-4, tau = 5-6,
 sigma_n = 7) it reports max |a - b| / max |a| over the rows, and prints the largest over all
 stations, plus the number of stations whose rows are bitwise equal as printed; --groups
-also prints the largest per quantity.  Standard library only.
+also prints the largest per quantity; with --bitwise the exit status is 1 unless every station is
+bitwise equal.  Standard library only.
 """
 import glob
 import os
@@ -47,6 +48,9 @@ def main():
     groups = '--groups' in args
     if groups:
         args.remove('--groups')
+    bitwise = '--bitwise' in args
+    if bitwise:
+        args.remove('--bitwise')
     gworst = {name: (0.0, None) for name, _ in GROUPS}
     a_dir, b_dir = args
     files = sorted(f for f in glob.glob(os.path.join(a_dir, '*_station_*.dat'))
@@ -79,6 +83,9 @@ def main():
         for name, _ in GROUPS:
             d, f = gworst[name]
             print(f'  {name:8s} {d:.3e}' + (f' ({f})' if f else ''))
+    if bitwise and same != n:
+        print(f'NOT bitwise equal: {n - same} of {n} stations differ')
+        sys.exit(1)
 
 
 if __name__ == '__main__':
