@@ -104,6 +104,19 @@
 // (checked at the end).  LTS needs cfl <= 0.6 (the accepted multirate
 // limit, Chunhui Zhao 2026-10-19) and kv_scale = "node".  --lts-same-step 1
 // (test only): the same clusters, every one at dt0.
+//
+// Poroelastic option (poroelastic plan rev 3, hook H3; multiphysics/
+// poroelastic/): [multiphysics.poroelastic] enabled = true, or --poroelastic
+// 1, puts PoroNitscheOperator, the Biot (u, w) bulk whose solid block is the
+// elastic operator built from the undrained sample, and PoroNewmarkStepper in
+// place of NitscheWaveOperator and CentralDifferenceSolver (step P2.5).  The
+// fault, stations, dumps and fault frames read that elastic operator as
+// before.  dt is PoroMaxDt (the fast P speed) at cfl x C(p), and the run
+// starts from a = 0 (derivation section 9.4).  Until step P4.1 the fault sees
+// no pore pressure (hook H2 null).  Refused with the option on: local time
+// stepping, the energy balance, a starting pressure, a fluid source,
+// background_p_pa != 0 (steps P4.1 and P4.2 wire these three) and a nonzero
+// force at t_initial (a = 0 is today's start M^{-1} F^0 only for F^0 = 0).
 
 #include "mfem.hpp"
 #include "../domain/nitsche_wave_operator.hpp"
@@ -120,6 +133,8 @@
 #include "../solver/nitsche_lts_setup.hpp"   // --lts-report (plan item 7, P0)
 #include "../solver/nitsche_lts_run.hpp"     // --lts rate2 (plan item 7, P3/P4)
 #include "../multiphysics/poroelastic/poro_config.hpp"   // poroelastic plan rev 3, P0
+#include "../multiphysics/poroelastic/poro_cfl.hpp"      // P1.2
+#include "../multiphysics/poroelastic/poro_newmark.hpp"  // P2.5 (hook H3)
 #ifdef MFEM_USE_HDF5
 #include "../io/fault_vtkhdf_writer.hpp"
 #include "../io/paraview_output.hpp"   // ParaViewOutput::ProbeH5ZZfpPluginOrAbort
@@ -808,9 +823,17 @@ int main(int argc, char *argv[])
                   "the option on; the Biot bulk is stepped globally (plan rev 3, section 4.3)");
       const std::string rho_err = poro::CheckBulkDensity(poro_cfg, cfg.material_fallback.rho);
       if (!rho_err.empty()) { MFEM_ABORT("poroelastic: " << rho_err); }
-      MFEM_ABORT("poroelastic: the option is parsed and checked, but the driver builds the "
-                 "Biot (u, w) operator and its stepper in step P2.5 of plan rev 3; nothing "
-                 "runs with it on yet");
+      // not wired yet (step P2.5 builds the bulk and its stepper only)
+      MFEM_VERIFY(!energy_on, "poroelastic: [diagnostics] energy_balance is refused with the "
+                  "option on; the energy monitor knows the elastic energy only, not the fluid's");
+      MFEM_VERIFY(!poro_cfg.initial_pressure.on, "poroelastic: "
+                  "[multiphysics.poroelastic.initial_pressure] is refused until step P4.2 of plan "
+                  "rev 3, which wires the starting pressure with the fault");
+      MFEM_VERIFY(!poro_cfg.source.on, "poroelastic: [multiphysics.poroelastic.source] is "
+                  "refused until step P4.2 of plan rev 3, which wires the fluid source");
+      MFEM_VERIFY(poro_cfg.background_p_pa == 0.0, "poroelastic: background_p_pa = "
+                  << poro_cfg.background_p_pa << " is refused until step P4.1 of plan rev 3: "
+                  "p_0 enters sigma_n' through the fault pressure hook (H2), not yet wired");
    }
    MakeDirs(out_dir);
 
@@ -1308,11 +1331,25 @@ int main(int argc, char *argv[])
    // ------------------------------------------------------------ operator
    DomainConfig dcfg;
    dcfg.penalty_factor = penalty_factor;
-   NitscheWaveOperator op(pmesh, p, material, bc, dcfg, &fs);
+   // with the poroelastic option (hook H3) `op` is the solid block of the Biot
+   // operator: the elastic operator built from the undrained sample
+   std::unique_ptr<poro::PoroMaterialSample> poro_sample;
+   std::unique_ptr<poro::PoroNitscheOperator> poro_op;
+   std::unique_ptr<NitscheWaveOperator> elastic_op;
+   if (poro_cfg.enabled)
+   {
+      poro_sample = std::make_unique<poro::PoroMaterialSample>(pmesh, material, poro_cfg);
+      poro_op = std::make_unique<poro::PoroNitscheOperator>(
+                   pmesh, p, *poro_sample, bc, poro_cfg.fluid_penalty, poro::PoroBoundaryConfig{},
+                   dcfg, &fs);
+   }
+   else { elastic_op = std::make_unique<NitscheWaveOperator>(pmesh, p, material, bc, dcfg, &fs); }
+   NitscheWaveOperator &op = poro_op ? poro_op->Elastic() : *elastic_op;
    MFEM_VERIFY(op.Orientation().GetReport().junction_edges == 0,
                "[fault_geometry] junction_policy = \"refuse\": the fault has "
                << op.Orientation().GetReport().junction_edges << " junction edges");
-   const real_t dt_cfl = ComputeMaxDt(op.Sample(), pmesh, p, cfl * kCeig[p]);
+   const real_t dt_cfl = poro_op ? poro::PoroMaxDt(*poro_sample, pmesh, p, cfl * kCeig[p])
+                         : ComputeMaxDt(op.Sample(), pmesh, p, cfl * kCeig[p]);
    const real_t dt_gts = std::min(dt_cfl, cfg.time.dt_max);
    // the step of the fault (and of the outputs): the global step, or with LTS
    // the fault cluster's step dt0 2^c_F
@@ -1800,6 +1837,55 @@ int main(int argc, char *argv[])
    op.SetFusedStiffness(fused_spmv != 0);
    op.SetDenseBlocks(dense_blocks != 0);
    CentralDifferenceSolver ode;
+   // poroelastic (hook H3): x = [u; w], v and a, from rest with a = 0
+   // (derivation section 9.4); U and Ud stay unused
+   std::unique_ptr<poro::PoroNewmarkStepper> poro_step;
+   Vector poro_x, poro_v, poro_a;
+   if (poro_op)
+   {
+      poro_step = std::make_unique<poro::PoroNewmarkStepper>(
+                     *poro_op, dt,
+                     poro_cfg.drag_gamma == "half" ? poro::DragGamma::kHalf
+                     : poro::DragGamma::kFitted,
+                     poro_cfg.velocity_coupling == "diagonal" ? poro::VelocityCoupling::kDiagonal
+                     : poro::VelocityCoupling::kMomentum);
+      poro_x.SetSize(poro_op->Height());
+      poro_v.SetSize(poro_op->Height());
+      poro_a.SetSize(poro_op->Height());
+      poro_x = 0.0;
+      poro_v = 0.0;
+      poro_a = 0.0;
+      // a = 0 is the elastic driver's start M^{-1} F^0 only when F^0 = 0 (a
+      // run from rest without Dirichlet data at t_initial and without a
+      // Kelvin-Voigt slip-rate load); the others are refused
+      Vector F0;
+      poro_op->Force(poro_x, &poro_v, &op.Slip(), F0);
+      real_t f0 = F0.Normlinf();
+      MPI_Allreduce(MPI_IN_PLACE, &f0, 1, MPITypeMap<real_t>::mpi_type, MPI_MAX, MPI_COMM_WORLD);
+      MFEM_VERIFY(f0 == 0.0, "poroelastic: the force at t_initial is not zero (max |F^0| = "
+                  << f0 << "); the run starts from a = 0 (derivation section 9.4), which is "
+                  "the elastic driver's start M^{-1} F^0 only for F^0 = 0, so a nonzero F^0 "
+                  "(Dirichlet data at t_initial, a Kelvin-Voigt load of an initial slip rate) "
+                  "is refused with the option on");
+      real_t zr[4] = {1e300, 1e300, 1e300, 1e300};   // min z, -max z, min gamma_w, -max
+      for (int e = 0; e < pmesh.GetNE(); e++)
+      {
+         zr[0] = std::min(zr[0], poro_step->Z()(e));
+         zr[1] = std::min(zr[1], -poro_step->Z()(e));
+         zr[2] = std::min(zr[2], poro_step->GammaW()(e));
+         zr[3] = std::min(zr[3], -poro_step->GammaW()(e));
+      }
+      MPI_Allreduce(MPI_IN_PLACE, zr, 4, MPITypeMap<real_t>::mpi_type, MPI_MIN, MPI_COMM_WORLD);
+      if (g_rank == 0)
+      {
+         std::cout << std::setprecision(6) << "  poroelastic: Biot (u, w) bulk, fluid penalty "
+                   << poro_cfg.fluid_penalty << "; dt from PoroMaxDt (fast P speed); z = dt/tau in ["
+                   << zr[0] << ", " << -zr[1] << "], gamma_w in [" << zr[2] << ", " << -zr[3]
+                   << "] (drag_gamma \"" << poro_cfg.drag_gamma << "\", velocity_coupling \""
+                   << poro_cfg.velocity_coupling << "\"); start a = 0; the fault sees no pore "
+                   "pressure until step P4.1\n";
+      }
+   }
    std::unique_ptr<NitscheLtsRun> lts_run;
    if (lts_on)
    {
@@ -1819,7 +1905,7 @@ int main(int argc, char *argv[])
                    << " MB over all ranks, built in " << tlm << " s (with the first forces)\n";
       }
    }
-   else { ode.Init(op); }
+   else if (!poro_step) { ode.Init(op); }
    Vector lts_zero_acc;
    if (lts_on && mon) { lts_zero_acc.SetSize(n); lts_zero_acc = 0.0; }
    if (stations)
@@ -1844,6 +1930,7 @@ int main(int argc, char *argv[])
          sync = lts_run->FaultStep(U, Ud, t);
          op.SetTime(t);
       }
+      else if (poro_step) { poro_step->Step(poro_x, poro_v, poro_a, t, h); }
       else { ode.Step(U, Ud, t, h); }
       const double ds = std::chrono::duration<double>(std::chrono::steady_clock::now() - ts0).count();
       if (s == 1) { step1_sec = ds; fault_sec1 = op.FaultSeconds(); }

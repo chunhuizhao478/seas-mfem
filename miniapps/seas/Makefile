@@ -3419,6 +3419,14 @@ $(NITSCHE_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
                              friction/rate_state_srw_closure.hpp \
                              friction/slip_weakening_closure.hpp \
                              multiphysics/poroelastic/poro_config.hpp \
+                             multiphysics/poroelastic/poro_material.hpp \
+                             multiphysics/poroelastic/poro_dispersion.hpp \
+                             multiphysics/poroelastic/poro_cfl.hpp \
+                             multiphysics/poroelastic/dg_poro_div_integrator.hpp \
+                             multiphysics/poroelastic/poro_nitsche_operator.hpp \
+                             multiphysics/poroelastic/poro_source.hpp \
+                             multiphysics/poroelastic/poro_mass.hpp \
+                             multiphysics/poroelastic/poro_newmark.hpp \
                              $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) $(TOML_FLAGS) -DSEAS_USE_MPI \
@@ -3435,7 +3443,9 @@ seas_nitsche_dyn_driver: $(NITSCHE_DYN_DRIVER_OBJ) $(SPATIAL_FRICTION_OBJ) \
 # Poroelastic plan rev 3 (multiphysics/poroelastic/, hook H4): the option
 # (P0.1) and its phase tests.  test-poro-p0 = U0-3, U0-4, U0-5 in
 # seas_test_poro_p0 (1 and 2 ranks), then the driver checks: the abort texts
-# of U0-4 and the refusals of U0-6.  U0-1 and U0-2 (the off path is
+# of U0-4, the refusals of U0-6 and of step P2.5, and (step P2.5, about 13 GB
+# and 3 minutes, skipped without the 1000 m TPV205 mesh) a 2-step run with the
+# option on.  U0-1 and U0-2 (the off path is
 # byte-identical; every test-nitsche-* target passes as at the base commit)
 # need a base build beside this one and are run as the review records them.
 $(PORO_CONFIG_OBJ): %.o: $(SRC)%.cpp multiphysics/poroelastic/poro_config.hpp \
@@ -3481,7 +3491,25 @@ test-poro-p0: seas_test_poro_p0 seas_nitsche_dyn_driver seas_driver
 	@{ cat $(PORO_P0_DECK); printf '\n$(PORO_P0_TABLE)rho_solid = 2600.0\n'; } > poro_p0_decks/rho.toml
 	@{ cat $(PORO_P0_DECK); printf '\n$(PORO_P0_TABLE)rho_solid = 2855.5555555555557\nporosty = 0.1\n'; } > poro_p0_decks/typo.toml
 	@{ cat config/bp5_example.toml; printf '\n$(PORO_P0_TABLE)rho_solid = 2855.5555555555557\n'; } > poro_p0_decks/qd.toml
-	@$(call PORO_P0_EXPECT_ABORT,./seas_nitsche_dyn_driver --config poro_p0_decks/ok.toml,U0-4 option on,its stepper in step P2.5)
+	@sed 's/^energy_balance = false/energy_balance = true/' poro_p0_decks/ok.toml > poro_p0_decks/energy.toml
+	@sed 's/^ *background_p_pa = 0.0$$/background_p_pa = 1.0e6/' poro_p0_decks/ok.toml > poro_p0_decks/p0.toml
+	@grep -q '^background_p_pa = 1.0e6$$' poro_p0_decks/p0.toml || { echo "FAILED: poro_p0_decks/p0.toml has no background_p_pa = 1.0e6"; exit 1; }
+	@{ cat poro_p0_decks/ok.toml; printf '[multiphysics.poroelastic.initial_pressure]\norigin_m = [0.0, 0.0, -7500.0]\nmagnitude_pa = 1.0e6\nwidth_per_m2 = 1.0e-6\n'; } > poro_p0_decks/init.toml
+	@{ cat poro_p0_decks/ok.toml; printf '[multiphysics.poroelastic.source]\nshape = "gaussian"\norigin_m = [0.0, 0.0, -7500.0]\nwidth_per_m2 = 1.0e-6\nrate = 1.0\ntime_function = "step"\n'; } > poro_p0_decks/source.toml
+	@$(call PORO_P0_EXPECT_ABORT,./seas_nitsche_dyn_driver --config poro_p0_decks/energy.toml,P2.5 option on with the energy balance,energy_balance is refused with the option on)
+	@$(call PORO_P0_EXPECT_ABORT,./seas_nitsche_dyn_driver --config poro_p0_decks/p0.toml,P2.5 option on with background_p_pa != 0,is refused until step P4.1)
+	@$(call PORO_P0_EXPECT_ABORT,./seas_nitsche_dyn_driver --config poro_p0_decks/init.toml,P2.5 option on with a starting pressure,initial_pressure] is refused until step P4.2)
+	@$(call PORO_P0_EXPECT_ABORT,./seas_nitsche_dyn_driver --config poro_p0_decks/source.toml,P2.5 option on with a fluid source,source] is refused until step P4.2)
+	@if [ -f $(PORO_P1_MESH1000) ]; then \
+	   sed 's/^paraview_enabled *= *true/paraview_enabled = false/' poro_p0_decks/ok.toml > poro_p0_decks/run.toml; \
+	   if $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_nitsche_dyn_driver --config poro_p0_decks/run.toml \
+	         --tfinal 0.002 --output-dir poro_p0_decks/out > poro_p0_run.log 2>&1 \
+	      && grep -qF 'poroelastic: Biot (u, w) bulk' poro_p0_run.log \
+	      && grep -qF '=== done: 2 steps' poro_p0_run.log; \
+	   then echo "  PASSED: P2.5 option on: the driver runs 2 steps of the Biot bulk ($(PORO_P1_MESH1000), p = 1, 1 rank)"; \
+	      rm -f poro_p0_run.log; \
+	   else echo "FAILED: P2.5 option on: the 2-step run did not finish"; cat poro_p0_run.log; exit 1; fi; \
+	else echo "  SKIPPED: P2.5 option on, the 2-step run ($(PORO_P1_MESH1000) not generated)"; fi
 	@$(call PORO_P0_EXPECT_ABORT,./seas_nitsche_dyn_driver --config poro_p0_decks/rho.toml,U0-4 density mismatch,differs from the poroelastic bulk density)
 	@$(call PORO_P0_EXPECT_ABORT,./seas_nitsche_dyn_driver --config poro_p0_decks/typo.toml,U0-4 misspelt key,porosty: unknown key)
 	@$(call PORO_P0_EXPECT_ABORT,./seas_nitsche_dyn_driver --config $(PORO_P0_DECK) --poroelastic 1,U0-4 --poroelastic 1 without the table,--poroelastic 1 needs the [multiphysics.poroelastic] table)
@@ -3534,13 +3562,16 @@ check-poro-refs:
 # P2.1: DGPoroDivIntegrator, the divergence form B_c with its penalty, boundary
 # rows and source loads.  P2.2: PoroNitscheOperator, the (u, w) operator and its
 # force.  P2.3: PoroSource, the fluid source and its loads.  P2.4: PoroMass,
-# the inverse of the mass and drag.  test-poro-p2 = U2-1 to U2-11 and the
-# extras X2-1 to X2-4 and X2-7 in seas_test_poro_p2 (1, 2 and 4 ranks; U2-5
-# runs on 1 rank only), then the aborts of X2-5, X2-6, U2-9, X2-7 and U2-10.
+# the inverse of the mass and drag.  P2.5: PoroNewmarkStepper and FittedGamma.
+# test-poro-p2 = U2-1 to U2-17, U2-19 and the extras X2-1 to X2-4, X2-7 and
+# X2-8 in seas_test_poro_p2 (1, 2 and 4 ranks; U2-5 runs on 1 rank only,
+# U2-16 on 1 and 2), then U2-18 (bisection, 1 rank, --only U2-18) and the
+# aborts of X2-5, X2-6, U2-9, X2-7, U2-10, X2-8 and the stepper.
 PORO_P2_HEADERS = multiphysics/poroelastic/dg_poro_div_integrator.hpp \
                   multiphysics/poroelastic/poro_nitsche_operator.hpp \
                   multiphysics/poroelastic/poro_source.hpp \
                   multiphysics/poroelastic/poro_mass.hpp \
+                  multiphysics/poroelastic/poro_newmark.hpp \
                   multiphysics/poroelastic/poro_cfl.hpp \
                   multiphysics/poroelastic/poro_dispersion.hpp \
                   domain/nitsche_mass.hpp \
@@ -3567,6 +3598,7 @@ seas_test_poro_p2: $(TEST_PORO_P2_OBJ) $(PORO_CONFIG_OBJ) $(HETEROGENEOUS_MATERI
 test-poro-p2: seas_test_poro_p2
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_poro_p2
 	for np in 2 4; do OPENBLAS_NUM_THREADS=1 $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_poro_p2 || exit 1; done
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_poro_p2 --only U2-18
 	@$(call PORO_P0_EXPECT_ABORT,./seas_test_poro_p2 --abort interior-only,X2-5 boundary face without boundary terms,a boundary face reached an integrator built without boundary terms)
 	@$(call PORO_P0_EXPECT_ABORT,./seas_test_poro_p2 --abort penalty-one-sided,X2-5 penalty with one normal term,the fluid penalty on a boundary face belongs to the no-flow rows)
 	@$(call PORO_P0_EXPECT_ABORT,./seas_test_poro_p2 --abort dirichlet-interior,X2-6 Dirichlet attribute on interior faces,conditions on the outer boundary only)
@@ -3577,6 +3609,8 @@ test-poro-p2: seas_test_poro_p2
 	@$(call PORO_P0_EXPECT_ABORT,./seas_test_poro_p2 --abort well-outside,X2-7 well outside the mesh,is outside the mesh)
 	@$(call PORO_P0_EXPECT_ABORT,./seas_test_poro_p2 --abort source-time,X2-7 source behind the operator time,advance the source first)
 	@$(call PORO_P0_EXPECT_ABORT,./seas_test_poro_p2 --abort mass-gamma,U2-10 gamma_w below 1/2,is not in [1/2)
+	@$(call PORO_P0_EXPECT_ABORT,./seas_test_poro_p2 --abort constants-rho,X2-8 given constants with rho m below rho_f^2,rho m - rho_f^2 =)
+	@$(call PORO_P0_EXPECT_ABORT,./seas_test_poro_p2 --abort stepper-dt,P2.5 stepper dt not the elastic operator's,call op.Elastic().SetTimeStep(dt) first)
 
 # P6 long checks (minutes each; np=8 unless noted): T-15 energy balance and
 # its NIPG control, T-20 coupled dt refinement (dt0/4..dt0/16 vs dt0/64),

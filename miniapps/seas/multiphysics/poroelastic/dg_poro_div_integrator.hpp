@@ -61,7 +61,14 @@
 // Quadrature: faces use 2p + 1 points, as the elastic face integrator; the
 // volume uses 2 OrderGrad, as MFEM's ElasticityIntegrator.  Both are exact
 // for a coefficient that is constant on each element (PoroMaterialSample) on
-// affine tetrahedra.
+// affine tetrahedra.  The face part of a source load (step P2.5) uses the
+// lowest triangle rule of order >= 2p + 1 whose points map onto themselves
+// under every vertex permutation of the face (SymmetricFaceOrder): a shared
+// face can be oriented differently from the same face of the serial mesh,
+// and differently on its two ranks, and the gaussian s is no polynomial, so
+// only such a rule gives the same load on every partition.  MFEM's order-7
+// triangle rule is symmetric under rotations only, so p = 3 takes order 8
+// (16 points); p = 1, 2 keep 2p + 1.
 
 #ifndef MFEM_SEAS_DG_PORO_DIV_INTEGRATOR_HPP
 #define MFEM_SEAS_DG_PORO_DIV_INTEGRATOR_HPP
@@ -74,6 +81,44 @@ namespace mfem
 {
 namespace seas
 {
+
+/// The lowest order >= q whose IntRules rule on `geom` is invariant under
+/// the six vertex permutations of a triangle (each point maps to a point of
+/// the same weight); other geometries return q.  Cached per order.
+inline int SymmetricFaceOrder(Geometry::Type geom, int q)
+{
+   if (geom != Geometry::TRIANGLE) { return q; }
+   static int cache[64] = {0};
+   MFEM_VERIFY(q >= 0 && q < 64, "SymmetricFaceOrder: order " << q << " out of range.");
+   if (cache[q] > 0) { return cache[q] - 1; }
+   const int perm[6][3] = {{0, 1, 2}, {1, 2, 0}, {2, 0, 1}, {0, 2, 1}, {2, 1, 0}, {1, 0, 2}};
+   int r = q;
+   for (;; r++)
+   {
+      const IntegrationRule &ir = IntRules.Get(Geometry::TRIANGLE, r);
+      bool sym = true;
+      for (int i = 0; sym && i < ir.GetNPoints(); i++)
+      {
+         const IntegrationPoint &a = ir.IntPoint(i);
+         const real_t l[3] = {1.0 - a.x - a.y, a.x, a.y};
+         for (int s = 0; sym && s < 6; s++)
+         {
+            const real_t x = l[perm[s][1]], y = l[perm[s][2]];
+            bool found = false;
+            for (int j = 0; !found && j < ir.GetNPoints(); j++)
+            {
+               const IntegrationPoint &b = ir.IntPoint(j);
+               found = std::abs(b.x - x) <= 1e-13 && std::abs(b.y - y) <= 1e-13
+                       && std::abs(b.weight - a.weight) <= 1e-13 * std::abs(a.weight);
+            }
+            sym = found;
+         }
+      }
+      if (sym) { break; }
+   }
+   cache[q] = r + 1;
+   return r;
+}
 
 class DGPoroDivIntegrator : public BilinearFormIntegrator
 {
@@ -276,7 +321,8 @@ public:
       elvect = 0.0;
 
       const int p = std::max(el1.GetOrder(), is_interior ? el2.GetOrder() : 0);
-      const IntegrationRule &ir = IntRules.Get(Trans.GetGeometryType(), 2 * p + 1);
+      const Geometry::Type fg = Trans.GetGeometryType();
+      const IntegrationRule &ir = IntRules.Get(fg, SymmetricFaceOrder(fg, 2 * p + 1));
 
       Vector N(n), D(n), nor(dim), nhat(dim);
       for (int q = 0; q < ir.GetNPoints(); q++)

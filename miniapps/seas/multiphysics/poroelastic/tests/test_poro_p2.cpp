@@ -110,15 +110,81 @@
 //         without absorbing faces and the elastic operator's damped mass
 //         NitscheMass(rho, C, dt/2) with them, bit for bit, for both Gamma.
 //
-// Usage: mpirun -np 1|2|4 ./seas_test_poro_p2 [--only U2-3|...|U2-11|X2-7]
+// Step P2.5: FittedGamma and PoroNewmarkStepper (poro_newmark.hpp), the step
+// (9.1)-(9.5) of section 9; every run starts from ConsistentStart
+// (a^0 = M^-1 F^0 without the drag) unless it says "from rest".
+//   U2-12 FittedGamma at the ten z of the reference header (gamma_table),
+//         R(1e-15 absolute); series and closed form within 5e-14 at the
+//         switch z = 1e-2 and across it; FittedGamma(0) = 1/2; on 2001 points
+//         of [1e-8, 1e8] increasing, inside [1/2, 1), and R(z) of (9.3) =
+//         e^-z (Proposition 9.1), R(1e-15 absolute).
+//   U2-13 F-A (tpv5-poro fluid, natural faces, MPI_COMM_SELF), a uniform
+//         constant force, z = 1e-2, 1, 100, 2600, 50 steps, p = 1-3, both
+//         Gamma: the error of the relative velocity against its terminal value
+//         falls as e^{-nz}; from rest with a = 0, v^1 = gamma_w z / (1 +
+//         gamma_w z) v_inf, then e^{-(n-1)z}; R(1e-13) of max |v_inf|.  With
+//         drag_gamma = "half" at z = 2600 the error alternates in sign
+//         (R = (2 - z) / (2 + z)); its distance from R^n e^0 is printed, not
+//         bounded (round-off of about z eps per step).
+//   U2-14 F-A, a force varying in time: total momentum advances by the
+//         trapezoid rule with Gamma_mom and by it plus rho_f dt (gamma_w -
+//         1/2)(a_w^{n+1} - a_w^n) with Gamma_diag (Proposition 9.2),
+//         R(1e-13) of the largest term; a and v_w the same for both Gamma,
+//         bit for bit.
+//   U2-15 alpha = 0, rho_f = 0, drag_gamma = "half", F-B with the fault
+//         (the TPV102 rate and state fault of test_poro_p0, seeded at V_ini),
+//         without and with absorbing faces and Kelvin-Voigt,
+//         p = 1-3, dt = PoroMaxDt at CFL 0.5: 1000 steps of u, v_u and the
+//         fault state equal today's CentralDifferenceSolver run, bit for bit;
+//         w stays 0.
+//   U2-16 F-B without the fault, every face free, no loads, x smooth, v = 0,
+//         10^4 steps, 1 and 2 ranks: (a) b = 0, E_h = E - dt^2/8 a^T M a
+//         constant, R(1e-10); (b) tpv5-poro drag, Gamma_mom: E_h never
+//         increases, R(1e-10) of E_h,0; E - dt^2/4 a^T M Gamma a printed.
+//         Gamma_diag's E_h is printed, not bounded: it rises once, in step 1,
+//         where a_w drops from the drag-free start to the Darcy value (its
+//         momentum term of Proposition 9.2; derivation F3 names U2-16 as the
+//         check of Gamma_mom).  Chosen by Chunhui Zhao on 2026-10-23 in the
+//         review of step P2.5: on the first run the bound of 1e-10 failed for
+//         Gamma_diag only, at 7.21e-4, 2.33e-4, 6.94e-5 of E_h,0 (p = 1-3),
+//         in step 1 alone.
+//   U2-17 F-D (1 km cube, u = 0 on every face; plan section 6.4), kappa =
+//         1e-7 m^2, both Gamma, p = 1-3, 64 steps at dt = PoroMaxDt at CFL
+//         0.5: errors of u, w, v_u, v_w at dt, dt/2, dt/4 against dt/16
+//         fall by 3.5-4.5 per halving.
+//   U2-18 (--only U2-18, 1 rank) bisection on blow-up over 1000 steps, as
+//         T-09(c), 3 x 3 x 2 F-B without the fault, p = 1-3: (a) b = 0, the
+//         limit within 1 % of 2/omega_max (power iteration on M^-1 K); (b)
+//         tpv5-poro drag, both Gamma, not below (a) by more than 5 %; (c)
+//         PoroMaxDt at CFL 0.5 below both.
+//   U2-19 F-B with absorbing faces, Kelvin-Voigt, the fault and a gaussian
+//         source, 200 steps on 1/2/4 ranks against a serial copy, R(1e-12)
+//         per field: x and v against their own maximum, a as dt^2 |a -
+//         a_serial| against max |x| (the size of the stiffness terms summed
+//         in a; |a - a_serial| / max |a| is printed).  Chosen by Chunhui Zhao
+//         on 2026-10-23 in the review of step P2.5: on the first run a failed
+//         against its own maximum at p = 1 and 2 on 2 ranks (a_u 5.45e-12 and
+//         9.07e-12, a_w 3.74e-12 and 3.46e-11; bound 1e-12), with x and v
+//         within 1.6e-13.  (p = 3 failed on every field then, up to 5.8e-3:
+//         the face rule of the gaussian load, see dg_poro_div_integrator.hpp,
+//         changed in the same step.)
+//   X2-8  F-C p = 2: the constants constructor of PoroMaterialSample gives
+//         the constants and the Force of the ten-input sample, bit for bit.
+//         (Makefile) --abort constants-rho (rho m < rho_f^2) and --abort
+//         stepper-dt (the stepper's dt is not the elastic operator's) abort.
+//
+// Usage: mpirun -np 1|2|4 ./seas_test_poro_p2
+//        [--only U2-3|...|U2-19|X2-7|X2-8]
 //        [--abort interior-only|penalty-one-sided|dirichlet-interior|
 //                 no-flow-fault|kappa-zero|well-face|well-vertex|
-//                 well-outside|source-time|mass-gamma]
+//                 well-outside|source-time|mass-gamma|constants-rho|
+//                 stepper-dt]
 
 #include "mfem.hpp"
 #include "../dg_poro_div_integrator.hpp"
 #include "../poro_cfl.hpp"
 #include "../poro_mass.hpp"
+#include "../poro_newmark.hpp"
 #include "../poro_nitsche_operator.hpp"
 #include "../poro_source.hpp"
 #include "../../../friction/rate_state_closure.hpp"
@@ -1143,9 +1209,10 @@ const Medium kMedB = PORO_MEDIUM(poro_refs::tpv205_equivalent);   // F-C x > 0
 ///   kDrained  z = 0 free surface (attribute 1), every other face Dirichlet (5);
 ///   kMixed    z = 0 free; x = -L Dirichlet and no-flow (6); x = +L absorbing
 ///             and no-flow (7); y = +-L and z = -L Dirichlet (5);
-///   kClamped  every outer face Dirichlet (1 and 5).
+///   kClamped  every outer face Dirichlet (1 and 5);
+///   kFree     every outer face free (attribute 1; BareBox, step P2.5).
 /// All of them are drained except the no-flow faces.
-enum class Walls { kDrained, kMixed, kClamped };
+enum class Walls { kDrained, kMixed, kClamped, kFree };
 
 Mesh *BoxMesh(int nx, int ny, int nz, Walls walls)
 {
@@ -1240,9 +1307,14 @@ struct PoroBox
 typedef std::function<void(BoundaryConfig &, PoroBoundaryConfig &, real_t &)> Tweak;
 
 /// The operator on `serial` (from BoxMesh) over `comm`; two_media = F-C.
+/// Step P2.5: `constants`, when given, sets the fluid constants directly
+/// (PoroMaterialSample's ConstantsField constructor) in place of the media's
+/// ten inputs; fault = false builds the operator without a fault (BareBox).
 std::unique_ptr<PoroBox> MakeBox(Mesh &serial, MPI_Comm comm, int p, bool two_media,
                                  Walls walls, real_t kappa_w, const DirichletFunc &g,
-                                 const Tweak &tweak = nullptr)
+                                 const Tweak &tweak = nullptr,
+                                 const PoroMaterialSample::ConstantsField &constants = nullptr,
+                                 bool fault = true)
 {
    auto B = std::make_unique<PoroBox>();
    B->pm = std::make_unique<ParMesh>(comm, serial);
@@ -1258,9 +1330,13 @@ std::unique_ptr<PoroBox> MakeBox(Mesh &serial, MPI_Comm comm, int p, bool two_me
    B->mf.lambda_coef = B->lam.get();
    B->mf.mu_coef = B->mu.get();
    B->mf.rho_coef = B->rho.get();
-   B->sample = std::make_unique<PoroMaterialSample>(
-                  *B->pm, B->mf, [two_media](int, const Vector &x)
-   { return (two_media && x(0) > 0.0) ? kMedB.f : kMedA.f; });
+   if (constants) { B->sample = std::make_unique<PoroMaterialSample>(*B->pm, B->mf, constants); }
+   else
+   {
+      B->sample = std::make_unique<PoroMaterialSample>(
+                     *B->pm, B->mf, [two_media](int, const Vector &x)
+      { return (two_media && x(0) > 0.0) ? kMedB.f : kMedA.f; });
+   }
    B->fs = FaultSetup();
    B->bc.fault_attr = 3;
    switch (walls)
@@ -1278,11 +1354,15 @@ std::unique_ptr<PoroBox> MakeBox(Mesh &serial, MPI_Comm comm, int p, bool two_me
       case Walls::kClamped:
          B->bc.dirichlet_attrs = {1, 5};
          break;
+      case Walls::kFree:
+         B->bc.natural_attrs = {1};
+         break;
    }
    B->bc.default_dirichlet_func = g;
    if (tweak) { tweak(B->bc, B->pbc, kappa_w); }
    B->op = std::make_unique<PoroNitscheOperator>(*B->pm, p, *B->sample, B->bc, kappa_w,
-                                                 B->pbc, mfem::seas::DomainConfig{}, &B->fs);
+                                                 B->pbc, mfem::seas::DomainConfig{},
+                                                 fault ? &B->fs : nullptr);
    return B;
 }
 
@@ -2708,6 +2788,1034 @@ int RunAbortP24(const std::string &mode)
    return 1;
 }
 
+// ------------------------------------------------------------- step P2.5
+
+using mfem::seas::poro::BiotFluidConstants;
+using mfem::seas::poro::DragGamma;
+using mfem::seas::poro::FittedGamma;
+using mfem::seas::poro::PoroNewmarkStepper;
+
+const real_t kRG = 1e-15;    // U2-12, absolute (plan section 6.4)
+const real_t kR13 = 1e-13;   // U2-13 and U2-14
+const real_t kR10 = 1e-10;   // R after many steps (U2-16)
+const real_t kR12 = 1e-12;   // U2-19
+/// C(p) of the elastic test T-09(c) (test_nitsche_p3.cpp), the driver's
+/// kCeig: the driver's step is PoroMaxDt at 0.5 C(p).
+const real_t kCeigP3[4] = {0.0, 0.113, 0.212, 0.282};
+
+/// tpv5-poro's fluid constants, as PoroMaterialSample's ConstantsField
+/// constructor takes them, with the drag b replaced.
+BiotFluidConstants Tpv5Fluid(real_t b)
+{
+   const real_t rho = BulkDensity(kMedA.f);
+   const BiotConstants c = DeriveBiotConstants(kMedA.lam, kMedA.mu, rho, kMedA.f);
+   BiotFluidConstants k;
+   k.rho_f = c.rho_f;
+   k.alpha = c.alpha;
+   k.M = c.M;
+   k.m = c.m;
+   k.b = b;
+   return k;
+}
+
+/// The drag b that gives z = dt / tau (eq. (8.4)) with tpv5-poro's rho, rho_f
+/// and m.
+real_t DragForZ(real_t dt, real_t z)
+{
+   const real_t rho = BulkDensity(kMedA.f);
+   const BiotFluidConstants k = Tpv5Fluid(0.0);
+   return z * (rho * k.m - k.rho_f * k.rho_f) / (dt * rho);
+}
+
+PoroMaterialSample::ConstantsField Uniform(const BiotFluidConstants &k)
+{
+   return [k](int, const Vector &) { return k; };
+}
+
+/// F-B without its fault: the TPV102 box of TPV102Box with no fault faces.
+/// The outer faces are attribute 1 (free) where z = 0 and 5 elsewhere, or 1
+/// everywhere (all_free).
+Mesh *BareBox(int nx, int ny, int nz, bool all_free)
+{
+   Mesh *mesh = new Mesh(Mesh::MakeCartesian3DWith24TetsPerHex(
+      nx, ny, nz, 2 * kL, 2 * kL, kL));
+   for (int v = 0; v < mesh->GetNV(); v++)
+   {
+      real_t *c = mesh->GetVertex(v);
+      c[0] -= kL; c[1] -= kL; c[2] -= kL;
+   }
+   const real_t tol = kL / nz * 0.1;
+   for (int b = 0; b < mesh->GetNBE(); b++)
+   {
+      Array<int> verts;
+      mesh->GetBdrElementVertices(b, verts);
+      real_t zc = 0.0;
+      for (int i = 0; i < verts.Size(); i++) { zc += mesh->GetVertex(verts[i])[2]; }
+      zc /= verts.Size();
+      mesh->SetBdrAttribute(b, (all_free || std::abs(zc) < tol) ? 1 : 5);
+   }
+   mesh->SetAttributes();
+   return mesh;
+}
+
+/// M v = [M_e (rho v_u + rho_f v_w); M_e (rho_f v_u + m v_w)] per element:
+/// the mass of (8.2), applied from the element masses and the constants.
+Vector ApplyPoroMass(const PoroNitscheOperator &op, const std::vector<BiotConstants> &c,
+                     const Vector &v)
+{
+   const mfem::seas::NitscheMass &mass = op.Elastic().Mass();
+   const int n = op.NumU(), ns = mass.NumScalarDofs();
+   Vector Mv(2 * n), xu, xw, yu, yw;
+   for (int e = 0; e < op.GetMesh().GetNE(); e++)
+   {
+      const Array<int> &dofs = mass.ElementScalarDofs(e);
+      const int nd = dofs.Size();
+      xu.SetSize(nd); xw.SetSize(nd); yu.SetSize(nd); yw.SetSize(nd);
+      for (int comp = 0; comp < 3; comp++)
+      {
+         const int off = comp * ns;
+         for (int k = 0; k < nd; k++)
+         {
+            xu(k) = c[e].rho * v(off + dofs[k]) + c[e].rho_f * v(n + off + dofs[k]);
+            xw(k) = c[e].rho_f * v(off + dofs[k]) + c[e].m * v(n + off + dofs[k]);
+         }
+         op.ElementMass(e).Mult(xu, yu);
+         op.ElementMass(e).Mult(xw, yw);
+         for (int k = 0; k < nd; k++)
+         {
+            Mv(off + dofs[k]) = yu(k);
+            Mv(n + off + dofs[k]) = yw(k);
+         }
+      }
+   }
+   return Mv;
+}
+
+/// F-A (two tetrahedra, every face free and drained) with the tpv5-poro
+/// frame and fluid, the drag set so that z = dt / tau, and its stepper: the
+/// element of derivation section 9.3.  On MPI_COMM_SELF (two elements).
+struct FAElement
+{
+   std::unique_ptr<ParMesh> pm;
+   MaterialField mf;
+   std::unique_ptr<PoroMaterialSample> sample;
+   BoundaryConfig bc;
+   std::unique_ptr<PoroNitscheOperator> op;
+   std::unique_ptr<PoroNewmarkStepper> st;
+};
+
+std::unique_ptr<FAElement> MakeFA(int p, real_t dt, real_t z, DragGamma drag,
+                                  VelocityCoupling cp)
+{
+   auto E = std::make_unique<FAElement>();
+   std::unique_ptr<Mesh> m(TwoTets());
+   E->pm = std::make_unique<ParMesh>(MPI_COMM_SELF, *m);
+   E->mf = MaterialField::MakeConstant(kMedA.lam, kMedA.mu, BulkDensity(kMedA.f));
+   E->sample = std::make_unique<PoroMaterialSample>(*E->pm, E->mf,
+                                                    Uniform(Tpv5Fluid(DragForZ(dt, z))));
+   E->bc.natural_attrs = {1};
+   E->op = std::make_unique<PoroNitscheOperator>(*E->pm, p, *E->sample, E->bc, kKappaW);
+   E->op->Elastic().SetTimeStep(dt);
+   E->st = std::make_unique<PoroNewmarkStepper>(*E->op, dt, drag, cp);
+   return E;
+}
+
+/// [f_u (x) M_e 1; f_w (x) M_e 1]: the load of a uniform force density.
+Vector UniformLoad(const PoroNitscheOperator &op, const real_t fu[3], const real_t fw[3])
+{
+   const mfem::seas::NitscheMass &mass = op.Elastic().Mass();
+   const int n = op.NumU(), ns = mass.NumScalarDofs();
+   Vector F(2 * n), one, y;
+   for (int e = 0; e < op.GetMesh().GetNE(); e++)
+   {
+      const Array<int> &dofs = mass.ElementScalarDofs(e);
+      one.SetSize(dofs.Size());
+      y.SetSize(dofs.Size());
+      one = 1.0;
+      op.ElementMass(e).Mult(one, y);
+      for (int comp = 0; comp < 3; comp++)
+      {
+         for (int k = 0; k < dofs.Size(); k++)
+         {
+            F(comp * ns + dofs[k]) = fu[comp] * y(k);
+            F(n + comp * ns + dofs[k]) = fw[comp] * y(k);
+         }
+      }
+   }
+   return F;
+}
+
+/// A copy of v(off .. off + n - 1).
+Vector Part(const Vector &v, int off, int n)
+{
+   Vector c(n);
+   for (int i = 0; i < n; i++) { c(i) = v(off + i); }
+   return c;
+}
+
+/// The component (0, 1, 2) of each vector DOF of one field.
+std::vector<int> Components(const PoroNitscheOperator &op)
+{
+   const int ns = op.Elastic().Mass().NumScalarDofs();
+   std::vector<int> comp(op.NumU());
+   for (int i = 0; i < op.NumU(); i++) { comp[i] = i / ns; }
+   return comp;
+}
+
+/// One step of the element system of derivation section 9.3, which has no
+/// stiffness: lines 1, 2, 5 and 6 of the stepper (Predict, Solve, Correct)
+/// with the force F = L - [0; D v*] in place of the operator's.
+void ElementStep(PoroNewmarkStepper &st, const PoroNitscheOperator &op, const Vector &L,
+                 Vector &x, Vector &v, Vector &a)
+{
+   const int n = op.NumU();
+   st.Predict(x, v, a);
+   Vector F(L), Dv;
+   Vector vw(v.GetData() + n, n), Fw(F.GetData() + n, n);
+   op.ApplyDrag(vw, Dv);
+   Fw -= Dv;
+   st.Solve(F, a);
+   st.Correct(x, v, a);
+}
+
+/// The consistent start of the element system: a = M^{-1} (L - [0; D v]).
+void ElementStart(PoroNewmarkStepper &st, const PoroNitscheOperator &op, const Vector &L,
+                  const Vector &v, Vector &a)
+{
+   const int n = op.NumU();
+   Vector F(L), Dv;
+   Vector vw(const_cast<real_t *>(v.GetData()) + n, n), Fw(F.GetData() + n, n);
+   op.ApplyDrag(vw, Dv);
+   Fw -= Dv;
+   st.ApplyMassInverse(F, a);
+}
+
+/// U2-12: FittedGamma.
+void TestU212()
+{
+   if (g_rank == 0)
+   {
+      std::cout << "--- U2-12: FittedGamma against poro_test_refs.hpp, at the switch to "
+                   "the series, and on z in [1e-8, 1e8]\n";
+   }
+   namespace G = poro_refs::gamma;
+   real_t tab = 0.0;
+   for (int k = 0; k < G::count; k++)
+   {
+      tab = std::max(tab, std::abs(FittedGamma(G::z[k]) - G::gamma_w[k]));
+   }
+   TEST_ASSERT(tab <= kRG, "U2-12 FittedGamma at the " + std::to_string(G::count)
+               + " z of gamma_table, among them gamma_w(1) = " + Fmt(FittedGamma(1.0))
+               + ", gamma_w(10) = " + Fmt(FittedGamma(10.0)) + ", gamma_w(2600) = "
+               + Fmt(FittedGamma(2600.0)) + ": max |FittedGamma - reference| = " + Fmt(tab)
+               + " (bound 1e-15 absolute)");
+
+   // The switch: the closed form and the series of (9.4) written out here.
+   const real_t zs = 1e-2, below = std::nextafter(zs, 0.0);
+   const real_t closed = 1.0 / (-std::expm1(-zs)) - 1.0 / zs;
+   const real_t series = 0.5 + zs / 12.0 - zs * zs * zs / 720.0
+                         + zs * zs * zs * zs * zs / 30240.0;
+   const real_t gap = std::abs(closed - series);
+   const real_t jump = std::abs(FittedGamma(zs) - FittedGamma(below));
+   TEST_ASSERT(gap <= 5e-14 && jump <= 5e-14,
+               "U2-12 at z = 1e-2 the series and the closed form are " + Fmt(gap)
+               + " apart (reference " + Fmt(G::junction) + "), and FittedGamma jumps by "
+               + Fmt(jump) + " across the switch (bound 5e-14)");
+   TEST_ASSERT(FittedGamma(0.0) == 0.5, "U2-12 FittedGamma(0) = 1/2 exactly (b = 0 gives "
+               "Gamma = I/2)");
+
+   // A log grid of 2001 points over [1e-8, 1e8].
+   const int npts = 2001;
+   real_t gprev = -1.0, rerr = 0.0, zbad = -1.0;
+   bool increasing = true, inside = true;
+   for (int k = 0; k < npts; k++)
+   {
+      const real_t z = std::pow(10.0, -8.0 + 16.0 * k / (npts - 1));
+      const real_t g = FittedGamma(z);
+      if (!(g > gprev)) { increasing = false; zbad = z; }
+      if (!(g >= 0.5 && g < 1.0)) { inside = false; zbad = z; }
+      const real_t R = (1.0 - (1.0 - g) * z) / (1.0 + g * z);   // eq. (9.3)
+      rerr = std::max(rerr, std::abs(R - std::exp(-z)));
+      gprev = g;
+   }
+   TEST_ASSERT(increasing && inside, "U2-12 on 2001 points of z in [1e-8, 1e8] (log grid) "
+               "gamma_w is increasing and inside [1/2, 1)"
+               + (zbad >= 0.0 ? " (fails at z = " + Fmt(zbad) + ")" : std::string()));
+   TEST_ASSERT(rerr <= kRG, "U2-12 on the same points R(z) of (9.3) with gamma_w(z) is "
+               "e^-z: max |R - e^-z| = " + Fmt(rerr) + " (bound 1e-15 absolute)");
+}
+
+/// The element of U2-13 and U2-14: dt and the force densities (N/m^3).
+const real_t kDtFA = 1e-3;
+const real_t kFu[3] = {2.0e3, -1.1e3, 0.6e3};
+const real_t kFw[3] = {0.9e3, 0.4e3, -1.7e3};
+const real_t kZ13[4] = {1e-2, 1.0, 100.0, 2600.0};
+
+/// The relative velocities v_w^n, n = 0..nsteps, of the element under the
+/// constant force, from rest: with the consistent start, or with a^0 = 0.
+std::vector<Vector> Relax(FAElement &E, bool consistent, int nsteps)
+{
+   PoroNitscheOperator &op = *E.op;
+   const int n = op.NumU();
+   const Vector L = UniformLoad(op, kFu, kFw);
+   Vector x(2 * n), v(2 * n), a(2 * n);
+   x = 0.0;
+   v = 0.0;
+   if (consistent) { ElementStart(*E.st, op, L, v, a); }
+   else { a = 0.0; }
+   std::vector<Vector> vw;
+   vw.push_back(Part(v, n, n));
+   for (int s = 1; s <= nsteps; s++)
+   {
+      ElementStep(*E.st, op, L, x, v, a);
+      vw.push_back(Part(v, n, n));
+   }
+   return vw;
+}
+
+/// U2-13: element relaxation (derivation section 9.3, Proposition 9.1, 9.4).
+void TestU213()
+{
+   if (g_rank == 0)
+   {
+      std::cout << "--- U2-13: element relaxation on F-A, uniform fields and a constant "
+                   "force, 50 steps (derivation section 9.3)\n";
+   }
+   const int nsteps = 50;
+   for (int p = 1; p <= 3; p++)
+   {
+      for (real_t zt : kZ13)
+      {
+         std::string rs;
+         bool ok = true;
+         for (VelocityCoupling cp : {VelocityCoupling::kMomentum, VelocityCoupling::kDiagonal})
+         {
+            auto E = MakeFA(p, kDtFA, zt, DragGamma::kFitted, cp);
+            const BiotConstants &k = E->st->Constants()[0];
+            const real_t z = E->st->Z()(0), g = E->st->GammaW()(0);
+            const std::vector<int> comp = Components(*E->op);
+            real_t vinf[3], scale = 0.0;
+            for (int c = 0; c < 3; c++)
+            {
+               vinf[c] = (kFw[c] - k.rho_f / k.rho * kFu[c]) / k.b;
+               scale = std::max(scale, std::abs(vinf[c]));
+            }
+            // consistent start: e^n = e^0 e^{-n z}, e^0 = -v_inf
+            const std::vector<Vector> vc = Relax(*E, true, nsteps);
+            real_t err_c = 0.0;
+            for (int s = 0; s <= nsteps; s++)
+            {
+               for (int i = 0; i < vc[s].Size(); i++)
+               {
+                  const real_t e = -vinf[comp[i]] * std::exp(-s * z);
+                  err_c = std::max(err_c, std::abs(vc[s](i) - vinf[comp[i]] - e) / scale);
+               }
+            }
+            // from rest with a^0 = 0: v^1 = g z / (1 + g z) v_inf, then e^{-(n-1) z}
+            const std::vector<Vector> vr = Relax(*E, false, nsteps);
+            real_t err_1 = 0.0, err_r = 0.0;
+            for (int i = 0; i < vr[1].Size(); i++)
+            {
+               const real_t v1 = g * z / (1.0 + g * z) * vinf[comp[i]];
+               err_1 = std::max(err_1, std::abs(vr[1](i) - v1) / scale);
+               for (int s = 2; s <= nsteps; s++)
+               {
+                  const real_t e = (v1 - vinf[comp[i]]) * std::exp(-(s - 1) * z);
+                  err_r = std::max(err_r, std::abs(vr[s](i) - vinf[comp[i]] - e) / scale);
+               }
+            }
+            ok = ok && err_c <= kR13 && err_1 <= kR13 && err_r <= kR13;
+            rs += std::string(rs.empty() ? "" : "; ")
+                  + (cp == VelocityCoupling::kMomentum ? "Gamma_mom " : "Gamma_diag ")
+                  + Fmt(err_c) + ", " + Fmt(err_1) + ", " + Fmt(err_r);
+         }
+         TEST_ASSERT(ok, "U2-13 F-A p = " + std::to_string(p) + ", z = " + Fmt(zt)
+                     + ": the relative velocity's error falls as e^{-nz} from the consistent "
+                     "start; from rest with a = 0, v^1 = gamma_w z/(1 + gamma_w z) v_inf and "
+                     "then e^{-(n-1)z}; R of these three = " + rs);
+      }
+      // drag_gamma = "half" at z = 2600: R(z) = (1 - z/2)/(1 + z/2) < 0
+      auto E = MakeFA(p, kDtFA, 2600.0, DragGamma::kHalf, VelocityCoupling::kMomentum);
+      const BiotConstants &k = E->st->Constants()[0];
+      const real_t z = E->st->Z()(0);
+      const real_t Rh = (1.0 - 0.5 * z) / (1.0 + 0.5 * z);
+      const std::vector<int> comp = Components(*E->op);
+      const std::vector<Vector> vc = Relax(*E, true, nsteps);
+      bool alternates = E->st->GammaW()(0) == 0.5;
+      real_t dev = 0.0, scale = 0.0, vinf[3];
+      for (int c = 0; c < 3; c++)
+      {
+         vinf[c] = (kFw[c] - k.rho_f / k.rho * kFu[c]) / k.b;
+         scale = std::max(scale, std::abs(vinf[c]));
+      }
+      for (int s = 1; s <= nsteps; s++)
+      {
+         for (int i = 0; i < vc[s].Size(); i++)
+         {
+            const real_t e = vc[s](i) - vinf[comp[i]];
+            const real_t e0 = -vinf[comp[i]];
+            // e^n has the sign of (-1)^n e^0
+            if (!(e * e0 * (s % 2 ? -1.0 : 1.0) > 0.0)) { alternates = false; }
+            dev = std::max(dev, std::abs(e - std::pow(Rh, s) * e0) / scale);
+         }
+      }
+      TEST_ASSERT(alternates, "U2-13 F-A p = " + std::to_string(p) + ", drag_gamma = "
+                  "\"half\", z = 2600: the relative velocity's error alternates in sign at "
+                  "every step and node, R(z) = " + Fmt(Rh) + " (expected as stated; its "
+                  "distance from R^n e^0 is " + Fmt(dev) + " of |v_inf|, round-off of about "
+                  "z eps per step, not bounded)");
+   }
+}
+
+/// U2-14: momentum (derivation Proposition 9.2) under a time-varying force.
+void TestU214()
+{
+   if (g_rank == 0)
+   {
+      std::cout << "--- U2-14: total momentum on F-A under a time-varying uniform force, "
+                   "50 steps (Proposition 9.2)\n";
+   }
+   const int nsteps = 50;
+   const real_t Tp = 20.0 * kDtFA;
+   auto force = [Tp](real_t t, real_t fu[3], real_t fw[3]) {
+      for (int c = 0; c < 3; c++)
+      {
+         fu[c] = kFu[c] * (1.0 + 0.5 * std::sin(2.0 * M_PI * t / Tp + c));
+         fw[c] = kFw[c] * std::cos(2.0 * M_PI * t / Tp + 0.5 * c);
+      }
+   };
+   for (int p = 1; p <= 3; p++)
+   {
+      for (real_t zt : kZ13)
+      {
+         std::map<VelocityCoupling, std::vector<Vector>> va, vw;
+         std::string rs;
+         bool ok = true;
+         for (VelocityCoupling cp : {VelocityCoupling::kMomentum, VelocityCoupling::kDiagonal})
+         {
+            auto E = MakeFA(p, kDtFA, zt, DragGamma::kFitted, cp);
+            PoroNitscheOperator &op = *E->op;
+            const BiotConstants &k = E->st->Constants()[0];
+            const real_t g = E->st->GammaW()(0);
+            const std::vector<int> comp = Components(op);
+            const int n = op.NumU();
+            real_t fu0[3], fw0[3], fu1[3], fw1[3];
+            force(0.0, fu0, fw0);
+            Vector x(2 * n), v(2 * n), a(2 * n);
+            x = 0.0;
+            v = 0.0;
+            ElementStart(*E->st, op, UniformLoad(op, fu0, fw0), v, a);
+            real_t res = 0.0, big = 0.0;
+            for (int s = 1; s <= nsteps; s++)
+            {
+               force(s * kDtFA, fu1, fw1);
+               const Vector v0(v), a0(a);
+               ElementStep(*E->st, op, UniformLoad(op, fu1, fw1), x, v, a);
+               va[cp].push_back(a);
+               vw[cp].push_back(Part(v, n, n));
+               for (int i = 0; i < n; i++)
+               {
+                  const int c = comp[i];
+                  const real_t dPu = k.rho * (v(i) - v0(i));
+                  const real_t dPw = k.rho_f * (v(n + i) - v0(n + i));
+                  const real_t trap = 0.5 * kDtFA * (fu0[c] + fu1[c]);
+                  const real_t extra = cp == VelocityCoupling::kDiagonal
+                                       ? k.rho_f * kDtFA * (g - 0.5) * (a(n + i) - a0(n + i)) : 0.0;
+                  res = std::max(res, std::abs(dPu + dPw - trap - extra));
+                  big = std::max({big, std::abs(dPu), std::abs(dPw), std::abs(trap),
+                                  std::abs(extra)});
+               }
+               for (int c = 0; c < 3; c++) { fu0[c] = fu1[c]; fw0[c] = fw1[c]; }
+            }
+            ok = ok && res <= kR13 * big;
+            rs += std::string(rs.empty() ? "" : ", ")
+                  + (cp == VelocityCoupling::kMomentum ? "Gamma_mom " : "Gamma_diag ")
+                  + Fmt(res / big);
+         }
+         long diff = 0;
+         for (int s = 0; s < nsteps; s++)
+         {
+            diff += BitDiff(va[VelocityCoupling::kMomentum][s], va[VelocityCoupling::kDiagonal][s]);
+            diff += BitDiff(vw[VelocityCoupling::kMomentum][s], vw[VelocityCoupling::kDiagonal][s]);
+         }
+         const std::string P = "U2-14 F-A p = " + std::to_string(p) + ", z = " + Fmt(zt) + ": ";
+         TEST_ASSERT(ok, P + "rho dv_u + rho_f dv_w = dt/2 (f^n + f^{n+1}) with Gamma_mom, plus "
+                     "rho_f dt (gamma_w - 1/2)(a_w^{n+1} - a_w^n) with Gamma_diag, at every "
+                     "step and node: R = " + rs);
+         TEST_ASSERT(diff == 0, P + "the acceleration (u and w) and the fluid velocity are the "
+                     "same for both Gamma at every step, bit for bit (" + std::to_string(diff)
+                     + " entries differ)");
+      }
+   }
+}
+
+/// tpv5-poro's drag b = eta / kappa.
+real_t Tpv5Drag()
+{
+   return DeriveBiotConstants(kMedA.lam, kMedA.mu, BulkDensity(kMedA.f), kMedA.f).b;
+}
+
+/// U2-15: with alpha = 0, rho_f = 0 and drag_gamma = "half" the u block of
+/// the poroelastic step is today's elastic step, bit for bit.
+void TestU215()
+{
+   if (g_rank == 0)
+   {
+      std::cout << "--- U2-15: alpha = 0, rho_f = 0, drag_gamma = \"half\": the u block "
+                   "against CentralDifferenceSolver on the elastic operator, F-B with "
+                   "slip, 1000 steps\n";
+   }
+   const real_t rho = BulkDensity(kMedA.f);
+   BiotFluidConstants k = Tpv5Fluid(Tpv5Drag());
+   k.alpha = 0.0;
+   k.rho_f = 0.0;
+   const int nsteps = 1000;
+   for (Walls walls : {Walls::kDrained, Walls::kMixed})
+   {
+      const bool kv = walls == Walls::kMixed;
+      std::unique_ptr<Mesh> m(BoxMesh(2, 2, 1, walls));
+      for (int p = 1; p <= 3; p++)
+      {
+         auto box = MakeBox(*m, MPI_COMM_WORLD, p, false, walls, kKappaW, FarField(), nullptr,
+                            Uniform(k));
+         PoroNitscheOperator &op = *box->op;
+         NitscheFaultSetup fs = FaultSetup();
+         NitscheWaveOperator ref(*box->pm, p, MaterialField::MakeConstant(kMedA.lam, kMedA.mu,
+                                                                          rho),
+                                 box->bc, {}, &fs);
+         if (kv)
+         {
+            ref.SetKelvinVoigt(0.1, NitscheWaveOperator::KVScale::Node, -1.0);
+            op.Elastic().SetKelvinVoigt(0.1, NitscheWaveOperator::KVScale::Node, -1.0);
+         }
+         SeedState(ref);
+         SeedState(op.Elastic());
+         const real_t dt = PoroMaxDt(*box->sample, *box->pm, p, 0.5 * kCeigP3[p]);
+         ref.SetTimeStep(dt);
+         op.Elastic().SetTimeStep(dt);
+         ref.SetTime(0.0);
+         op.SetTime(0.0);
+         const int n = ref.Height();
+
+         // today's elastic step
+         Vector U(n), V(n);
+         U = 0.0;
+         V = 0.0;
+         real_t tr = 0.0;
+         CentralDifferenceSolver ode;
+         ode.Init(ref);
+         for (int s = 0; s < nsteps; s++)
+         {
+            real_t h = dt;
+            ode.Step(U, V, tr, h);
+         }
+
+         // the poroelastic step from the same start (its first pass)
+         PoroNewmarkStepper st(op, dt, DragGamma::kHalf, VelocityCoupling::kMomentum);
+         Vector x(2 * n), v(2 * n), a(2 * n);
+         x = 0.0;
+         v = 0.0;
+         st.ConsistentStart(x, v, a);
+         real_t t = 0.0;
+         for (int s = 0; s < nsteps; s++) { st.Step(x, v, a, t, dt); }
+
+         const long dx = LSum(BitDiff(Part(x, 0, n), U), MPI_COMM_WORLD);
+         const long dv = LSum(BitDiff(Part(v, 0, n), V), MPI_COMM_WORLD);
+         const NitscheWaveOperator &el = op.Elastic();
+         const long df = LSum(BitDiff(el.Slip(), ref.Slip()) + BitDiff(el.SlipRate(), ref.SlipRate())
+                              + BitDiff(el.State(), ref.State()), MPI_COMM_WORLD);
+         const real_t wmax = std::max(MaxAbs(x, n, 2 * n, MPI_COMM_WORLD),
+                                      MaxAbs(v, n, 2 * n, MPI_COMM_WORLD));
+         const real_t umax = MaxAbs(U, 0, n, MPI_COMM_WORLD);
+         const real_t smax = RMax(ref.Slip().Size() ? ref.Slip().Normlinf() : 0.0, MPI_COMM_WORLD);
+         TEST_ASSERT(dx == 0 && dv == 0 && df == 0 && t == tr && wmax == 0.0
+                     && std::isfinite(umax) && std::isfinite(smax),
+                     "U2-15 F-B p = " + std::to_string(p)
+                     + (kv ? ", absorbing faces and Kelvin-Voigt" : ", no absorbing faces")
+                     + ": after " + std::to_string(nsteps) + " steps (t = " + Fmt(t)
+                     + " s, max |u| " + Fmt(umax) + " m, max |slip| " + Fmt(smax)
+                     + " m) u, v_u and the fault state (d, V, psi) equal the elastic run "
+                     "bit for bit (" + std::to_string(dx) + ", " + std::to_string(dv) + ", "
+                     + std::to_string(df) + " entries differ); w and v_w stay 0 (max "
+                     + Fmt(wmax) + ")");
+      }
+   }
+}
+
+/// A smooth field on the box [lo, hi]: `which` picks one of four shapes.
+Vector Smooth(ParFiniteElementSpace &fes, const real_t lo[3], const real_t hi[3], int which,
+              real_t scale)
+{
+   return ProjectNodes(fes, [=](const Vector &, const Vector &x, Vector &v) {
+      real_t q[3];
+      for (int d = 0; d < 3; d++) { q[d] = (x(d) - lo[d]) / (hi[d] - lo[d]); }
+      const real_t s0 = std::sin(2.0 * M_PI * q[0]) * std::sin(M_PI * q[1]) * std::sin(M_PI * q[2]);
+      const real_t s1 = std::sin(M_PI * q[0]) * std::sin(2.0 * M_PI * q[1]) * std::sin(M_PI * q[2]);
+      const real_t c0 = std::cos(M_PI * q[0]) * std::sin(2.0 * M_PI * q[1]) * std::cos(0.5 * M_PI * q[2]);
+      const real_t c1 = std::cos(2.0 * M_PI * q[0]) * std::cos(M_PI * q[1]) * std::sin(0.5 * M_PI * q[2]);
+      const real_t f[4] = {s0, s1, c0, c1};
+      const real_t w[4][3] = {{1.0, -0.5, 0.25}, {-0.3, 0.8, 0.45}, {0.3, 0.2, -0.4},
+                              {-0.6, 0.15, 0.35}};
+      for (int d = 0; d < 3; d++) { v(d) = scale * w[which][d] * f[which]; }
+   });
+}
+
+/// U2-16: energy without loads on F-B (no fault), every face free.
+void TestU216()
+{
+   if (Mpi::WorldSize() > 2)
+   {
+      if (g_rank == 0)
+      {
+         std::cout << "--- U2-16 runs on 1 and 2 ranks (plan section 6.4); not on "
+                   << Mpi::WorldSize() << "\n";
+      }
+      return;
+   }
+   if (g_rank == 0)
+   {
+      std::cout << "--- U2-16: E_h = E - dt^2/8 a^T M a on F-B without the fault, every face "
+                   "free, no loads, 10^4 steps\n";
+   }
+   const int nsteps = 10000;
+   const real_t lo[3] = {-kL, -kL, -kL}, hi[3] = {kL, kL, 0.0};
+   struct Case { real_t b; VelocityCoupling cp; const char *name; };
+   const Case cases[3] = {{0.0, VelocityCoupling::kMomentum, "(a) b = 0"},
+                          {Tpv5Drag(), VelocityCoupling::kMomentum, "(b) tpv5-poro drag, Gamma_mom"},
+                          {Tpv5Drag(), VelocityCoupling::kDiagonal, "(b) tpv5-poro drag, Gamma_diag"}};
+   std::unique_ptr<Mesh> m(BareBox(2, 2, 1, true));
+   for (int p = 1; p <= 3; p++)
+   {
+      for (const Case &cs : cases)
+      {
+         auto box = MakeBox(*m, MPI_COMM_WORLD, p, false, Walls::kFree, kKappaW, ZeroG(),
+                            nullptr, Uniform(Tpv5Fluid(cs.b)), false);
+         PoroNitscheOperator &op = *box->op;
+         ParFiniteElementSpace &fes = Space(*box);
+         const real_t dt = PoroMaxDt(*box->sample, *box->pm, p, 0.5 * kCeigP3[p]);
+         op.Elastic().SetTimeStep(dt);
+         PoroNewmarkStepper st(op, dt, DragGamma::kFitted, cs.cp);
+         const std::vector<BiotConstants> &c = st.Constants();
+         const int n = op.NumU();
+         Vector x = Join(Smooth(fes, lo, hi, 0, 1e-3), Smooth(fes, lo, hi, 2, 1e-3));
+         Vector v(2 * n), a(2 * n), Kx;
+         v = 0.0;
+         op.SetTime(0.0);
+         st.ConsistentStart(x, v, a);
+         // E_h, and E - dt^2/4 a^T M Gamma a (printed only)
+         auto energy = [&](real_t &Eh, real_t &Hg) {
+            op.ApplyStiffness(x, Kx);
+            const Vector Mv = ApplyPoroMass(op, c, v), Ma = ApplyPoroMass(op, c, a);
+            Vector ga(a);
+            const mfem::seas::NitscheMass &mass = op.Elastic().Mass();
+            const int ns = mass.NumScalarDofs();
+            for (int e = 0; e < box->pm->GetNE(); e++)
+            {
+               const Array<int> &dofs = mass.ElementScalarDofs(e);
+               for (int comp = 0; comp < 3; comp++)
+               {
+                  for (int k = 0; k < dofs.Size(); k++)
+                  {
+                     const int i = comp * ns + dofs[k];
+                     ga(i) = 0.5 * a(i) + st.GuwDt()(e) / dt * a(n + i);
+                     ga(n + i) = st.GammaW()(e) * a(n + i);
+                  }
+               }
+            }
+            const real_t E = 0.5 * InnerProduct(MPI_COMM_WORLD, v, Mv)
+                             + 0.5 * InnerProduct(MPI_COMM_WORLD, x, Kx);
+            Eh = E - dt * dt / 8.0 * InnerProduct(MPI_COMM_WORLD, a, Ma);
+            Hg = E - dt * dt / 4.0 * InnerProduct(MPI_COMM_WORLD, ga, Ma);
+         };
+         real_t Eh0, Hg0;
+         energy(Eh0, Hg0);
+         real_t Ehp = Eh0, Hgp = Hg0, drift = 0.0, rise = -1e300, hrise = -1e300;
+         int nrise = 0, srise = 0;
+         real_t t = 0.0;
+         for (int s = 1; s <= nsteps; s++)
+         {
+            st.Step(x, v, a, t, dt);
+            real_t Eh, Hg;
+            energy(Eh, Hg);
+            drift = std::max(drift, std::abs(Eh - Eh0) / Eh0);
+            if ((Eh - Ehp) / Eh0 > rise) { rise = (Eh - Ehp) / Eh0; srise = s; }
+            hrise = std::max(hrise, (Hg - Hgp) / Hg0);
+            if (Eh > Ehp) { nrise++; }
+            Ehp = Eh;
+            Hgp = Hg;
+         }
+         const std::string P = std::string("U2-16 p = ") + std::to_string(p) + ", " + cs.name
+                               + " (dt = " + Fmt(dt) + " s, z = " + Fmt(st.Z()(0))
+                               + ", gamma_w = " + Fmt(st.GammaW()(0)) + "): ";
+         const std::string R = "max (E_h^{n+1} - E_h^n) / E_h,0 = " + Fmt(rise) + " at step "
+                               + std::to_string(srise) + " (" + std::to_string(nrise)
+                               + " of 10^4 steps rise); E_h falls to " + Fmt(Ehp / Eh0)
+                               + " E_h,0; E - dt^2/4 a^T M Gamma a rises by at most "
+                               + Fmt(hrise) + " of its start (printed only)";
+         if (cs.b == 0.0)
+         {
+            TEST_ASSERT(drift <= kR10, P + "max |E_h - E_h,0| / E_h,0 = " + Fmt(drift)
+                        + " over 10^4 steps (bound 1e-10)");
+         }
+         else if (cs.cp == VelocityCoupling::kMomentum)
+         {
+            TEST_ASSERT(rise <= kR10, P + "E_h never increases (bound 1e-10): " + R);
+         }
+         else if (g_rank == 0)
+         {
+            // Gamma_diag has no energy identity (M Gamma_diag is not
+            // symmetric); its momentum gains rho_f dt (gamma_w - 1/2) times
+            // the change of a_w (Proposition 9.2), which is large in the step
+            // where a_w drops from the drag-free start to the Darcy value
+            std::cout << "  MEASURED (not bounded): " << P << R << "\n";
+         }
+      }
+   }
+}
+
+/// U2-17: temporal order on F-D (no periodicity), resolved drag.
+void TestU217()
+{
+   if (g_rank == 0)
+   {
+      std::cout << "--- U2-17: temporal order on F-D (1 km cube, 4 hexes per side, 6 tets "
+                   "each, u = 0 on every face), kappa = 1e-7 m^2: dt, dt/2, dt/4 against "
+                   "dt/16, 64 steps at dt\n";
+   }
+   const real_t side = 1000.0, lo[3] = {0.0, 0.0, 0.0}, hi[3] = {side, side, side};
+   std::unique_ptr<Mesh> m(new Mesh(Mesh::MakeCartesian3D(4, 4, 4, Element::TETRAHEDRON,
+                                                          side, side, side)));
+   for (int b = 0; b < m->GetNBE(); b++) { m->SetBdrAttribute(b, 5); }
+   m->SetAttributes();
+   const BiotFluidConstants k = Tpv5Fluid(kMedA.f.viscosity / 1e-7);
+   const int n0 = 64;
+   for (int p = 1; p <= 3; p++)
+   {
+      for (VelocityCoupling cp : {VelocityCoupling::kMomentum, VelocityCoupling::kDiagonal})
+      {
+         real_t dt0 = 0.0, z0 = 0.0;
+         auto run = [&](int refine, Vector &x, Vector &v) {
+            auto box = MakeBox(*m, MPI_COMM_WORLD, p, false, Walls::kDrained, kKappaW, ZeroG(),
+                               nullptr, Uniform(k), false);
+            PoroNitscheOperator &op = *box->op;
+            ParFiniteElementSpace &fes = Space(*box);
+            dt0 = PoroMaxDt(*box->sample, *box->pm, p, 0.5 * kCeigP3[p]);
+            const real_t dt = dt0 / refine;
+            op.Elastic().SetTimeStep(dt);
+            PoroNewmarkStepper st(op, dt, DragGamma::kFitted, cp);
+            if (refine == 1) { z0 = st.Z()(0); }
+            x = Join(Smooth(fes, lo, hi, 0, 1e-3), Smooth(fes, lo, hi, 2, 1e-3));
+            v = Join(Smooth(fes, lo, hi, 1, 1e-2), Smooth(fes, lo, hi, 3, 1e-2));
+            Vector a(x.Size());
+            op.SetTime(0.0);
+            st.ConsistentStart(x, v, a);
+            real_t t = 0.0;
+            for (int s = 0; s < n0 * refine; s++) { st.Step(x, v, a, t, dt); }
+            return op.NumU();
+         };
+         Vector xr, vr;
+         const int n = run(16, xr, vr);
+         real_t e[4][3];   // x_u, x_w, v_u, v_w at dt, dt/2, dt/4
+         const int ref[3] = {1, 2, 4};
+         for (int r = 0; r < 3; r++)
+         {
+            Vector x, v;
+            run(ref[r], x, v);
+            x -= xr;
+            v -= vr;
+            for (int f = 0; f < 4; f++)
+            {
+               const Vector d = Part(f < 2 ? x : v, (f % 2) * n, n);
+               e[f][r] = std::sqrt(InnerProduct(MPI_COMM_WORLD, d, d));
+            }
+         }
+         bool ok = true;
+         std::string rs;
+         const char *names[4] = {"u", "w", "v_u", "v_w"};
+         for (int f = 0; f < 4; f++)
+         {
+            const real_t r1 = e[f][0] / e[f][1], r2 = e[f][1] / e[f][2];
+            ok = ok && r1 >= 3.5 && r1 <= 4.5 && r2 >= 3.5 && r2 <= 4.5;
+            rs += std::string(f ? "; " : "") + names[f] + " " + Fmt(r1) + ", " + Fmt(r2);
+         }
+         TEST_ASSERT(ok, "U2-17 F-D p = " + std::to_string(p)
+                     + (cp == VelocityCoupling::kMomentum ? ", Gamma_mom" : ", Gamma_diag")
+                     + " (dt = " + Fmt(dt0) + " s, z = " + Fmt(z0) + "): error ratios per "
+                     "halving in [3.5, 4.5]: " + rs);
+      }
+   }
+}
+
+/// Random x, v = 0, nsteps steps of dt: true if |x| grew past 1e3 times its
+/// start or stopped being finite (checked every 50 steps, as T-09(c)).
+bool PoroBlowsUp(PoroBox &B, real_t dt, VelocityCoupling cp, int nsteps)
+{
+   PoroNitscheOperator &op = *B.op;
+   op.Elastic().SetTimeStep(dt);
+   PoroNewmarkStepper st(op, dt, DragGamma::kFitted, cp);
+   const int n2 = op.Height();
+   Vector x(n2), v(n2), a(n2);
+   x.Randomize(777 + g_rank);
+   x -= 0.5;
+   v = 0.0;
+   MPI_Comm comm = B.pm->GetComm();
+   const real_t n0 = std::sqrt(InnerProduct(comm, x, x));
+   op.SetTime(0.0);
+   st.ConsistentStart(x, v, a);
+   real_t t = 0.0;
+   for (int s = 0; s < nsteps; s++)
+   {
+      st.Step(x, v, a, t, dt);
+      if (s % 50 == 49 || s == nsteps - 1)
+      {
+         const real_t nx = std::sqrt(InnerProduct(comm, x, x));
+         if (!std::isfinite(nx) || nx > 1e3 * n0) { return true; }
+      }
+   }
+   return false;
+}
+
+/// Largest stable C in dt = C dt_unit by bisection to 1 %, from [lo, hi].
+real_t BisectPoro(PoroBox &B, real_t dt_unit, VelocityCoupling cp, real_t lo, real_t hi)
+{
+   const int nsteps = 1000;
+   int guard = 0;
+   while (PoroBlowsUp(B, lo * dt_unit, cp, nsteps) && guard++ < 10) { lo *= 0.7; }
+   guard = 0;
+   while (!PoroBlowsUp(B, hi * dt_unit, cp, nsteps) && guard++ < 10) { hi *= 1.3; }
+   while ((hi - lo) / hi > 0.01)
+   {
+      const real_t mid = 0.5 * (lo + hi);
+      if (PoroBlowsUp(B, mid * dt_unit, cp, nsteps)) { hi = mid; } else { lo = mid; }
+   }
+   return lo;
+}
+
+/// U2-18: stability by bisection (1 rank; --only U2-18).
+void TestU218()
+{
+   if (g_rank == 0)
+   {
+      std::cout << "--- U2-18: largest stable C in dt = C h/(p^2 c_fast) by bisection on "
+                   "blow-up over 1000 steps, 3 x 3 x 2 box of F-B (no fault; z = 0 free, "
+                   "other faces u = 0)\n";
+   }
+   std::unique_ptr<Mesh> m(BareBox(3, 3, 2, false));
+   for (int p = 1; p <= 3; p++)
+   {
+      // (a) without drag: bisection and 2 / omega_max
+      auto box0 = MakeBox(*m, MPI_COMM_WORLD, p, false, Walls::kDrained, kKappaW, ZeroG(),
+                          nullptr, Uniform(Tpv5Fluid(0.0)), false);
+      PoroNitscheOperator &op0 = *box0->op;
+      const real_t dt_unit = PoroMaxDt(*box0->sample, *box0->pm, p, 1.0);
+      op0.Elastic().SetTimeStep(dt_unit);
+      PoroNewmarkStepper st0(op0, dt_unit, DragGamma::kFitted, VelocityCoupling::kMomentum);
+      MPI_Comm comm = box0->pm->GetComm();
+      Vector y(op0.Height()), Ky, w;
+      y.Randomize(4242 + g_rank);
+      y -= 0.5;
+      y /= std::sqrt(InnerProduct(comm, y, y));
+      real_t lam = 0.0, lam_old = 0.0;
+      int it = 1;
+      for (; it <= 3000; it++)
+      {
+         op0.ApplyStiffness(y, Ky);
+         const Vector My = ApplyPoroMass(op0, st0.Constants(), y);
+         lam = InnerProduct(comm, y, Ky) / InnerProduct(comm, y, My);
+         if (it > 1 && std::abs(lam - lam_old) < 1e-6 * std::abs(lam)) { break; }
+         lam_old = lam;
+         st0.ApplyMassInverse(Ky, w);
+         y = w;
+         y /= std::sqrt(InnerProduct(comm, y, y));
+      }
+      const real_t C_eig = 2.0 / std::sqrt(lam) / dt_unit;
+      const real_t C_a = BisectPoro(*box0, dt_unit, VelocityCoupling::kMomentum,
+                                    0.8 * C_eig, 1.2 * C_eig);
+      const real_t rel = std::abs(C_a - C_eig) / C_eig;
+      const std::string P = "U2-18 p = " + std::to_string(p) + ": ";
+      TEST_ASSERT(rel <= 0.0101, P + "(a) without drag the bisection limit C = " + Fmt(C_a)
+                  + " agrees with 2 / omega_max = " + Fmt(C_eig) + " (power iteration, "
+                  + std::to_string(it) + " iterations) to " + Fmt(rel) + " (bound 1 %); "
+                  "the elastic C(p) of T-09(c) is " + Fmt(kCeigP3[p]));
+      // (b) the tpv5-poro drag, both couplings
+      auto box5 = MakeBox(*m, MPI_COMM_WORLD, p, false, Walls::kDrained, kKappaW, ZeroG(),
+                          nullptr, nullptr, false);
+      real_t C_b[2];
+      for (int k = 0; k < 2; k++)
+      {
+         const VelocityCoupling cp = k ? VelocityCoupling::kDiagonal : VelocityCoupling::kMomentum;
+         C_b[k] = BisectPoro(*box5, dt_unit, cp, 0.8 * C_eig, 1.2 * C_eig);
+      }
+      TEST_ASSERT(C_b[0] >= 0.95 * C_a && C_b[1] >= 0.95 * C_a,
+                  P + "(b) with the tpv5-poro drag the limit is C = " + Fmt(C_b[0])
+                  + " (Gamma_mom) and " + Fmt(C_b[1]) + " (Gamma_diag), " + Fmt(C_b[0] / C_a)
+                  + " and " + Fmt(C_b[1] / C_a) + " of (a) (bound: not below 0.95)");
+      // (c) the driver's step
+      const real_t C_c = 0.5 * kCeigP3[p];
+      TEST_ASSERT(C_c < C_a && C_c < C_b[0] && C_c < C_b[1],
+                  P + "(c) the driver's step, PoroMaxDt at 0.5 C(p) = " + Fmt(C_c)
+                  + ", is below (a) and (b)");
+   }
+}
+
+/// U2-19: the whole step on this rank count against a serial copy.
+void TestU219()
+{
+   if (g_rank == 0)
+   {
+      std::cout << "--- U2-19: the whole step (fault, Dirichlet data, absorbing and no-flow "
+                   "faces, Kelvin-Voigt, a gaussian source) on " << Mpi::WorldSize()
+                << " rank(s) against a serial copy, 200 steps\n";
+   }
+   const real_t xs[3] = {-0.21 * kL, 0.13 * kL, -0.47 * kL};
+   const PoroSourceConfig scfg = SourceCfg("gaussian", "ramp", 2.0e-6, xs);
+   const int nsteps = 200;
+   std::unique_ptr<Mesh> m(BoxMesh(2, 2, 1, Walls::kMixed));
+   for (int p = 1; p <= 3; p++)
+   {
+      std::unique_ptr<PoroBox> box[2];
+      std::unique_ptr<PoroSource> src[2];
+      std::unique_ptr<PoroNewmarkStepper> st[2];
+      Vector x[2], v[2], a[2];
+      box[1] = MakeBox(*m, MPI_COMM_SELF, p, false, Walls::kMixed, kKappaW, FarField());
+      const real_t dt = PoroMaxDt(*box[1]->sample, *box[1]->pm, p, 0.5 * kCeigP3[p]);
+      box[0] = MakeBox(*m, MPI_COMM_WORLD, p, false, Walls::kMixed, kKappaW, FarField());
+      for (int k = 0; k < 2; k++)
+      {
+         PoroNitscheOperator &op = *box[k]->op;
+         op.Elastic().SetKelvinVoigt(0.1, NitscheWaveOperator::KVScale::Node, -1.0);
+         SeedState(op.Elastic());
+         op.Elastic().SetTimeStep(dt);
+         src[k] = std::make_unique<PoroSource>(scfg);
+         src[k]->Advance(0.0);
+         op.SetSource(src[k].get());
+         op.SetTime(0.0);
+         st[k] = std::make_unique<PoroNewmarkStepper>(op, dt, DragGamma::kFitted,
+                                                      VelocityCoupling::kMomentum, src[k].get());
+         x[k].SetSize(op.Height());
+         v[k].SetSize(op.Height());
+         a[k].SetSize(op.Height());
+         x[k] = 0.0;
+         v[k] = 0.0;
+         st[k]->ConsistentStart(x[k], v[k], a[k]);
+         real_t t = 0.0;
+         for (int s = 0; s < nsteps; s++) { st[k]->Step(x[k], v[k], a[k], t, dt); }
+      }
+      real_t gap;
+      const std::vector<int> map = MatchBoxDofs(Space(*box[0]), Space(*box[1]), gap);
+      const int n = box[0]->op->NumU(), ns = box[1]->op->NumU();
+      bool ok = RMax(gap, MPI_COMM_WORLD) < 1e-6 * kL;
+      std::string rs;
+      const char *names[3] = {"x", "v", "a"};
+      for (int f = 0; f < 3; f++)
+      {
+         const Vector &P = f == 0 ? x[0] : f == 1 ? v[0] : a[0];
+         const Vector &S = f == 0 ? x[1] : f == 1 ? v[1] : a[1];
+         for (int half = 0; half <= 1; half++)
+         {
+            real_t num = 0.0;
+            for (int i = 0; i < n; i++)
+            {
+               num = std::max(num, std::abs(P(half * n + i) - S(half * ns + map[i])));
+            }
+            // x and v against their own maximum; a as the displacement it
+            // makes in a step, dt^2 |a - a_serial| against max |x|: the
+            // stiffness terms summed in a are of size |x| / dt^2, while
+            // max |a| is what is left after they cancel
+            const real_t den = f < 2 ? MaxAbs(S, half * ns, (half + 1) * ns, MPI_COMM_SELF)
+                               : MaxAbs(x[1], half * ns, (half + 1) * ns, MPI_COMM_SELF)
+                               / (dt * dt);
+            const real_t r = RMax(num, MPI_COMM_WORLD) / den;
+            ok = ok && r <= kR12 && den > 0.0;
+            rs += std::string(rs.empty() ? "" : ", ") + names[f] + (half ? "_w " : "_u ") + Fmt(r);
+            if (f == 2)
+            {
+               const real_t am = MaxAbs(S, half * ns, (half + 1) * ns, MPI_COMM_SELF);
+               rs += std::string(" (") + Fmt(RMax(num, MPI_COMM_WORLD) / am) + " of max |a|)";
+            }
+         }
+      }
+      TEST_ASSERT(ok, "U2-19 F-B p = " + std::to_string(p) + ": after " + std::to_string(nsteps)
+                  + " steps the fields equal the serial run's: R = " + rs + " (bound 1e-12; "
+                  "x, v against their max, a as dt^2 |a - a_serial| against max |x|)");
+   }
+}
+
+/// X2-8 (extra): the ConstantsField constructor of PoroMaterialSample.
+void TestX28()
+{
+   if (g_rank == 0)
+   {
+      std::cout << "--- X2-8 (extra): PoroMaterialSample from given fluid constants against "
+                   "the ten inputs (F-C)\n";
+   }
+   std::unique_ptr<Mesh> m(BoxMesh(2, 2, 1, Walls::kDrained));
+   auto derived = [](const Medium &md) {
+      const BiotConstants c = DeriveBiotConstants(md.lam, md.mu, BulkDensity(md.f), md.f);
+      BiotFluidConstants k;
+      k.rho_f = c.rho_f; k.alpha = c.alpha; k.M = c.M; k.m = c.m; k.b = c.b;
+      return k;
+   };
+   const BiotFluidConstants kA = derived(kMedA), kB = derived(kMedB);
+   auto byx = [kA, kB](int, const Vector &x) { return x(0) > 0.0 ? kB : kA; };
+   auto b0 = MakeBox(*m, MPI_COMM_WORLD, 2, true, Walls::kDrained, kKappaW, FarField());
+   auto b1 = MakeBox(*m, MPI_COMM_WORLD, 2, true, Walls::kDrained, kKappaW, FarField(), nullptr,
+                     byx);
+   long diff = 0;
+   for (int e = 0; e < b0->pm->GetNE(); e++)
+   {
+      const BiotConstants &c0 = b0->sample->Constants(e), &c1 = b1->sample->Constants(e);
+      const real_t f0[14] = {c0.lambda, c0.mu, c0.rho, c0.rho_f, c0.Kd, c0.alpha, c0.M,
+                             c0.lambda_u, c0.Ku, c0.B, c0.m, c0.b, c0.tau, 0.0};
+      const real_t f1[14] = {c1.lambda, c1.mu, c1.rho, c1.rho_f, c1.Kd, c1.alpha, c1.M,
+                             c1.lambda_u, c1.Ku, c1.B, c1.m, c1.b, c1.tau, 0.0};
+      diff += std::memcmp(f0, f1, sizeof(f0)) != 0;
+   }
+   diff = LSum(diff, MPI_COMM_WORLD);
+   const int n = b0->op->NumU();
+   Vector x(2 * n), v(2 * n), F0, F1;
+   x.Randomize(5 + g_rank);
+   v.Randomize(7 + g_rank);
+   x *= 1e-3;
+   v *= 1e-2;
+   b0->op->SetTime(0.4);
+   b1->op->SetTime(0.4);
+   b0->op->Force(x, &v, nullptr, F0);
+   b1->op->Force(x, &v, nullptr, F1);
+   const long fd = LSum(BitDiff(F0, F1), MPI_COMM_WORLD);
+   TEST_ASSERT(diff == 0 && fd == 0, "X2-8 F-C p = 2: the constants of every element and the "
+               "operator's Force are those of the ten-input sample, bit for bit ("
+               + std::to_string(diff) + " elements, " + std::to_string(fd) + " force entries "
+               "differ)");
+}
+
+/// X2-8 and stepper aborts.
+int RunAbortP25(const std::string &mode)
+{
+   if (g_rank == 0) { std::cout << "expecting an abort: " << mode << "\n"; }
+   std::unique_ptr<Mesh> m(BoxMesh(2, 2, 1, Walls::kDrained));
+   if (mode == "constants-rho")
+   {
+      BiotFluidConstants k = Tpv5Fluid(Tpv5Drag());
+      k.rho_f = 2.0 * std::sqrt(BulkDensity(kMedA.f) * k.m);
+      auto box = MakeBox(*m, MPI_COMM_WORLD, 1, false, Walls::kDrained, kKappaW, ZeroG(),
+                         nullptr, Uniform(k));
+   }
+   else if (mode == "stepper-dt")
+   {
+      auto box = MakeBox(*m, MPI_COMM_WORLD, 1, false, Walls::kDrained, kKappaW, ZeroG());
+      box->op->Elastic().SetTimeStep(1e-3);
+      PoroNewmarkStepper st(*box->op, 2e-3, DragGamma::kFitted, VelocityCoupling::kMomentum);
+   }
+   else
+   {
+      if (g_rank == 0) { std::cout << "FAILED: unknown abort mode " << mode << "\n"; }
+      return 1;
+   }
+   if (g_rank == 0) { std::cout << "FAILED: " << mode << " did not abort\n"; }
+   return 1;
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -2725,13 +3833,14 @@ int main(int argc, char *argv[])
          if (mode == "interior-only" || mode == "penalty-one-sided") { return RunAbort(mode); }
          if (mode.rfind("well-", 0) == 0 || mode == "source-time") { return RunAbortP23(mode); }
          if (mode.rfind("mass-", 0) == 0) { return RunAbortP24(mode); }
+         if (mode == "constants-rho" || mode == "stepper-dt") { return RunAbortP25(mode); }
          return RunAbortP22(mode);
       }
       if (a == "--only" && i + 1 < argc) { only = argv[++i]; }
    }
    if (g_rank == 0)
    {
-      std::cout << "=== Poroelastic P2 (plan rev 3), steps P2.1 to P2.4, on "
+      std::cout << "=== Poroelastic P2 (plan rev 3), steps P2.1 to P2.5, on "
                 << Mpi::WorldSize() << " rank(s)" << (only.empty() ? "" : ", only " + only)
                 << " ===\n";
    }
@@ -2751,6 +3860,16 @@ int main(int argc, char *argv[])
    if (run("X2-7")) { TestX27(); }
    if (run("U2-10")) { TestU210(); }
    if (run("U2-11")) { TestU211(); }
+   if (run("U2-12")) { TestU212(); }
+   if (run("U2-13")) { TestU213(); }
+   if (run("U2-14")) { TestU214(); }
+   if (run("U2-15")) { TestU215(); }
+   if (run("U2-16")) { TestU216(); }
+   if (run("U2-17")) { TestU217(); }
+   // U2-18 (minutes on one rank) runs only when named: --only U2-18
+   if (only == "U2-18") { TestU218(); }
+   if (run("U2-19")) { TestU219(); }
+   if (run("X2-8")) { TestX28(); }
    int nf = num_failed;
    MPI_Allreduce(MPI_IN_PLACE, &nf, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
    if (g_rank == 0)

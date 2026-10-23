@@ -21,7 +21,11 @@
 //
 // PoroMaterialSample samples every element at its centroid, as
 // NitscheMaterialSample does, and stores the constants as order-0 L2
-// ParGridFunctions with face-neighbour data exchanged.  UndrainedSample() is a
+// ParGridFunctions with face-neighbour data exchanged.  A second constructor
+// (step P2.5) takes the fluid constants (rho_f, alpha, M, m, b) per element
+// directly, for media the eight inputs cannot describe: alpha = 0, rho_f = 0
+// or b = 0, which tests U2-15, U2-16 and U2-18 need; lambda_u, K_u, B and tau
+// then follow from them (CompleteBiotConstants).  UndrainedSample() is a
 // NitscheMaterialSample with (lambda_u, mu, rho): the elastic operator, its
 // penalty, traction kernel, slip load and Kelvin-Voigt layer are built from it
 // (derivation Proposition 6.2, option F2).
@@ -37,6 +41,7 @@
 
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -172,6 +177,72 @@ inline std::string CheckBiotInputs(real_t lambda, real_t mu, real_t rho,
    return err.str();
 }
 
+/// The fluid constants of one element given directly (step P2.5), for media
+/// the eight inputs cannot describe (alpha = 0, rho_f = 0, b = 0).
+struct BiotFluidConstants
+{
+   real_t rho_f = 0.0;   ///< fluid density, >= 0
+   real_t alpha = 0.0;   ///< Biot coefficient, in [0, 1]
+   real_t M = 0.0;       ///< Biot modulus, > 0
+   real_t m = 0.0;       ///< apparent fluid mass, > 0
+   real_t b = 0.0;       ///< drag, >= 0
+};
+
+/// The constants of one element from the elastic inputs and the given fluid
+/// constants: K_d, lambda_u, K_u, B by eq. (4.4) and tau by (8.4), in the
+/// operation order of DeriveBiotConstants; tau = +inf when b = 0.
+inline BiotConstants CompleteBiotConstants(real_t lambda, real_t mu, real_t rho,
+                                           const BiotFluidConstants &k)
+{
+   BiotConstants c;
+   c.lambda = lambda;
+   c.mu = mu;
+   c.rho = rho;
+   c.rho_f = k.rho_f;
+   c.Kd = lambda + 2.0 / 3.0 * mu;
+   c.alpha = k.alpha;
+   c.M = k.M;
+   c.lambda_u = lambda + c.alpha * c.alpha * c.M;
+   c.Ku = c.Kd + c.alpha * c.alpha * c.M;
+   c.B = c.alpha * c.M / c.Ku;
+   c.m = k.m;
+   c.b = k.b;
+   c.tau = c.b > 0.0 ? (rho * c.m - c.rho_f * c.rho_f) / (c.b * rho)
+           : std::numeric_limits<real_t>::infinity();
+   return c;
+}
+
+/// Empty when the elastic inputs and the given fluid constants make a valid
+/// mass, drag and stiffness, otherwise the reason.
+inline std::string CheckBiotConstants(real_t lambda, real_t mu, real_t rho,
+                                      const BiotFluidConstants &k)
+{
+   std::ostringstream err;
+   if (!(mu > 0.0 && lambda + 2.0 / 3.0 * mu > 0.0 && rho > 0.0))
+   {
+      err << "the frame needs mu > 0, K_d = lambda + 2 mu / 3 > 0 and rho > 0 (lambda "
+          << lambda << ", mu " << mu << ", rho " << rho << ")";
+   }
+   else if (!(k.alpha >= 0.0 && k.alpha <= 1.0))
+   {
+      err << "Biot coefficient alpha = " << k.alpha << " is not in [0, 1]";
+   }
+   else if (!(k.M > 0.0 && k.m > 0.0))
+   {
+      err << "Biot modulus M = " << k.M << " and fluid mass m = " << k.m
+          << " must be > 0";
+   }
+   else if (!(k.rho_f >= 0.0 && k.b >= 0.0))
+   {
+      err << "rho_f = " << k.rho_f << " and b = " << k.b << " must be >= 0";
+   }
+   else if (!(rho * k.m - k.rho_f * k.rho_f > 0.0))
+   {
+      err << "rho m - rho_f^2 = " << rho * k.m - k.rho_f * k.rho_f << " is not > 0";
+   }
+   return err.str();
+}
+
 #ifdef MFEM_USE_MPI
 
 /// Per-element Biot constants of a ParMesh (eq. (4.4), (8.4)), and the
@@ -190,6 +261,45 @@ public:
 
    PoroMaterialSample(ParMesh &pmesh, const MaterialField &material,
                       const FluidField &fluid)
+      : PoroMaterialSample(pmesh, material, ElementFn(
+                              [&fluid](int e, const Vector &x, real_t lam, real_t mu,
+                                       real_t rho, BiotConstants &c)
+   {
+      const BiotFluidInputs f = fluid(e, x);
+      const std::string err = CheckBiotInputs(lam, mu, rho, f);
+      if (err.empty()) { c = DeriveBiotConstants(lam, mu, rho, f); }
+      return err;
+   }), ByElement{})
+   { }
+
+   /// The fluid constants of local element e, whose centroid is x (step P2.5).
+   using ConstantsField = std::function<BiotFluidConstants(int e, const Vector &x)>;
+
+   /// The fluid constants given directly (CheckBiotConstants,
+   /// CompleteBiotConstants); the elastic inputs come from `material` as in
+   /// the other constructors.
+   PoroMaterialSample(ParMesh &pmesh, const MaterialField &material,
+                      const ConstantsField &constants)
+      : PoroMaterialSample(pmesh, material, ElementFn(
+                              [&constants](int e, const Vector &x, real_t lam, real_t mu,
+                                           real_t rho, BiotConstants &c)
+   {
+      const BiotFluidConstants k = constants(e, x);
+      const std::string err = CheckBiotConstants(lam, mu, rho, k);
+      if (err.empty()) { c = CompleteBiotConstants(lam, mu, rho, k); }
+      return err;
+   }), ByElement{})
+   { }
+
+private:
+   /// The constants of element e (centroid x) from its elastic inputs, or the
+   /// reason they are refused.
+   using ElementFn = std::function<std::string(int e, const Vector &x, real_t lam,
+                                               real_t mu, real_t rho, BiotConstants &c)>;
+   struct ByElement { };
+
+   PoroMaterialSample(ParMesh &pmesh, const MaterialField &material,
+                      const ElementFn &element, ByElement)
       : drained_(pmesh, material),
         fec_(0, pmesh.Dimension()),
         fes_(&pmesh, &fec_),
@@ -214,12 +324,11 @@ public:
 
          ElementTransformation *T = pmesh.GetElementTransformation(e);
          T->Transform(Geometries.GetCenter(pmesh.GetElementBaseGeometry(e)), x);
-         const BiotFluidInputs f = fluid(e, x);
-         const std::string err = CheckBiotInputs(lam, mu, rho, f);
+         BiotConstants c;
+         const std::string err = element(e, x, lam, mu, rho, c);
          MFEM_VERIFY(err.empty(), "PoroMaterialSample: element " << e
                      << " (centroid " << x(0) << ", " << x(1) << ", " << x(2)
                      << "): " << err);
-         const BiotConstants c = DeriveBiotConstants(lam, mu, rho, f);
          constants_[e] = c;
 
          fes_.GetElementDofs(e, dofs);
@@ -247,6 +356,7 @@ public:
                       pmesh, MaterialField::MakeGridFunction(rho_gf_, lambda_u_gf_, mu_gf_));
    }
 
+public:
    /// (lambda, mu, rho) as the elastic run samples them.
    const NitscheMaterialSample &DrainedSample() const { return drained_; }
    /// (lambda_u, mu, rho) for the elastic block (Proposition 6.2).

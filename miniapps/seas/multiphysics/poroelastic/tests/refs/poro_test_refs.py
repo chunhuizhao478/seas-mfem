@@ -228,6 +228,17 @@ def write_header(refs, path):
         for k in PATCH_KEYS:
             lines.append(f'constexpr double {k} = {float(d[k]):.16e};')
         lines.append(f'}} // namespace {name}')
+    # The fitted coefficient of eq. (9.4) (step P2.5, test U2-12): z, gamma_w and R(z) of eq. (9.3)
+    # per row of gamma_table, and the series-closed-form gap at z = 1e-2.
+    rows = refs['gamma']
+    lines.append('namespace gamma')
+    lines.append('{')
+    lines.append(f'constexpr int count = {len(rows)};')
+    for k in ('z', 'gamma_w', 'R'):
+        lines.append(f'constexpr double {k}[count] = {{')
+        lines += [f'   {float(r[k]):.16e}' + (',' if i + 1 < len(rows) else '};') for i, r in enumerate(rows)]
+    lines.append(f"constexpr double junction = {float(refs['gamma_junction']):.16e};")
+    lines.append('} // namespace gamma')
     lines += ['} // namespace poro_refs', '', '#endif // MFEM_SEAS_PORO_TEST_REFS_HPP', '']
     with open(path, 'w') as fh:
         fh.write('\n'.join(lines))
