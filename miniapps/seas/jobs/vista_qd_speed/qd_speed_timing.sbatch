@@ -43,6 +43,9 @@
 #                 exist, reads dense G from GREEN_CACHE, compresses it and
 #                 writes HCACHE.  Again only one job may write it: the
 #                 submit script makes the others wait (afterok);
+#        hcount, hbytes  hgreen with --qd-green-layout count or bytes (QD
+#                 speed item C), reading HCACHE only: the job stops before
+#                 its first run when HCACHE does not exist;
 #      repeating a mode measures the run-to-run spread;
 #   3. timing_summary.txt: one line per run (s/step, solve ms/call and the
 #      other parts) from the end-of-run [STAGE-TIMERS] table, then the
@@ -52,6 +55,16 @@
 #   qd_speed_submit.sh STEPS=events), each run is also compared with that
 #   reference run through its earthquakes by jobs/vista_qd_speed/
 #   qd_event_compare.py, into <run>/event_compare.txt.
+#   With LOG_VIEW=1 each run also writes PETSc's -log_view table to
+#   <run>/petsc_log.txt (QD speed item D1).
+#   4. layout_compare.txt (QD speed item C), for each hbytes run that
+#      follows an hcount run: every output file of the hbytes run must be
+#      byte-identical (cmp) to the same file of the hcount run, both runs
+#      must write the same files, and the bytes layout's largest rank must
+#      hold at most 1.2x the mean ([QD-HMAT] layout line); otherwise the
+#      job fails.  With LAYOUT_REF_JOB=<job id> the first hcount run is
+#      also compared with that earlier job's hgreen run, over the lines
+#      both files have (reported, not gated).
 #
 # Ranks per node below 144 leave cores idle: the BLAS (NVPL *_seq) and
 # MUMPS of the G0 build are sequential, so threads per rank would not be
@@ -105,6 +118,14 @@ GREEN_CACHE="${GREEN_CACHE:-${SCRATCH:-${WORK}}/seas-qd-green/bp5_prod_p${ORDER}
 HEPS="${HEPS:-1e-10}"
 HMEM="${HMEM:-64}"
 HCACHE="${HCACHE:-${SCRATCH:-${WORK}}/seas-qd-green/bp5_prod_p${ORDER}_h${HEPS}.bin}"
+if [[ " ${MODES} " == *" hcount "* || " ${MODES} " == *" hbytes "* ]] \
+   && [ ! -f "${HCACHE}" ]; then
+   echo "ERROR: MODES='${MODES}': no H file ${HCACHE}; hcount and hbytes" \
+        "only read it." >&2
+   exit 1
+fi
+LOG_VIEW="${LOG_VIEW:-0}"
+LAYOUT_REF_JOB="${LAYOUT_REF_JOB:-}"
 EVENT_REF="${EVENT_REF:-}"
 if [ -n "${EVENT_REF}" ]; then
    read -r EVENT_REF_DIR EVENT_REF_PFX <<< "${EVENT_REF}"
@@ -114,7 +135,8 @@ if [ -n "${EVENT_REF}" ]; then
       exit 1
    fi
 fi
-GOLD_README_KNOBS+=(ORDER RUN_STEPS MODES GREEN_CACHE HEPS HMEM HCACHE EVENT_REF)
+GOLD_README_KNOBS+=(ORDER RUN_STEPS MODES GREEN_CACHE HEPS HMEM HCACHE EVENT_REF
+                    LOG_VIEW LAYOUT_REF_JOB)
 
 cd "${SEAS_DIR}"
 OUT_ROOT="bp5/results_qd_speed/timing_n${NNODES}_r${NRANKS}_c${CPT}_p${ORDER}_job${SLURM_JOB_ID}"
@@ -127,6 +149,7 @@ g0_provenance "${OUT_ROOT}"
    echo "green cache: ${GREEN_CACHE}"
    echo "H-matrix cache: ${HCACHE} (eps ${HEPS}, ${HMEM} GiB per node while compressing)"
    echo "event reference: ${EVENT_REF:-none}"
+   echo "PETSc -log_view: ${LOG_VIEW}; layout reference job: ${LAYOUT_REF_JOB:-none}"
 } >> "${OUT_ROOT}/provenance.txt"
 
 # ---- 1. Layout and bandwidth ----
@@ -157,13 +180,24 @@ for MODE in ${MODES}; do
                     OPS=(--qd-green --qd-green-cache "${GREEN_CACHE}"
                          --qd-green-compress "${HEPS}" --qd-green-hcache "${HCACHE}"
                          --qd-green-compress-mem "${HMEM}") ;;
+      hcount|hbytes)
+                    OPS=(--qd-green --qd-green-cache "${GREEN_CACHE}"
+                         --qd-green-compress "${HEPS}" --qd-green-hcache "${HCACHE}"
+                         --qd-green-compress-mem "${HMEM}"
+                         --qd-green-layout "${MODE#h}") ;;
       *) echo "ERROR: unknown mode ${MODE}" >&2; overall=1; continue ;;
    esac
    echo "=== ${TAG}: start $(date -u +%T) ==="
-   ibrun ./seas_bp5_full --mesh "${G0_MESH_PROD}" "${G0_V63_FLAGS[@]}" \
-         --order "${ORDER}" "${OPS[@]}" --max-steps "${RUN_STEPS}" \
-         --stage-timers 100 --checkpoint-interval 0 \
-         --output-dir "${OUT}" --output-prefix "${PFX}" > "${OUT}/run.log" 2>&1
+   (
+      # PETSc reads PETSC_OPTIONS in PetscInitialize; only this run gets it
+      if [ "${LOG_VIEW}" = 1 ]; then
+         export PETSC_OPTIONS="-log_view ascii:${OUT}/petsc_log.txt"
+      fi
+      ibrun ./seas_bp5_full --mesh "${G0_MESH_PROD}" "${G0_V63_FLAGS[@]}" \
+            --order "${ORDER}" "${OPS[@]}" --max-steps "${RUN_STEPS}" \
+            --stage-timers 100 --checkpoint-interval 0 \
+            --output-dir "${OUT}" --output-prefix "${PFX}" > "${OUT}/run.log" 2>&1
+   )
    rc=$?
    echo "${rc}" > "${OUT}/exit_code"
    echo "=== ${TAG}: exit ${rc} at $(date -u +%T) ==="
@@ -191,14 +225,24 @@ for MODE in ${MODES}; do
          overall=1
       fi
    fi
-   if [ "${MODE}" = green ] || [ "${MODE}" = hgreen ]; then
+   if [ "${MODE}" != loops ] && [ "${MODE}" != matrix ] && [ "${MODE}" != default ]; then
       grep -E '\[QD-(GREEN|HMAT)\]' "${OUT}/run.log" > "${OUT}/qd_green.txt"
       if ! grep -q '\[QD-GREEN\] check against the solve path' "${OUT}/qd_green.txt"; then
          echo "ERROR: ${TAG}: no '[QD-GREEN] check against the solve path' line." >&2
          overall=1
       fi
-      if [ "${MODE}" = hgreen ] && ! grep -q '\[QD-HMAT\] stored' "${OUT}/qd_green.txt"; then
+      if [ "${MODE}" != green ] && ! grep -q '\[QD-HMAT\] stored' "${OUT}/qd_green.txt"; then
          echo "ERROR: ${TAG}: no '[QD-HMAT] stored' line: G was not compressed." >&2
+         overall=1
+      fi
+   fi
+   if [ "${MODE}" = hcount ] || [ "${MODE}" = hbytes ]; then
+      if ! grep -q "\[QD-HMAT\] read at" "${OUT}/qd_green.txt"; then
+         echo "ERROR: ${TAG}: no '[QD-HMAT] read at' line: the H file was not read." >&2
+         overall=1
+      fi
+      if ! grep -q "\[QD-HMAT\] layout ${MODE#h} " "${OUT}/qd_green.txt"; then
+         echo "ERROR: ${TAG}: no '[QD-HMAT] layout ${MODE#h}' line." >&2
          overall=1
       fi
    fi
@@ -207,5 +251,85 @@ done
 # ---- 3. Summary ----
 python3 jobs/vista_qd_speed/qd_speed_summary.py "${OUT_ROOT}" \
    | tee "${OUT_ROOT}/timing_summary.txt"
+
+# ---- 4. Layouts: bytes against count (QD speed item C) ----
+# same_files A_DIR A_PFX B_DIR B_PFX: cmp every output file (not the logs
+# and tables, which hold times) of run A with run B's; 0 when all match.
+same_files() {
+   local a_dir="$1" a_pfx="$2" b_dir="$3" b_pfx="$4" bad=0 n=0 f sfx
+   for f in "${a_dir}/${a_pfx}"_*; do
+      [ -f "${f}" ] || continue
+      sfx="${f#"${a_dir}/${a_pfx}"}"
+      case "${sfx}" in _matrix_stats.json) continue ;; esac
+      n=$((n + 1))
+      if [ ! -f "${b_dir}/${b_pfx}${sfx}" ]; then
+         echo "  MISSING ${b_pfx}${sfx}"; bad=1
+      elif ! cmp -s "${f}" "${b_dir}/${b_pfx}${sfx}"; then
+         echo "  DIFFER  ${sfx#_} ($(cmp "${f}" "${b_dir}/${b_pfx}${sfx}" 2>&1 | head -n 1))"
+         bad=1
+      fi
+   done
+   for f in "${b_dir}/${b_pfx}"_*; do
+      [ -f "${f}" ] || continue
+      sfx="${f#"${b_dir}/${b_pfx}"}"
+      [ -f "${a_dir}/${a_pfx}${sfx}" ] || { echo "  EXTRA   ${b_pfx}${sfx}"; bad=1; }
+   done
+   echo "  ${n} files compared"
+   [ "${n}" -gt 0 ] || bad=1
+   return "${bad}"
+}
+CMP="${OUT_ROOT}/layout_compare.txt"
+: > "${CMP}"
+k=0
+last_count=""
+first_count=""
+for MODE in ${MODES}; do
+   k=$((k + 1))
+   TAG="run${k}_${MODE}"
+   if [ "${MODE}" = hcount ]; then
+      last_count="${TAG}"
+      [ -n "${first_count}" ] || first_count="${TAG}"
+   elif [ "${MODE}" = hbytes ] && [ -n "${last_count}" ]; then
+      echo "${TAG} against ${last_count}:" >> "${CMP}"
+      if same_files "${OUT_ROOT}/${last_count}" "qd_speed_${last_count}" \
+                    "${OUT_ROOT}/${TAG}" "qd_speed_${TAG}" >> "${CMP}"; then
+         echo "  PASS: byte-identical" >> "${CMP}"
+      else
+         echo "  FAIL" >> "${CMP}"
+         overall=1
+      fi
+      line="$(grep '\[QD-HMAT\] layout bytes' "${OUT_ROOT}/${TAG}/qd_green.txt" | tail -n 1)"
+      ratio="$(sed -n 's/.*, \([0-9.]*\)x the mean.*/\1/p' <<< "${line}")"
+      if [ -n "${ratio}" ] && awk -v r="${ratio}" 'BEGIN { exit !(r <= 1.2) }'; then
+         echo "  PASS: largest rank ${ratio}x the mean (at most 1.2)" >> "${CMP}"
+      else
+         echo "  FAIL: largest rank '${ratio:-?}'x the mean (at most 1.2)" >> "${CMP}"
+         overall=1
+      fi
+   fi
+done
+if [ -n "${LAYOUT_REF_JOB}" ] && [ -n "${first_count}" ]; then
+   ref="$(ls -d bp5/results_qd_speed/timing_*_job"${LAYOUT_REF_JOB}"/run*_hgreen 2>/dev/null \
+          | head -n 1)"
+   echo "${first_count} against job ${LAYOUT_REF_JOB} (${ref:-not found}), over the" \
+        "lines both files have; reported, not gated:" >> "${CMP}"
+   if [ -n "${ref}" ]; then
+      rpfx="qd_speed_$(basename "${ref}")"
+      for f in "${ref}/${rpfx}"_*.txt; do
+         [ -f "${f}" ] || continue
+         sfx="${f#"${ref}/${rpfx}"}"
+         g="${OUT_ROOT}/${first_count}/qd_speed_${first_count}${sfx}"
+         if [ ! -f "${g}" ]; then echo "  ${sfx#_}: not in ${first_count}"; continue; fi
+         nl="$(( $(wc -l < "${f}") < $(wc -l < "${g}") ? $(wc -l < "${f}") : $(wc -l < "${g}") ))"
+         if cmp -s <(head -n "${nl}" "${f}") <(head -n "${nl}" "${g}"); then
+            echo "  ${sfx#_}: same over ${nl} lines"
+         else
+            echo "  ${sfx#_}: differs within ${nl} lines" \
+                 "($(cmp <(head -n "${nl}" "${f}") <(head -n "${nl}" "${g}") 2>&1 | head -n 1))"
+         fi
+      done >> "${CMP}"
+   fi
+fi
+if [ -s "${CMP}" ]; then cat "${CMP}"; else rm -f "${CMP}"; fi
 echo "QD speed timing overall: $([ "${overall}" = 0 ] && echo PASS || echo FAIL)"
 exit "${overall}"

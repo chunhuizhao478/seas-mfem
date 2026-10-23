@@ -70,6 +70,19 @@
 #             a2   6vr, atol 1e-7
 #             a3   5dp, atol 1e-8         with a0, today's cost-accuracy line
 #             a4   5dp + DSP PI42, 1e-7
+#   layout  QD speed item C (qd-c-design-rev1 section 5.2): the timing
+#           script with MODES="hcount hbytes" and LOG_VIEW=1, so each job
+#           runs the count layout and then the bytes layout on the same
+#           nodes, compares their output files byte for byte and writes
+#           PETSc's log (item D1).  The H files are only read, and the step
+#           stops unless they exist.  Not in the default STEPS;
+#           C_LAYOUTS limits it:
+#             c_n1_r144     p = 1, 1,000 steps, 1 node   (count run also
+#             c_n2_r288     p = 1, 1,000 steps, 2 nodes   compared with
+#             c_n4_r576     p = 1, 1,000 steps, 4 nodes   1084131-33)
+#             c_p2_n4_r576  p = 2, 200 steps, 4 nodes    (with 1086777)
+#           EXCLUDE (default i617-131) keeps those jobs off nodes that
+#           failed at startup.
 # Layouts (nodes x ranks, CPUs per rank):
 #   n1_r144  1 x 144, 1   loops and the new default, twice each
 #   n1_r72   1 x 72,  2   default
@@ -95,6 +108,8 @@ EVENT_LAYOUTS="${EVENT_LAYOUTS:-e_n1_r144_loops e_n1_r144_default e_n1_r144_gree
 HGREEN_LAYOUTS="${HGREEN_LAYOUTS:-h_n1_r144 h_n2_r288 h_n4_r576}"
 HEVENT_LAYOUTS="${HEVENT_LAYOUTS:-e_n1_r144_hgreen e_n4_r576_hgreen}"
 INTEGRATOR_RUNS="${INTEGRATOR_RUNS:-a0 a1 a2 a3 a4}"
+C_LAYOUTS="${C_LAYOUTS:-c_n1_r144 c_n2_r288 c_n4_r576 c_p2_n4_r576}"
+EXCLUDE="${EXCLUDE:-i617-131}"
 
 if [ ! -f jobs/vista_qd_speed/qd_speed_timing.sbatch ]; then
    echo "ERROR: run from miniapps/seas" >&2
@@ -292,4 +307,37 @@ if has integrator; then
    sub "integrator compare" --dependency="afterany${ids}" \
        --export="ALL,RUNS=${RUNS_DONE# },LINE=a0 a3" \
        jobs/vista_qd_speed/qd_integrator_compare.sbatch
+fi
+
+if has layout; then
+   HCACHE_P2="$(dirname "${GREEN_CACHE_P1}")/bp5_prod_p2_h${HEPS}.bin"
+   # name:order:steps:nodes:ranks:reference job:walltime.  Each job reads
+   # the H file twice (p = 1 about 10 s, p = 2 about 19 s) and runs two
+   # timing runs (p = 1 0.08-0.12 s/step, p = 2 0.22 s/step).
+   C_SPECS="c_n1_r144:1:1000:1:144:1084131:00:45:00
+            c_n2_r288:1:1000:2:288:1084132:00:30:00
+            c_n4_r576:1:1000:4:576:1084133:00:30:00
+            c_p2_n4_r576:2:200:4:576:1086777:00:45:00"
+   # Every H file first, so a missing one submits none of these jobs
+   for spec in ${C_SPECS}; do
+      IFS=: read -r name order _ <<< "${spec}"
+      [[ " ${C_LAYOUTS} " == *" ${name} "* ]] || continue
+      hfile="${HCACHE_P1}"
+      [ "${order}" = 1 ] || hfile="${HCACHE_P2}"
+      if [ ! -f "${hfile}" ]; then
+         echo "ERROR: layout ${name}: no H file ${hfile}; these jobs only" \
+              "read it." >&2
+         exit 1
+      fi
+   done
+   for spec in ${C_SPECS}; do
+      IFS=: read -r name order steps nodes ranks ref hh mm ss <<< "${spec}"
+      [[ " ${C_LAYOUTS} " == *" ${name} "* ]] || continue
+      hfile="${HCACHE_P1}"
+      [ "${order}" = 1 ] || hfile="${HCACHE_P2}"
+      sub "layout ${name}" "${DEP[@]}" -J qd_layout --exclude="${EXCLUDE}" \
+          --export="ALL,MODES=hcount hbytes,ORDER=${order},RUN_STEPS=${steps},LOG_VIEW=1,LAYOUT_REF_JOB=${ref},HEPS=${HEPS},HCACHE=${hfile}" \
+          -N "${nodes}" -n "${ranks}" --ntasks-per-node="$((ranks / nodes))" -c 1 \
+          -t "${hh}:${mm}:${ss}" jobs/vista_qd_speed/qd_speed_timing.sbatch
+   done
 fi
