@@ -3533,13 +3533,17 @@ check-poro-refs:
 
 # P2.1: DGPoroDivIntegrator, the divergence form B_c with its penalty, boundary
 # rows and source loads.  P2.2: PoroNitscheOperator, the (u, w) operator and its
-# force.  P2.3: PoroSource, the fluid source and its loads.  test-poro-p2 =
-# U2-1 to U2-9 and the extras X2-1 to X2-4 and X2-7 in seas_test_poro_p2 (1, 2
-# and 4 ranks; U2-5 runs on 1 rank only), then the aborts of X2-5, X2-6, U2-9
-# and X2-7.
+# force.  P2.3: PoroSource, the fluid source and its loads.  P2.4: PoroMass,
+# the inverse of the mass and drag.  test-poro-p2 = U2-1 to U2-11 and the
+# extras X2-1 to X2-4 and X2-7 in seas_test_poro_p2 (1, 2 and 4 ranks; U2-5
+# runs on 1 rank only), then the aborts of X2-5, X2-6, U2-9, X2-7 and U2-10.
 PORO_P2_HEADERS = multiphysics/poroelastic/dg_poro_div_integrator.hpp \
                   multiphysics/poroelastic/poro_nitsche_operator.hpp \
                   multiphysics/poroelastic/poro_source.hpp \
+                  multiphysics/poroelastic/poro_mass.hpp \
+                  multiphysics/poroelastic/poro_cfl.hpp \
+                  multiphysics/poroelastic/poro_dispersion.hpp \
+                  domain/nitsche_mass.hpp \
                   multiphysics/poroelastic/poro_config.hpp \
                   multiphysics/poroelastic/poro_material.hpp \
                   domain/nitsche_wave_operator.hpp \
@@ -3572,6 +3576,7 @@ test-poro-p2: seas_test_poro_p2
 	@$(call PORO_P0_EXPECT_ABORT,./seas_test_poro_p2 --abort well-vertex,U2-9 well on a vertex,edge or vertex of the mesh)
 	@$(call PORO_P0_EXPECT_ABORT,./seas_test_poro_p2 --abort well-outside,X2-7 well outside the mesh,is outside the mesh)
 	@$(call PORO_P0_EXPECT_ABORT,./seas_test_poro_p2 --abort source-time,X2-7 source behind the operator time,advance the source first)
+	@$(call PORO_P0_EXPECT_ABORT,./seas_test_poro_p2 --abort mass-gamma,U2-10 gamma_w below 1/2,is not in [1/2)
 
 # P6 long checks (minutes each; np=8 unless noted): T-15 energy balance and
 # its NIPG control, T-20 coupled dt refinement (dt0/4..dt0/16 vs dt0/64),

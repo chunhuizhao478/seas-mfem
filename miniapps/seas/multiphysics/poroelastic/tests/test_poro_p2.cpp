@@ -93,13 +93,32 @@
 //         well-outside | source-time (Force with the source behind the
 //         operator's time) abort.
 //
-// Usage: mpirun -np 1|2|4 ./seas_test_poro_p2 [--only U2-3|...|U2-9|X2-7]
+// Step P2.4: PoroMass (poro_mass.hpp), the inverse of M + dt D Gamma of (8.2),
+// (8.3) and (9.5), on F-C (2 x 2 x 1), p = 1-3, dt from PoroMaxDt at CFL 0.5,
+// gamma_w(z) = 1 / (1 - e^-z) - 1 / z with the drag b set so that z = dt / tau
+// on every element.  Without absorbing faces (drained walls) and with them
+// (mixed walls: x = +L absorbing).
+//   U2-10 For z = 1e-2, 1, 2600, 2e5, Gamma_mom and Gamma_diag: PoroMass
+//         applied to (M + dt D Gamma) x gives x, R(1e-12) per field;
+//         M + dt D Gamma assembled independently (MFEM's
+//         VectorMassIntegrator with a 2p + 2 rule for rho, rho_f and
+//         m + dt gamma_w b; the elastic operator's dashpot C on the u rows).
+//         Without absorbing faces the two Gamma give the same a, bit for bit
+//         (Proposition 9.3).  (Makefile) --abort mass-gamma (gamma_w = 0.4)
+//         aborts.
+//   U2-11 rho_f = 0, z = 2600: the u rows of PoroMass equal NitscheMass(rho)
+//         without absorbing faces and the elastic operator's damped mass
+//         NitscheMass(rho, C, dt/2) with them, bit for bit, for both Gamma.
+//
+// Usage: mpirun -np 1|2|4 ./seas_test_poro_p2 [--only U2-3|...|U2-11|X2-7]
 //        [--abort interior-only|penalty-one-sided|dirichlet-interior|
 //                 no-flow-fault|kappa-zero|well-face|well-vertex|
-//                 well-outside|source-time]
+//                 well-outside|source-time|mass-gamma]
 
 #include "mfem.hpp"
 #include "../dg_poro_div_integrator.hpp"
+#include "../poro_cfl.hpp"
+#include "../poro_mass.hpp"
 #include "../poro_nitsche_operator.hpp"
 #include "../poro_source.hpp"
 #include "../../../friction/rate_state_closure.hpp"
@@ -2435,6 +2454,260 @@ int RunAbortP23(const std::string &mode)
    return 1;
 }
 
+// ------------------------------------------------------------- step P2.4
+
+using mfem::seas::poro::ElementConstants;
+using mfem::seas::poro::GammaUW;
+using mfem::seas::poro::PoroMass;
+using mfem::seas::poro::PoroMaxDt;
+using mfem::seas::poro::VelocityCoupling;
+
+/// z = dt / tau of U2-10 (plan section 6.4).
+const real_t kZ[4] = {1e-2, 1.0, 2600.0, 2e5};
+/// CFL number for dt in U2-10 and U2-11.
+const real_t kCfl = 0.5;
+
+/// gamma_w(z) = 1 / (1 - e^-z) - 1 / z, derivation (9.4): an input of U2-10
+/// and U2-11 (FittedGamma arrives in step P2.5).
+real_t GammaOfZ(real_t z) { return 1.0 / (-std::expm1(-z)) - 1.0 / z; }
+
+/// The sample's constants with the drag b set so that z = dt / tau = dt b rho
+/// / (rho m - rho_f^2) (eq. (8.4)) on every element.
+std::vector<BiotConstants> ConstantsAtZ(const PoroMaterialSample &s, real_t dt, real_t z)
+{
+   std::vector<BiotConstants> c = ElementConstants(s);
+   for (BiotConstants &k : c) { k.b = z * (k.rho * k.m - k.rho_f * k.rho_f) / (dt * k.rho); }
+   return c;
+}
+
+/// The vector DG mass with one value per element, by MFEM's
+/// VectorMassIntegrator and a 2p + 2 rule (the NitscheMass loop uses 2p).
+std::unique_ptr<HypreParMatrix> ElementMass(ParFiniteElementSpace &fes,
+                                            const std::vector<real_t> &val)
+{
+   ParMesh &m = *fes.GetParMesh();
+   L2_FECollection fec0(0, 3);
+   ParFiniteElementSpace fes0(&m, &fec0);
+   ParGridFunction gf(&fes0);
+   Array<int> d;
+   for (int e = 0; e < m.GetNE(); e++)
+   {
+      fes0.GetElementDofs(e, d);
+      gf(d[0]) = val[e];
+   }
+   GridFunctionCoefficient q(&gf);
+   const int p = fes.GetMaxElementOrder();
+   VectorMassIntegrator *vmi = new VectorMassIntegrator(q);
+   vmi->SetIntRule(&IntRules.Get(Geometry::TETRAHEDRON, 2 * p + 2));
+   ParBilinearForm a(&fes);
+   a.AddDomainIntegrator(vmi);
+   a.Assemble(0);
+   a.Finalize(0);
+   return std::unique_ptr<HypreParMatrix>(a.ParallelAssemble());
+}
+
+/// F = (M + dt D Gamma) x of (8.2), (9.5), assembled independently of
+/// PoroMass: the three element masses above and, on the u rows, the elastic
+/// operator's dashpot dt C (1/2 x_u + g_uw x_w) (ApplyDamping).
+Vector ApplyMassDrag(PoroNitscheOperator &op, const std::vector<BiotConstants> &c,
+                     real_t dt, const Vector &gw, VelocityCoupling coupling,
+                     const Vector &x)
+{
+   ParFiniteElementSpace &fes = op.Elastic().Elasticity().GetFESpace();
+   ParMesh &m = *fes.GetParMesh();
+   const int n = op.NumU(), ne = m.GetNE();
+   std::vector<real_t> rho(ne), rhof(ne), mp(ne), guw(ne);
+   for (int e = 0; e < ne; e++)
+   {
+      rho[e] = c[e].rho;
+      rhof[e] = c[e].rho_f;
+      mp[e] = c[e].m + dt * gw(e) * c[e].b;
+      guw[e] = GammaUW(coupling, c[e].rho, c[e].rho_f, gw(e));
+   }
+   auto Mr = ElementMass(fes, rho), Mf = ElementMass(fes, rhof), Mm = ElementMass(fes, mp);
+   Vector xu(x.GetData(), n), xw(x.GetData() + n, n), F(2 * n), t(n), v(n), Cv;
+   Vector Fu(F.GetData(), n), Fw(F.GetData() + n, n);
+   Mr->Mult(xu, Fu);
+   Mf->Mult(xw, t);
+   Fu += t;
+   Mf->Mult(xu, Fw);
+   Mm->Mult(xw, t);
+   Fw += t;
+   Array<int> vd;
+   for (int e = 0; e < ne; e++)
+   {
+      fes.GetElementVDofs(e, vd);
+      for (int i : vd) { v(i) = 0.5 * xu(i) + guw[e] * xw(i); }
+   }
+   op.Elastic().ApplyDamping(v, Cv);
+   Fu.Add(dt, Cv);
+   return F;
+}
+
+/// A field that changes from element to element, the same on every rank
+/// count: smooth in x plus a jump through the centroid.
+Vector MassField(ParFiniteElementSpace &fes, real_t phase)
+{
+   return ProjectNodes(fes, [phase](const Vector &cen, const Vector &x, Vector &v) {
+      for (int c = 0; c < 3; c++)
+      {
+         v(c) = std::sin(2.1 * x(0) / kL + 1.3 * x(1) / kL - 0.7 * x(2) / kL + c + phase)
+                + 0.4 * std::cos(3.7 * cen(0) / kL - 2.3 * cen(1) / kL + 1.1 * cen(2) / kL
+                                 + 0.5 * c + 2.0 * phase);
+      }
+   });
+}
+
+/// U2-10: PoroMass against (M + dt D Gamma), as its inverse.
+void TestU210()
+{
+   if (g_rank == 0)
+   {
+      std::cout << "--- U2-10: PoroMass::Apply inverts an independently assembled "
+                   "M + dt D Gamma (z = 1e-2, 1, 2600, 2e5; F-C)\n";
+   }
+   for (Walls walls : {Walls::kDrained, Walls::kMixed})
+   {
+      const bool absorbing = walls == Walls::kMixed;
+      std::unique_ptr<Mesh> m(BoxMesh(2, 2, 1, walls));
+      for (int p = 1; p <= 3; p++)
+      {
+         auto box = MakeBox(*m, MPI_COMM_WORLD, p, true, walls, kKappaW, ZeroG());
+         PoroNitscheOperator &op = *box->op;
+         ParFiniteElementSpace &fes = Space(*box);
+         const int n = op.NumU(), ne = box->pm->GetNE();
+         const real_t dt = PoroMaxDt(*box->sample, *box->pm, p, kCfl);
+         const std::map<int, DenseMatrix> &blocks = op.Elastic().DampingBlocks();
+         const long ndamped = LSum(static_cast<long>(blocks.size()), MPI_COMM_WORLD);
+         const Vector x = Join(MassField(fes, 0.0), MassField(fes, 1.0));
+         const std::string P = std::string("U2-10 F-C p = ") + std::to_string(p)
+                               + (absorbing ? ", absorbing faces (" + std::to_string(ndamped)
+                                  + " damped elements)" : ", no absorbing faces");
+         std::map<VelocityCoupling, std::vector<Vector>> sol;
+         for (VelocityCoupling cp : {VelocityCoupling::kMomentum, VelocityCoupling::kDiagonal})
+         {
+            bool ok = absorbing ? ndamped > 0 : ndamped == 0;
+            std::string rs;
+            for (real_t z : kZ)
+            {
+               const std::vector<BiotConstants> c = ConstantsAtZ(*box->sample, dt, z);
+               Vector gw(ne);
+               gw = GammaOfZ(z);
+               PoroMass mass(*box->pm, p, c, dt, gw, cp, &blocks);
+               const Vector F = ApplyMassDrag(op, c, dt, gw, cp, x);
+               Vector a;
+               mass.Apply(F, a);
+               sol[cp].push_back(a);
+               real_t r[2];
+               for (int half = 0; half <= 1; half++)
+               {
+                  real_t num = 0.0;
+                  for (int i = half * n; i < (half + 1) * n; i++)
+                  {
+                     num = std::max(num, std::abs(a(i) - x(i)));
+                  }
+                  r[half] = RMax(num, MPI_COMM_WORLD) / MaxAbs(x, half * n, (half + 1) * n,
+                                                               MPI_COMM_WORLD);
+                  ok = ok && r[half] <= kRV;
+               }
+               rs += (rs.empty() ? "" : "; ") + Fmt(z) + ": " + Fmt(r[0]) + " / " + Fmt(r[1]);
+            }
+            TEST_ASSERT(ok, P + std::string(cp == VelocityCoupling::kMomentum ? ", Gamma_mom"
+                                            : ", Gamma_diag")
+                        + ": a = PoroMass(M + dt D Gamma) x equals x, R of the u / w rows "
+                        "at z = " + rs);
+         }
+         if (!absorbing)
+         {
+            long diff = 0;
+            for (size_t k = 0; k < sol[VelocityCoupling::kMomentum].size(); k++)
+            {
+               diff += BitDiff(sol[VelocityCoupling::kMomentum][k],
+                               sol[VelocityCoupling::kDiagonal][k]);
+            }
+            diff = LSum(diff, MPI_COMM_WORLD);
+            TEST_ASSERT(diff == 0, P + ": Gamma_mom and Gamma_diag give the same a at every "
+                        "z, bit for bit (Proposition 9.3; " + std::to_string(diff)
+                        + " entries differ)");
+         }
+      }
+   }
+}
+
+/// U2-11: with rho_f = 0 the u rows of PoroMass are NitscheMass's.
+void TestU211()
+{
+   if (g_rank == 0)
+   {
+      std::cout << "--- U2-11: with rho_f = 0 the u rows of PoroMass equal NitscheMass "
+                   "(rho, and rho M + dt/2 C where C is present), bit for bit\n";
+   }
+   const real_t z = 2600.0;
+   for (Walls walls : {Walls::kDrained, Walls::kMixed})
+   {
+      const bool absorbing = walls == Walls::kMixed;
+      std::unique_ptr<Mesh> m(BoxMesh(2, 2, 1, walls));
+      for (int p = 1; p <= 3; p++)
+      {
+         auto box = MakeBox(*m, MPI_COMM_WORLD, p, true, walls, kKappaW, ZeroG());
+         PoroNitscheOperator &op = *box->op;
+         ParFiniteElementSpace &fes = Space(*box);
+         const int n = op.NumU(), ne = box->pm->GetNE();
+         const real_t dt = PoroMaxDt(*box->sample, *box->pm, p, kCfl);
+         std::vector<BiotConstants> c = ConstantsAtZ(*box->sample, dt, z);
+         for (BiotConstants &k : c) { k.rho_f = 0.0; }
+         Vector gw(ne);
+         gw = GammaOfZ(z);
+         const Vector F = Join(MassField(fes, 2.0), MassField(fes, 3.0));
+         const Vector Fu(const_cast<real_t *>(F.GetData()), n);
+         Vector ref;
+         const mfem::seas::NitscheMass *nm = &op.Elastic().Mass();
+         if (absorbing)
+         {
+            op.Elastic().SetTimeStep(dt);
+            nm = op.Elastic().DampedMass();
+         }
+         nm->Apply(Fu, ref);
+         const long ndamped = LSum(static_cast<long>(op.Elastic().DampingBlocks().size()),
+                                   MPI_COMM_WORLD);
+         for (VelocityCoupling cp : {VelocityCoupling::kMomentum, VelocityCoupling::kDiagonal})
+         {
+            PoroMass mass(*box->pm, p, c, dt, gw, cp, &op.Elastic().DampingBlocks());
+            Vector a;
+            mass.Apply(F, a);
+            Vector au(a.GetData(), n);
+            const long diff = LSum(BitDiff(au, ref), MPI_COMM_WORLD);
+            TEST_ASSERT(diff == 0 && (absorbing ? ndamped > 0 : ndamped == 0),
+                        std::string("U2-11 F-C p = ") + std::to_string(p)
+                        + (absorbing ? ", absorbing faces (" + std::to_string(ndamped)
+                           + " damped elements), against NitscheMass(rho, C, dt/2)"
+                           : ", no absorbing faces, against NitscheMass(rho)")
+                        + (cp == VelocityCoupling::kMomentum ? ", Gamma_mom" : ", Gamma_diag")
+                        + ": u rows identical (" + std::to_string(diff) + " differ)");
+         }
+      }
+   }
+}
+
+/// U2-10 abort: gamma_w outside [1/2, 1].
+int RunAbortP24(const std::string &mode)
+{
+   if (g_rank == 0) { std::cout << "expecting an abort: " << mode << "\n"; }
+   if (mode != "mass-gamma")
+   {
+      if (g_rank == 0) { std::cout << "FAILED: unknown abort mode " << mode << "\n"; }
+      return 1;
+   }
+   std::unique_ptr<Mesh> m(BoxMesh(2, 2, 1, Walls::kDrained));
+   auto box = MakeBox(*m, MPI_COMM_WORLD, 1, false, Walls::kDrained, kKappaW, ZeroG());
+   Vector gw(box->pm->GetNE());
+   gw = 0.4;
+   PoroMass mass(*box->pm, 1, ElementConstants(*box->sample), 1e-3, gw,
+                 VelocityCoupling::kMomentum);
+   if (g_rank == 0) { std::cout << "FAILED: " << mode << " did not abort\n"; }
+   return 1;
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -2451,13 +2724,14 @@ int main(int argc, char *argv[])
          const std::string mode = argv[i + 1];
          if (mode == "interior-only" || mode == "penalty-one-sided") { return RunAbort(mode); }
          if (mode.rfind("well-", 0) == 0 || mode == "source-time") { return RunAbortP23(mode); }
+         if (mode.rfind("mass-", 0) == 0) { return RunAbortP24(mode); }
          return RunAbortP22(mode);
       }
       if (a == "--only" && i + 1 < argc) { only = argv[++i]; }
    }
    if (g_rank == 0)
    {
-      std::cout << "=== Poroelastic P2 (plan rev 3), steps P2.1 to P2.3, on "
+      std::cout << "=== Poroelastic P2 (plan rev 3), steps P2.1 to P2.4, on "
                 << Mpi::WorldSize() << " rank(s)" << (only.empty() ? "" : ", only " + only)
                 << " ===\n";
    }
@@ -2475,6 +2749,8 @@ int main(int argc, char *argv[])
    if (run("U2-8")) { TestU28(); }
    if (run("U2-9")) { TestU29(); }
    if (run("X2-7")) { TestX27(); }
+   if (run("U2-10")) { TestU210(); }
+   if (run("U2-11")) { TestU211(); }
    int nf = num_failed;
    MPI_Allreduce(MPI_IN_PLACE, &nf, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
    if (g_rank == 0)
