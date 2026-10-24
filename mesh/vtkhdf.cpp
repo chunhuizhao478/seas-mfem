@@ -118,7 +118,7 @@ hid_t VTKHDF::EnsureDataset(hid_t f, const std::string &name, hid_t type,
       chunk[0] = chunk_size_bytes / t_bytes;
       if (chunk_to_first_append)
       {
-         chunk[0] = std::min<hsize_t>(chunk[0], std::max<hsize_t>(dims[0], 1024));
+         chunk[0] = FirstAppendChunk(dims[0], chunk[0]);
       }
       const hid_t dcpl = H5Pcreate(H5P_DATASET_CREATE);
       H5Pset_chunk(dcpl, ndims, chunk);
@@ -858,6 +858,57 @@ void VTKHDF::SavePointData(const std::string &name, const std::vector<FP_T> &val
    if (vdim > 1) { dims[1] = vdim; }
    auto offset_total = AppendParVector(point_data, name, values, dims);
    point_data_offsets[name].Update(offset_total.total);
+}
+
+hsize_t VTKHDF::FirstAppendChunk(hsize_t n, hsize_t cmax)
+{
+   if (n <= cmax) { return std::min<hsize_t>(cmax, std::max<hsize_t>(n, 1024)); }
+   // a longer append: the largest divisor of n that fits, so that equal
+   // appends still fill whole chunks; none down to cmax/16: cmax rows
+   for (hsize_t d = cmax; d >= std::max<hsize_t>(cmax / 16, 1); d--)
+   {
+      if (n % d == 0) { return d; }
+   }
+   return cmax;
+}
+
+void VTKHDF::SavePointDataChunks(const std::string &name, hsize_t n,
+                                 const std::vector<const unsigned char*> &bytes,
+                                 const std::vector<size_t> &sizes)
+{
+#if H5_VERSION_GE(1, 10, 3)
+   MFEM_VERIFY(!UsingMpi(), "VTKHDF::SavePointDataChunks: serial files only");
+   MFEM_VERIFY(chunk_to_first_append && algorithm == CompressionAlgorithm::Deflate
+               && compression_level >= 0, "VTKHDF::SavePointDataChunks: needs "
+               "SetChunkToFirstAppend(true) and deflate (the chunks are shuffled "
+               "and deflated at the file's level by the caller)");
+   MFEM_VERIFY(n == last_np, "VTKHDF::SavePointDataChunks: " << n << " values for "
+               << last_np << " points");
+   EnsureGroup("PointData", point_data);
+   Dims dims(1);
+   dims[0] = n;
+   const hid_t d = EnsureDataset(point_data, name, GetTypeID<double>(), dims);
+   // the caller cut the values with the chunk length the dataset has
+   const hid_t dcpl = H5Dget_create_plist(d);
+   hsize_t c = 0;
+   H5Pget_chunk(dcpl, 1, &c);
+   H5Pclose(dcpl);
+   MFEM_VERIFY(c > 0 && n % c == 0 && bytes.size() == n / c && sizes.size() == bytes.size(),
+               "VTKHDF::SavePointDataChunks: '" << name << "' has chunks of " << c
+               << " values; got " << bytes.size() << " chunks for " << n << " values");
+   const hsize_t start = dims[0] - n;
+   for (size_t j = 0; j < bytes.size(); ++j)
+   {
+      hsize_t off = start + j * c;
+      MFEM_VERIFY(H5Dwrite_chunk(d, dxpl, 0, &off, sizes[j], bytes[j]) >= 0,
+                  "VTKHDF::SavePointDataChunks: H5Dwrite_chunk failed for '" << name
+                  << "' at offset " << off);
+   }
+   H5Dclose(d);
+   point_data_offsets[name].Update(n);
+#else
+   MFEM_ABORT("VTKHDF::SavePointDataChunks needs HDF5 1.10.3 or later (H5Dwrite_chunk)");
+#endif
 }
 
 void VTKHDF::Flush()

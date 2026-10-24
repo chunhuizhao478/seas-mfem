@@ -389,8 +389,36 @@ public:
    /// enabled, a new dataset's chunk is no longer than its first append (but
    /// at least 1024 rows), so equal-sized appends fill whole chunks.  The
    /// stored values are the same; only the chunk layout differs.  (SEAS
-   /// profiling plan item 1, Chunhui Zhao 2026-10-17.)
+   /// profiling plan item 1, Chunhui Zhao 2026-10-17.)  A first append
+   /// longer than 0.5 MB gets the largest chunk that divides it
+   /// (FirstAppendChunk), for the same reason.
    void SetChunkToFirstAppend(bool on) { chunk_to_first_append = on; }
+
+   /// @brief Chunk rows SetChunkToFirstAppend gives a dataset whose first
+   /// append has @a n rows, where @a cmax rows make 0.5 MB.
+   ///
+   /// @a n up to @a cmax: max(n, 1024), at most @a cmax.  Longer: the
+   /// largest divisor of @a n that is at most @a cmax, or @a cmax when no
+   /// divisor is at least @a cmax / 16.  (SEAS fault-writer note rev1, W0,
+   /// 2026-10-24.)
+   static hsize_t FirstAppendChunk(hsize_t n, hsize_t cmax);
+
+   /// @brief Append one step of a one-component double point field whose
+   /// chunks the caller has already filtered.
+   ///
+   /// @a bytes[j], of @a sizes[j] bytes, is chunk j of the step's @a n
+   /// values: what HDF5's shuffle and deflate filters (at this file's
+   /// compression level) make of values j c to (j + 1) c - 1, c being the
+   /// dataset's chunk length.  The chunks are written as they are
+   /// (H5Dwrite_chunk), so a reader sees the file SavePointData would have
+   /// written.  Serial files with SetChunkToFirstAppend(true) and deflate
+   /// only; @a n must equal the points of the last SaveMesh and be a multiple
+   /// of the chunk length, FirstAppendChunk(n, 65536) for a new dataset.
+   /// (SEAS fault-writer note rev1, W1, 2026-10-24: compressing the chunks
+   /// on other ranks.)
+   void SavePointDataChunks(const std::string &name, hsize_t n,
+                            const std::vector<const unsigned char*> &bytes,
+                            const std::vector<size_t> &sizes);
 
    /// @brief Save the mesh, appending as a new time step.
    ///

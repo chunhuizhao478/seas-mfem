@@ -12,6 +12,10 @@
 # commit (build_lts_vista.sbatch or build_speed_next_vista.sbatch, through build_vista.sh, writes
 # miniapps/seas/BUILD_COMMIT_VISTA) and whose mesh sha256 is in
 # jobs/vista_profiling/meshes.sha256.
+# V2 (v2_*.sbatch, fault-writer note rev1, Chunhui Zhao 2026-10-24) sets GOLD to V1's kept run of the
+# same layout, and FAULT_COMPARE, one "a|b|flags" per comparison of two fault.vtkhdf files after the
+# variants (@BASE@ = this job's output folder), run on one rank with seas_test_fault_frame_spread
+# --compare a b flags; a difference fails the job.
 export LC_ALL=C LANG=C
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1      # one thread per MPI rank
 ROOT=$(cd "$SLURM_SUBMIT_DIR/../../../.." && pwd)    # repository root
@@ -72,6 +76,15 @@ for spec in "${VARIANTS[@]}"; do
       echo "--- $v stations against the first $TFINAL s of $GOLD (meant to be bitwise equal) ---"
       python3 -I jobs/vista_profiling/compare_stations.py $GOLD $OUT --tmax $TFINAL --time-tol 2e-9 --groups
    fi
+done
+for spec in "${FAULT_COMPARE[@]}"; do
+   IFS='|' read -r A B CFLAGS <<< "$spec"
+   A=${A//@BASE@/$BASE}; B=${B//@BASE@/$BASE}
+   echo "--- fault file $A against $B ${CFLAGS:+($CFLAGS)} ---"
+   [ -x ./seas_test_fault_frame_spread ] && [ ! ./seas_test_fault_frame_spread -ot ./seas_nitsche_dyn_driver ] \
+      || { echo "ERROR: seas_test_fault_frame_spread missing or older than the driver; rerun the build job"; rc_all=2; continue; }
+   [ -f "$A" ] && [ -f "$B" ] || { echo "ERROR: $( [ -f "$A" ] && echo "$B" || echo "$A") missing"; rc_all=2; continue; }
+   ibrun -n 1 -o 0 ./seas_test_fault_frame_spread --compare "$A" "$B" $CFLAGS || rc_all=1
 done
 du -sh $BASE/*
 echo "total $(( $(date +%s) - T0 )) s"

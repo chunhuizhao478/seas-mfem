@@ -489,6 +489,16 @@ public:
    double WaitSeconds() const { return wait_sec_; }
    /// Face-neighbour elements this rank receives at level <= k (all ranks' max).
    int NumHaloElements() const { return nh_; }
+   /// Cluster c's blocks on this rank: patch elements, interior face
+   /// blocks, shared face blocks (the driver's per-rank balance report,
+   /// fault-writer note rev1, L1, Chunhui Zhao 2026-10-24).
+   std::array<long long, 3> ClusterCounts(int c) const
+   {
+      return {static_cast<long long>(C_[c].pe.size()), static_cast<long long>(C_[c].fhi.size()),
+              static_cast<long long>(C_[c].se.size())};
+   }
+   /// Ranks this rank exchanges halo values with.
+   int NumNeighbourRanks() const { return static_cast<int>(groups_.size()); }
 
    /// Post the exchange of the halo clusters 0..top read: u (and v for K_eta).
    void PostHalo(int top, const Vector &u, const Vector *v)

@@ -56,6 +56,26 @@
 // rank 0, a larger file).  Deflate is lossless, so the values are the same
 // either way.  Not with [output] paraview_fault_zfp_tol.  Absent = the deck.
 //
+// Fault frame compression (fault-writer note rev1, W1, Chunhui Zhao
+// 2026-10-24): with --fault-frame-compress spread (default) and deflate on,
+// rank 0 cuts each changing field of a fault frame into the dataset's chunks
+// and sends them to up to nranks - 1 other ranks, which shuffle and deflate
+// them as HDF5 would; rank 0 writes the returned bytes as they are
+// (vtkhdf::FaultHDFStream::SetSpread).  The file is the one rank 0 alone
+// writes (rank0), byte for byte in its chunks; only the compression work
+// moves off rank 0.  The fast fault writer only (--fast-fault-output 1);
+// with no filter, ZFP or one rank, rank 0 writes as before.
+//
+// Rank balance (fault-writer note rev1, L1, Chunhui Zhao 2026-10-24): with
+// --lts rate2 the run ends with one row per rank in
+// <output-dir>/<prefix>_rank_balance.csv: the time in ode.Step after step 1,
+// the halo wait, the non-wait time (their difference), the step loop's
+// time outside ode.Step, the fault time, and the work counts (patch element
+// kicks, tets, fault-face sides, halo values; per cluster tets, patch
+// elements, interior and shared face blocks) with the node name.  The log
+// gives max/mean of each, their correlation with the non-wait time, and a
+// least-squares fit non-wait = a kicks + b sides + c (8 ranks or more).
+//
 // Setup phases (speed-next S1, Chunhui Zhao 2026-10-20): before step 1 the
 // log prints the wall time of each setup phase, max and mean over the ranks
 // (SetupTimer; one reduction, no barrier), and (2026-10-22) each rank's
@@ -441,16 +461,19 @@ class FaultVTKHDFOutput
 public:
    /// fast: plan item 1 (vtkhdf::FaultHDFStream: same file, less work per
    /// frame; param_a and param_Dc written once); else the SAFS writer.
+   /// spread (fast only): the frames' deflate on the other ranks
+   /// (FaultHDFStream::SetSpread).
    FaultVTKHDFOutput(NitscheWaveOperator &op, ParMesh &pmesh, int order,
                      const std::string &dir,
                      ParaViewHDFDataCollection::HDFCompression alg, double param,
-                     bool fast = true)
+                     bool fast = true, bool spread = false)
       : op_(op), E_(op.Elasticity()), dir_(dir), fe_(order, BasisType::GaussLobatto),
         fast_(fast)
    {
       state_.compression_alg = alg;
       state_.compression_param = param;
       stream_.SetCompression(alg, param);
+      stream_.SetSpread(spread);
       nbf_ = E_.GetNbfPerFace();
       // the face basis must be the one the fault DOFs are nodal values of
       const IntegrationRule &nir = E_.GetFaceQuadrature()->GetNodalRule();
@@ -638,6 +661,13 @@ public:
    /// fast writer only: gather and HDF5 write seconds on this rank
    double GatherSeconds() const { return stream_.GatherSeconds(); }
    double WriteSeconds() const { return stream_.WriteSeconds(); }
+   /// fast writer, spread compression: on, helper ranks, chunk values, rank
+   /// 0's scatter-to-last-chunk seconds, this rank's compress2 seconds
+   bool SpreadActive() const { return stream_.SpreadActive(); }
+   int SpreadHelpers() const { return stream_.SpreadHelpers(); }
+   long long ChunkValues() const { return stream_.ChunkValues(); }
+   double SpreadSeconds() const { return stream_.SpreadSeconds(); }
+   double CompressSeconds() const { return stream_.CompressSeconds(); }
 
 private:
    /// sub-triangles of the 6 corners (0,1,2 vertices; 3,4,5 midpoints of
@@ -663,6 +693,157 @@ private:
 };
 #endif // MFEM_USE_HDF5
 
+/// Per-rank balance report (header, "Rank balance"): collective.  Every rank
+/// sends its stepping times and work counts to rank 0, which writes one row
+/// per rank to @a csv and logs how the work counts follow the time.
+void RankBalanceReport(const NitscheLtsRun &run, const std::vector<int> &cl, int ne,
+                       double step_sec, double step1_sec, double loop_sec, double fault_sec,
+                       double fault_sides, const std::string &csv)
+{
+   const NitscheLtsBlocks &B = run.Blocks();
+   const int nc = run.NumClusters();
+   const int nranks = Mpi::WorldSize();
+   // per rank: 11 scalars, then per cluster tets, patch elements, interior
+   // face blocks, shared face blocks
+   enum { kStep, kStep1, kWait, kLoop, kFault, kKicks, kTets, kSides, kHalo, kNbr, kRounds, kN };
+   const int nv = kN + 4 * nc;
+   std::vector<double> v(nv, 0.0);
+   v[kStep] = step_sec;
+   v[kStep1] = step1_sec;
+   v[kWait] = B.WaitSeconds();
+   v[kLoop] = loop_sec;
+   v[kFault] = fault_sec;
+   v[kKicks] = static_cast<double>(run.PatchUpdates());
+   v[kTets] = ne;
+   v[kSides] = fault_sides;
+   v[kHalo] = static_cast<double>(B.ExchangeValues());
+   v[kNbr] = B.NumNeighbourRanks();
+   v[kRounds] = static_cast<double>(B.ExchangeRounds());
+   for (int e = 0; e < ne; e++) { v[kN + cl[e]] += 1.0; }
+   for (int c = 0; c < nc; c++)
+   {
+      const std::array<long long, 3> k = B.ClusterCounts(c);
+      for (int j = 0; j < 3; j++) { v[kN + (j + 1) * nc + c] = static_cast<double>(k[j]); }
+   }
+   constexpr int kName = 64;
+   char name[MPI_MAX_PROCESSOR_NAME + kName] = {0};
+   int len = 0;
+   MPI_Get_processor_name(name, &len);
+   name[kName - 1] = '\0';
+   std::vector<double> all(g_rank == 0 ? static_cast<std::size_t>(nv) * nranks : 0);
+   std::vector<char> names(g_rank == 0 ? static_cast<std::size_t>(kName) * nranks : 0);
+   MPI_Gather(v.data(), nv, MPI_DOUBLE, all.data(), nv, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+   MPI_Gather(name, kName, MPI_CHAR, names.data(), kName, MPI_CHAR, 0, MPI_COMM_WORLD);
+   if (g_rank != 0) { return; }
+
+   const auto at = [&](int r, int j) { return all[static_cast<std::size_t>(r) * nv + j]; };
+   std::ofstream f(csv);
+   f << std::setprecision(10) << "# per-rank balance (fault-writer note rev1, L1): step_sec = "
+     "ode.Step after step 1, wait_sec = WaitHalo (step 1 included), nonwait_sec = step_sec - "
+     "wait_sec, outside_sec = loop_sec - step_sec - step1_sec, kicks = patch elements kicked, "
+     "fault_sides = 2 interior + shared fault faces\n";
+   f << "rank,node,step_sec,step1_sec,wait_sec,nonwait_sec,loop_sec,outside_sec,fault_sec,"
+        "kicks,tets,fault_sides,halo_values,halo_rounds,neighbour_ranks";
+   const char *kind[4] = {"tets", "patch", "iface", "sface"};
+   for (int j = 0; j < 4; j++)
+   {
+      for (int c = 0; c < nc; c++) { f << "," << kind[j] << "_c" << c; }
+   }
+   f << "\n";
+   std::vector<double> work(nranks), kicks(nranks), tets(nranks), sides(nranks);
+   for (int r = 0; r < nranks; r++)
+   {
+      work[r] = at(r, kStep) - at(r, kWait);
+      kicks[r] = at(r, kKicks);
+      tets[r] = at(r, kTets);
+      sides[r] = at(r, kSides);
+      f << r << "," << &names[static_cast<std::size_t>(r) * kName] << "," << at(r, kStep) << ","
+        << at(r, kStep1) << "," << at(r, kWait) << "," << work[r] << "," << at(r, kLoop) << ","
+        << at(r, kLoop) - at(r, kStep) - at(r, kStep1) << "," << at(r, kFault) << ","
+        << static_cast<long long>(kicks[r]) << "," << static_cast<long long>(tets[r]) << ","
+        << static_cast<long long>(sides[r]) << "," << static_cast<long long>(at(r, kHalo)) << ","
+        << static_cast<long long>(at(r, kRounds)) << "," << static_cast<long long>(at(r, kNbr));
+      for (int j = kN; j < nv; j++) { f << "," << static_cast<long long>(at(r, j)); }
+      f << "\n";
+   }
+   // max / mean, the correlation of each count with the non-wait time, and
+   // the least-squares fit work = a kicks + b sides + c
+   const auto mean = [&](const std::vector<double> &x)
+   {
+      double s = 0.0;
+      for (double y : x) { s += y; }
+      return s / x.size();
+   };
+   const auto maxmean = [&](const std::vector<double> &x)
+   {
+      return *std::max_element(x.begin(), x.end()) / std::max(mean(x), 1e-300);
+   };
+   const auto corr = [&](const std::vector<double> &x, const std::vector<double> &y)
+   {
+      const double mx = mean(x), my = mean(y);
+      double sxy = 0.0, sxx = 0.0, syy = 0.0;
+      for (std::size_t i = 0; i < x.size(); i++)
+      {
+         sxy += (x[i] - mx) * (y[i] - my);
+         sxx += (x[i] - mx) * (x[i] - mx);
+         syy += (y[i] - my) * (y[i] - my);
+      }
+      return (sxx > 0.0 && syy > 0.0) ? sxy / std::sqrt(sxx * syy) : 0.0;
+   };
+   std::cout << std::setprecision(4) << "  rank balance (" << csv << "): max/mean non-wait "
+             << maxmean(work) << ", tets " << maxmean(tets) << ", patch kicks " << maxmean(kicks)
+             << ", fault sides " << maxmean(sides) << "; correlation of non-wait with tets "
+             << corr(work, tets) << ", patch kicks " << corr(work, kicks) << ", fault sides "
+             << corr(work, sides) << "\n";
+   if (nranks >= 8)
+   {
+      // normal equations of [kicks sides 1] x = work, in units scaled to ~1
+      const double sk = std::max(mean(kicks), 1e-300), ss = std::max(mean(sides), 1e-300);
+      DenseMatrix A(3, 3);
+      Vector rhs(3), x(3);
+      A = 0.0;
+      rhs = 0.0;
+      for (int r = 0; r < nranks; r++)
+      {
+         const double row[3] = {kicks[r] / sk, sides[r] / ss, 1.0};
+         for (int i = 0; i < 3; i++)
+         {
+            rhs(i) += row[i] * work[r];
+            for (int j = 0; j < 3; j++) { A(i, j) += row[i] * row[j]; }
+         }
+      }
+      if (std::abs(A.Det()) > 1e-12 * std::pow(A.MaxMaxNorm(), 3))
+      {
+         DenseMatrixInverse(A).Mult(rhs, x);
+         const double mw = mean(work);
+         double res = 0.0, tot = 0.0;
+         for (int r = 0; r < nranks; r++)
+         {
+            const double fit = x(0) * kicks[r] / sk + x(1) * sides[r] / ss + x(2);
+            res += (work[r] - fit) * (work[r] - fit);
+            tot += (work[r] - mw) * (work[r] - mw);
+         }
+         std::cout << "  rank balance fit: non-wait = a kicks + b sides + c with a = "
+                   << 1e6 * x(0) / sk << " us per patch kick, b = " << 1e3 * x(1) / ss
+                   << " ms per fault side, c = " << x(2) << " s; R^2 "
+                   << (tot > 0.0 ? 1.0 - res / tot : 0.0) << "\n";
+      }
+      else { std::cout << "  rank balance fit: singular (the counts do not vary apart)\n"; }
+   }
+   std::vector<int> order(nranks);
+   for (int r = 0; r < nranks; r++) { order[r] = r; }
+   std::sort(order.begin(), order.end(), [&](int a, int b) { return work[a] > work[b]; });
+   std::cout << "  slowest ranks (non-wait s, tets, patch kicks, fault sides, node):";
+   for (int i = 0; i < std::min(nranks, 3); i++)
+   {
+      const int r = order[i];
+      std::cout << " r" << r << " " << work[r] << " " << static_cast<long long>(tets[r]) << " "
+                << static_cast<long long>(kicks[r]) << " " << static_cast<long long>(sides[r]) << " "
+                << &names[static_cast<std::size_t>(r) * kName] << (i + 1 < std::min(nranks, 3) ? ";" : "");
+   }
+   std::cout << "\n";
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -686,6 +867,7 @@ int main(int argc, char *argv[])
                       " [--station-flush-every n] [--fast-fault 0|1]"
                       " [--fused-spmv 0|1] [--dense-blocks 0|1] [--fault-weight w]"
                       " [--fast-fault-output 0|1] [--paraview-fault-deflate-level n|none]"
+                      " [--fault-frame-compress spread|rank0]"
                       " [--lts-report 0|1]"
                       " [--lts-report-cap n] [--lts-report-ranks a,b,...]"
                       " [--lts off|rate2] [--lts-cap n] [--lts-fault-buffer n]"
@@ -736,6 +918,10 @@ int main(int argc, char *argv[])
    MFEM_VERIFY(fault_deflate.empty() || fault_deflate == "none"
                || (fault_deflate.size() == 1 && fault_deflate[0] >= '0' && fault_deflate[0] <= '9'),
                "--paraview-fault-deflate-level " << fault_deflate << ": expected 0..9 or none");
+   // fault-writer note rev1, W1 (header, "Fault frame compression")
+   const std::string fault_compress = ArgStr(argc, argv, "--fault-frame-compress", "spread");
+   MFEM_VERIFY(fault_compress == "spread" || fault_compress == "rank0",
+               "--fault-frame-compress " << fault_compress << ": expected spread or rank0");
    const real_t fault_weight = ArgReal(argc, argv, "--fault-weight", kDefaultFaultWeight);
    const int lts_report = ArgInt(argc, argv, "--lts-report", 0);
    const int lts_report_cap = ArgInt(argc, argv, "--lts-report-cap", 4);
@@ -1870,7 +2056,8 @@ int main(int argc, char *argv[])
          param = ocfg.paraview_fault_deflate_level;
       }
       pv = std::make_unique<FaultVTKHDFOutput>(op, pmesh, p, out_dir, alg, param,
-                                               fast_fault_output != 0);
+                                               fast_fault_output != 0,
+                                               fault_compress == "spread");
       if (g_rank == 0)
       {
          std::cout << "  fault ParaView output every " << pv_every << " steps (" << pv_every * dt
@@ -1881,7 +2068,13 @@ int main(int argc, char *argv[])
             std::cout << (alg == ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy
                           ? "ZFP accuracy " : "deflate level ") << param;
          }
-         std::cout << ", at most " << ocfg.max_snapshots << " snapshots\n";
+         std::cout << ", at most " << ocfg.max_snapshots << " snapshots";
+         if (fast_fault_output != 0 && param >= 0.0
+             && alg == ParaViewHDFDataCollection::HDFCompression::Deflate)
+         {
+            std::cout << ", --fault-frame-compress " << fault_compress;
+         }
+         std::cout << "\n";
       }
 #endif
    }
@@ -2014,6 +2207,7 @@ int main(int argc, char *argv[])
    double step_sec = 0.0, step1_sec = 0.0, fault_sec1 = 0.0;
    long lts_next_log = log_every;   // LTS: log at the first sync point from here
    bool station_signal_seen = false;
+   const auto loop0 = std::chrono::steady_clock::now();
    for (long s = 1; s <= nsteps; s++)
    {
       real_t h = dt;
@@ -2132,6 +2326,9 @@ int main(int argc, char *argv[])
          (void)rho;
       }
    }
+   // this rank's whole step loop (stations, frames, logs included)
+   const double loop_sec = std::chrono::duration<double>(std::chrono::steady_clock::now()
+                                                         - loop0).count();
    if (stations) { stations->Close(); }
    if (mon && g_rank == 0)
    {
@@ -2155,6 +2352,13 @@ int main(int argc, char *argv[])
       }
    }
 #ifdef MFEM_USE_HDF5
+   // the slowest helper's deflate time (collective: pv exists on every rank)
+   double pv_compress_max = 0.0;
+   if (pv)
+   {
+      pv_compress_max = pv->CompressSeconds();
+      MPI_Allreduce(MPI_IN_PLACE, &pv_compress_max, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+   }
    if (pv && g_rank == 0)
    {
       std::cout << std::setprecision(6) << "  fault ParaView output: " << pv->Frames()
@@ -2164,7 +2368,15 @@ int main(int argc, char *argv[])
                 << (pv->Frames() ? pv->PackSeconds() / pv->Frames() : 0.0)
                 << ", gather + HDF write "
                 << (pv->Frames() ? (pv->Seconds() - pv->PackSeconds()) / pv->Frames() : 0.0);
-      if (pv->Fast() && pv->Frames())
+      if (pv->Fast() && pv->Frames() && pv->SpreadActive())
+      {
+         std::cout << " = gather " << pv->GatherSeconds() / pv->Frames() << " + spread "
+                   << pv->SpreadSeconds() / pv->Frames() << " + write "
+                   << pv->WriteSeconds() / pv->Frames() << "; deflate on " << pv->SpreadHelpers()
+                   << " ranks in chunks of " << pv->ChunkValues() << " values, slowest "
+                   << pv_compress_max / pv->Frames() << " s/frame";
+      }
+      else if (pv->Fast() && pv->Frames())
       {
          std::cout << " = gather " << pv->GatherSeconds() / pv->Frames() << " + write "
                    << pv->WriteSeconds() / pv->Frames();
@@ -2254,6 +2466,12 @@ int main(int argc, char *argv[])
          std::cout << std::setprecision(4) << "  fault work: " << 1e3 * fmx / ns
                    << " ms/step on the busiest rank; cost per step " << 1e6 * c_tet << " us per tet, "
                    << 1e6 * c_side << " us per fault-face side (w = " << c_side / c_tet << " tets)\n";
+      }
+      if (lts_run)
+      {
+         RankBalanceReport(*lts_run, lts_cl, pmesh.GetNE(), step_sec, step1_sec, loop_sec, fsec,
+                           2.0 * el.FaultFaceOpsInterior() + el.FaultFaceOpsShared(),
+                           out_dir + "/" + prefix + "_rank_balance.csv");
       }
    }
    const real_t wall = std::chrono::duration<real_t>(std::chrono::steady_clock::now() - wall0).count();

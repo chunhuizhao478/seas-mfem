@@ -52,11 +52,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <climits>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include <sys/stat.h>
+#include <zlib.h>   // FaultHDFStream::SetSpread: the helpers' deflate
 
 #ifndef MFEM_USE_HDF5
 #error "fault_vtkhdf_writer.hpp requires MFEM_USE_HDF5=YES.  Either enable HDF5 in config/config.mk and rebuild MFEM, or use Phase 1's binary VTU path (the default in this build)."
@@ -332,6 +334,17 @@ inline void WriteFaultPackHdf(FaultHDFState &state,
 /// The values, point order, field names and step layout are otherwise those
 /// of WriteFaultPackHdf with the same filter.  Collective; the file lives on
 /// rank 0.
+///
+/// SetSpread(true) (fault-writer note rev1, W1, Chunhui Zhao 2026-10-24):
+/// with deflate on and more than one rank, rank 0 no longer compresses the
+/// changing fields alone.  It cuts each field's step into the dataset's
+/// chunks (VTKHDF::FirstAppendChunk), scatters them to up to nranks - 1
+/// helper ranks, each helper applies HDF5's shuffle and deflate (zlib
+/// compress2 at the file's level) to its chunks, and rank 0 writes the
+/// returned bytes with VTKHDF::SavePointDataChunks.  The file holds the
+/// bytes HDF5's own filters would write; only the work moves.  When the
+/// step has no chunk length that divides it (FirstAppendChunk), the frame
+/// stays on rank 0 as without the option.
 class FaultHDFStream
 {
 public:
@@ -342,6 +355,10 @@ public:
       alg_ = alg;
       param_ = param;
    }
+
+   /// Compress the changing fields on helper ranks (see the class comment).
+   /// Call before the first Write, with the same value on every rank.
+   void SetSpread(bool on) { spread_ = on; }
 
    void Write(const std::string &prefix, real_t time, const vtu::LocalFaultPack &local,
               const std::vector<char> &constant, int rank, int nranks
@@ -379,7 +396,17 @@ public:
 #endif
          gather_sec_ += Now_() - t0;
          if (rank == 0) { Open_(prefix, g); }
-         if (rank == 0) { Save_(time, g.field_arrays); }
+#ifdef MFEM_USE_MPI
+         if (par)
+         {
+            SpreadSetup_(rank, nranks, comm);
+            Store_(time, g.field_arrays, rank, nranks, comm);
+         }
+         else
+#endif
+         {
+            if (rank == 0) { Save_(time, g.field_arrays); }
+         }
       }
       else
       {
@@ -434,7 +461,7 @@ public:
                }
             }
             gather_sec_ += Now_() - t0;
-            if (rank == 0) { Save_(time, arrays_); }
+            Store_(time, arrays_, rank, nranks, comm);
          }
 #endif
       }
@@ -445,11 +472,31 @@ public:
    /// Seconds in the gather (all ranks) and in the HDF5 write (rank 0).
    double GatherSeconds() const { return gather_sec_; }
    double WriteSeconds() const { return write_sec_; }
+   /// SetSpread: whether the frames go through the helpers (known after the
+   /// first Write), how many helpers, the chunk length (values); seconds from
+   /// the scatter to the last compressed chunk back on rank 0 (rank 0), and
+   /// this rank's seconds in compress2 (helpers).
+   bool SpreadActive() const { return spread_on_; }
+   int SpreadHelpers() const { return helpers_; }
+   long long ChunkValues() const { return chunk_; }
+   double SpreadSeconds() const { return spread_sec_; }
+   double CompressSeconds() const { return compress_sec_; }
 
 private:
    static double Now_()
    {
       return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+   }
+
+   /// HDF5's shuffle filter for 8-byte values: byte b of value i to
+   /// position b n + i.
+   static void Shuffle8_(const unsigned char *in, std::size_t nbytes, unsigned char *out)
+   {
+      const std::size_t n = nbytes / 8;
+      for (std::size_t i = 0; i < n; i++)
+      {
+         for (std::size_t b = 0; b < 8; b++) { out[b * n + i] = in[8 * i + b]; }
+      }
    }
 
    /// Rank 0: the mesh and the file, with the filter mapping of
@@ -482,6 +529,19 @@ private:
       ppc_ = GlobGeometryRefiner.Refine(Geometry::TRIANGLE, 1, 1)->RefPts.GetNPoints();
    }
 
+   /// Rank 0: field k's per-cell values at the cells' points, as one step.
+   void SaveCells_(int k, const std::vector<double> &a)
+   {
+      MFEM_VERIFY(static_cast<int>(a.size()) == ncell_total_, "FaultHDFStream: field '"
+                  << names_[k] << "' has " << a.size() << " cells, the mesh " << ncell_total_);
+      pts_.resize(static_cast<std::size_t>(ppc_) * a.size());
+      for (std::size_t c = 0; c < a.size(); c++)
+      {
+         for (int i = 0; i < ppc_; i++) { pts_[ppc_ * c + i] = a[c]; }
+      }
+      file_->SavePointData<double>(names_[k], pts_, 1);
+   }
+
    /// Rank 0: one step.  arrays[k] = per-cell values of field k (constant
    /// fields are read at the first frame only).
    void Save_(real_t time, const std::vector<std::vector<double>> &arrays)
@@ -491,20 +551,195 @@ private:
       for (int k : order_)
       {
          if (frames_ > 0 && constant_[k]) { continue; }
-         const std::vector<double> &a = arrays[k];
-         MFEM_VERIFY(static_cast<int>(a.size()) == ncell_total_, "FaultHDFStream: field '"
-                     << names_[k] << "' has " << a.size() << " cells, the mesh " << ncell_total_);
-         pts_.resize(static_cast<std::size_t>(ppc_) * a.size());
-         for (std::size_t c = 0; c < a.size(); c++)
-         {
-            for (int i = 0; i < ppc_; i++) { pts_[ppc_ * c + i] = a[c]; }
-         }
-         file_->SavePointData<double>(names_[k], pts_, 1);
+         SaveCells_(k, arrays[k]);
       }
       file_->UpdateSteps(time);
       file_->Flush();
       write_sec_ += Now_() - t0;
    }
+
+#ifdef MFEM_USE_MPI
+   /// Collective, at the first frame: rank 0 decides whether the frames go
+   /// through the helpers and tells the others the chunk geometry.
+   void SpreadSetup_(int rank, int nranks, MPI_Comm comm)
+   {
+      long long v[4] = {0, 0, 0, 0};   // on, values per field and step, chunk, level
+      if (rank == 0 && spread_ && alg_ == ParaViewHDFDataCollection::HDFCompression::Deflate
+          && param_ >= 0.0 && !var_.empty())
+      {
+         const hsize_t n = static_cast<hsize_t>(ppc_) * static_cast<hsize_t>(ncell_total_);
+         const hsize_t c = VTKHDF::FirstAppendChunk(n, (1024 * 1024 / 2) / sizeof(double));
+         if (n >= 1024 && n % c == 0)
+         {
+            v[0] = 1;
+            v[1] = static_cast<long long>(n);
+            v[2] = static_cast<long long>(c);
+            v[3] = static_cast<long long>(param_);
+         }
+      }
+      MPI_Bcast(v, 4, MPI_LONG_LONG, 0, comm);
+      spread_on_ = v[0] != 0;
+      npts_ = v[1];
+      chunk_ = v[2];
+      level_ = static_cast<int>(v[3]);
+      if (spread_on_)
+      {
+         const long long ntask = static_cast<long long>(var_.size()) * (npts_ / chunk_);
+         helpers_ = static_cast<int>(std::min<long long>(ntask, nranks - 1));
+         MFEM_VERIFY(ntask * chunk_ < INT_MAX, "FaultHDFStream: " << ntask * chunk_
+                     << " values per frame is too many for one MPI_Scatterv");
+      }
+   }
+
+   /// Collective: one step, through the helpers when SpreadSetup_ said so.
+   void Store_(real_t time, const std::vector<std::vector<double>> &arrays, int rank, int nranks,
+               MPI_Comm comm)
+   {
+      if (spread_on_) { SpreadSave_(time, arrays, rank, nranks, comm); }
+      else if (rank == 0) { Save_(time, arrays); }
+   }
+
+   /// Collective: Save_ with the changing fields compressed on the helpers.
+   void SpreadSave_(real_t time, const std::vector<std::vector<double>> &arrays, int rank,
+                    int nranks, MPI_Comm comm)
+   {
+      const double t0 = Now_();
+      const long long m = npts_ / chunk_;   // chunks per field and step
+      const long long ntask = static_cast<long long>(var_.size()) * m;
+      const int K = helpers_;
+      // task t = chunk t % m of field var_[t / m], on rank 1 + t % K
+      const auto ntasks_of = [&](int h) -> long long
+      {
+         return (h < 1 || h > K) ? 0 : (ntask - h + K) / K;
+      };
+      std::vector<int> cnt, dsp;
+      if (rank == 0)
+      {
+         cnt.assign(nranks, 0);
+         dsp.assign(nranks, 0);
+         in_.resize(static_cast<std::size_t>(ntask * chunk_));
+         long long pos = 0;
+         for (int h = 1; h <= K; h++)
+         {
+            dsp[h] = static_cast<int>(pos);
+            for (long long t = h - 1; t < ntask; t += K)
+            {
+               const std::vector<double> &a = arrays[var_[t / m]];
+               MFEM_VERIFY(static_cast<int>(a.size()) == ncell_total_, "FaultHDFStream: field '"
+                           << names_[var_[t / m]] << "' has " << a.size() << " cells, the mesh "
+                           << ncell_total_);
+               const long long p0 = (t % m) * chunk_;
+               for (long long q = 0; q < chunk_; q++) { in_[pos + q] = a[(p0 + q) / ppc_]; }
+               pos += chunk_;
+            }
+            cnt[h] = static_cast<int>(pos) - dsp[h];
+         }
+      }
+      const long long mine = ntasks_of(rank);
+      mine_.resize(static_cast<std::size_t>(mine * chunk_));
+      MPI_Scatterv(rank == 0 ? in_.data() : nullptr, rank == 0 ? cnt.data() : nullptr,
+                   rank == 0 ? dsp.data() : nullptr, MPI_DOUBLE, mine_.data(),
+                   static_cast<int>(mine_.size()), MPI_DOUBLE, 0, comm);
+      // helpers: the bytes HDF5's shuffle + deflate filters make of each chunk
+      const double tc = Now_();
+      const std::size_t cb = static_cast<std::size_t>(chunk_) * sizeof(double);
+      std::vector<unsigned long long> sizes(static_cast<std::size_t>(mine));
+      out_.clear();
+      shuf_.resize(cb);
+      for (long long i = 0; i < mine; i++)
+      {
+         Shuffle8_(reinterpret_cast<const unsigned char *>(mine_.data() + i * chunk_), cb, shuf_.data());
+         uLongf len = compressBound(static_cast<uLong>(cb));
+         const std::size_t at = out_.size();
+         out_.resize(at + len);
+         const int zs = compress2(out_.data() + at, &len, shuf_.data(), static_cast<uLong>(cb), level_);
+         MFEM_VERIFY(zs == Z_OK, "FaultHDFStream: compress2 returned " << zs);
+         out_.resize(at + len);
+         sizes[static_cast<std::size_t>(i)] = len;
+      }
+      compress_sec_ += Now_() - tc;
+      // the sizes, then the bytes, back to rank 0 (helper by helper, in task order)
+      std::vector<int> scnt, sdsp, bcnt, bdsp;
+      std::vector<unsigned long long> all;
+      if (rank == 0)
+      {
+         scnt.assign(nranks, 0);
+         sdsp.assign(nranks, 0);
+         all.resize(static_cast<std::size_t>(ntask));
+         int s = 0;
+         for (int h = 1; h <= K; h++)
+         {
+            sdsp[h] = s;
+            scnt[h] = static_cast<int>(ntasks_of(h));
+            s += scnt[h];
+         }
+      }
+      MPI_Gatherv(sizes.data(), static_cast<int>(mine), MPI_UNSIGNED_LONG_LONG,
+                  rank == 0 ? all.data() : nullptr, rank == 0 ? scnt.data() : nullptr,
+                  rank == 0 ? sdsp.data() : nullptr, MPI_UNSIGNED_LONG_LONG, 0, comm);
+      if (rank == 0)
+      {
+         bcnt.assign(nranks, 0);
+         bdsp.assign(nranks, 0);
+         long long s = 0;
+         std::size_t ti = 0;
+         for (int h = 1; h <= K; h++)
+         {
+            bdsp[h] = static_cast<int>(s);
+            long long b = 0;
+            for (int i = 0; i < scnt[h]; i++) { b += static_cast<long long>(all[ti++]); }
+            bcnt[h] = static_cast<int>(b);
+            s += b;
+            MFEM_VERIFY(s < INT_MAX, "FaultHDFStream: " << s << " compressed bytes per frame "
+                        "is too many for one MPI_Gatherv");
+         }
+         back_.resize(static_cast<std::size_t>(s));
+      }
+      MPI_Gatherv(out_.data(), static_cast<int>(out_.size()), MPI_BYTE,
+                  rank == 0 ? back_.data() : nullptr, rank == 0 ? bcnt.data() : nullptr,
+                  rank == 0 ? bdsp.data() : nullptr, MPI_BYTE, 0, comm);
+      spread_sec_ += Now_() - t0;
+      if (rank != 0) { return; }
+
+      // rank 0: task t's bytes, then the step in Save_'s order
+      std::vector<const unsigned char *> ptr(static_cast<std::size_t>(ntask));
+      std::vector<std::size_t> len(static_cast<std::size_t>(ntask));
+      {
+         std::size_t at = 0, ti = 0;
+         for (int h = 1; h <= K; h++)
+         {
+            for (long long t = h - 1; t < ntask; t += K)
+            {
+               ptr[static_cast<std::size_t>(t)] = back_.data() + at;
+               len[static_cast<std::size_t>(t)] = static_cast<std::size_t>(all[ti]);
+               at += static_cast<std::size_t>(all[ti++]);
+            }
+         }
+      }
+      const double tw = Now_();
+      file_->SaveMesh<double>(*mesh_, /*high_order=*/false, /*ref=*/1);
+      std::vector<const unsigned char *> pb(static_cast<std::size_t>(m));
+      std::vector<std::size_t> pl(static_cast<std::size_t>(m));
+      for (int k : order_)
+      {
+         if (constant_[k])
+         {
+            if (frames_ == 0) { SaveCells_(k, arrays[k]); }
+            continue;
+         }
+         const long long v = std::find(var_.begin(), var_.end(), k) - var_.begin();
+         for (long long j = 0; j < m; j++)
+         {
+            pb[static_cast<std::size_t>(j)] = ptr[static_cast<std::size_t>(v * m + j)];
+            pl[static_cast<std::size_t>(j)] = len[static_cast<std::size_t>(v * m + j)];
+         }
+         file_->SavePointDataChunks(names_[k], static_cast<hsize_t>(npts_), pb, pl);
+      }
+      file_->UpdateSteps(time);
+      file_->Flush();
+      write_sec_ += Now_() - tw;
+   }
+#endif
 
    ParaViewHDFDataCollection::HDFCompression alg_ =
       ParaViewHDFDataCollection::HDFCompression::Deflate;
@@ -518,6 +753,13 @@ private:
    std::unique_ptr<Mesh> mesh_;
    std::unique_ptr<VTKHDF> file_;
    double gather_sec_ = 0.0, write_sec_ = 0.0;
+   // SetSpread
+   bool spread_ = false, spread_on_ = false;
+   int helpers_ = 0, level_ = 0;
+   long long npts_ = 0, chunk_ = 0;
+   std::vector<double> in_, mine_;
+   std::vector<unsigned char> shuf_, out_, back_;
+   double spread_sec_ = 0.0, compress_sec_ = 0.0;
 };
 
 } // namespace vtkhdf

@@ -3263,6 +3263,30 @@ test-station-output: seas_test_station_output
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_station_output
 	rm -rf test_station_output_out
 
+# Fault frames compressed on the other ranks (fault-writer note rev1, W0/W1,
+# Chunhui Zhao 2026-10-24): the chunk length rule and the same fault.vtkhdf
+# with --fault-frame-compress spread and rank0 (FS-1 .. FS-3).
+TEST_FAULT_FRAME_SPREAD_SRC = tests/verification/test_fault_frame_spread.cpp
+TEST_FAULT_FRAME_SPREAD_OBJ = $(TEST_FAULT_FRAME_SPREAD_SRC:.cpp=.o)
+$(TEST_FAULT_FRAME_SPREAD_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                 io/fault_vtkhdf_writer.hpp io/fault_vtu_binary.hpp \
+                                 $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_fault_frame_spread: $(TEST_FAULT_FRAME_SPREAD_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_FRAME_SPREAD_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-fault-frame-spread: seas_test_fault_frame_spread
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_fault_frame_spread
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_fault_frame_spread
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 3 ./seas_test_fault_frame_spread
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_fault_frame_spread
+	rm -rf test_fault_frame_spread_out
+
 # The parallel mesh from parts sent by rank 0 (Chunhui Zhao 2026-10-22,
 # partition-memory report rev1 option D, speed-next S1): the same mesh, DOF
 # numbers and element values as ParMesh(comm, serial mesh, partition)
@@ -3492,6 +3516,7 @@ $(NITSCHE_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
                              dynamic/fault_station_file.hpp \
                              dynamic/station_copy_average.hpp \
                              dynamic/mesh_parts.hpp \
+                             io/fault_vtkhdf_writer.hpp \
                              friction/rate_state_closure.hpp \
                              friction/rate_state_srw_closure.hpp \
                              friction/slip_weakening_closure.hpp \
