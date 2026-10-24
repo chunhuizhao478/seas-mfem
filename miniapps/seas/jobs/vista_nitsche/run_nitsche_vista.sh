@@ -45,8 +45,10 @@ OUT=$SCRATCH/nitsche_benchmarks/${PROB}_${RES:-200m}_p${ORDER}_$SLURM_JOB_ID
 mkdir -p $OUT
 cp "$DECK" $OUT/
 { echo "commit $HEAD"; echo "mesh $MESH $SHA"; echo "deck $DECK"; echo "job $SLURM_JOB_ID nodes $SLURM_JOB_NUM_NODES ranks $SLURM_NTASKS"; } > $OUT/RUN_INFO.txt
-# Memory in use on the first node (MemTotal - MemAvailable, 2 s samples), for the speed record.
-( while :; do echo "$(date +%s) $(awk '/^MemTotal|^MemAvailable/{print $2}' /proc/meminfo | tr '\n' ' ')"; sleep 2; done ) > $OUT/meminfo_kB.log &
+# Memory on the first node, 2 s samples, for the speed record: time MemTotal MemAvailable CommitLimit
+# Committed_AS (kB).  Vista compute nodes use strict overcommit, so allocations fail once
+# Committed_AS reaches CommitLimit (half the RAM), well before MemAvailable runs out.
+( while :; do echo "$(date +%s) $(awk '/^MemTotal|^MemAvailable|^CommitLimit|^Committed_AS/{print $2}' /proc/meminfo | tr '\n' ' ')"; sleep 2; done ) > $OUT/meminfo_kB.log &
 MON=$!
 T0=$(date +%s)
 ibrun ./seas_nitsche_dyn_driver --config "$DECK" --mesh "$MESH" --order $ORDER --tfinal $TFINAL \
@@ -55,6 +57,6 @@ rc=$?
 kill $MON 2>/dev/null; wait $MON 2>/dev/null
 echo "driver exit $rc after $(( $(date +%s) - T0 )) s"; grep "=== done" $OUT/driver.log || tail -20 $OUT/driver.log
 grep -a "time in ode.Step per rank\|fault work:\|fault ParaView output: [0-9]* frames" $OUT/driver.log
-awk '{u=($2-$3)/1048576; if(u>m)m=u; t=$2/1048576} END{printf "first node memory: peak in use %.1f GB of %.1f GB (2 s samples)\n", m, t}' $OUT/meminfo_kB.log
+awk '{u=($2-$3)/1048576; if(u>m)m=u; t=$2/1048576; if($5/1048576>c)c=$5/1048576; l=$4/1048576} END{printf "first node memory: peak in use %.1f GB of %.1f GB, peak committed %.1f of %.1f GiB (2 s samples)\n", m, t, c, l}' $OUT/meminfo_kB.log
 du -sh $OUT
 exit $rc
