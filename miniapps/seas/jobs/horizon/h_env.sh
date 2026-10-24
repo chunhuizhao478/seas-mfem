@@ -35,6 +35,12 @@ export CUDA_MODULE="${CUDA_MODULE:-cuda/13.1}"
 export G0_MODULES="${G0_MODULES:-gcc/15.3.0 ${CUDA_MODULE} ucc/1.9.0 openmpi/5.0.11 nvpl/26.9 cmake/4.4.0}"
 export MODULES="${G0_MODULES}"
 export GPU_ARCH=100
+# MFEM and seas: device code optimized for compute_90 (as on Vista), then
+# assembled to sm_100 machine code at build time.  nvcc 13.0 and 13.1
+# optimizing for compute_100 take hours on some MFEM kernel files (job
+# 67627 hit its 6 h limit in fem/integ/bilininteg_convection_ea.cpp,
+# which takes under a minute for sm_90).  PETSc's hypre stays sm_100.
+export MFEM_CUDA_ARCH="compute_90 -code=sm_100"
 export DEPS_ROOT="${DEPS_ROOT:-${SCRATCH}/seas-gpu-deps}"
 export G0_DEPS_PROVENANCE="${DEPS_ROOT}/build_provenance_cuda.txt"
 export G1_GOLDEN_ROOT="${G1_GOLDEN_ROOT:-${SCRATCH}/seas-gpu-goldens/g0_vista}"
