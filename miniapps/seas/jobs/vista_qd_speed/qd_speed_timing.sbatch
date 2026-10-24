@@ -237,8 +237,8 @@ for MODE in ${MODES}; do
       fi
    fi
    if [ "${MODE}" = hcount ] || [ "${MODE}" = hbytes ]; then
-      if ! grep -q "\[QD-HMAT\] read at" "${OUT}/qd_green.txt"; then
-         echo "ERROR: ${TAG}: no '[QD-HMAT] read at' line: the H file was not read." >&2
+      if ! grep -q "\[QD-HMAT\] read from " "${OUT}/qd_green.txt"; then
+         echo "ERROR: ${TAG}: no '[QD-HMAT] read from' line: the H file was not read." >&2
          overall=1
       fi
       if ! grep -q "\[QD-HMAT\] layout ${MODE#h} " "${OUT}/qd_green.txt"; then
