@@ -45,5 +45,11 @@ export DEPS_ROOT="${DEPS_ROOT:-${SCRATCH}/seas-gpu-deps}"
 export G0_DEPS_PROVENANCE="${DEPS_ROOT}/build_provenance_cuda.txt"
 export G1_GOLDEN_ROOT="${G1_GOLDEN_ROOT:-${SCRATCH}/seas-gpu-goldens/g0_vista}"
 export GREEN_CACHE="${GREEN_CACHE:-${SCRATCH}/seas-qd-green/bp5_prod_p1.bin}"
+# Nsight Systems for the G4 and G3c transfer traces.  The nsys on the
+# compute nodes' PATH (/usr/local/bin, 2025.6.3) aborted all three traces
+# of job 68898 at launch: "Failed to probe the process (sync). Timeout: 2
+# sec", then LogicException.  Use the one in the NVHPC 26.3 SDK, the SDK
+# that ships the cuda/13.1 we build with.
+export NSYS="${NSYS:-/home1/apps/nvidia/Linux_aarch64/26.3/compilers/bin/nsys}"
 echo "Horizon settings: ${G0_MODULES}; sm_${GPU_ARCH}; deps ${DEPS_ROOT};" \
      "goldens ${G1_GOLDEN_ROOT}; G cache ${GREEN_CACHE}"
