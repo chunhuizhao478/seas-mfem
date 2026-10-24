@@ -1,0 +1,36 @@
+commit 2d09c4411292a97c41ed81c2f81bfbd2946ff4c1
+host i614-151.vista.tacc.utexas.edu  nodes 4  ranks 512
+deck tpv104/configs/tpv104_nitsche.toml  mesh tpv104/mesh/tpv104_200m.msh sha256 10cecfd73d0c7cb93cfa188aac08e4a99a6ec81d439a3363bd7175e3a8ae4aa0  order 1  tfinal 12.0  gold tpv104/gold/nitsche-kv0p1_p1_cd_pc_200m_jobid1075919_git81759da/results
+modules: ucc/1.9.0 ucx/1.22.0 cmake/4.1.1 xalt/3.1 TACC gcc/14.2.0 nvpl/26.9 cuda/12.6 openmpi/5.0.5 hypre/2.31.0 metis/5.1.0.3 phdf5/1.14.6 
+=== gts [] 0 -> 1.0 s: driver exit 0, 183 s in the job
+  fault ParaView output: /scratch/10024/zhaochun/nitsche_profiling/lts_tpv104_200m_p1_1081280/gts/fault.vtkhdf, 37928 fault faces x 4 sub-triangles (19135 faces re-wound to nhat); face map vs DOF positions max error 0 m
+  fault ParaView output: 49 frames in /scratch/10024/zhaochun/nitsche_profiling/lts_tpv104_200m_p1_1081280/gts/fault.vtkhdf; on rank 0 10.4569 s (0.213406 s/frame: pack 1.40861e-06, gather + HDF write 0.213405 = gather 0.00373206 + write 0.208286; fast writer)
+  time in ode.Step per rank after step 1: min 36.0475 s, mean 48.7594 s, max 62.7869 s (15.389 ms/step at the max); step 1 1.35146 s (with the operator assembly); fast fault on, fused K/K_eta off, dense blocks on (15192.7 MB over all ranks)
+  fault work: 5.047 ms/step on the busiest rank; cost per step 2.424 us per tet, 1.841 us per fault-face side (w = 0.7594 tets)
+=== done: 4081 steps, t = 1.00024 s; max|V| 3.63094 m/s; max|V|dt/Dc 0.00222482; sigma_n_eff in [1.12752e+08, 1.27675e+08] Pa; sigma_pc in [1.12934e+08, 1.27412e+08] Pa; wall 177.932 s ===
+first node memory: peak in use 186.9 GB of 237.6 GB (2 s samples)
+=== lts [--lts rate2] 0 -> 12.0 s: driver exit 0, 528 s in the job
+  LTS (plan item 7): rate2, 4 clusters (hard cap 4), dt0 = 0.000245096 s; tets per cluster 87075 323474 1079730 976270; ideal 3.8493x; fault (75856 tets) in cluster 0 after 2 clustering(s)
+  partition: multi-constraint (BuildLtsAwarePartition, fault weight w = 0); max/mean overall 1.06, per cluster 1.111 1.051 1.052 1.052, fault tets 1.161
+  LTS: dt0 = 0.000245095696968 s, global dt = 0.000245095696968 s (relative difference 0); fault step dt_F = 0.000245095696968 s
+  fault ParaView output: /scratch/10024/zhaochun/nitsche_profiling/lts_tpv104_200m_p1_1081280/lts/fault.vtkhdf, 37928 fault faces x 4 sub-triangles (19150 faces re-wound to nhat); face map vs DOF positions max error 0 m
+  LTS: 6121 sync intervals of 8 ticks (0.001960765576 s), the fault every 1 tick(s): 48968 fault steps to t = 12.00184609 s
+  LTS: cluster blocks 19464.8 MB over all ranks, built in 0.613356 s (with the first forces)
+  fault ParaView output: 597 frames in /scratch/10024/zhaochun/nitsche_profiling/lts_tpv104_200m_p1_1081280/lts/fault.vtkhdf; on rank 0 196.789 s (0.32963 s/frame: pack 3.23023e-05, gather + HDF write 0.329597 = gather 0.00363627 + write 0.325939; fast writer)
+  time in ode.Step per rank after step 1: min 119.467 s, mean 189.976 s, max 387.337 s (7.91016 ms/step at the max); step 1 0.00173114 s (with the operator assembly); fast fault on, fused K/K_eta off, dense blocks off
+  LTS: 48968 ticks; patch element kicks 105943883944 = 0.438575 of global stepping's per tick; halo rounds 48969 per rank (= ticks + 1 on every rank), 276600529968 values received over all ranks; halo wait max 209.049 s, mean 12.8599 s, largest share of a rank's stepping 0.540251
+  fault work: 0.3575 ms/step on the busiest rank; cost per step 0.748 us per tet, 1.865 us per fault-face side (w = 2.493 tets)
+=== done: 48968 steps, t = 12.0018 s; max|V| 17.5281 m/s; max|V|dt/Dc 0.0107401; sigma_n_eff in [4.59509e+07, 2.36268e+08] Pa; sigma_pc in [4.66401e+07, 2.36178e+08] Pa; wall 524.138 s ===
+first node memory: peak in use 175.8 GB of 237.6 GB (2 s samples)
+=== stations (per quantity: max |a - b| over max |a| of slip, V, tau, sigma_n at that station) ===
+/scratch/10024/zhaochun/nitsche_profiling/lts_tpv104_200m_p1_1081280/gts vs tpv104/gold/nitsche-kv0p1_p1_cd_pc_200m_jobid1075919_git81759da/results: 9 stations, 4081 rows each; 0 bitwise equal as printed; largest difference 1.000e-10 (tpv104_station_x2_0_x3_3.dat V)
+/scratch/10024/zhaochun/nitsche_profiling/lts_tpv104_200m_p1_1081280/lts vs /scratch/10024/zhaochun/nitsche_profiling/lts_tpv104_200m_p1_1081280/gts: 9 stations, 4081 rows each; 0 bitwise equal as printed; largest difference 6.973e-03 (tpv104_station_x2_0_x3_7.5.dat V)
+  slip     1.362e-03 (tpv104_station_x2_0_x3_7.5.dat)
+  V        6.973e-03 (tpv104_station_x2_0_x3_7.5.dat)
+  tau      5.621e-04 (tpv104_station_x2_0_x3_7.5.dat)
+  sigma_n  8.142e-04 (tpv104_station_x2_0_x3_7.5.dat)
+512	/scratch/10024/zhaochun/nitsche_profiling/lts_tpv104_200m_p1_1081280/RUN_INFO.txt
+333M	/scratch/10024/zhaochun/nitsche_profiling/lts_tpv104_200m_p1_1081280/gts
+7.6G	/scratch/10024/zhaochun/nitsche_profiling/lts_tpv104_200m_p1_1081280/lts
+7.0K	/scratch/10024/zhaochun/nitsche_profiling/lts_tpv104_200m_p1_1081280/tpv104_nitsche.toml
+total 712 s

@@ -222,13 +222,10 @@ public:
       }
    }
 
-   /// @brief Write output if adaptive schedule requires it.
-   ///
-   /// Each rank evaluates owned stations from local data — no gather.
-   /// All ranks must call collectively for the write-decision sync.
-   bool Write(real_t time, const Vector &state,
-              const RateStateFaultOperator<ParMesh, 2> &fault,
-              const Vector &traction, real_t global_V_max)
+   /// @brief Whether Write() at @a time writes: the adaptive schedule,
+   /// agreed over the ranks.  Collective.  (GPU plan G4: the TS monitor
+   /// asks first, and copies the state to the host only when it does.)
+   bool WriteDue(real_t time, real_t global_V_max) const
    {
       real_t dt_out = BP5BenchmarkOutput<Mesh>::OutputInterval(global_V_max);
       int should_write =
@@ -237,7 +234,24 @@ public:
       MPI_Allreduce(MPI_IN_PLACE, &should_write, 1, MPI_INT, MPI_MAX,
                     mpi_ctx_.GetComm());
 #endif
-      if (!should_write) { return false; }
+      return should_write != 0;
+   }
+
+   /// @brief Write output if adaptive schedule requires it.
+   ///
+   /// Each rank evaluates owned stations from local data — no gather.
+   /// All ranks must call collectively for the write-decision sync.
+   ///
+   /// @param normal_traction Elastic normal traction from the same
+   ///        evaluation as @a traction, or nullptr when that evaluation used
+   ///        the constant sigma_n (pass SEAS operator's
+   ///        GetFrictionNormalTraction()).
+   bool Write(real_t time, const Vector &state,
+              const RateStateFaultOperator<ParMesh, 2> &fault,
+              const Vector &traction, const Vector *normal_traction,
+              real_t global_V_max)
+   {
+      if (!WriteDue(time, global_V_max)) { return false; }
 
       if (!owned_stations_.empty())
       {
@@ -257,11 +271,21 @@ public:
          // staleness (exp(-psi/a) sensitivity); traction staleness is orders
          // of magnitude smaller.  A full fix would require re-solving the
          // domain at output time.
+         //
+         // The normal traction from the same evaluation enters sigma_n_eff
+         // exactly as in ComputeRHS().  Dropping it is not small:
+         // d(ln V)/d(sigma_n) = -(tau/sigma_n)/(a*sigma_n), about -6 per MPa
+         // at a locked DOF in the BP5 VW core (f = 0.6, a = 0.004,
+         // sigma_n = 25 MPa).
          Vector local_slip, local_theta;
          fault.GetSlip(state, local_slip);
          fault.GetTheta(state, local_theta);
          Vector local_V;
-         fault.RecomputeSlipRate(traction, state, local_V);
+         fault.RecomputeSlipRate(traction, state, local_V, normal_traction);
+         // GPU plan G4: the re-solve runs where the data is; the station
+         // loop below reads V and the traction on the host.
+         local_V.HostRead();
+         traction.HostRead();
          int N = fault.NumNodes();
 
          Vector slip_dip(N), slip_strike(N), V_dip(N), V_strike(N);
@@ -372,10 +396,11 @@ public:
 
    void ForceWrite(real_t time, const Vector &state,
                    const RateStateFaultOperator<ParMesh, 2> &fault,
-                   const Vector &traction, real_t global_V_max)
+                   const Vector &traction, const Vector *normal_traction,
+                   real_t global_V_max)
    {
       last_write_time_ = -1e30;
-      Write(time, state, fault, traction, global_V_max);
+      Write(time, state, fault, traction, normal_traction, global_V_max);
       Flush();
    }
 
