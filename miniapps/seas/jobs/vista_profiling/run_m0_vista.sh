@@ -16,6 +16,9 @@
 # same layout, and FAULT_COMPARE, one "a|b|flags" per comparison of two fault.vtkhdf files after the
 # variants (@BASE@ = this job's output folder), run on one rank with seas_test_fault_frame_spread
 # --compare a b flags; a difference fails the job.
+# V3 (v3_*.sbatch, L2 note rev1, Chunhui Zhao 2026-10-25) marks a variant roundoff when its stations are
+# compared with GOLD's but meant to agree at round-off only (another partition), and needs no
+# FAULT_COMPARE.
 export LC_ALL=C LANG=C
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1      # one thread per MPI rank
 ROOT=$(cd "$SLURM_SUBMIT_DIR/../../../.." && pwd)    # repository root
@@ -72,8 +75,9 @@ for spec in "${VARIANTS[@]}"; do
    grep -a "^ *step [0-9]* t = " $OUT/driver.log | awk '{print "   " $0}'
    awk '{u=($2-$3)/1048576; if(u>m)m=u; t=$2/1048576} END{printf "first node memory: peak in use %.1f GB of %.1f GB (2 s samples)\n", m, t}' $OUT/meminfo_kB.log
    ls -l $OUT/fault.vtkhdf 2>/dev/null | awk '{printf "fault.vtkhdf %.1f MB\n", $5/1e6}'
-   if [ "$COMPARE" = "gold" ]; then
-      echo "--- $v stations against the first $TFINAL s of $GOLD (meant to be bitwise equal) ---"
+   if [ "$COMPARE" = "gold" ] || [ "$COMPARE" = "roundoff" ]; then
+      [ "$COMPARE" = "gold" ] && what="meant to be bitwise equal" || what="meant to agree at round-off"
+      echo "--- $v stations against the first $TFINAL s of $GOLD ($what) ---"
       python3 -I jobs/vista_profiling/compare_stations.py $GOLD $OUT --tmax $TFINAL --time-tol 2e-9 --groups
    fi
 done

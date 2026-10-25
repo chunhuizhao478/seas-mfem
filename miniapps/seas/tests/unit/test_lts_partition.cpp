@@ -8,13 +8,19 @@
 //       the scalar 2^(maxC-cluster) fallback, incl. clamping;
 //   (2) BuildLtsAwarePartition — on a small connected grid: partition in range
 //       [0, nparts), the fault-locality invariant (every fault pair co-located),
-//       the nparts<=1 trivial case, and the scalar-weight fallback.
+//       the nparts<=1 trivial case, and the scalar-weight fallback;
+//   (3) L2 (Chunhui Zhao 2026-10-25): BuildLtsBlockWeights against hand counts,
+//       its rank sums against the patch elements + 2 x interior + shared face
+//       blocks counted from a cut, ComputeLtsBlockBalance by hand, and the
+//       block-weight cut (in range, fault pairs together, a better block
+//       balance than the tet cut on a graded grid).
 
 #include "../../dynamic/lts_partition.hpp"
 
 #include <cmath>
 #include <cstdio>
 #include <set>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -56,6 +62,53 @@ void BuildGrid(int P, int Q, std::vector<int>& xadj, std::vector<int>& adjncy,
          { fault.emplace_back(id(i, seam_col - 1), id(i, seam_col)); }
       }
    }
+}
+// A P×Q grid graded in columns: cluster c holds `width[c]` columns from the
+// left (the finest at the fault seam on the left edge, fault pairs between
+// columns 0 and 1), the coarsest the rest.
+void BuildGradedGrid(int P, int Q, const std::vector<int>& width, std::vector<int>& xadj,
+                     std::vector<int>& adjncy, std::vector<int>& cluster,
+                     std::vector<std::pair<int,int>>& fault)
+{
+   BuildGrid(P, Q, xadj, adjncy, cluster, fault, 1);
+   const int nc = static_cast<int>(width.size());
+   for (int i = 0; i < P; ++i)
+   {
+      for (int j = 0, c = 0, edge = width[0]; j < Q; ++j)
+      {
+         while (j >= edge && c < nc - 1) { ++c; edge += width[c]; }
+         cluster[i * Q + j] = c;
+      }
+   }
+}
+
+// P_c(r) + 2 I_c(r) + S_c(r) counted from the cut, as NitscheLtsBlocks lays
+// out the blocks: flat [c * nparts + r].
+std::vector<long long> CountBlocks(const std::vector<int>& xadj, const std::vector<int>& adjncy,
+                                   const std::vector<int>& cluster, int nc,
+                                   const std::vector<int>& part, int nparts)
+{
+   std::vector<long long> B(static_cast<std::size_t>(nc) * nparts, 0);
+   const int nv = static_cast<int>(cluster.size());
+   for (int v = 0; v < nv; ++v)
+   {
+      std::set<int> patch = {cluster[v]};
+      for (int k = xadj[v]; k < xadj[v + 1]; ++k) { patch.insert(cluster[adjncy[k]]); }
+      for (int c : patch) { B[static_cast<std::size_t>(c) * nparts + part[v]] += 1; }
+      for (int k = xadj[v]; k < xadj[v + 1]; ++k)
+      {
+         const int f = adjncy[k];
+         std::set<int> sides = {cluster[v], cluster[f]};
+         for (int c : sides)
+         {
+            if (part[f] != part[v])
+            { B[static_cast<std::size_t>(c) * nparts + part[v]] += 1; }   // shared
+            else if (v < f)
+            { B[static_cast<std::size_t>(c) * nparts + part[v]] += 2; }   // interior
+         }
+      }
+   }
+   return B;
 }
 }  // namespace
 
@@ -243,6 +296,142 @@ int main()
          CHECK(std::abs(pib2.overall - 1.0) < 1e-12,
                "imb: empty => neutral overall 1");
       }
+   }
+
+   // ---- T8 (L2): block weights against hand counts ----
+   {
+      // element 0 in cluster 1 with neighbours 1, 2 (cluster 1) and 3
+      // (cluster 2), its fourth face on the boundary (the note's example);
+      // element 4 in cluster 3 with four neighbours 5..8 in cluster 3
+      const std::vector<int> xadj   = {0, 3, 4, 5, 6, 10, 11, 12, 13, 14};
+      const std::vector<int> adjncy = {1, 2, 3, 0, 0, 0, 5, 6, 7, 8, 4, 4, 4, 4};
+      const std::vector<int> cluster = {1, 1, 1, 2, 3, 3, 3, 3, 3};
+      const int nc = 4;
+      const std::vector<int> w = BuildLtsBlockWeights(xadj, adjncy, cluster, nc, nullptr);
+      CHECK(w.size() == cluster.size() * nc, "blocks: size nvtxs * num_clusters");
+      auto row = [&](int v) { return std::vector<int>(w.begin() + v * nc, w.begin() + (v + 1) * nc); };
+      CHECK(row(0) == std::vector<int>({0, 4, 2, 0}), "blocks: seam tet w_1 = 1 + 3, w_2 = 1 + 1");
+      CHECK(row(1) == std::vector<int>({0, 2, 0, 0}), "blocks: one face inside cluster 1 -> 2");
+      CHECK(row(3) == std::vector<int>({0, 2, 2, 0}), "blocks: cluster-2 tet facing cluster 1");
+      CHECK(row(4) == std::vector<int>({0, 0, 0, 5}), "blocks: deep tet = 1 + 4");
+      // cell_cost: x 100, plus round(100 x) on the own cluster; <= 0 adds nothing
+      std::vector<double> extra(cluster.size(), 0.0);
+      extra[0] = 0.5;
+      extra[3] = -2.0;
+      const std::vector<int> wc = BuildLtsBlockWeights(xadj, adjncy, cluster, nc, &extra);
+      CHECK(std::vector<int>(wc.begin(), wc.begin() + nc) == std::vector<int>({0, 450, 200, 0}),
+            "blocks: cell_cost 0.5 -> 100 w + 50 on the own cluster");
+      CHECK(std::vector<int>(wc.begin() + 3 * nc, wc.begin() + 4 * nc)
+            == std::vector<int>({0, 200, 200, 0}), "blocks: negative cell_cost adds nothing");
+      bool threw = false;
+      try
+      {
+         const std::vector<int> bad = {1, 2, 3, 9, 0, 0, 5, 6, 7, 8, 4, 4, 4, 4};
+         BuildLtsBlockWeights(xadj, bad, cluster, nc, nullptr);
+      }
+      catch (const std::runtime_error&) { threw = true; }
+      CHECK(threw, "blocks: a neighbour out of range throws");
+   }
+
+   // ---- T9 (L2): rank sums of the block weights = P + 2I + S of the cut ----
+   {
+      std::vector<int> xadj, adjncy, cluster;
+      std::vector<std::pair<int,int>> fault;
+      BuildGradedGrid(12, 16, {2, 3, 4, 7}, xadj, adjncy, cluster, fault);
+      const int nc = 4, nparts = 5, nv = 12 * 16;
+      const std::vector<int> w = BuildLtsBlockWeights(xadj, adjncy, cluster, nc, nullptr);
+      bool ok = true;
+      for (int cut = 0; cut < 2; ++cut)
+      {
+         std::vector<int> part(nv);
+         for (int v = 0; v < nv; ++v)
+         { part[v] = cut == 0 ? (v * 7 + v / 5) % nparts : ((v / 16) / 3 + (v % 16) / 6) % nparts; }
+         const std::vector<long long> B = CountBlocks(xadj, adjncy, cluster, nc, part, nparts);
+         for (int c = 0; c < nc; ++c)
+         {
+            for (int r = 0; r < nparts; ++r)
+            {
+               long long sum = 0;
+               for (int v = 0; v < nv; ++v) { if (part[v] == r) { sum += w[v * nc + c]; } }
+               if (sum != B[static_cast<std::size_t>(c) * nparts + r]) { ok = false; }
+            }
+         }
+      }
+      CHECK(ok, "blocks: per rank and cluster, sum w_c = patch + 2 interior + shared blocks");
+   }
+
+   // ---- T10 (L2): ComputeLtsBlockBalance by hand ----
+   {
+      // rank 0: W_0 = 2, W_1 = 1; rank 1: W_0 = 0, W_1 = 1.  M_0 = 2, M_1 = 3,
+      // interval = M_0 + M_1 = 5; at the mean 1 + 2 = 3.
+      const std::vector<int> w = {2, 0, 0, 1, 0, 1};
+      const std::vector<int> part = {0, 1, 0};
+      const LtsBlockBalance b = ComputeLtsBlockBalance(w, 2, part, 2);
+      CHECK(b.per_cluster.size() == 2 && std::abs(b.per_cluster[0] - 2.0) < 1e-12
+            && std::abs(b.per_cluster[1] - 1.0) < 1e-12, "balance: per cluster 2 and 1");
+      CHECK(std::abs(b.tick_model - 5.0 / 3.0) < 1e-12, "balance: tick model 5/3");
+      // one element per cluster on different ranks: M_0 = 1, M_1 = 1, at the
+      // mean 0.5 + 1
+      const LtsBlockBalance e = ComputeLtsBlockBalance({1, 0, 0, 1}, 2, {0, 1}, 2);
+      CHECK(std::abs(e.per_cluster[0] - 2.0) < 1e-12 && std::abs(e.tick_model - 4.0 / 3.0) < 1e-12,
+            "balance: one element per cluster on different ranks");
+      bool threw = false;
+      try { ComputeLtsBlockBalance(w, 2, {0, 2, 0}, 2); }
+      catch (const std::runtime_error&) { threw = true; }
+      CHECK(threw, "balance: a rank out of range throws");
+      threw = false;
+      try { ComputeLtsBlockBalance(w, 2, {0, 1}, 2); }
+      catch (const std::runtime_error&) { threw = true; }
+      CHECK(threw, "balance: weights of the wrong size throw");
+   }
+
+   // ---- T11 (L2): the block-weight cut ----
+   {
+      std::vector<int> xadj, adjncy, cluster;
+      std::vector<std::pair<int,int>> fault;
+      BuildGradedGrid(40, 40, {2, 4, 8, 26}, xadj, adjncy, cluster, fault);
+      const int nc = 4, nparts = 8, nv = 1600;
+      LtsPartitionOptions tets, blocks;
+      blocks.block_weights = true;
+      std::vector<int> pt, pb;
+      BuildLtsAwarePartition(nv, xadj, adjncy, cluster, nc, nparts, nullptr, fault, tets, pt);
+      CHECK(BuildLtsAwarePartition(nv, xadj, adjncy, cluster, nc, nparts, nullptr, fault,
+                                   blocks, pb), "block cut succeeded");
+      bool in_range = static_cast<int>(pb.size()) == nv;
+      for (int r : pb) { if (r < 0 || r >= nparts) { in_range = false; } }
+      CHECK(in_range, "block cut: every part id in [0, nparts)");
+      CHECK(VerifyLtsPartitionFaultLocality(fault, pb) == 0, "block cut: fault pairs together");
+      CHECK(std::set<int>(pb.begin(), pb.end()).size() == static_cast<std::size_t>(nparts),
+            "block cut: every rank gets elements");
+      CHECK(pb != pt, "block cut differs from the tet cut");
+      const std::vector<int> w = BuildLtsBlockWeights(xadj, adjncy, cluster, nc, nullptr);
+      const LtsBlockBalance bt = ComputeLtsBlockBalance(w, nc, pt, nparts);
+      const LtsBlockBalance bb = ComputeLtsBlockBalance(w, nc, pb, nparts);
+      double mt = 0.0, mb = 0.0;
+      for (int c = 0; c < nc; ++c)
+      {
+         mt = std::max(mt, bt.per_cluster[c]);
+         mb = std::max(mb, bb.per_cluster[c]);
+      }
+      std::printf("  T11 graded 40x40 grid, 8 parts: block work max/mean over clusters "
+                  "tets %.3f, blocks %.3f; tick model tets %.3f, blocks %.3f\n",
+                  mt, mb, bt.tick_model, bb.tick_model);
+      CHECK(bb.tick_model < bt.tick_model, "block cut: lower tick model on block work");
+      CHECK(mb < mt, "block cut: lower worst block imbalance per cluster");
+      // with a cell_cost (the driver's --fault-weight term) the cut still runs
+      std::vector<double> extra(nv, 0.0);
+      for (const auto& pr : fault) { extra[pr.first] += 1.0; extra[pr.second] += 1.0; }
+      std::vector<int> pf;
+      CHECK(BuildLtsAwarePartition(nv, xadj, adjncy, cluster, nc, nparts, &extra, fault,
+                                   blocks, pf)
+            && VerifyLtsPartitionFaultLocality(fault, pf) == 0,
+            "block cut with cell_cost: succeeded, fault pairs together");
+      LtsPartitionOptions both = blocks;
+      both.scalar_weights = true;
+      bool threw = false;
+      try { BuildLtsAwarePartition(nv, xadj, adjncy, cluster, nc, nparts, nullptr, fault, both, pf); }
+      catch (const std::runtime_error&) { threw = true; }
+      CHECK(threw, "block_weights with scalar_weights throws");
    }
 
    std::printf("test_lts_partition: %d checks, %d failures\n", g_checks, g_fails);

@@ -76,6 +76,19 @@
 // gives max/mean of each, their correlation with the non-wait time, and a
 // least-squares fit non-wait = a kicks + b sides + c (8 ranks or more).
 //
+// Partition weights (L2 note rev1, Chunhui Zhao 2026-10-25): with --lts
+// rate2 on more than one part, --lts-partition-weight tets (default) gives
+// each tet weight 1 in its own cluster's METIS constraint, as before; blocks
+// gives constraint c of a tet the dense blocks of cluster c's sweep it
+// carries (its diagonal block when it is in the patch of c, one unit per
+// face with a side in c; BuildLtsBlockWeights), so each cluster's block work
+// is balanced per rank instead of its tets.  --fault-weight w adds 100 w per
+// fault-face side on the tet's own cluster with either weight.  The
+// partition line prints the block work per cluster (max/mean) and the tick
+// model of the cut made, whichever weights made it.  blocks changes only the
+// cut, so the stations move at round-off; the mesh part files record the
+// weight.
+//
 // Setup phases (speed-next S1, Chunhui Zhao 2026-10-20): before step 1 the
 // log prints the wall time of each setup phase, max and mean over the ranks
 // (SetupTimer; one reduction, no barrier), and (2026-10-22) each rank's
@@ -871,6 +884,7 @@ int main(int argc, char *argv[])
                       " [--lts-report 0|1]"
                       " [--lts-report-cap n] [--lts-report-ranks a,b,...]"
                       " [--lts off|rate2] [--lts-cap n] [--lts-fault-buffer n]"
+                      " [--lts-partition-weight tets|blocks]"
                       " [--lts-same-step 0|1] [--mesh-setup rank0|every-rank]"
                       " [--mesh-parts-out d --mesh-parts-n N] [--mesh-parts d]\n";
       }
@@ -948,6 +962,11 @@ int main(int argc, char *argv[])
    const bool lts_same = ArgInt(argc, argv, "--lts-same-step", 0) != 0;
    const int lts_buffer = ArgInt(argc, argv, "--lts-fault-buffer", 3);
    MFEM_VERIFY(lts_buffer >= 0, "--lts-fault-buffer " << lts_buffer << ": expected >= 0");
+   // Partition weights (header)
+   const std::string lts_weight = ArgStr(argc, argv, "--lts-partition-weight", "tets");
+   MFEM_VERIFY(lts_weight == "tets" || lts_weight == "blocks", "--lts-partition-weight "
+               << lts_weight << ": expected tets or blocks");
+   MFEM_VERIFY(lts_on || lts_weight == "tets", "--lts-partition-weight blocks needs --lts rate2");
    // Mesh setup (header)
    const std::string mesh_setup = ArgStr(argc, argv, "--mesh-setup", "rank0");
    MFEM_VERIFY(mesh_setup == "rank0" || mesh_setup == "every-rank", "--mesh-setup "
@@ -1098,6 +1117,14 @@ int main(int argc, char *argv[])
                      "parts in " << parts_in << " were cut with " << parts_opts[i].first << " = "
                      << info(parts_opts[i].first) << "; this run has " << parts_opts[i].second);
       }
+      if (lts_on)
+      {
+         // parts cut before L2 carry no weight: theirs is the tet weight
+         const auto it = parts_info.find("lts_partition_weight");
+         const std::string w = it == parts_info.end() ? "tets" : it->second;
+         MFEM_VERIFY(w == lts_weight, "--mesh-parts: the parts in " << parts_in << " were cut "
+                     "with lts_partition_weight = " << w << "; this run has " << lts_weight);
+      }
       if (g_rank == 0)
       {
          const std::string h = FileFnv1a64(mesh_path);
@@ -1207,40 +1234,56 @@ int main(int argc, char *argv[])
       if (smesh_here) { part.resize(ne); }
       if (g_rank == 0)
       {
+         const bool blocks = lts_weight == "blocks";
          std::vector<double> cost;
          if (fault_weight > 0.0)
          {
-            // integer METIS weights: 100 per tet + 100 w per fault-face side
-            cost.assign(ne, 100.0);
+            // integer METIS weights: 100 per tet + 100 w per fault-face side;
+            // blocks: w per fault-face side, which BuildLtsBlockWeights scales
+            // by 100 and adds on the tet's own cluster to 100 per block
+            const double base = blocks ? 0.0 : 100.0, side = blocks ? 1.0 : 100.0;
+            cost.assign(ne, base);
             for (const auto &pr : lts_asg.fault_pairs)
             {
-               cost[pr.first] += 100.0 * fault_weight;
-               cost[pr.second] += 100.0 * fault_weight;
+               cost[pr.first] += side * fault_weight;
+               cost[pr.second] += side * fault_weight;
             }
          }
          const Table &e2e = smesh->ElementToElementTable();
          std::vector<int> xadj(e2e.GetI(), e2e.GetI() + ne + 1);
          std::vector<int> adj(e2e.GetJ(), e2e.GetJ() + e2e.Size_of_connections());
          LtsPartitionOptions popt;
+         popt.block_weights = blocks;
+         std::vector<int> bw;   // block work per element and cluster (L2)
          try
          {
             BuildLtsAwarePartition(ne, xadj, adj, lts_asg.cluster, lts_asg.num_clusters,
                                    nparts, cost.empty() ? nullptr : &cost,
                                    lts_asg.fault_pairs, popt, part);
+            bw = BuildLtsBlockWeights(xadj, adj, lts_asg.cluster, lts_asg.num_clusters, nullptr);
          }
          catch (const std::exception &ex)
          {
-            MFEM_ABORT("--lts rate2: BuildLtsAwarePartition failed on " << nparts
+            MFEM_ABORT("--lts rate2: the partition failed on " << nparts
                        << " ranks: " << ex.what());
          }
+         // the tet balance, weighted as the cut with tets (the cost), not with blocks
          const LtsPartitionImbalance imb = ComputeLtsPartitionImbalance(
             lts_asg.cluster, lts_asg.num_clusters, part, nparts,
-            cost.empty() ? nullptr : &cost, lts_asg.fault_pairs);
+            cost.empty() || blocks ? nullptr : &cost, lts_asg.fault_pairs);
+         const LtsBlockBalance bb =
+            ComputeLtsBlockBalance(bw, lts_asg.num_clusters, part, nparts);
+         const LtsBlockBalance tb = ComputeLtsBlockBalance(
+            BuildLtsVertexWeights(lts_asg.cluster, lts_asg.num_clusters, nullptr, false),
+            lts_asg.num_clusters, part, nparts);
          std::cout << std::setprecision(4) << "  partition: multi-constraint (BuildLtsAwarePartition, "
-                   << "fault weight w = " << fault_weight << "); max/mean overall " << imb.overall
-                   << ", per cluster";
+                   << (blocks ? "block" : "tet") << " weights, fault weight w = " << fault_weight
+                   << "); max/mean overall " << imb.overall << ", per cluster";
          for (double x : imb.per_cluster) { std::cout << " " << x; }
-         std::cout << ", fault tets " << imb.fault << "\n";
+         std::cout << ", fault tets " << imb.fault << "; block work per cluster";
+         for (double x : bb.per_cluster) { std::cout << " " << x; }
+         std::cout << "; tick model " << bb.tick_model << " on block work, " << tb.tick_model
+                   << " on tets\n";
       }
       if (!mesh_rank0) { MPI_Bcast(part.data(), ne, MPI_INT, 0, MPI_COMM_WORLD); }
    }
@@ -1307,6 +1350,7 @@ int main(int argc, char *argv[])
          kv.push_back({"lts_passes", std::to_string(lts_asg.passes)});
          kv.push_back({"lts_fault_pairs", std::to_string(lts_asg.fault_pairs.size())});
          kv.push_back({"lts_dt0", exact(lts_asg.dt0)});
+         kv.push_back({"lts_partition_weight", lts_weight});
       }
       WriteMeshPartsInfo(parts_out, kv);
       std::cout << "  mesh parts: " << nparts << " parts of " << mesh_path << " written to "

@@ -10,6 +10,7 @@
 #include <metis.h>
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -71,6 +72,141 @@ std::vector<int> BuildLtsVertexWeights(const std::vector<int>& cluster,
          static_cast<int>(weight_of(v));
    }
    return vwgt;
+}
+
+std::vector<int> BuildLtsBlockWeights(const std::vector<int>& xadj,
+                                      const std::vector<int>& adjncy,
+                                      const std::vector<int>& cluster,
+                                      int num_clusters,
+                                      const std::vector<double>* cell_cost)
+{
+   const int nv = static_cast<int>(cluster.size());
+   const int nc = num_clusters;
+   if (nc < 1)
+   { throw std::runtime_error("BuildLtsBlockWeights: num_clusters < 1"); }
+   if (static_cast<int>(xadj.size()) != nv + 1 || xadj[0] != 0
+       || static_cast<long long>(adjncy.size()) < xadj[nv])
+   { throw std::runtime_error("BuildLtsBlockWeights: xadj/adjncy do not match the clusters"); }
+   if (cell_cost && static_cast<int>(cell_cost->size()) != nv)
+   { throw std::runtime_error("BuildLtsBlockWeights: cell_cost.size() != nvtxs"); }
+   auto check_cluster = [&](int v)
+   {
+      if (cluster[v] < 0 || cluster[v] >= nc)
+      {
+         throw std::runtime_error("BuildLtsBlockWeights: element " + std::to_string(v)
+                                  + " in cluster " + std::to_string(cluster[v]) + " of "
+                                  + std::to_string(nc));
+      }
+   };
+
+   const long long scale = cell_cost ? 100 : 1;
+   std::vector<long long> total(static_cast<std::size_t>(nc), 0);
+   std::vector<int> w(static_cast<std::size_t>(nv) * nc, 0);
+   std::vector<long long> row(static_cast<std::size_t>(nc));
+   for (int v = 0; v < nv; ++v)
+   {
+      check_cluster(v);
+      const int cv = cluster[v];
+      std::fill(row.begin(), row.end(), 0);
+      if (xadj[v + 1] < xadj[v])
+      { throw std::runtime_error("BuildLtsBlockWeights: xadj decreases at " + std::to_string(v)); }
+      // faces: each has a side in cluster[v], and one in its neighbour's
+      for (int k = xadj[v]; k < xadj[v + 1]; ++k)
+      {
+         const int f = adjncy[static_cast<std::size_t>(k)];
+         if (f < 0 || f >= nv || f == v)
+         {
+            throw std::runtime_error("BuildLtsBlockWeights: element " + std::to_string(v)
+                                     + " has neighbour " + std::to_string(f));
+         }
+         check_cluster(f);
+         row[static_cast<std::size_t>(cv)] += 1;
+         if (cluster[f] != cv) { row[static_cast<std::size_t>(cluster[f])] += 1; }
+      }
+      // diagonal block: in the patch of its own cluster and of its neighbours'
+      for (int c = 0; c < nc; ++c)
+      {
+         if (c == cv || row[static_cast<std::size_t>(c)] > 0) { row[static_cast<std::size_t>(c)] += 1; }
+      }
+      for (int c = 0; c < nc; ++c) { row[static_cast<std::size_t>(c)] *= scale; }
+      if (cell_cost && (*cell_cost)[static_cast<std::size_t>(v)] > 0.0)
+      {
+         const double x = std::min(100.0 * (*cell_cost)[static_cast<std::size_t>(v)],
+                                   static_cast<double>(1LL << 20));
+         row[static_cast<std::size_t>(cv)] += std::llround(x);
+      }
+      for (int c = 0; c < nc; ++c)
+      {
+         const long long x = row[static_cast<std::size_t>(c)];
+         total[static_cast<std::size_t>(c)] += x;
+         w[static_cast<std::size_t>(v) * nc + c] = static_cast<int>(x);
+      }
+   }
+   // METIS sums the weights of each constraint in its 32-bit idx_t
+   for (int c = 0; c < nc; ++c)
+   {
+      if (total[static_cast<std::size_t>(c)] > INT_MAX)
+      {
+         throw std::runtime_error("BuildLtsBlockWeights: the weights of cluster "
+                                  + std::to_string(c) + " total "
+                                  + std::to_string(total[static_cast<std::size_t>(c)])
+                                  + ", more than METIS's 32-bit idx_t holds");
+      }
+   }
+   return w;
+}
+
+LtsBlockBalance ComputeLtsBlockBalance(const std::vector<int>& weights,
+                                       int num_clusters,
+                                       const std::vector<int>& part,
+                                       int nparts)
+{
+   const int nc = num_clusters;
+   if (nc < 1 || nparts < 1)
+   { throw std::runtime_error("ComputeLtsBlockBalance: num_clusters or nparts < 1"); }
+   const std::size_t nv = part.size();
+   if (weights.size() != nv * static_cast<std::size_t>(nc))
+   { throw std::runtime_error("ComputeLtsBlockBalance: weights.size() != part.size() * num_clusters"); }
+
+   // W[c * nparts + r]: rank r's work in cluster c
+   std::vector<double> W(static_cast<std::size_t>(nc) * nparts, 0.0);
+   for (std::size_t v = 0; v < nv; ++v)
+   {
+      const int r = part[v];
+      if (r < 0 || r >= nparts)
+      {
+         throw std::runtime_error("ComputeLtsBlockBalance: element " + std::to_string(v)
+                                  + " on rank " + std::to_string(r) + " of "
+                                  + std::to_string(nparts));
+      }
+      for (int c = 0; c < nc; ++c)
+      { W[static_cast<std::size_t>(c) * nparts + r] += weights[v * nc + c]; }
+   }
+
+   LtsBlockBalance out;
+   out.per_cluster.assign(static_cast<std::size_t>(nc), 1.0);
+   const int L = nc - 1;
+   std::vector<double> cum(static_cast<std::size_t>(nparts), 0.0);
+   double interval = 0.0, interval_mean = 0.0;
+   for (int k = 0; k <= L; ++k)
+   {
+      double sum = 0.0, mx = 0.0, mk = 0.0, cum_sum = 0.0;
+      for (int r = 0; r < nparts; ++r)
+      {
+         const double x = W[static_cast<std::size_t>(k) * nparts + r];
+         sum += x;
+         mx = std::max(mx, x);
+         cum[static_cast<std::size_t>(r)] += x;
+         mk = std::max(mk, cum[static_cast<std::size_t>(r)]);
+         cum_sum += cum[static_cast<std::size_t>(r)];
+      }
+      if (sum > 0.0) { out.per_cluster[static_cast<std::size_t>(k)] = mx / (sum / nparts); }
+      const double mult = (k < L) ? std::ldexp(1.0, L - k - 1) : 1.0;
+      interval += mult * mk;
+      interval_mean += mult * cum_sum / nparts;
+   }
+   if (interval_mean > 0.0) { out.tick_model = interval / interval_mean; }
+   return out;
 }
 
 namespace
@@ -169,11 +305,14 @@ bool BuildLtsAwarePartition(
       }
    }
 
+   if (opt.block_weights && opt.scalar_weights)
+   { throw std::runtime_error("BuildLtsAwarePartition: block_weights excludes scalar_weights"); }
    const bool multi = (!opt.scalar_weights) && (num_clusters > 1);
    idx_t ncon = multi ? static_cast<idx_t>(num_clusters) : 1;
 
-   const std::vector<int> vwgt_i =
-      BuildLtsVertexWeights(cluster, num_clusters, cell_cost, !multi);
+   const std::vector<int> vwgt_i = opt.block_weights
+      ? BuildLtsBlockWeights(xadj, adjncy, cluster, num_clusters, cell_cost)
+      : BuildLtsVertexWeights(cluster, num_clusters, cell_cost, !multi);
 
    // Copy inputs into idx_t / real_t arrays (idx_t == int32 here; METIS wants
    // mutable pointers).  real_t is metis's float in this TU — no mfem collision.

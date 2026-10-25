@@ -37,6 +37,11 @@ struct LtsPartitionOptions
    /// constraint with geometric per-cluster weights `2^(maxC - cluster[v])`,
    /// so a finer element (smaller cluster id ⇒ more steps) carries more weight.
    bool scalar_weights = false;
+   /// L2 (Chunhui Zhao 2026-10-25): when true, the constraint weights are the
+   /// block work of BuildLtsBlockWeights (what the LTS sweep of each cluster
+   /// pays) instead of the tets of BuildLtsVertexWeights, and `cell_cost` is
+   /// read as BuildLtsBlockWeights reads it.  Excludes `scalar_weights`.
+   bool block_weights = false;
 };
 
 /// Build the METIS vertex weights (exposed for unit testing).
@@ -55,6 +60,34 @@ std::vector<int> BuildLtsVertexWeights(
    const std::vector<double>* cell_cost,
    bool scalar_weights);
 
+/// Block-work weights (L2): constraint c of element e gets the dense blocks of
+/// cluster c's LTS sweep (solver/nitsche_lts_run.hpp, NitscheLtsBlocks) that e
+/// carries,
+///   w_c(e) = [e in the patch of c] + #{face neighbours f of e :
+///                                       cluster[e] == c or cluster[f] == c},
+/// the patch of c being its elements and their face neighbours.  The first
+/// term is e's diagonal block, the second gives every face with a side in c
+/// one unit on each of its two elements, so a face inside a rank counts 2
+/// (its block and its transpose) and a cut face 1 on each rank: the rank sums
+/// of w_c are the patch elements + 2 x interior face blocks + shared face
+/// blocks of cluster c for ANY cut.  Values 0..5 on tets (faces without a
+/// neighbour carry no block).
+///   xadj / adjncy : CSR face adjacency, as for BuildLtsAwarePartition.
+///   cell_cost     : nullptr => the weights above.  Otherwise the extra work
+///                   of each element in units of one block (e.g. the fault-
+///                   face term), added on its own cluster, and everything is
+///                   scaled by 100 so a fractional extra survives rounding:
+///                   100 w_c(e) + [c == cluster[e]] round(100 cell_cost[e])
+///                   (cell_cost <= 0 adds nothing; capped at 2^20).
+/// Returns a flat vector of length `nvtxs*num_clusters`.  Throws
+/// std::runtime_error on inconsistent sizes or ids.
+std::vector<int> BuildLtsBlockWeights(
+   const std::vector<int>& xadj,
+   const std::vector<int>& adjncy,
+   const std::vector<int>& cluster,
+   int num_clusters,
+   const std::vector<double>* cell_cost);
+
 /// Partition `nvtxs` elements into `nparts` ranks with cluster-balanced weights,
 /// then lock every fault pair onto one rank (fault locality).
 ///
@@ -63,7 +96,9 @@ std::vector<int> BuildLtsVertexWeights(
 ///                   graph must be symmetric and self-loop-free, as METIS
 ///                   requires).
 ///   cluster       : per-element cluster id in `[0, num_clusters)`.
-///   cell_cost     : per-element work weight (`nullptr` ⇒ uniform 1).
+///   cell_cost     : per-element work weight (`nullptr` ⇒ uniform 1); with
+///                   `opt.block_weights` the extra work per element of
+///                   BuildLtsBlockWeights.
 ///   fault_pairs   : `(e1, e2)` element pairs across each fault face; both are
 ///                   forced onto the rep's rank AFTER the METIS cut (mirrors
 ///                   BuildFaultLocalityPartitioning).
@@ -130,6 +165,30 @@ LtsPartitionImbalance ComputeLtsPartitionImbalance(
    int nparts,
    const std::vector<double>* cell_cost,
    const std::vector<std::pair<int, int>>& fault_pairs);
+
+/// Block-work balance of a cut (L2 diagnostic): `weights` is a flat
+/// `nvtxs*num_clusters` vector (BuildLtsBlockWeights without cell_cost, or
+/// any per-cluster work), `part` the cut.
+///   per_cluster : max/mean over ranks of each cluster's work (1.0 when a
+///                 cluster carries none).
+///   tick_model  : the cost of one sync interval of 2^L ticks (L =
+///                 num_clusters - 1; tick type k ends clusters 0..k and waits
+///                 for the busiest rank), sum_{k<L} 2^(L-k-1) M_k + M_L with
+///                 M_k = max_r sum_{c<=k} W_c(r) (the interval of the LTS
+///                 report's tick model, solver/nitsche_lts_setup.hpp), over
+///                 the same sum with every rank at the mean (1.0 = perfect).
+/// Pure reduction; throws std::runtime_error on inconsistent sizes or ranks.
+struct LtsBlockBalance
+{
+   std::vector<double> per_cluster;   ///< length num_clusters
+   double tick_model = 1.0;
+};
+
+LtsBlockBalance ComputeLtsBlockBalance(
+   const std::vector<int>& weights,
+   int num_clusters,
+   const std::vector<int>& part,
+   int nparts);
 
 } // namespace seas
 } // namespace mfem
