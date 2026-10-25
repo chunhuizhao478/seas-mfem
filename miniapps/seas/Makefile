@@ -877,6 +877,7 @@ DOMAIN_HEADERS = common/seas_types.hpp \
                  domain/nitsche_sipg_operator.hpp \
                  domain/elasticity_operator_qd.inl \
                  domain/qd_stage_operators.hpp \
+                 domain/qd_green_operator.hpp \
                  domain/matrix_stats.hpp \
                  domain/boundary_config.hpp \
                  domain/domain_config.hpp \
@@ -1072,6 +1073,10 @@ TEST_CUDSS_VS_MUMPS_OBJ = $(TEST_CUDSS_VS_MUMPS_SRC:.cpp=.o)
 # GPU plan G4: the fault kernels against the host friction code
 TEST_DEVICE_FRICTION_SRC = tests/parallel/test_device_friction.cpp
 TEST_DEVICE_FRICTION_OBJ = $(TEST_DEVICE_FRICTION_SRC:.cpp=.o)
+
+# GPU plan G3c: the device product of the QD Green's function
+TEST_QD_GREEN_DEVICE_SRC = tests/parallel/test_qd_green_device.cpp
+TEST_QD_GREEN_DEVICE_OBJ = $(TEST_QD_GREEN_DEVICE_SRC:.cpp=.o)
 
 # Parallel wave operator tests (dynamic rupture)
 TEST_PARALLEL_WAVE_SRC = tests/parallel/test_parallel_wave_operator.cpp
@@ -5857,6 +5862,22 @@ $(TEST_DEVICE_FRICTION_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS
 test-device-friction: seas_test_device_friction
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_device_friction
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_device_friction --device debug --n 100000
+
+# GPU plan G3c: the device product of the QD Green's function against the
+# host product (debug device here; a GPU build runs it with --device cuda)
+seas_test_qd_green_device: $(TEST_QD_GREEN_DEVICE_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_QD_GREEN_DEVICE_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+$(TEST_QD_GREEN_DEVICE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+test-qd-green-device: seas_test_qd_green_device
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_qd_green_device --device debug
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_qd_green_device --device debug
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 3 ./seas_test_qd_green_device --device debug --uneven
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_qd_green_device --device debug --no-normal
 
 # Parallel wave operator tests (dynamic rupture)
 # Match the serial rule (line 847): the test instantiates

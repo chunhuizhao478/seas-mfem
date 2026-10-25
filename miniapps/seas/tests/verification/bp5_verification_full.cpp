@@ -65,10 +65,32 @@
 //                              mfem::Device string (GPU plan G1)
 //   --device-id N              GPU for this rank (default: node-local rank
 //                              modulo the number of visible GPUs)
-//   --qd-operators MODE        loops (default): per-stage face loops;
+//   --qd-operators MODE        auto (default): matrix with --dg-method IP,
+//                              loops with BR2 or SEAS_DEBUG_FACE_TRACE;
+//                              loops: per-stage face loops;
 //                              matrix: B, D, C, N operators built once,
 //                              b = B*slip + D*g(t), T = C_u*u + C_d*slip
 //                              (GPU plan G2; IP only, no face tracer)
+//   --qd-green                 Opt-in (QD speed item 3): stages through the
+//                              discrete Green's function, T = G*slip +
+//                              t*T_D, built once with blocked solves; no
+//                              volume solve per stage.  Needs --qd-operators
+//                              matrix, a linear elastic bulk and loading
+//                              g(t) = t*g_hat.  G is dense, (2|3)*N_f x
+//                              2*N_f (37.5 GB for production p=1).  With
+//                              --device (GPU plan G3c) G is read from
+//                              --qd-green-cache, written by a CPU run, and
+//                              kept on the device (cuBLAS on a GPU)
+//   --qd-green-block M         Unit slips per blocked solve (default 64)
+//   --qd-green-cache FILE      Read G from FILE if it exists, else build it
+//                              and write FILE (any rank count)
+//   --qd-green-tol X           Max rel. difference of G to a solve, checked
+//                              after the build or read (default 1e-8)
+//   --qd-green-check N         Every N stages also run the solve path and
+//                              report the difference (default 0 = off)
+//   --qd-green-gpu-mpi         With --device and more than one rank: give
+//                              MPI device pointers (CUDA-aware MPI) instead
+//                              of staging through the host (default off)
 
 #include "mfem.hpp"
 #ifdef MFEM_USE_PETSC
@@ -611,6 +633,7 @@ static void CheckAcceptedState(G0Measure &g0, PBP5SEASOp &seas_op,
                                const Vector &state, real_t time, int step,
                                MPIContext &mpi)
 {
+   seas_op.RefreshDisplacement();  // --qd-green: solve u of the last stage
    Vector u_c(seas_op.GetDisplacement());
    const Vector T_c(seas_op.GetTraction());
    const Vector *Tn_c_ptr = seas_op.GetFrictionNormalTraction();
@@ -626,6 +649,7 @@ static void CheckAcceptedState(G0Measure &g0, PBP5SEASOp &seas_op,
    Vector rate(state.Size());
    seas_op.SetTime(time);
    seas_op.Mult(state, rate);
+   seas_op.RefreshDisplacement();
 
    const Vector &u_f = seas_op.GetDisplacement();
    const Vector &T_f = seas_op.GetTraction();
@@ -928,6 +952,7 @@ static PetscErrorCode bp5_ts_monitor_body(
       seas::ScopedStageTimer ckpt_timer(timers,
                                         seas::StageTimers::MonitorCheckpoint);
       Vector u_vec;
+      mon->seas_op->RefreshDisplacement();  // --qd-green: solve u once
       u_vec = mon->seas_op->GetDisplacement();
       Vector empty_k0;
       WriteCheckpoint(mon->full_prefix, time, mon->current_dt,
@@ -1174,7 +1199,10 @@ int main(int argc, char *argv[])
    std::string device_str = "cpu";     // --device STR
    int device_id_override = -1;        // --device-id N (-1 = automatic)
    // GPU plan G2.
-   std::string qd_operators = "loops"; // --qd-operators loops|matrix
+   std::string qd_operators = "auto";  // --qd-operators auto|loops|matrix
+   bool qd_green = false;              // --qd-green (QD speed item 3)
+   seas::QDGreenConfig qd_green_config;
+   int qd_green_check = 0;             // --qd-green-check N
 
    for (int i = 1; i < argc; i++)
    {
@@ -1294,10 +1322,29 @@ int main(int argc, char *argv[])
       if (arg == "--qd-operators" && i + 1 < argc)
       {
          qd_operators = argv[++i];
-         MFEM_VERIFY(qd_operators == "loops" || qd_operators == "matrix",
-                     "--qd-operators: loops or matrix, got '"
+         MFEM_VERIFY(qd_operators == "auto" || qd_operators == "loops" ||
+                     qd_operators == "matrix",
+                     "--qd-operators: auto, loops or matrix, got '"
                      << qd_operators << "'");
       }
+      if (arg == "--qd-green") { qd_green = true; }
+      if (arg == "--qd-green-block" && i + 1 < argc)
+      {
+         qd_green_config.block = std::atoi(argv[++i]);
+      }
+      if (arg == "--qd-green-cache" && i + 1 < argc)
+      {
+         qd_green_config.cache_path = argv[++i];
+      }
+      if (arg == "--qd-green-tol" && i + 1 < argc)
+      {
+         qd_green_config.tol = std::atof(argv[++i]);
+      }
+      if (arg == "--qd-green-check" && i + 1 < argc)
+      {
+         qd_green_check = std::atoi(argv[++i]);
+      }
+      if (arg == "--qd-green-gpu-mpi") { qd_green_config.gpu_mpi = true; }
       if (arg == "--device-id" && i + 1 < argc)
       {
          device_id_override = std::atoi(argv[++i]);
@@ -1575,6 +1622,48 @@ int main(int argc, char *argv[])
    else if (dg_method_str == "BR2" || dg_method_str == "br2")
    {
       dg_method = DGMethod::BR2;
+   }
+
+   auto env_truthy = [](const char *name) -> bool
+   {
+      const char *v = std::getenv(name);
+      if (!v || !*v) { return false; }
+      std::string s(v);
+      std::transform(s.begin(), s.end(), s.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      return !(s == "0" || s == "false" || s == "off" || s == "no");
+   };
+
+   // QD speed item 1: the stage operators are the default wherever they
+   // apply.  They need the IP method, and the face tracer
+   // (SEAS_DEBUG_FACE_TRACE, below) needs the loops' decomposed traction.
+   std::string qd_operators_why = "--qd-operators";
+   if (qd_operators == "auto")
+   {
+      if (dg_method != DGMethod::IP)
+      {
+         qd_operators = "loops";
+         qd_operators_why = "default; matrix needs --dg-method IP";
+      }
+      else if (env_truthy("SEAS_DEBUG_FACE_TRACE"))
+      {
+         qd_operators = "loops";
+         qd_operators_why = "default; SEAS_DEBUG_FACE_TRACE needs the loops";
+      }
+      else
+      {
+         qd_operators = "matrix";
+         qd_operators_why = "default";
+      }
+   }
+   if (qd_green && qd_operators != "matrix")
+   {
+      if (mpi.IsRoot())
+      {
+         std::cerr << "ERROR: --qd-green needs --qd-operators matrix (here "
+                   << qd_operators << ": " << qd_operators_why << ").\n";
+      }
+      return 2;
    }
 
    // Process --solver flag
@@ -2145,21 +2234,28 @@ int main(int argc, char *argv[])
    }
    if (mpi.IsRoot())
    {
-      std::cout << "  [G2] qd-operators: " << qd_operators << "\n";
+      std::cout << "  [G2] qd-operators: " << qd_operators << " ("
+                << qd_operators_why << ")\n";
+   }
+   // QD speed item 3: stages through the Green's function (opt-in)
+   if (qd_green)
+   {
+      seas_op.SetQDGreen(qd_green_config, qd_green_check);
+   }
+   if (mpi.IsRoot())
+   {
+      std::cout << "  [QD-GREEN] " << (qd_green ? "ON" : "off (--qd-green)");
+      if (qd_green)
+      {
+         std::cout << ", check every " << qd_green_check << " stages"
+                   << (qd_green_check > 0 ? "" : " (off)");
+      }
+      std::cout << "\n";
    }
 
    // Face tracer for per-face diagnostics (rank-local, no MPI)
    // Coordinate window selects faces in the region where prior blowups occurred.
    // All ranks participate; max_traced_faces limits output per rank.
-   auto env_truthy = [](const char *name) -> bool
-   {
-      const char *v = std::getenv(name);
-      if (!v || !*v) { return false; }
-      std::string s(v);
-      std::transform(s.begin(), s.end(), s.begin(),
-                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-      return !(s == "0" || s == "false" || s == "off" || s == "no");
-   };
    auto env_int = [](const char *name, int default_value) -> int
    {
       const char *v = std::getenv(name);
@@ -2837,6 +2933,13 @@ int main(int argc, char *argv[])
       }
 
       // -------- Volume-PVD path (default) --------
+      // --qd-green: the volume output reads the live displacement, which
+      // the stages no longer compute; solve it once when this step writes.
+      if (seas_op.QDGreenActive() &&
+          pv_out->PeekShouldWrite(step_num, time, V_max))
+      {
+         seas_op.RefreshDisplacement();
+      }
       // Expand owned fault vectors to local (all faces) for visualization
       Vector owned_slip;
       fault_op.GetSlip(state, owned_slip);
@@ -3553,6 +3656,7 @@ int main(int argc, char *argv[])
             seas::ScopedStageTimer ckpt_timer(
                timers, seas::StageTimers::MonitorCheckpoint);
             Vector u_vec;
+            seas_op.RefreshDisplacement();  // --qd-green: solve u once
             u_vec = seas_op.GetDisplacement();
             WriteCheckpoint(full_prefix, t, current_dt,
                             step, num_seismic_events, in_seismic_event,
@@ -3622,6 +3726,7 @@ int main(int argc, char *argv[])
    if (checkpoint_interval > 0)
    {
       Vector u_vec;
+      seas_op.RefreshDisplacement();  // --qd-green: solve u once
       u_vec = seas_op.GetDisplacement();
       WriteCheckpoint(full_prefix, t, current_dt,
                       step, num_seismic_events, in_seismic_event,
@@ -3697,6 +3802,7 @@ int main(int argc, char *argv[])
                                  ? step_rejections
                                  : ode_solver.GetTotalRejections();
       domain.PrintQDStageEvalSummary(step, rejected, std::cout);
+      seas_op.PrintQDGreenCheckSummary(std::cout);
    }
 
    if (mpi.IsRoot())

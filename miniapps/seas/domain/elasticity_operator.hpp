@@ -324,6 +324,14 @@ public:
                    Vector *normal_owned) override;
    /// The operators, or nullptr before BuildQDStageOperators().
    const QDStageOperators *GetQDStageOperators() const { return qd_ops_.get(); }
+   // QD speed item 3: a stage through the discrete Green's function
+   // (qd_green_operator.hpp, elasticity_operator_qd.inl).  Opt-in
+   // (--qd-green); needs the stage operators.
+   void BuildQDGreen(const QDGreenConfig &config) override;
+   void GreenStage(real_t time, const Vector &slip_owned,
+                   Vector &traction_owned, Vector *normal_owned) override;
+   /// The Green's function, or nullptr before BuildQDGreen().
+   const QDGreenOperator *GetQDGreen() const { return qd_green_.get(); }
    /// The assembled stiffness matrix K, or nullptr before assembly (first
    /// Solve(), SolveStage() or AssembleMatrixOnly()).
    const HypreParMatrix *GetStiffnessMatrix() const
@@ -578,6 +586,7 @@ private:
 
 #ifdef MFEM_USE_MPI
    std::unique_ptr<QDStageOperators> qd_ops_;  // GPU plan G2
+   std::unique_ptr<QDGreenOperator> qd_green_;  // QD speed item 3
 #endif
 
    /// Solve K X_ = B_ with B_ loaded, check, copy to displacement.
@@ -601,6 +610,11 @@ private:
 #ifdef MFEM_USE_MPI
    /// Fill qd_ops_->g with g(t) at the stored Dirichlet points.
    void EvaluateQDDirichletValues(real_t time) const;
+   /// Stage traction through the solve path (b, K⁻¹, C, N) into @a T,
+   /// @a Tn (nullptr: no normal rows), without the displacement copy or
+   /// the stage timers: what the Green's function is checked against.
+   void QDSolvePathTraction(real_t time, const Vector &slip_owned,
+                            Vector &T, Vector *Tn);
 #endif
 
    enum class DebugAssemblePhase { None, Slip, Dirichlet };

@@ -598,4 +598,315 @@ void ElasticityDomainOperator<MeshType>::PrintQDStageEvalSummary(
    os.flush();
 }
 
+// ---------------------------------------------------------------------------
+// Green's function (QD speed item 3, --qd-green)
+// ---------------------------------------------------------------------------
+
+template <typename MeshType>
+void ElasticityDomainOperator<MeshType>::QDSolvePathTraction(
+   real_t time, const Vector &slip_owned, Vector &T, Vector *Tn)
+{
+   StageTimers *timers = stage_timers_;
+   stage_timers_ = nullptr;
+   Vector b, x;
+   QDStageRHS(time, slip_owned, b);
+   x.SetSize(b.Size());
+   x = 0.0;
+   solver_->Mult(b, x);
+   QDStageTraction(x, slip_owned, T, Tn);
+   stage_timers_ = timers;
+}
+
+template <typename MeshType>
+void ElasticityDomainOperator<MeshType>::BuildQDGreen(
+   const QDGreenConfig &config)
+{
+   if constexpr (!IsParallelMesh<MeshType>::value)
+   {
+      MFEM_ABORT("--qd-green needs a parallel mesh (block = "
+                 << config.block << ")");
+   }
+   else
+   {
+      MFEM_VERIFY(qd_ops_, "--qd-green needs the QD stage operators: call "
+                  "BuildQDStageOperators() first (--qd-operators matrix)");
+      // GPU plan G3c: on a device, G is read from the cache file a CPU
+      // run wrote, then kept on the device.
+      const bool on_device = Device::Allows(Backend::DEVICE_MASK);
+      MFEM_VERIFY(!on_device || !config.cache_path.empty(),
+                  "--qd-green with --device reads G from --qd-green-cache, "
+                  "written by a CPU run (same model, no --device); building "
+                  "G on the device is not implemented");
+      MFEM_VERIFY(config.block >= 1, "--qd-green-block must be >= 1, got "
+                  << config.block);
+      if (!stiffness_assembled_)
+      {
+         ScopedStageTimer timer(stage_timers_, StageTimers::MatrixSetup);
+         AssembleStiffness();
+      }
+      MFEM_VERIFY(solver_, "--qd-green: no linear solver was set up");
+      MPI_Comm comm = mesh_.GetComm();
+      int rank, nranks;
+      MPI_Comm_rank(comm, &rank);
+      MPI_Comm_size(comm, &nranks);
+      QDStageOperators &ops = *qd_ops_;
+      const bool with_normal = ops.with_normal;
+      const int nown = num_owned_fault_dofs_;
+      Array<HYPRE_BigInt> part;
+      HYPRE_BigInt fault_first = 0;
+      const HYPRE_BigInt nf_glob = MakeQDPartition(comm, nown, part,
+                                                   fault_first);
+      const HYPRE_BigInt nslip_glob = 2 * nf_glob;
+      const HYPRE_BigInt slip_first = 2 * fault_first;
+      const double t_start = MPI_Wtime();
+
+      // The loading must have one time shape, g(t) = t·ĝ: g(0) = 0 and
+      // g(2) = 2·g(1).
+      Vector g_hat;
+      {
+         EvaluateQDDirichletValues(0.0);
+         real_t g0 = ops.g.Normlinf();
+         EvaluateQDDirichletValues(1.0);
+         g_hat = ops.g;
+         EvaluateQDDirichletValues(2.0);
+         real_t dev = 0.0, gmax = g_hat.Normlinf();
+         g_hat.HostRead();
+         ops.g.HostRead();
+         for (int i = 0; i < g_hat.Size(); i++)
+         {
+            dev = std::max(dev, std::abs(ops.g(i) - 2.0 * g_hat(i)));
+         }
+         real_t loc[3] = {g0, dev, gmax}, glob[3];
+         MPI_Allreduce(loc, glob, 3, MPITypeMap<real_t>::mpi_type, MPI_MAX,
+                       comm);
+         MFEM_VERIFY(glob[0] == 0.0 && glob[1] <= 1e-12 * glob[2],
+                     "--qd-green needs Dirichlet loading g(t) = t*g_hat: "
+                     "max|g(0)| = " << glob[0] << ", max|g(2) - 2 g(1)| = "
+                     << glob[1] << " (max|g(1)| = " << glob[2]
+                     << ").  Run without --qd-green.");
+      }
+
+      if (rank == 0)
+      {
+         const double gib = double(with_normal ? 3 : 2) * double(nf_glob) *
+                            double(nslip_glob) * sizeof(real_t) / 1073741824.0;
+         mfem::out << "[QD-GREEN] allocating G: " << std::fixed
+                   << std::setprecision(2) << gib << " GiB in all, about "
+                   << gib / nranks << " GiB per rank (rows split over all "
+                   << nranks << " ranks)\n";
+         mfem::out.flush();
+      }
+      auto green = std::unique_ptr<QDGreenOperator>(new QDGreenOperator(
+         comm, nf_glob, fault_first, nown, with_normal));
+      if (!config.cache_path.empty())
+      {
+         // Position key of each owned fault DOF (node, face centroid), so
+         // the cache file can be read on another partition.
+         MFEM_VERIFY(mesh_.SpaceDimension() == 3, "--qd-green-cache needs "
+                     "a 3-D mesh (the file keys fault DOFs by position)");
+         Vector xyz, keys(6 * nown);
+         GetFaultDOFCoords3D(xyz);
+         const int nbf = nbf_per_face_;
+         for (int o = 0; o < nown; o++)
+         {
+            const int ld = owned_fault_dof_to_local_dof_[o];
+            const int f0 = (ld / nbf) * nbf;
+            for (int d = 0; d < 3; d++)
+            {
+               real_t c = 0.0;
+               for (int k = 0; k < nbf; k++) { c += xyz(3 * (f0 + k) + d); }
+               keys(6 * o + d) = xyz(3 * ld + d);
+               keys(6 * o + 3 + d) = c / nbf;
+            }
+         }
+         green->SetKeys(keys);
+      }
+      std::string info;
+      bool loaded = false;
+      if (!config.cache_path.empty())
+      {
+         loaded = green->ReadFile(config.cache_path, info);
+      }
+      MFEM_VERIFY(loaded || !on_device, "--qd-green with --device: no cache "
+                  "file '" << config.cache_path << "'.  Write it first with "
+                  "a CPU run of the same model (no --device, same "
+                  "--qd-green-cache), then rerun on the device.");
+      double t_solve = 0.0, t_cols = 0.0;
+      if (!loaded)
+      {
+         const int m_max = config.block;
+         std::vector<Vector> E(m_max), R(m_max), X(m_max), Ts(m_max),
+             Tn(with_normal ? m_max : 0);
+         for (int i = 0; i < m_max; i++)
+         {
+            E[i].SetSize(2 * nown);
+            R[i].SetSize(ops.B->Height());
+            X[i].SetSize(ops.B->Height());
+         }
+         for (HYPRE_BigInt j0 = 0; j0 < nslip_glob; j0 += m_max)
+         {
+            const int m = static_cast<int>(
+               std::min<HYPRE_BigInt>(m_max, nslip_glob - j0));
+            Array<const Vector *> Rp(m);
+            Array<Vector *> Xp(m);
+            for (int i = 0; i < m; i++)
+            {
+               E[i] = 0.0;
+               const HYPRE_BigInt jl = j0 + i - slip_first;
+               if (jl >= 0 && jl < 2 * nown) { E[i](static_cast<int>(jl)) = 1.0; }
+               ops.B->Mult(E[i], R[i]);
+               X[i] = 0.0;
+               Rp[i] = &R[i];
+               Xp[i] = &X[i];
+            }
+            const double t0 = MPI_Wtime();
+            solver_->ArrayMult(Rp, Xp);
+            const double t1 = MPI_Wtime();
+            for (int i = 0; i < m; i++)
+            {
+               QDStageTraction(X[i], E[i], Ts[i],
+                               with_normal ? &Tn[i] : nullptr);
+            }
+            green->SetColumns(j0, m, Ts, Tn);
+            t_solve += t1 - t0;
+            t_cols += MPI_Wtime() - t1;
+         }
+         // T_D: the loading ĝ with zero slip
+         Vector zero(2 * nown), b(ops.B->Height()), x(ops.B->Height());
+         zero = 0.0;
+         ops.D->Mult(g_hat, b);
+         x = 0.0;
+         solver_->Mult(b, x);
+         Vector TDs, TDn;
+         QDStageTraction(x, zero, TDs, with_normal ? &TDn : nullptr);
+         green->SetLoading(TDs, TDn);
+      }
+      MFEM_VERIFY(green->Complete(), "--qd-green: G is incomplete after "
+                  << (loaded ? "reading" : "building") << " it");
+      const double t_built = MPI_Wtime() - t_start;
+      if (!loaded && !config.cache_path.empty())
+      {
+         std::ostringstream o;
+         o << "N_f " << nf_glob << ", order " << order_ << ", penalty factor "
+           << penalty_factor_ << ", " << (with_normal ? 3 : 2)
+           << " components, built on " << nranks << " ranks";
+         green->WriteFile(config.cache_path, o.str());
+      }
+      qd_green_ = std::move(green);
+      double t_upload = 0.0, dev_bytes = 0.0;
+      if (on_device)
+      {
+         MPI_Barrier(comm);
+         const double free0 = detail::FreeDeviceBytes();
+         const double t0 = MPI_Wtime();
+         qd_green_->UseDevice(config.gpu_mpi);
+         if (Device::Allows(Backend::CUDA_MASK)) { MFEM_DEVICE_SYNC; }
+         t_upload = MPI_Wtime() - t0;
+         dev_bytes = free0 - detail::FreeDeviceBytes();
+      }
+
+      // Check against the solve path: slip of order 1 m varying along the
+      // fault and t = 100 yr, so both G·δ and t·T_D matter.
+      const real_t t_v = 100.0 * 365.25 * 86400.0;
+      Vector dv(2 * nown);
+      for (int i = 0; i < 2 * nown; i++)
+      {
+         const real_t j = static_cast<real_t>(slip_first + i);
+         dv(i) = std::sin(0.37 * j + 0.1) + 0.5 * std::cos(0.011 * j);
+      }
+      Vector Tg, Tng, Ts_, Tns;
+      qd_green_->Apply(t_v, dv, Tg, with_normal ? &Tng : nullptr, nullptr);
+      QDSolvePathTraction(t_v, dv, Ts_, with_normal ? &Tns : nullptr);
+      auto rel = [&](const Vector &a, const Vector &b)
+      {
+         real_t loc[2] = {0.0, 0.0}, glob[2];
+         a.HostRead();
+         b.HostRead();
+         for (int i = 0; i < a.Size(); i++)
+         {
+            loc[0] = std::max(loc[0], std::abs(a(i) - b(i)));
+            loc[1] = std::max(loc[1], std::abs(b(i)));
+         }
+         MPI_Allreduce(loc, glob, 2, MPITypeMap<real_t>::mpi_type, MPI_MAX,
+                       comm);
+         return glob[1] > 0.0 ? glob[0] / glob[1] : glob[0];
+      };
+      const real_t rel_s = rel(Tg, Ts_);
+      const real_t rel_n = with_normal ? rel(Tng, Tns) : 0.0;
+
+      // The build's g(t) calls are not stage evaluations.
+      ops.g_evals = 0;
+      ops.g_eval_seconds = 0.0;
+      ops.g_copy_seconds = 0.0;
+
+      double bytes = qd_green_->LocalBytes(), bmax = 0.0, btot = 0.0;
+      MPI_Reduce(&bytes, &bmax, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
+      MPI_Reduce(&bytes, &btot, 1, MPI_DOUBLE, MPI_SUM, 0, comm);
+      double tm[4] = {t_built, t_solve, t_cols, t_upload}, tmax[4];
+      MPI_Reduce(tm, tmax, 4, MPI_DOUBLE, MPI_MAX, 0, comm);
+      double dbmax = 0.0;
+      MPI_Reduce(&dev_bytes, &dbmax, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
+      if (rank == 0)
+      {
+         std::ostringstream o;
+         o << "[QD-GREEN] G " << qd_green_->NComp() * nf_glob << " x "
+           << nslip_glob << " (N_f " << nf_glob << ", "
+           << (with_normal ? "shear + normal" : "shear") << " rows), "
+           << std::fixed << std::setprecision(2) << btot / 1073741824.0
+           << " GiB in all, " << bmax / 1073741824.0 << " GiB largest rank\n";
+         if (loaded)
+         {
+            o << "[QD-GREEN] read from " << config.cache_path << " in "
+              << std::setprecision(1) << tmax[0] << " s (" << info << ")\n";
+         }
+         else
+         {
+            o << "[QD-GREEN] built in " << std::setprecision(1) << tmax[0]
+              << " s (blocked solves " << tmax[1] << " s, traction and "
+              << "redistribution " << tmax[2] << " s; " << config.block
+              << " columns per solve)";
+            if (!config.cache_path.empty())
+            {
+               o << ", written to " << config.cache_path;
+            }
+            o << "\n";
+         }
+         if (on_device)
+         {
+            o << "[QD-GREEN] on the device (" << qd_green_->ProductName()
+              << "): moved in " << std::fixed << std::setprecision(1)
+              << tmax[3] << " s, device memory used " << std::setprecision(2)
+              << dbmax / 1073741824.0 << " GiB on the largest rank"
+              << (nranks > 1 ? (config.gpu_mpi ? "; MPI on device buffers"
+                                               : "; MPI staged through the host")
+                             : "")
+              << "\n";
+         }
+         o << "[QD-GREEN] check against the solve path (t = 100 yr, test "
+           << "slip): max rel. difference shear " << std::scientific
+           << std::setprecision(3) << rel_s;
+         if (with_normal) { o << ", normal " << rel_n; }
+         o << " (tolerance " << config.tol << ")\n";
+         mfem::out << o.str();
+         mfem::out.flush();
+      }
+      MFEM_VERIFY(rel_s <= config.tol && rel_n <= config.tol,
+                  "--qd-green: G differs from the solve path by " << rel_s
+                  << " (shear), " << rel_n << " (normal), above --qd-green-tol "
+                  << config.tol << (loaded ? ".  The cache file "
+                  "belongs to another model: remove it or pass another "
+                  "--qd-green-cache." : "."));
+   }
+}
+
+template <typename MeshType>
+void ElasticityDomainOperator<MeshType>::GreenStage(
+   real_t time, const Vector &slip_owned, Vector &traction_owned,
+   Vector *normal_owned)
+{
+   MFEM_VERIFY(qd_green_, "--qd-green: BuildQDGreen() was not called");
+   qd_green_->Apply(time, slip_owned, traction_owned, normal_owned,
+                    stage_timers_);
+}
+
 #endif // MFEM_USE_MPI

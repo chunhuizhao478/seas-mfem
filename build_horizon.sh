@@ -76,6 +76,9 @@
 #   MODE=cuda only:
 #   CUDA_MODULE=cuda/13.0       CUDA toolkit module added to MODULES
 #   GPU_ARCH=90                 CUDA compute capability (90 GH200, 100 GB200)
+#   MFEM_CUDA_ARCH=sm_${GPU_ARCH}
+#                               nvcc -arch for MFEM and seas (MFEM's
+#                               CUDA_ARCH), e.g. "compute_90 -code=sm_100"
 #   CUDSS_VERSION=0.7.1.6       cuDSS release, from the PyPI wheel
 #                               nvidia-cudss-cu<CUDA major> (aarch64)
 #   CUDSS_DIR=<dir>             cuDSS install to use (default: the wheel
@@ -214,7 +217,7 @@ record_toolchain() {
       echo "cpu flags: ${CPU_FLAGS}"
       if [ "${MODE}" = "cuda" ]; then
          echo "nvcc: $(nvcc --version 2>&1 | grep -m1 release)"
-         echo "gpu arch: sm_${GPU_ARCH}"
+         echo "gpu arch: sm_${GPU_ARCH}, mfem -arch=${MFEM_CUDA_ARCH:-sm_${GPU_ARCH}}"
          echo "cudss: ${CUDSS_DIR} (CUDSS_VERSION ${CUDSS_VERSION})"
       fi
       echo "petsc: ${PETSC_VERSION} at ${PETSC_PREFIX}"
@@ -511,7 +514,7 @@ stage_mfem() {
       local cuda_dir
       cuda_dir="$(dirname "$(dirname "$(command -v nvcc)")")"
       mfem_cuda_args=(
-         MFEM_USE_CUDA=YES CUDA_DIR="${cuda_dir}" CUDA_ARCH="sm_${GPU_ARCH}"
+         MFEM_USE_CUDA=YES CUDA_DIR="${cuda_dir}" CUDA_ARCH="${MFEM_CUDA_ARCH:-sm_${GPU_ARCH}}"
          MFEM_USE_CUDSS=YES CUDSS_DIR="${CUDSS_DIR}"
       )
       # nvcc links too and rejects -Wl,: linker flags go through -Xlinker=

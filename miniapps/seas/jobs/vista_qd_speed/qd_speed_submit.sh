@@ -1,0 +1,124 @@
+#!/bin/bash
+# QD speed items 1 and 2 on Vista: print (default) or submit the jobs.
+#
+#   cd $WORK/seas-mfem-qd-speed/miniapps/seas
+#   bash jobs/vista_qd_speed/qd_speed_submit.sh            # dry run
+#   SUBMIT=1 bash jobs/vista_qd_speed/qd_speed_submit.sh   # submit
+#   SUBMIT=1 STEPS="timing" BUILD_JOB=none bash jobs/vista_qd_speed/qd_speed_submit.sh
+#
+# The clone is its own: $WORK/seas-mfem-qd-speed on branch
+# quasi-dynamic-profiling-speedup.  The GPU thread's clones
+# ($WORK/seas-mfem-gpu, $WORK/seas-mfem-gpu-g2) are only read, for G0's
+# goldens (jobs/vista/cpu_clone_build.sbatch copies them once); PETSc and
+# MUMPS are G0's in $WORK/seas-gpu-deps, not rebuilt.
+#
+# STEPS (default "build gate timing"):
+#   build   jobs/vista/cpu_clone_build.sbatch: MFEM and seas_bp5_full in
+#           this clone (1 node, up to 1.5 h)
+#   gate    jobs/vista_qd_speed/qd_default_gate.sbatch: the new default
+#           against G0's goldens, and which path it picks (1 node, 8 ranks)
+#   timing  jobs/vista_qd_speed/qd_speed_timing.sbatch at every layout
+#           below, 1,000 steps per run at p=1
+#   green   the same script with MODES="green default" (QD speed item 3,
+#           --qd-green) on 1, 2 and 4 full nodes: g_n1_r144 builds G
+#           (37.5 GB at p=1) and writes the cache file (GREEN_CACHE in the
+#           script); g_n2_r288 and g_n4_r576 wait for it (afterok) and
+#           read it.  Each also runs the default solve at its layout.
+#           Not in the default STEPS; GREEN_LAYOUTS limits it
+# Layouts (nodes x ranks, CPUs per rank):
+#   n1_r144  1 x 144, 1   loops and the new default, twice each
+#   n1_r72   1 x 72,  2   default
+#   n1_r36   1 x 36,  4   default
+#   n2_r288  2 x 144, 1   default
+#   n2_r144  2 x 72,  2   default
+#   n2_r72   2 x 36,  4   default
+# LAYOUTS limits the timing jobs to those names.  Every job after the build
+# waits for it (afterok) unless BUILD_JOB=none (build done) or
+# BUILD_JOB=<jobid>.  Wall times are estimates from G0's 0.366 s/step at
+# 144 ranks; fewer ranks per node are expected to be slower per step.
+
+set -euo pipefail
+SUBMIT="${SUBMIT:-0}"
+STEPS="${STEPS:-build gate timing}"
+BUILD_JOB="${BUILD_JOB:-}"
+LAYOUTS="${LAYOUTS:-n1_r144 n1_r72 n1_r36 n2_r288 n2_r144 n2_r72}"
+GREEN_LAYOUTS="${GREEN_LAYOUTS:-g_n1_r144 g_n2_r288 g_n4_r576}"
+
+if [ ! -f jobs/vista_qd_speed/qd_speed_timing.sbatch ]; then
+   echo "ERROR: run from miniapps/seas" >&2
+   exit 1
+fi
+
+n=0
+JOB=""
+# sub NAME [sbatch args...] : prints the sbatch line, or submits it; the job
+# id (a placeholder in a dry run) is left in JOB.
+sub() {
+   local name="$1"; shift
+   n=$((n + 1))
+   if [ "${SUBMIT}" = 1 ]; then
+      # Vista's sbatch prints a banner on stdout even with --parsable; the
+      # job id ("id" or "id;cluster") is the last line.
+      local out
+      out="$(sbatch --parsable "$@")"
+      JOB="$(printf '%s\n' "${out}" | tail -n 1)"
+      JOB="${JOB%%;*}"
+      if ! [[ "${JOB}" =~ ^[0-9]+$ ]]; then
+         echo "ERROR: ${name}: no job id in sbatch output:" >&2
+         printf '%s\n' "${out}" >&2
+         exit 1
+      fi
+      echo "${name}: job ${JOB}"
+   else
+      JOB="JOB${n}"
+      printf '%s (%s): sbatch' "${name}" "${JOB}"
+      printf ' %q' "$@"
+      printf '\n'
+   fi
+}
+
+has() { [[ " ${STEPS} " == *" $1 "* ]]; }
+has_layout() { [[ " ${LAYOUTS} " == *" $1 "* ]]; }
+
+if has build; then
+   sub build jobs/vista/cpu_clone_build.sbatch
+   BUILD_JOB="${JOB}"
+fi
+DEP=()
+if [ -n "${BUILD_JOB}" ] && [ "${BUILD_JOB}" != none ]; then
+   DEP=(--dependency="afterok:${BUILD_JOB}" --kill-on-invalid-dep=yes)
+fi
+
+if has gate; then
+   sub "default gate" "${DEP[@]}" jobs/vista_qd_speed/qd_default_gate.sbatch
+fi
+
+if has timing; then
+   # name:nodes:ranks:cpus-per-task:walltime
+   for spec in n1_r144:1:144:1:01:30:00 n1_r72:1:72:2:01:30:00 \
+               n1_r36:1:36:4:02:00:00 n2_r288:2:288:1:01:00:00 \
+               n2_r144:2:144:2:01:30:00 n2_r72:2:72:4:01:30:00; do
+      IFS=: read -r name nodes ranks cpt hh mm ss <<< "${spec}"
+      has_layout "${name}" || continue
+      sub "timing ${name}" "${DEP[@]}" -N "${nodes}" -n "${ranks}" \
+          --ntasks-per-node="$((ranks / nodes))" -c "${cpt}" \
+          -t "${hh}:${mm}:${ss}" jobs/vista_qd_speed/qd_speed_timing.sbatch
+   done
+fi
+
+if has green; then
+   # name:nodes:ranks:walltime; the first one builds G, the others read it.
+   GREEN_DEP=("${DEP[@]}")
+   for spec in g_n1_r144:1:144:02:00:00 g_n2_r288:2:288:01:00:00 \
+               g_n4_r576:4:576:01:00:00; do
+      IFS=: read -r name nodes ranks hh mm ss <<< "${spec}"
+      [[ " ${GREEN_LAYOUTS} " == *" ${name} "* ]] || continue
+      sub "green ${name}" "${GREEN_DEP[@]}" -J qd_green_timing \
+          --export="ALL,MODES=green default" -N "${nodes}" -n "${ranks}" \
+          --ntasks-per-node="$((ranks / nodes))" -c 1 \
+          -t "${hh}:${mm}:${ss}" jobs/vista_qd_speed/qd_speed_timing.sbatch
+      if [ "${name}" = g_n1_r144 ]; then
+         GREEN_DEP=(--dependency="afterok:${JOB}" --kill-on-invalid-dep=yes)
+      fi
+   done
+fi
