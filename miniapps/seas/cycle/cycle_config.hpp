@@ -127,6 +127,21 @@
 //                   rate2 needs [numerics] cfl <= 0.6 and kv_scale = "node",
 //                   and partitions the mesh with BuildLtsAwarePartition
 //                   (both regimes then use that partition)
+//   [cycle.loading] the Dirichlet loading of both regimes (2D in-plane
+//                   design rev 3, phase A; cycle/loading.hpp).  kind
+//                   ["bp5": MakeBP5DirichletFunc, the fault plane y = 0,
+//                   slip along x, band 1 km; no other key] or "plate":
+//                   plane_point p [required], plane_normal m [the
+//                   [fault_geometry] ref_normal], slip_dir s [required],
+//                   band b [m, required]; unit m and s with s . m = 0, and m
+//                   not in the fault plane (|m . ref_normal| >= 1e-6).
+//                     d = (x - p) . m;  u = +(Vp t / 2) s  for d > b,
+//                                       u = -(Vp t / 2) s  for d < -b,
+//                                       u = sgn(-m . ref_normal) Vp t s inside
+//                   (inside the band: the jump across the prescribed-slip
+//                   faces, which ComputeSkeletonDirichletSign signs by the
+//                   oriented normal; the factor keeps that jump equal to the
+//                   side m points to moving by +(Vp t / 2) s)
 //
 // The dynamic regime reads the keys the Nitsche driver reads, from the same
 // shared sections (drivers/nitsche_dyn_driver.cpp:616-648, 708-736,
@@ -308,6 +323,18 @@ struct ProbeConfig
    bool Enabled() const { return !V_off.empty(); }
 };
 
+/// [cycle.loading] (see the file comment and cycle/loading.hpp).
+struct LoadingConfig
+{
+   std::string kind = "bp5";                                ///< "bp5" | "plate"
+   std::array<real_t, 3> plane_point = {{0.0, 0.0, 0.0}};   ///< p [m]
+   std::array<real_t, 3> plane_normal = {{0.0, 1.0, 0.0}};  ///< m, unit
+   std::array<real_t, 3> slip_dir = {{1.0, 0.0, 0.0}};      ///< s, unit, s . m = 0
+   real_t band = 1000.0;                                    ///< b [m]
+   real_t band_sign = 1.0;   ///< sgn(-m . ref_normal), set by Load
+   bool Plate() const { return kind == "plate"; }
+};
+
 /// The dynamic regime's numerics (see the file comment for the keys).
 struct DynamicConfig
 {
@@ -347,6 +374,7 @@ struct CycleConfig
    SnapshotConfig snapshots;
    BenchmarkConfig bench;
    LtsConfig lts;
+   LoadingConfig loading;         ///< [cycle.loading] (default: the BP5 function)
    int checkpoint_every = 0;
 
    // Shortcuts into `shared`, checked by Load.
@@ -593,7 +621,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
    OnlyKeys(cy, "cycle", {"ic", "switching", "qd_radiation_damping", "mesh_scale",
                           "plate_rate", "penalty_factor", "qd", "switch", "probe",
                           "prestress", "fields", "output", "checkpoint", "snapshots",
-                          "benchmark", "lts"});
+                          "benchmark", "lts", "loading"});
    c.ic = Str(cy, "cycle", "ic", "", true);
    MFEM_VERIFY(c.ic == "gold" || c.ic == "scec_fd",
                "[cycle].ic must be \"gold\" or \"scec_fd\"; got \"" << c.ic << "\"");
@@ -1016,6 +1044,58 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       }
       d.sigma_min = s.stress.pore_pressure.min_sigma_n_pa;
    }
+   // ---- [cycle.loading] (after [fault_geometry]: m defaults to ref_normal) ----
+   if (cy.contains("loading"))
+   {
+      const std::string sec = "cycle.loading";
+      const toml::value &l = cy.at("loading");
+      OnlyKeys(l, sec, {"kind", "plane_point", "plane_normal", "slip_dir", "band"});
+      LoadingConfig &L = c.loading;
+      L.kind = Str(l, sec, "kind", L.kind);
+      MFEM_VERIFY(L.kind == "bp5" || L.kind == "plate",
+                  "[" << sec << "].kind must be \"bp5\" or \"plate\"; got \"" << L.kind << "\"");
+      if (L.kind == "bp5")
+      {
+         MFEM_VERIFY(!l.contains("plane_point") && !l.contains("plane_normal") &&
+                     !l.contains("slip_dir") && !l.contains("band"),
+                     "[" << sec << "] kind = \"bp5\" takes no other key (it is the fault "
+                     "plane y = 0, slip along x, band 1 km); use kind = \"plate\"");
+      }
+      else
+      {
+         auto dot = [](const std::array<real_t, 3> &u, const std::array<real_t, 3> &v)
+         { return u[0] * v[0] + u[1] * v[1] + u[2] * v[2]; };
+         L.plane_point = Vec3(l, sec, "plane_point", L.plane_point, true);
+         L.plane_normal = Vec3(l, sec, "plane_normal", c.dyn.ref_normal);
+         L.slip_dir = Vec3(l, sec, "slip_dir", L.slip_dir, true);
+         L.band = Real(l, sec, "band", 0.0, true);
+         MFEM_VERIFY(std::abs(dot(L.plane_normal, L.plane_normal) - 1.0) < 1e-12 &&
+                     std::abs(dot(L.slip_dir, L.slip_dir) - 1.0) < 1e-12,
+                     "[" << sec << "] plane_normal and slip_dir must be unit vectors");
+         MFEM_VERIFY(std::abs(dot(L.plane_normal, L.slip_dir)) < 1e-12,
+                     "[" << sec << "] slip_dir must lie in the plane (slip_dir . "
+                     "plane_normal = " << dot(L.plane_normal, L.slip_dir) << ")");
+         MFEM_VERIFY(L.band >= 0.0, "[" << sec << "].band must be >= 0");
+         const real_t mr = dot(L.plane_normal, c.dyn.ref_normal);
+         MFEM_VERIFY(std::abs(mr) >= 1e-6, "[" << sec << "] plane_normal . "
+                     "[fault_geometry].ref_normal = " << mr << ": the plane normal lies in "
+                     "the fault plane, so the side of the prescribed jump is undefined");
+         L.band_sign = (mr < 0.0) ? 1.0 : -1.0;
+      }
+   }
+   if (!c.loading.Plate())
+   {
+      // The BP5 function's band value +Vp t x is the jump of the side y > 0
+      // over the side y < 0, which ComputeSkeletonDirichletSign gives only
+      // with the oriented normal along (0, -1, 0).
+      const std::array<real_t, 3> &r = c.dyn.ref_normal;
+      MFEM_VERIFY(std::abs(r[0]) < 1e-12 && std::abs(r[1] + 1.0) < 1e-12 &&
+                  std::abs(r[2]) < 1e-12,
+                  "[cycle.loading] kind = \"bp5\" (the default) is the BP5 function of "
+                  "the plane y = 0 and needs [fault_geometry].ref_normal = (0, -1, 0); got ("
+                  << r[0] << ", " << r[1] << ", " << r[2] << "): use kind = \"plate\"");
+   }
+
    if (c.lts.On())
    {
       // The Nitsche driver's --lts rate2 conditions (nitsche_lts_run.hpp)

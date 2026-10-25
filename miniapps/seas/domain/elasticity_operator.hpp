@@ -199,6 +199,9 @@ public:
    /// internally from BCMode with legacy BP5 attribute numbers.
    /// Existing tests and drivers continue to work unchanged.
    /// `fault_frames`: see FaultFrameSource (default: the constants).
+   /// `dirichlet_func`: the loading on the Dirichlet attributes (2D in-plane
+   /// design rev 3, A4: the cycle's [cycle.loading]); empty: the BP5
+   /// function MakeBP5DirichletFunc(Vp), as before.
    ElasticityDomainOperator(MeshType &mesh, int order,
                              real_t lambda, real_t mu,
                              real_t Vp, real_t Wf, real_t lf,
@@ -206,7 +209,8 @@ public:
                              SolverType solver_type = SolverType::MUMPS_BLR,
                              BCMode bc_mode = BCMode::FarField,
                              int face_basis_type = BasisType::GaussLobatto,
-                             const FaultFrameSource &fault_frames = {})
+                             const FaultFrameSource &fault_frames = {},
+                             const DirichletFunc &dirichlet_func = nullptr)
       : mesh_(mesh), order_(order),
         lambda_val_(lambda), mu_val_(mu),
         Vp_(Vp), Wf_(Wf), lf_(lf),
@@ -225,7 +229,8 @@ public:
 
       // Build BoundaryConfig from legacy BCMode numbers.
       bdr_config_.fault_attr = 3;
-      bdr_config_.default_dirichlet_func = MakeBP5DirichletFunc(Vp);
+      bdr_config_.default_dirichlet_func =
+         dirichlet_func ? dirichlet_func : MakeBP5DirichletFunc(Vp);
       if (bc_mode == BCMode::AllDirichlet)
       {
          mfem::out << "\n  *** WARNING: AllDirichlet BC mode is legacy and known "

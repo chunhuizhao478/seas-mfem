@@ -77,6 +77,7 @@
 #include "mfem.hpp"
 #include "cycle_config.hpp"
 #include "cycle_frames.hpp"
+#include "loading.hpp"
 #include "fault_fields.hpp"
 #include "prestress.hpp"
 #include "fd_cycle_output.hpp"
@@ -145,12 +146,14 @@ public:
       // Legacy ctor: Dirichlet {5} (walls and creep plane), natural {1},
       // fault 3 (BCMode::FarField), exactly as seas_bp5_full builds it, with
       // the cycle's one fault orientation system (phase A): the operator
-      // builds the FaultFrameField; the dynamic regime reads it.
+      // builds the FaultFrameField; the dynamic regime reads it.  Loading:
+      // [cycle.loading] (cycle/loading.hpp; default the BP5 function).
       FaultFrameSource frames;
       frames.config = std::make_shared<const FaultFrameConfig>(CycleFrameConfig(cfg));
       dom_ = std::make_unique<DomainOp>(pmesh, s.mesh.order, lambda, mu, cfg.plate_rate,
                                         seed_.Wf, seed_.lf, DGMethod::IP, st,
-                                        BCMode::FarField, BasisType::GaussLobatto, frames);
+                                        BCMode::FarField, BasisType::GaussLobatto, frames,
+                                        MakeCycleLoading(cfg));
       if (st == SolverType::MUMPS_BLR) { dom_->SetBLRTol(cfg.qd.blr_tol); }
       if (cfg.penalty_factor != 1.0) { dom_->SetPenaltyFactor(cfg.penalty_factor); }
 

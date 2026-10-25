@@ -6,6 +6,8 @@
 #
 #   tests/2d_inplane/parity_3d.sh run BIN OUT      run the set with the binaries in BIN
 #   tests/2d_inplane/parity_3d.sh compare A B      compare two OUT folders file by file
+#   tests/2d_inplane/parity_3d.sh decks OUT        only write the run decks, OUT/decks
+#                                                  (tests/2d_inplane/rotation_run.sh)
 #
 # Run from miniapps/seas.  BIN holds seas_nitsche_dyn_driver,
 # seas_fd_cycle_driver, seas_bp5_full and the unit-test binaries listed below
@@ -128,9 +130,13 @@ PY
    exit $?
 fi
 
-[ "$mode" = run ] || { echo "unknown mode $mode"; exit 2; }
-BIN=$(cd "${2:?}" && pwd); OUT=${3:?}
-MESHES=${MESHES:?set MESHES to the folder with the 1000 m TPV205/TPV104 meshes}
+[ "$mode" = run ] || [ "$mode" = decks ] || { echo "unknown mode $mode"; exit 2; }
+if [ "$mode" = decks ]; then
+   OUT=${2:?}
+else
+   BIN=$(cd "${2:?}" && pwd); OUT=${3:?}
+   MESHES=${MESHES:?set MESHES to the folder with the 1000 m TPV205/TPV104 meshes}
+fi
 MPIRUN=${MPIRUN:-mpirun --oversubscribe}
 ONLY=${ONLY:-}
 [ -e "$OUT" ] && { echo "$OUT exists: not replacing it"; exit 2; }
@@ -171,6 +177,7 @@ qd = sub(s, "V_on               = 1.0e-2", "V_on               = 1.0e2")
 open(f"{work}/cycle_qd.toml", "w").write(qd)
 open(f"{work}/cycle_dyn.toml", "w").write(dyn)
 PY
+[ "$mode" = decks ] && exit 0
 
 want() { [ -z "$ONLY" ] || [[ " $ONLY " == *" $1 "* ]]; }
 run() {   # name, ranks, binary, options...

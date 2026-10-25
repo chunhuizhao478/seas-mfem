@@ -10,7 +10,8 @@
 //   DynPhase(pmesh, cfg, table, par, pre):
 //     bc  = {Dirichlet {5}, natural {1}, fault 3}: the QD legacy
 //           constructor's lists (BCMode::FarField, stage 1 of plan 6.4)
-//     bc.default_dirichlet_func = (x, tau) -> MakeBP5DirichletFunc(Vp)(x, t0 + tau)
+//     bc.default_dirichlet_func = (x, tau) -> MakeCycleLoading(cfg)(x, t0 + tau)
+//           ([cycle.loading], cycle/loading.hpp: the QD regime's loading)
 //     fs  = closure RateStateClosure (aging law, the deck's b, f0, V0),
 //           orientation and frame from [fault_geometry],
 //           prestress zero (H2 below), parameters (a, Dc) = par at the DOF
@@ -62,6 +63,7 @@
 #include "mfem.hpp"
 #include "cycle_config.hpp"
 #include "cycle_frames.hpp"
+#include "loading.hpp"
 #include "fault_fields.hpp"
 #include "prestress.hpp"
 #include "state_bridge.hpp"
@@ -146,7 +148,7 @@ public:
       bc_.natural_attrs = {1};
       bc_.fault_attr = cfg.fault_attr;
       {
-         const DirichletFunc load = MakeBP5DirichletFunc(cfg.plate_rate);
+         const DirichletFunc load = MakeCycleLoading(cfg);   // [cycle.loading], as QD
          std::shared_ptr<const real_t> t0 = t0_;
          bc_.default_dirichlet_func = [load, t0](const Vector &x, real_t tau, Vector &u)
          { load(x, *t0 + tau, u); };

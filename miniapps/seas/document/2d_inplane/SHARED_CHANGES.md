@@ -65,3 +65,78 @@ walls (every deck in config/fd_cycle uses (0, -1, 0); part 2's
 `[cycle.loading]` refuses the combination); (4) `cycle-owned-check` (the
 fully-dynamic-cycle branch's rule M1) lists the shared files above: expected
 on this branch.
+
+## Phase A, part 2: the plate loading (A4), the Okada check, the rotation run
+
+New files (branch-owned): `cycle/loading.hpp`; `tests/2d_inplane/frame_box.hpp`
+(the test box and rotations, moved out of the field test),
+`test_plate_loading.cpp`, `okada92.hpp` (Okada's DC3D in C++),
+`test_okada_dislocation.cpp`, `rotate_case.py`, `rotation_run.sh`,
+`rotation_compare.py`.
+
+| Shared file | Change | Without the new input |
+|---|---|---|
+| `cycle/cycle_config.hpp` | `LoadingConfig` and `CycleConfig::loading`: the `[cycle.loading]` table (`kind = "bp5"` or `"plate"` with `plane_point`, `plane_normal`, `slip_dir`, `band`); `band_sign = sgn(-plane_normal . ref_normal)`; checks (unit vectors, slip direction in the plane, plane normal not in the fault plane); kind `"bp5"` requires `ref_normal = (0, -1, 0)` | no table: kind `"bp5"` |
+| `domain/elasticity_operator.hpp` | legacy constructor takes a trailing `dirichlet_func` (default empty) | `MakeBP5DirichletFunc(Vp)`, as before |
+| `cycle/qd_phase.hpp` | the QD operator gets `MakeCycleLoading(cfg)` | kind `"bp5"`: `MakeBP5DirichletFunc(plate_rate)`, the function it had |
+| `cycle/dyn_phase.hpp` | the dynamic regime's loading is `MakeCycleLoading(cfg)` | the same `MakeBP5DirichletFunc(plate_rate)` |
+| `tests/2d_inplane/parity_3d.sh` | `decks OUT` mode (only the decks, for the rotation run) | - |
+
+The band value.  Inside the band the loading value is the jump that the
+prescribed-slip (creep) faces impose, and the operator multiplies it by
+`ComputeSkeletonDirichletSign` (+1 where the face's Elem1-outward normal
+points along the oriented normal n), so the imposed jump is
+u(side opposite n) - u(side n points to).  The plate motion's jump across
+the plane is u(side of m) - u(other side) = Vp t s, which is that jump when
+m points away from n and its negative when m points along n: the band value
+is sgn(-m . ref) Vp t s (design rev 3 wrote Vp t s, which is right only for
+m . ref < 0, as in BP5).  The value does not change under (m, s) -> (-m, -s).
+
+The ψ0 and initial slip direction items of A3 needed no change: the per-DOF
+V_init (dip, strike) is already the deck's (`[cycle.fields]`, H1b
+`SetInitialFieldsPerDOF`, which overwrites the constructor's (0, 1)
+direction), and the SCEC-mode ψ0 is computed per DOF from the deck's f0, b,
+V0 and V_background (uniformity of those is asserted), so neither depends on
+the fault's orientation.
+
+How it was checked (cloud container, 10-25).  Plate test (1 and 2 ranks):
+kind "plate" with BP5's vectors equals `MakeBP5DirichletFunc` bit for bit at
+65156 point-times on the BP5 mesh's Dirichlet boundary; the operator's
+solution with the walls and the creep band loaded and the fault slipping by
+the same jump is the rigid two-block motion to 4.4e-14 on a flat, a 60°
+dipping and a generally rotated plane (O(1) with the band sign reversed);
+six refusals.  3D parity (as part 1): TPV205, TPV104, cycle QD and dynamic
+on 1 rank and dynamic on 2 ranks byte for byte against the base and part 1
+(apart from the commit stamp); cycle QD on 2 ranks 4.8e-9 from the base
+(repeat runs of one binary set: 8.6e-10 and 3.7e-9); BP5 quick check on 8
+ranks 1.1e-7 (base reruns: up to 9.3e-8); unit tests exit 0, their logs
+differing only in the order of ranks' lines and in a 2-rank MUMPS residual
+at 1e-12.
+
+Known behaviour changes: (1) a cycle deck without `[cycle.loading]` and with
+a `[fault_geometry].ref_normal` other than (0, -1, 0) is now refused (the
+BP5 function is the y = 0 plane's); every deck in config/fd_cycle passes.
+
+Okada check (cloud container, 10-25; tests only).  okada92.hpp equals
+Okada's Fortran DC3D (REAL*8 build) bit for bit at 1e5 points.
+test_okada_dislocation: 39 of 39 on 2 ranks, 29 of 29 in quick mode on 1
+rank.  60-degree dip, dip slip, p = 2, n = 4 to 8: surface displacement
+3.1 % to 0.33 %, the traction's stress part 32 % to 9.1 %, the full
+traction (with the penalty term) 877 % to 88 %: the uniform-slip patch's
+edges are singular and pollute the penalty term, so the test bounds the
+stress part and asks the full traction to converge.
+
+Rotation run (cloud container, 10-25): the parity set's cycle decks run
+unrotated with kind "plate" and BP5's vectors (33 files byte for byte the same as the
+parity runs with the default loading, QD and dynamic), rotated by 40
+degrees about (1, 2, 3) (mesh nodes and every deck vector), and unrotated
+on 2 ranks as the control.  Largest difference, vectors measured together
+(rotation_compare.py): QD 10 steps 7.9e-10 rotated / 9.1e-10 control;
+dynamic 40 steps 3.6e-11 / 3.6e-12; QD-to-dynamic switch (V_on 3.5e-2 m/s,
+then 40 dynamic steps) 1.5e-8 / 2.0e-8, switch at t = 0.421874329 s
+unrotated and 0.421874327 s rotated.  The QD regime's adaptive steps carry
+roundoff into the step sizes; a change of rank count does the same.  The
+checkpoint's volume displacement matches within each tet (3123 of 62874
+tets list their DOFs in another order on the rotated mesh: MFEM's
+Mesh::MarkTetMeshForRefinement orders a tet's vertices by edge length, and
+equal lengths differ in the last bit after the rotation).
