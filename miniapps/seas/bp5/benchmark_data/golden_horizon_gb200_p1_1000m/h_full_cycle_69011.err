@@ -1,0 +1,133 @@
+
+Lmod is automatically replacing "nvidia/26.9" with "gcc/15.3.0".
+
+
+Due to MODULEPATH changes, the following have been reloaded:
+  1) nvpl/26.9     2) openmpi/5.0.11
+
+The following have been reloaded with a version change:
+  1) cuda/13.3 => cuda/13.1
+
+tests/unit/../../domain/../integrator/dg_br2_integrator.hpp(41): warning #611-D: overloaded virtual function "mfem::BilinearFormIntegrator::AssembleFaceMatrix" is only partially overridden in class "mfem::seas::BR2InteriorFaceIntegrator"
+  class BR2InteriorFaceIntegrator : public BilinearFormIntegrator
+        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+tests/unit/../../domain/../integrator/dg_br2_integrator.hpp(81): warning #611-D: overloaded virtual function "mfem::BilinearFormIntegrator::AssembleFaceMatrix" is only partially overridden in class "mfem::seas::BR2BoundaryFaceIntegrator"
+  class BR2BoundaryFaceIntegrator : public BilinearFormIntegrator
+        ^
+
+tests/unit/../../domain/../integrator/dg_br2_integrator.hpp(41): warning #611-D: overloaded virtual function "mfem::BilinearFormIntegrator::AssembleFaceMatrix" is only partially overridden in class "mfem::seas::BR2InteriorFaceIntegrator"
+  class BR2InteriorFaceIntegrator : public BilinearFormIntegrator
+        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+tests/unit/../../domain/../integrator/dg_br2_integrator.hpp(81): warning #611-D: overloaded virtual function "mfem::BilinearFormIntegrator::AssembleFaceMatrix" is only partially overridden in class "mfem::seas::BR2BoundaryFaceIntegrator"
+  class BR2BoundaryFaceIntegrator : public BilinearFormIntegrator
+        ^
+
+tests/unit/../../domain/../integrator/dg_elasticity_br2_integrator.hpp(47): warning #611-D: overloaded virtual function "mfem::BilinearFormIntegrator::AssembleFaceMatrix" is only partially overridden in class "mfem::seas::DGElasticityBR2Integrator"
+  class DGElasticityBR2Integrator : public BilinearFormIntegrator
+        ^
+
+tests/unit/../../domain/../integrator/dg_elasticity_br2_integrator.hpp(109): warning #611-D: overloaded virtual function "mfem::BilinearFormIntegrator::AssembleFaceMatrix" is only partially overridden in class "mfem::seas::DGElasticityBR2BoundaryIntegrator"
+  class DGElasticityBR2BoundaryIntegrator : public DGElasticityBR2Integrator
+        ^
+
+tests/unit/../../domain/../integrator/dg_elasticity_br2_integrator.hpp(47): warning #611-D: overloaded virtual function "mfem::BilinearFormIntegrator::AssembleFaceMatrix" is only partially overridden in class "mfem::seas::DGElasticityBR2Integrator"
+  class DGElasticityBR2Integrator : public BilinearFormIntegrator
+        ^
+
+tests/unit/../../domain/../integrator/dg_elasticity_br2_integrator.hpp(109): warning #611-D: overloaded virtual function "mfem::BilinearFormIntegrator::AssembleFaceMatrix" is only partially overridden in class "mfem::seas::DGElasticityBR2BoundaryIntegrator"
+  class DGElasticityBR2BoundaryIntegrator : public DGElasticityBR2Integrator
+        ^
+
+tests/verification/../../solver/../domain/../integrator/dg_br2_integrator.hpp(41): warning #611-D: overloaded virtual function "mfem::BilinearFormIntegrator::AssembleFaceMatrix" is only partially overridden in class "mfem::seas::BR2InteriorFaceIntegrator"
+  class BR2InteriorFaceIntegrator : public BilinearFormIntegrator
+        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+tests/verification/../../solver/../domain/../integrator/dg_br2_integrator.hpp(81): warning #611-D: overloaded virtual function "mfem::BilinearFormIntegrator::AssembleFaceMatrix" is only partially overridden in class "mfem::seas::BR2BoundaryFaceIntegrator"
+  class BR2BoundaryFaceIntegrator : public BilinearFormIntegrator
+        ^
+
+tests/verification/../../solver/../domain/../integrator/dg_elasticity_br2_integrator.hpp(47): warning #611-D: overloaded virtual function "mfem::BilinearFormIntegrator::AssembleFaceMatrix" is only partially overridden in class "mfem::seas::DGElasticityBR2Integrator"
+  class DGElasticityBR2Integrator : public BilinearFormIntegrator
+        ^
+
+tests/verification/../../solver/../domain/../integrator/dg_elasticity_br2_integrator.hpp(109): warning #611-D: overloaded virtual function "mfem::BilinearFormIntegrator::AssembleFaceMatrix" is only partially overridden in class "mfem::seas::DGElasticityBR2BoundaryIntegrator"
+  class DGElasticityBR2BoundaryIntegrator : public DGElasticityBR2Integrator
+        ^
+
+tests/unit/../../domain/../integrator/dg_br2_integrator.hpp(41): warning #611-D: overloaded virtual function "mfem::BilinearFormIntegrator::AssembleFaceMatrix" is only partially overridden in class "mfem::seas::BR2InteriorFaceIntegrator"
+  class BR2InteriorFaceIntegrator : public BilinearFormIntegrator
+        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+tests/unit/../../domain/../integrator/dg_br2_integrator.hpp(81): warning #611-D: overloaded virtual function "mfem::BilinearFormIntegrator::AssembleFaceMatrix" is only partially overridden in class "mfem::seas::BR2BoundaryFaceIntegrator"
+  class BR2BoundaryFaceIntegrator : public BilinearFormIntegrator
+        ^
+
+tests/unit/../../domain/../integrator/dg_br2_integrator.hpp(41): warning #611-D: overloaded virtual function "mfem::BilinearFormIntegrator::AssembleFaceMatrix" is only partially overridden in class "mfem::seas::BR2InteriorFaceIntegrator"
+  class BR2InteriorFaceIntegrator : public BilinearFormIntegrator
+        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+tests/unit/../../domain/../integrator/dg_br2_integrator.hpp(81): warning #611-D: overloaded virtual function "mfem::BilinearFormIntegrator::AssembleFaceMatrix" is only partially overridden in class "mfem::seas::BR2BoundaryFaceIntegrator"
+  class BR2BoundaryFaceIntegrator : public BilinearFormIntegrator
+        ^
+
+tests/unit/../../domain/../integrator/dg_elasticity_br2_integrator.hpp(47): warning #611-D: overloaded virtual function "mfem::BilinearFormIntegrator::AssembleFaceMatrix" is only partially overridden in class "mfem::seas::DGElasticityBR2Integrator"
+  class DGElasticityBR2Integrator : public BilinearFormIntegrator
+        ^
+
+tests/unit/../../domain/../integrator/dg_elasticity_br2_integrator.hpp(109): warning #611-D: overloaded virtual function "mfem::BilinearFormIntegrator::AssembleFaceMatrix" is only partially overridden in class "mfem::seas::DGElasticityBR2BoundaryIntegrator"
+  class DGElasticityBR2BoundaryIntegrator : public DGElasticityBR2Integrator
+        ^
+
+tests/unit/../../domain/../integrator/dg_elasticity_br2_integrator.hpp(47): warning #611-D: overloaded virtual function "mfem::BilinearFormIntegrator::AssembleFaceMatrix" is only partially overridden in class "mfem::seas::DGElasticityBR2Integrator"
+  class DGElasticityBR2Integrator : public BilinearFormIntegrator
+        ^
+
+tests/unit/../../domain/../integrator/dg_elasticity_br2_integrator.hpp(109): warning #611-D: overloaded virtual function "mfem::BilinearFormIntegrator::AssembleFaceMatrix" is only partially overridden in class "mfem::seas::DGElasticityBR2BoundaryIntegrator"
+  class DGElasticityBR2BoundaryIntegrator : public DGElasticityBR2Integrator
+        ^
+
+tests/verification/../../solver/../domain/../integrator/dg_br2_integrator.hpp(41): warning #611-D: overloaded virtual function "mfem::BilinearFormIntegrator::AssembleFaceMatrix" is only partially overridden in class "mfem::seas::BR2InteriorFaceIntegrator"
+  class BR2InteriorFaceIntegrator : public BilinearFormIntegrator
+        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+tests/verification/../../solver/../domain/../integrator/dg_br2_integrator.hpp(81): warning #611-D: overloaded virtual function "mfem::BilinearFormIntegrator::AssembleFaceMatrix" is only partially overridden in class "mfem::seas::BR2BoundaryFaceIntegrator"
+  class BR2BoundaryFaceIntegrator : public BilinearFormIntegrator
+        ^
+
+tests/verification/../../solver/../domain/../integrator/dg_elasticity_br2_integrator.hpp(47): warning #611-D: overloaded virtual function "mfem::BilinearFormIntegrator::AssembleFaceMatrix" is only partially overridden in class "mfem::seas::DGElasticityBR2Integrator"
+  class DGElasticityBR2Integrator : public BilinearFormIntegrator
+        ^
+
+tests/verification/../../solver/../domain/../integrator/dg_elasticity_br2_integrator.hpp(109): warning #611-D: overloaded virtual function "mfem::BilinearFormIntegrator::AssembleFaceMatrix" is only partially overridden in class "mfem::seas::DGElasticityBR2BoundaryIntegrator"
+  class DGElasticityBR2BoundaryIntegrator : public DGElasticityBR2Integrator
+        ^
+
+tests/unit/../../domain/elasticity_operator_debug.inl(447): warning #177-D: variable "nbf" was declared but never referenced
+        const int nbf = nbf_per_face_;
+                  ^
+          detected during instantiation of "void mfem::seas::ElasticityDomainOperator<MeshType>::Solve(mfem::real_t, const mfem::Vector &, mfem::seas::ElasticityDomainOperator<MeshType>::GridFuncType &) [with MeshType=mfem::ParMesh]" at line 147 of tests/unit/test_g0_matrix_only.cpp
+
+tests/unit/../../domain/elasticity_operator_debug.inl(447): warning #177-D: variable "nbf" was declared but never referenced
+        const int nbf = nbf_per_face_;
+                  ^
+          detected during instantiation of "void mfem::seas::ElasticityDomainOperator<MeshType>::Solve(mfem::real_t, const mfem::Vector &, mfem::seas::ElasticityDomainOperator<MeshType>::GridFuncType &) [with MeshType=mfem::Mesh]" at line 251 of tests/unit/test_elasticity_operator.cpp
+
+tests/verification/../../solver/../domain/elasticity_operator_debug.inl(447): warning #177-D: variable "nbf" was declared but never referenced
+        const int nbf = nbf_per_face_;
+                  ^
+          detected during instantiation of "void mfem::seas::ElasticityDomainOperator<MeshType>::Solve(mfem::real_t, const mfem::Vector &, mfem::seas::ElasticityDomainOperator<MeshType>::GridFuncType &) [with MeshType=mfem::ParMesh]" 
+

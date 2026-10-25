@@ -1,0 +1,6 @@
+[QD-GREEN] allocating G: 34.89 GiB in all, about 34.89 GiB per rank (rows split over all 1 ranks)
+[QD-GREEN] G 83808 x 55872 (N_f 27936, shear + normal rows), 34.89 GiB in all, 34.89 GiB largest rank
+[QD-GREEN] read from /scratch/10024/zhaochun/seas-qd-green/bp5_prod_p1.bin in 214.0 s (N_f 27936, order 1, penalty factor 1, 3 components, built on 144 ranks)
+[QD-GREEN] on the device (cuBLAS dgemv): moved in 0.3 s, device memory used 34.89 GiB on the largest rank
+[QD-GREEN] check against the solve path (t = 100 yr, test slip): max rel. difference shear 3.198e-15, normal 5.308e-14 (tolerance 1.000e-08)
+[QD-GREEN] stages 1968895, checks 0
