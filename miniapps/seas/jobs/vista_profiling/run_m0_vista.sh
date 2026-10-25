@@ -68,7 +68,7 @@ for spec in "${VARIANTS[@]}"; do
    rc=$?; kill $MON 2>/dev/null; wait $MON 2>/dev/null
    [ $rc -eq 0 ] || rc_all=$rc
    echo "=== $v: deck $DECK, flags [--lts rate2 $FLAGS], 0 -> $TFINAL s: driver exit $rc, $(( $(date +%s) - s )) s in the job"
-   grep -a "partition:\|LTS\|fault ParaView output:\|time in ode.Step per rank\|fault work:\|halo\|setup (wall\|station output:\|=== done" $OUT/driver.log || tail -20 $OUT/driver.log
+   grep -a "partition:\|LTS\|fault ParaView output:\|time in ode.Step per rank\|fault work:\|rank balance\|slowest ranks\|halo\|setup (wall\|station output:\|=== done" $OUT/driver.log || tail -20 $OUT/driver.log
    grep -a "^ *step [0-9]* t = " $OUT/driver.log | awk '{print "   " $0}'
    awk '{u=($2-$3)/1048576; if(u>m)m=u; t=$2/1048576} END{printf "first node memory: peak in use %.1f GB of %.1f GB (2 s samples)\n", m, t}' $OUT/meminfo_kB.log
    ls -l $OUT/fault.vtkhdf 2>/dev/null | awk '{printf "fault.vtkhdf %.1f MB\n", $5/1e6}'
