@@ -63,3 +63,9 @@ committed memory went from 114.1 GiB to 37.6 GiB (profiling job 1090566).
   with std::bad_alloc on 21 ranks, all on node i617-101; driver.log in
   $SCRATCH/nitsche_benchmarks/tpv26_mirror200m_p2_1087808.  The node commit limit above, with every rank
   holding the serial mesh, is the likely cause (inferred); the rerun uses rank-0 mesh setup.
+- Build 1094996 and TPV26 1094998 (b618bbb5, 2026-10-24): the build passed; TPV26 ran 0 to 13 s in 22 min
+  (12.8 ms/step), the first node's peak committed memory 56.6 GiB of 118.8.  Against DRDG3D (station PDF in
+  /mnt/project-files/nonlinearity/tpv26-200m-p2-stations-2026-10-24/): median arrival difference 0.023 s,
+  slip 0.30 %, peak slip rate 4.6 %; sigma_n 0.3 to 1 % above DRDG3D at five stations, whose station files
+  held a fault node 50 m deeper than the SCEC point (sigma_n grows 17.6 MPa per km).  The .geo now makes
+  the 12 stations mesh vertices.

@@ -22,6 +22,10 @@ for res in "$@"; do
    gmsh -3 tpv26/mesh/tpv2627_half.geo -setnumber lc_fault "$res" $GMSH_OPTS -format msh22 \
         -o "$base.half.msh" > "$base.gmsh.log" 2>&1 \
       || { echo "ERROR: gmsh failed at $res m (log $base.gmsh.log)"; tail -5 "$base.gmsh.log"; exit 1; }
+   # gmsh exits 0 when a .geo command fails (a station point it cannot embed), so read its log too.
+   if grep -q "^Error" "$base.gmsh.log"; then
+      echo "ERROR: gmsh reported errors at $res m (log $base.gmsh.log)"; grep "^Error" "$base.gmsh.log"; exit 1
+   fi
    python3 scripts/mirror_mesh.py "$base.half.msh" "$base.msh" --fault-attr 103 | tee "$base.mirror.log"
    rm -f "$base.half.msh"
    echo "$base.msh: $(( $(date +%s) - t )) s"

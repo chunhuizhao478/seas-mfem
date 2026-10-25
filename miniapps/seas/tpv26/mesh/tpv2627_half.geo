@@ -52,8 +52,12 @@ Point(5) = {Xmax, 0, Zmin, lc};
 Point(6) = {-Xmax, 0, Zmin, lc};
 Point(7) = {-xf, 0, -Fault_width, lc};
 Point(8) = {xf, 0, -Fault_width, lc};
+Point(111) = {-5e3, 0, 0, lc};   // the two surface stations (below)
+Point(112) = {15e3, 0, 0, lc};
 Line(1) = {1, 2};
-Line(2) = {2, 3};
+Line(2) = {2, 111};              // the fault's top edge, in three pieces
+Line(31) = {111, 112};
+Line(32) = {112, 3};
 Line(3) = {3, 4};
 Line(4) = {4, 5};
 Line(5) = {5, 6};
@@ -62,9 +66,26 @@ Line(7) = {2, 7};
 Line(8) = {7, 8};
 Line(9) = {8, 3};
 Curve Loop(1) = {1, 7, 8, 9, 3, 4, 5, 6};
-Curve Loop(2) = {2, -9, -8, -7};
+Curve Loop(2) = {2, 31, 32, -9, -8, -7};
 Plane Surface(1) = {1};       // the Y = 0 plane outside the fault (99)
 Plane Surface(2) = {2};       // the fault (103)
+
+// The 12 on-fault stations (description v13, Part 8; tpv26/stations/tpv26_fault_stations.csv) are
+// mesh vertices, so every station file holds the solution at its SCEC point.  Without them the
+// nearest fault node was up to 50 m deeper and 46 m along strike (job 1094998, 200 m: sigma_n 0.3 to
+// 1 % above DRDG3D at five stations).  The two surface stations, points 111 and 112, end pieces of
+// the fault's top edge (the built-in kernel cannot embed a point in a curve).
+Point(101) = {-15e3, 0, -10e3, lc};
+Point(102) = {-5e3, 0, -5e3, lc};
+Point(103) = {-5e3, 0, -10e3, lc};
+Point(104) = {-5e3, 0, -15e3, lc};
+Point(105) = {0, 0, -10e3, lc};
+Point(106) = {5e3, 0, -10e3, lc};
+Point(107) = {10e3, 0, -10e3, lc};
+Point(108) = {15e3, 0, -5e3, lc};
+Point(109) = {15e3, 0, -10e3, lc};
+Point(110) = {15e3, 0, -15e3, lc};
+Point{101:110} In Surface{2};
 
 // The far side Y = Ymax and the faces that join it to the Y = 0 face.
 Point(11) = {-Xmax, Ymax, 0, lc};
@@ -80,7 +101,7 @@ Line(22) = {14, 15};
 Line(23) = {15, 16};
 Line(24) = {16, 11};
 Curve Loop(11) = {21, 22, 23, 24};          // the far side Y = Ymax
-Curve Loop(12) = {1, 2, 3, 14, -21, -11};   // the free surface Z = 0
+Curve Loop(12) = {1, 2, 31, 32, 3, 14, -21, -11};   // the free surface Z = 0
 Curve Loop(13) = {-5, 15, 23, -16};         // the bottom Z = Zmin
 Curve Loop(14) = {4, 15, -22, -14};         // the side X = Xmax
 Curve Loop(15) = {6, 11, -24, -16};         // the side X = -Xmax

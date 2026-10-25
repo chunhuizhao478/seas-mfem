@@ -14,8 +14,12 @@
 # the TPV205/TPV104 golds).  Compared with DRDG3D TPV26 over 0-12 s by the plan's criteria; a gold if it
 # passes.  Submit from miniapps/seas/jobs/vista_rheology/ AFTER build_tpv2627_vista.sbatch passed at this
 # commit (it builds the driver and writes the mesh and its sha256 to MESH_SHA256_TPV2627_VISTA).
-# Mesh (Vista gmsh 4.15.0-git, built-in kernel, build job 1086883): 2,995,976 tets, 46,328 fault faces,
-# dt 1.330e-4 s, 97,755 steps to 13 s.
+# Mesh: the 12 on-fault stations are mesh vertices (tpv26/mesh/tpv2627_half.geo); the build job's 200 m
+# load check prints its tets and dt.  Cloud gmsh 4.15.2: 3,000,070 tets, 46,462 fault faces, smallest 6V/A
+# 29.1 m (29.9 m without the station points; the smallest elements lie away from the stations, gmsh's
+# own scatter), so dt and the step count move by a few percent at most.  The mesh before (Vista gmsh
+# 4.15.0-git, build job 1086883, run 1094998): 2,995,976 tets, 46,328 fault faces, dt 1.330e-4 s,
+# 97,755 steps to 13 s.
 # Estimate from the trunk's 1 s run in LTS job 1082384 (TPV205 200 m p2, 1.89 M tets, 7,394 steps,
 # 199 s on 2,304 ranks: 3.3e-5 core-s per tet-step with setup): 2,700 core-h, 0.9 h on 3,072 ranks,
 # 24 nodes x 0.9 h x 0.33 = 7 SU; the larger fault adds rank-0 frame output.
