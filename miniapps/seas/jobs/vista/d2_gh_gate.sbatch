@@ -19,6 +19,9 @@
 #   (NP = 1, 2, 4 GPUs, one rank per GH200 node; from miniapps/seas of
 #   $WORK/seas-mfem-gpu-dyn-d2 after d2_gh_build.sbatch passed at the same
 #   commit; REF_RUNS is the gg check at the same NP: 1082888, 1082889, 1082890)
+# Each rank needs its own GPU: at most as many ranks per node as the node has
+# GPUs.  On Horizon (4 GB200 per node) all three fit on one node,
+# jobs/horizon/h_d2_gate.sbatch with sbatch -n NP.
 #
 # MF_LAYOUT (default auto: element at p = 1, team2 at p = 2 on the GPU) is
 # passed as --mf-layout.  A case fails when the driver's summary does not say
@@ -32,8 +35,10 @@ export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 TOL=${TOL:-1e-8}
 MF_LAYOUT=${MF_LAYOUT:-auto}
 ROOT=$(cd "$SLURM_SUBMIT_DIR/../.." && pwd)              # submitted from miniapps/seas
-NP=${SLURM_NTASKS:?run with sbatch -N NP -n NP}
-[ "$NP" = "${SLURM_NNODES:-0}" ] || { echo "ERROR: one rank per GPU: sbatch -N NP -n NP (got $SLURM_NNODES nodes, $NP tasks)"; exit 2; }
+NP=${SLURM_NTASKS:?run with sbatch -N NODES -n NP}
+NGPU=$(nvidia-smi -L | grep -c '^GPU ')
+RPN=$(( (NP + ${SLURM_NNODES:-1} - 1) / ${SLURM_NNODES:-1} ))
+[ "$RPN" -le "$NGPU" ] || { echo "ERROR: one rank per GPU: $NP tasks on $SLURM_NNODES node(s) of $NGPU GPU(s)"; exit 2; }
 [ -n "${REF_RUNS:-}" ] && [ -f "$REF_RUNS/../RUN_INFO.txt" ] \
    || { echo "ERROR: set REF_RUNS to a d1_gg_check job's runs directory"; exit 2; }
 grep -q ", NP $NP," "$REF_RUNS/../RUN_INFO.txt" \

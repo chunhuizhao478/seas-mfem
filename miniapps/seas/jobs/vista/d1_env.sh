@@ -68,10 +68,12 @@ d1_gg_modules () {
    module load cuda/12.6 openmpi/5.0.5 hypre/2.31.0 metis/5.1.0.3 phdf5/1.14.6 gmsh/4.15.0
 }
 
-# The modules of build_horizon.sh MODE=cuda (gh runs).
+# The modules of build_horizon.sh MODE=cuda (gh runs), or G0_MODULES when set
+# (jobs/horizon/h_env.sh: Horizon's GB200 nodes).
 d1_gh_modules () {
    module purge
-   module load gcc/13.2.0 "${CUDA_MODULE:-cuda/13.0}" openmpi/5.0.11 nvpl/26.9 cmake/3.31.5
+   # shellcheck disable=SC2086   # a list of modules
+   module load ${G0_MODULES:-gcc/13.2.0 ${CUDA_MODULE:-cuda/13.0} openmpi/5.0.11 nvpl/26.9 cmake/3.31.5}
 }
 
 # Bitwise check of run dir $1 against run dir $2: same exit code (0), same

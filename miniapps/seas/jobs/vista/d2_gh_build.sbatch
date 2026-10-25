@@ -20,7 +20,8 @@
 # on TPV205 1000 m, p = 1 and 2, heterogeneous moduli, with the absorbing
 # boundary made Dirichlet (every face kind of the product): 1 rank, and 4
 # ranks sharing the GPU (the halo and shared fault faces) when its compute
-# mode is Default.  BUILD_COMMIT_CUDA records the commit for d2_gh_gate.sbatch.
+# mode is Default, or each on its own GPU on a node of 4 (Horizon's GB200).
+# BUILD_COMMIT_CUDA records the commit for d2_gh_gate.sbatch.
 # Then the transfer trace (plan rev2 §4.3 acceptance, "an Nsight trace shows
 # no volume-sized copy inside a step, only the planned fault gather"):
 # TPV205 1000 m on 1 GPU, p = 1 and 2, 200 steps of the device step under
@@ -28,20 +29,29 @@
 # Systems is NSYS if set, else nsys on PATH, else the CUDA module's.
 #
 # MFEM is configured in place with build_horizon.sh MODE=cuda (the CUDA
-# PETSc of $WORK/seas-gpu-deps and the HDF5 of $WORK/seas-gpu-dyn-deps, both
-# read only).  It stops if another job of yours is queued or running in the
-# clone.  Login node, in the D2 clone:
+# PETSc of DEPS_ROOT, read only, and the HDF5 of HDF5_ROOT, built there when
+# absent; on Vista $WORK/seas-gpu-deps and $WORK/seas-gpu-dyn-deps).  It stops
+# if another job of yours is queued or running in the clone, unless that job
+# waits on this one (a gate submitted after it).  Login node, in the D2 clone:
 #   cd $WORK/seas-mfem-gpu-dyn-d2 && git pull --ff-only
 #   cd miniapps/seas && sbatch jobs/vista/d2_gh_build.sbatch
-# The meshes are D0a's, copied from $WORK/seas-mfem-gpu-dyn-nit when absent
-# (sha256 checked).  Every check runs; the job exits 1 when any failed.
+# The meshes are D0a's, copied from MESH_SRC (default the miniapps/seas of
+# $WORK/seas-mfem-gpu-dyn-nit) when absent (sha256 checked).  On Horizon,
+# jobs/horizon/h_d2_build.sbatch runs this script with the settings of
+# jobs/horizon/h_dyn_env.sh (GPU_ARCH, MFEM_CUDA_ARCH, DEPS_ROOT, HDF5_ROOT,
+# MESH_SRC, the modules and NSYS).  Every check runs; the job exits 1 when
+# any failed.
 # Cost: 1 gh node x <= 4 h (1 SU per node-hour); the build is most of it.
 export LC_ALL=C LANG=C
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 ROOT=$(cd "$SLURM_SUBMIT_DIR/../.." && pwd)              # submitted from miniapps/seas
 NIT=${NIT:-$WORK/seas-mfem-gpu-dyn-nit}
-Q=$(squeue -h -u "$USER" -o "%i %Z") || { echo "ERROR: squeue failed"; exit 2; }
-OTHERS=$(awk -v me="$SLURM_JOB_ID" -v r="$ROOT" '$1 != me && (($2 == r) || index($2, r "/") == 1) {print $1}' <<< "$Q" | tr '\n' ' ')
+MESH_SRC=${MESH_SRC:-$NIT/miniapps/seas}
+# Other jobs in this clone, except those still waiting on this one (their
+# dependency names this job: "afterok:<id>(unfulfilled)"), which start on
+# the binary this job builds.
+Q=$(squeue -h -u "$USER" -o "%i %E %Z") || { echo "ERROR: squeue failed"; exit 2; }
+OTHERS=$(awk -v me="$SLURM_JOB_ID" -v r="$ROOT" '$1 != me && index($2, ":" me "(") == 0 && (($3 == r) || index($3, r "/") == 1) {print $1}' <<< "$Q" | tr '\n' ' ')
 [ -z "$OTHERS" ] || { echo "ERROR: jobs $OTHERS are queued or running in $ROOT; use another clone or wait"; exit 2; }
 # shellcheck source=d1_env.sh
 source "$ROOT/miniapps/seas/jobs/vista/d1_env.sh"
@@ -57,8 +67,8 @@ echo "job $SLURM_JOB_ID on $(hostname), $(date -u +%FT%TZ); checkout $ROOT at $S
 
 cd "$ROOT" || exit 2
 rm -f miniapps/seas/BUILD_COMMIT_CUDA
-if ! MODE=cuda GPU_ARCH=90 STAGE="hdf5 mfem seas" WITH_HDF5=1 \
-      DEPS_ROOT="$WORK/seas-gpu-deps" HDF5_ROOT="$WORK/seas-gpu-dyn-deps" \
+if ! MODE=cuda GPU_ARCH="${GPU_ARCH:-90}" STAGE="hdf5 mfem seas" WITH_HDF5=1 \
+      DEPS_ROOT="${DEPS_ROOT:-$WORK/seas-gpu-deps}" HDF5_ROOT="${HDF5_ROOT:-$WORK/seas-gpu-dyn-deps}" \
       PROVENANCE_FILE="$OUT/build_provenance_cuda.txt" \
       SEAS_TARGETS="seas_nitsche_dyn_driver seas_test_nitsche_sipg_mf" JOBS=72 \
       bash build_horizon.sh > "$OUT/build.log" 2>&1; then
@@ -70,11 +80,12 @@ echo "BUILD: done at $SHA in $(( $(date +%s) - T0 )) s"
 
 cd "$ROOT/miniapps/seas" || exit 2
 for m in tpv205/mesh/tpv2053d_1000m.msh tpv104/mesh/tpv104_1000m.msh; do
-   [ -f "$m" ] || cp -v "$NIT/miniapps/seas/$m" "$m"
+   [ -f "$m" ] || cp -v "$MESH_SRC/$m" "$m"
 done
 d1_check_meshes "$ROOT/miniapps/seas" || exit 2
 d1_gh_modules
 CM=$(nvidia-smi --query-gpu=compute_mode --format=csv,noheader | head -1)
+NGPU=$(nvidia-smi -L | grep -c '^GPU ')
 { echo "job $SLURM_JOB_ID on $(hostname), $(date -u +%FT%TZ), commit $SHA ($ROOT)"
   echo "modules: $(module -t list 2>&1 | tr '\n' ' ')"
   nvidia-smi --query-gpu=name,compute_mode,driver_version --format=csv,noheader; } | tee "$OUT/RUN_INFO.txt"
@@ -96,10 +107,10 @@ run () {
 CHECK=(--hetero 0.2 --dirichlet 105 --layout both --batch 2,4)
 for P in 1 2; do
    run "gpu_check_p$P" 1 --order "$P" --device cuda "${CHECK[@]}"
-   if [ "$CM" = "Default" ]; then
+   if [ "$NGPU" -ge 4 ] || [ "$CM" = "Default" ]; then
       run "gpu_share_check_p$P" 4 --order "$P" --device cuda "${CHECK[@]}"
    else
-      echo "gpu_share_check_p$P: NOT RUN (compute mode $CM: ranks cannot share the GPU); the halo on the GPU waits for d2_gh_gate.sbatch at 2 and 4 GPUs"
+      echo "gpu_share_check_p$P: NOT RUN ($NGPU GPU(s), compute mode $CM: 4 ranks cannot share them); the halo on the GPU waits for d2_gh_gate.sbatch at 2 and 4 GPUs"
    fi
 done
 
