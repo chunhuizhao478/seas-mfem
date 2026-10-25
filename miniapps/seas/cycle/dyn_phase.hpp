@@ -61,6 +61,7 @@
 
 #include "mfem.hpp"
 #include "cycle_config.hpp"
+#include "cycle_frames.hpp"
 #include "fault_fields.hpp"
 #include "prestress.hpp"
 #include "state_bridge.hpp"
@@ -121,9 +122,13 @@ public:
    /// `table`, `par` and `pre` are the QD regime's, on the same owned fault
    /// DOFs.  `dt_scale` multiplies the CFL step (tests only).  `lts`: the
    /// layout of MapLts with [cycle.lts] rate2 (null or off: global stepping).
+   /// `frames`: the QD regime's fault orientation (QDPhase::Domain().
+   /// FrameField()); null: the Nitsche operator builds the same field
+   /// itself from CycleFrameConfig (tests).
    DynPhase(ParMesh &pmesh, const CycleConfig &cfg, const FaultDOFTable &table,
             const FaultParams &par, const Prestress &pre, real_t dt_scale = 1.0,
-            const LtsLayout *lts = nullptr)
+            const LtsLayout *lts = nullptr,
+            std::shared_ptr<const FaultFrameField> frames = nullptr)
       : pmesh_(pmesh), cfg_(cfg), t0_(std::make_shared<real_t>(0.0))
    {
       const spatial::SpatialFrictionConfig &s = cfg.shared;
@@ -153,16 +158,11 @@ public:
       closure_ = std::make_unique<RateStateClosure>(*fr_, RateStateClosure::StateLaw::Aging);
       NitscheFaultSetup fs;
       fs.closure = closure_.get();
-      FaultOrientationConfig &oc = fs.orientation;
-      for (int i = 0; i < 3; i++)
       {
-         oc.ref_normal[i] = dc.ref_normal[i];
-         oc.up[i] = dc.up[i];
-         fs.up[i] = dc.up[i];
+         const FaultFrameConfig fc = CycleFrameConfig(cfg);   // phase A: one system
+         fs.orientation = fc.orientation;
+         for (int i = 0; i < 3; i++) { fs.up[i] = fc.up[i]; }
       }
-      oc.pin = FaultOrientationConfig::Pin::Reference;
-      if (dc.pin_min_margin > 0.0) { oc.c_min = dc.pin_min_margin; }
-      oc.fault_attrs = {cfg.fault_attr};
       fs.sigma_min = dc.sigma_min;
       // The prestress arrives through H2 after setup; the projection sees 0.
       fs.prestress = [](const real_t[3], real_t sig[9])
@@ -190,6 +190,7 @@ public:
 
       DomainConfig dcfg;
       dcfg.penalty_factor = cfg.penalty_factor;
+      dcfg.fault_frames.field = frames;
       W_ = std::make_unique<NitscheWaveOperator>(pmesh, p, *material_, bc_, dcfg, &fs);
       MFEM_VERIFY(W_->Orientation().GetReport().junction_edges == 0,
                   "DynPhase: the fault has " << W_->Orientation().GetReport().junction_edges
@@ -636,6 +637,12 @@ private:
                     pmesh_.GetComm());
       ghost_mismatch_ = red[0];
       normal_mismatch_ = red[1];
+      // Phase A: the kernel triad and the census come from one FaultFrameField
+      // (the triad is sigma_f (n, d, s) up to the rounding of the per-DOF
+      // CalcOrtho normal), so eps_f n_k = n holds to rounding on every DOF.
+      MFEM_VERIFY(normal_mismatch_ <= 1e-12, "DynPhase: max |eps_f n_k - n| = "
+                  << normal_mismatch_ << " > 1e-12: the kernel triad and the fault census "
+                  "do not describe one orientation");
    }
 
    ParMesh &pmesh_;

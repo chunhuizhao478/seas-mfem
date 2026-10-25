@@ -71,10 +71,15 @@ public:
    /// @param fault_faces Interior face indices forming the fault
    /// @param ref_normal  Reference normal for consistent orientation
    /// @param up          Reference "up" vector for strike/dip decomposition
+   /// @param face_ref    Optional per-face reference normals, 3 per face in
+   ///                    basis order (2D in-plane design rev 3, phase A: the
+   ///                    oriented normal of the one orientation system); when
+   ///                    given they replace ref_normal face by face.
    void Compute(Mesh &mesh,
                 const Array<int> &fault_faces,
                 const Vector &ref_normal,
-                const Vector &up)
+                const Vector &up,
+                const real_t *face_ref = nullptr)
    {
       dim_ = mesh.Dimension();
       num_faces_ = fault_faces.Size();
@@ -96,7 +101,8 @@ public:
          CalcOrtho(ftr->Face->Jacobian(), n_raw);
 
          real_t nl;
-         ComputeOrientedFrame(n_raw, dim_, ref_normal, up,
+         Vector ref_i;
+         ComputeOrientedFrame(n_raw, dim_, RefFor_(ref_normal, face_ref, i, ref_i), up,
                               basis_[i].normal, basis_[i].tangent1,
                               basis_[i].tangent2, basis_[i].sign_flipped, nl);
          MFEM_VERIFY(nl > 0.0, "Zero-length face normal");
@@ -117,7 +123,8 @@ public:
                         const Array<int> &fault_faces,
                         const Vector &ref_normal,
                         const Vector &up,
-                        const IntegrationRule &ir)
+                        const IntegrationRule &ir,
+                        const real_t *face_ref = nullptr)
    {
       int nq = ir.GetNPoints();
       for (int i = 0; i < fault_faces.Size(); i++)
@@ -127,6 +134,8 @@ public:
          if (!ftr) { continue; }
 
          basis_[i].qp_data.resize(nq);
+         Vector ref_i;
+         const Vector &ref = RefFor_(ref_normal, face_ref, i, ref_i);
          for (int q = 0; q < nq; q++)
          {
             ftr->Face->SetIntPoint(&ir.IntPoint(q));
@@ -134,7 +143,7 @@ public:
             CalcOrtho(ftr->Face->Jacobian(), n_raw);
 
             auto &qpd = basis_[i].qp_data[q];
-            ComputeOrientedFrame(n_raw, dim_, ref_normal, up,
+            ComputeOrientedFrame(n_raw, dim_, ref, up,
                                  qpd.normal, qpd.tangent1, qpd.tangent2,
                                  qpd.sign_flipped, qpd.nl);
          }
@@ -148,7 +157,8 @@ public:
                               const Vector &ref_normal,
                               const Vector &up,
                               const IntegrationRule &ir,
-                              int interior_face_count)
+                              int interior_face_count,
+                              const real_t *face_ref = nullptr)
    {
       int nq = ir.GetNPoints();
       for (int i = 0; i < shared_faces.Size(); i++)
@@ -159,6 +169,8 @@ public:
 
          int bi = interior_face_count + i;
          basis_[bi].qp_data.resize(nq);
+         Vector ref_i;
+         const Vector &ref = RefFor_(ref_normal, face_ref, bi, ref_i);
          for (int q = 0; q < nq; q++)
          {
             ftr->Face->SetIntPoint(&ir.IntPoint(q));
@@ -166,7 +178,7 @@ public:
             CalcOrtho(ftr->Face->Jacobian(), n_raw);
 
             auto &qpd = basis_[bi].qp_data[q];
-            ComputeOrientedFrame(n_raw, dim_, ref_normal, up,
+            ComputeOrientedFrame(n_raw, dim_, ref, up,
                                  qpd.normal, qpd.tangent1, qpd.tangent2,
                                  qpd.sign_flipped, qpd.nl);
          }
@@ -181,7 +193,8 @@ public:
    void AppendSharedFaces(MeshType &mesh,
                           const Array<int> &shared_faces,
                           const Vector &ref_normal,
-                          const Vector &up)
+                          const Vector &up,
+                          const real_t *face_ref = nullptr)
    {
 #ifdef MFEM_USE_MPI
       int ns = shared_faces.Size();
@@ -207,7 +220,8 @@ public:
 
          int bi = old_count + i;
          real_t nl;
-         ComputeOrientedFrame(n_raw, dim_, ref_normal, up,
+         Vector ref_i;
+         ComputeOrientedFrame(n_raw, dim_, RefFor_(ref_normal, face_ref, bi, ref_i), up,
                               basis_[bi].normal, basis_[bi].tangent1,
                               basis_[bi].tangent2, basis_[bi].sign_flipped, nl);
          MFEM_VERIFY(nl > 0.0, "Zero-length shared face normal");
@@ -512,6 +526,17 @@ public:
    }
 
 private:
+   /// The reference normal of basis face bi: ref_normal, or face_ref's
+   /// entry (copied into tmp) when per-face references are given.
+   static const Vector &RefFor_(const Vector &ref_normal, const real_t *face_ref,
+                                int bi, Vector &tmp)
+   {
+      if (!face_ref) { return ref_normal; }
+      tmp.SetSize(3);
+      for (int d = 0; d < 3; d++) { tmp(d) = face_ref[3 * bi + d]; }
+      return tmp;
+   }
+
    // R-008 (v9.1.0 rev 3): explicit closing `private:` section.  The
    // v9.1.0 R-003 patch opened a mid-class `public:` block above the
    // static `ComputeOrientedFrame` (so the test can call it directly).

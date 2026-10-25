@@ -950,8 +950,11 @@ int main(int argc, char *argv[])
       if (cfg.switching)
       {
          const double w = MPI_Wtime();
+         // Phase A (2D in-plane design rev 3): the dynamic regime reads the
+         // QD regime's fault orientation (one system for both).
          dyn = std::make_unique<cycle::DynPhase>(pmesh, cfg, qd.Table(), par, pre, 1.0,
-                                                 lts.on ? &lts : nullptr);
+                                                 lts.on ? &lts : nullptr,
+                                                 qd.Domain().FrameField());
          PrintDynamicSetup(mpi, cfg, *dyn, MPI_Wtime() - w);
       }
       auto dynamic_phase = [&](real_t ts, real_t Vs)

@@ -597,7 +597,7 @@
             CalcOrtho(FTr->Jacobian(), nor_q);
 
             w_all[q] = ip.weight;
-            slip_sign_all[q] = (nor_q(1) > 0) ? 1.0 : -1.0;
+            slip_sign_all[q] = SlipSignBR2_(fi, nor_q);
          }
 
          // ===================================================================
@@ -940,7 +940,7 @@
                CalcOrtho(FTr->Jacobian(), nor_q);
 
                w_all[q] = ip.weight;
-               slip_sign_all[q] = (nor_q(1) > 0) ? 1.0 : -1.0;
+               slip_sign_all[q] = SlipSignBR2_(slip_idx, nor_q);
             }
 
             // Two-sided BR2 lifting (both elements contribute to lifting)

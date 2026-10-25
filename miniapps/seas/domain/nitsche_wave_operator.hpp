@@ -107,6 +107,7 @@
 #include "dense_block_stiffness.hpp"
 #include "../integrator/dg_absorbing_bc_integrator.hpp"
 #include "../fault/fault_orientation.hpp"
+#include "../fault/fault_frame_field.hpp"
 #include "../fault/fault_frame.hpp"
 #include "../friction/fault_closure.hpp"
 
@@ -199,10 +200,26 @@ public:
       lam_fb_ = lam_fb;
       mu_fb_ = mu_fb;
 
+      // Phase A (2D in-plane design rev 3): one fault orientation system.
+      // Without a source in `config`, the elastic operator builds the field
+      // from its own face lists with the fault setup's [fault_geometry]
+      // (the census this operator made in SetupFault_ before phase A); the
+      // Kelvin-Voigt copy and the fault setup then read that same field.
+      DomainConfig ecfg = config;
+      if (fault != nullptr && ecfg.fault_frames.Empty())
+      {
+         auto fc = std::make_shared<FaultFrameConfig>();
+         fc->orientation = fault->orientation;
+         for (int i = 0; i < 3; i++) { fc->up[i] = fault->up[i]; }
+         ecfg.fault_frames.config = fc;
+      }
       elast_ = std::make_unique<ElasticityDomainOperator<ParMesh>>(
          mesh, order, sample_->Lambda(), sample_->Mu(), lam_fb, mu_fb,
          /*Vp=*/0.0, /*Wf=*/0.0, /*lf=*/0.0, bc, DGMethod::IP,
-         SolverType::OperatorOnly, config);
+         SolverType::OperatorOnly, ecfg);
+      frames_ = elast_->FrameField();
+      config_ = ecfg;
+      if (frames_) { config_.fault_frames = FaultFrameSource{frames_, nullptr}; }
 
       int nfd = elast_->GetNumFaultDOFs();
       MPI_Allreduce(MPI_IN_PLACE, &nfd, 1, MPI_INT, MPI_SUM, mesh.GetComm());
@@ -379,7 +396,9 @@ public:
    /// Per-point parameters of owned DOF j as NitscheFaultSetup::parameters
    /// gave them (psi and slip_abs zero; the step sets them per call).
    const FaultPointState &FaultParams(int j) const { return par_own_[j]; }
-   const FaultOrientation &Orientation() const { return *orient_; }
+   const FaultOrientation &Orientation() const { return frames_->FaultCensus(); }
+   /// The one fault orientation system of the run (null without a fault).
+   std::shared_ptr<const FaultFrameField> FrameField() const { return frames_; }
    const NitscheStepRecord &LastStep() const { return record_; }
    /// Box 8/9 values of the last advance on owned DOFs: X_tan in the frame
    /// (dip, strike; 2 no) and sigma_n_eff (no).
@@ -586,7 +605,7 @@ public:
          {
             long long key[3];
             real_t xv[3][3];
-            orient_->FaceVertexData(fi, key, xv);
+            frames_->FaultCensus().FaceVertexData(fi, key, xv);
             for (int c = 0; c < 3; c++) { cl.push_back((xv[0][c] + xv[1][c] + xv[2][c]) / 3.0); }
          }
       }
@@ -1339,31 +1358,43 @@ private:
       MPI_Allreduce(MPI_IN_PLACE, &nsh, 1, MPI_INT, MPI_SUM, mesh_.GetComm());
       n_shared_global_ = nsh / 2;
 
-      // N-08 orientation; its constructor refuses an inadmissible fault.
-      orient_ = std::make_unique<FaultOrientation>(mesh_, fint, fsh, fs.orientation);
+      // N-08 orientation: the census of the run's FaultFrameField (built by
+      // elast_ from these face lists, or handed in through the DomainConfig);
+      // its constructor refused an inadmissible fault.
+      MFEM_VERIFY(frames_, "NitscheWaveOperator: the elastic operator has no fault "
+                  "frame field");
+      {
+         FaultFrameConfig want;
+         want.orientation = fs.orientation;
+         for (int i = 0; i < 3; i++) { want.up[i] = fs.up[i]; }
+         MFEM_VERIFY(SameFrameConfig(frames_->Config(), want),
+                     "NitscheWaveOperator: the fault frame field was built with another "
+                     "[fault_geometry] (ref_normal, up, pin, margins) than this "
+                     "NitscheFaultSetup asks for");
+      }
+      const FaultOrientation &orient = frames_->FaultCensus();
 
       // Kernel triad and eps_f per local DOF (dictionary, plan Part IV).
+      // One system: eps_f is the field's sigma_f of the DOF's face.
       elast_->GetFaultDOFBasis(Bk_);
       eps_loc_.assign(nd_, 1.0);
       for (int k = 0; k < nd_; k++)
       {
          real_t nk[3], t1k[3], t2k[3];
          KernelTriad_(k, nk, t1k, t2k);
-         eps_loc_[k] = fault_frame::EpsilonF(orient_->Normal(k / nbf_), nk);
+         eps_loc_[k] = fault_frame::EpsilonF(orient.Normal(k / nbf_), nk);
+         MFEM_VERIFY(eps_loc_[k] == frames_->Sigma(k / nbf_),
+                     "NitscheWaveOperator: eps_f = " << eps_loc_[k] << " at local fault "
+                     "DOF " << k << " but the frame field's sigma_f = "
+                     << frames_->Sigma(k / nbf_) << " (one orientation system)");
       }
 
-      // N-09 frame per local face -> per owned DOF.
+      // N-09 frame per local face -> per owned DOF (the field computed it
+      // with ComputeFrame(n, up, DegeneracyThreshold(1.0)), as here before).
       Vector frame_loc(9 * nd_);
       for (int fi = 0; fi < nloc_faces_; fi++)
       {
-         fault_frame::FaceVertices fv;
-         fv.nv = 3;
-         orient_->FaceVertexData(fi, fv.key, fv.x);
-         fault_frame::Frame fr;
-         const bool ok = fault_frame::ComputeFrame(
-            orient_->Normal(fi), fs.up, fault_frame::DegeneracyThreshold(1.0), fv, fr);
-         MFEM_VERIFY(ok, "NitscheWaveOperator: degenerate frame (F6(b)) on "
-                     "local fault face " << fi);
+         const fault_frame::Frame &fr = frames_->Frame(fi);
          for (int kk = 0; kk < nbf_; kk++)
          {
             real_t *f = &frame_loc(9 * (fi * nbf_ + kk));
@@ -1380,7 +1411,7 @@ private:
          {
             long long key[3];
             real_t xv[3][3];
-            orient_->FaceVertexData(fi, key, xv);
+            orient.FaceVertexData(fi, key, xv);
             MFEM_ABORT("NitscheWaveOperator: the penalty sigma_F is not "
                        "constant on fault face " << fi << " of rank "
                        << Mpi::WorldRank() << " (centroid ("
@@ -1485,7 +1516,7 @@ private:
    const IFaultClosure *closure_ = nullptr;
    real_t sigma_min_ = 0.0;
    std::function<real_t(real_t)> nuc_temporal_;
-   std::unique_ptr<FaultOrientation> orient_;
+   std::shared_ptr<const FaultFrameField> frames_;   ///< census + N-09 frames (phase A)
    int nd_ = 0, no_ = 0, nbf_ = 1, nloc_faces_ = 0, n_shared_global_ = 0;
    DenseMatrix Bk_;                    // kernel triad per local DOF (9 x nd)
    std::vector<real_t> eps_loc_;       // eps_f per local DOF

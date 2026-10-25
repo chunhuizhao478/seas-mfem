@@ -22,6 +22,9 @@
 #include "boundary_config.hpp"
 #include "domain_config.hpp"
 #include "../fault/fault_basis.hpp"
+#ifdef MFEM_USE_MPI
+#include "../fault/fault_frame_field.hpp"
+#endif
 #include "../integrator/dg_elasticity_br2_integrator.hpp"
 #include "../integrator/dg_elasticity_ip_penalty_integrator.hpp"
 #include "../integrator/dg_elasticity_ip_combined_integrator.hpp"
@@ -135,6 +138,7 @@ public:
         blr_tol_(config.blr_tol),
         match_quad_order_(config.match_quad_order)
    {
+      frame_src_ = config.fault_frames;
       const auto *le = dynamic_cast<const LinearElastic *>(model_);
       MFEM_VERIFY(le, "ElasticityDomainOperator currently requires LinearElastic");
       lambda_val_ = le->GetLambda();
@@ -176,6 +180,7 @@ public:
         blr_tol_(config.blr_tol),
         match_quad_order_(config.match_quad_order)
    {
+      frame_src_ = config.fault_frames;
       owned_model_ = std::make_unique<LinearElastic>(lambda_fb, mu_fb);
       model_ = owned_model_.get();
       lambda_ptr_ = &lambda;
@@ -193,13 +198,15 @@ public:
    /// Creates an internal LinearElastic model and builds BoundaryConfig
    /// internally from BCMode with legacy BP5 attribute numbers.
    /// Existing tests and drivers continue to work unchanged.
+   /// `fault_frames`: see FaultFrameSource (default: the constants).
    ElasticityDomainOperator(MeshType &mesh, int order,
                              real_t lambda, real_t mu,
                              real_t Vp, real_t Wf, real_t lf,
                              DGMethod method = DGMethod::BR2,
                              SolverType solver_type = SolverType::MUMPS_BLR,
                              BCMode bc_mode = BCMode::FarField,
-                             int face_basis_type = BasisType::GaussLobatto)
+                             int face_basis_type = BasisType::GaussLobatto,
+                             const FaultFrameSource &fault_frames = {})
       : mesh_(mesh), order_(order),
         lambda_val_(lambda), mu_val_(mu),
         Vp_(Vp), Wf_(Wf), lf_(lf),
@@ -212,6 +219,7 @@ public:
         fault_coords_computed_(false),
         face_basis_type_(face_basis_type)
    {
+      frame_src_ = fault_frames;
       owned_model_ = std::make_unique<LinearElastic>(lambda, mu);
       model_ = owned_model_.get();
 
@@ -379,6 +387,12 @@ public:
    const Array<int> &GetFaultDOFs() const override { return fault_dofs_; }
 
    const FaultBasis *GetFaultBasis() const override { return &fault_basis_; }
+
+#ifdef MFEM_USE_MPI
+   /// The fault orientation this operator reads (null: the constants; see
+   /// FaultFrameSource).  Hand it to the other operators of the run.
+   std::shared_ptr<const FaultFrameField> FrameField() const { return frame_field_; }
+#endif
 
    const Array<int> &GetFaultInteriorFaces() const { return fault_interior_faces_; }
    const Array<int> &GetFaultSharedFaces() const { return fault_shared_faces_; }
@@ -566,6 +580,15 @@ private:
    // Used by ComputeSkeletonDirichletSign() to determine f_q sign on
    // interior/shared Dirichlet faces, same role as DGCurvilinearCommon.h:97.
    Vector ref_normal_;
+   Vector up_;   ///< F1 up vector: (0, 0, 1), or the field's
+
+   // Phase A (2D in-plane design rev 3): the one orientation system.
+   FaultFrameSource frame_src_;
+#ifdef MFEM_USE_MPI
+   std::shared_ptr<const FaultFrameField> frame_field_;
+#endif
+   bool field_mode_ = false;
+   std::vector<real_t> face_ref_;   ///< field mode: oriented normal per fault face (basis order)
 
    bool match_quad_order_ = false;       // Use 2p instead of 2p+1 quadrature
    real_t penalty_factor_ = 1.0;  // v50a: scale IP penalty (1.0=default)
@@ -804,17 +827,49 @@ private:
    ///
    /// @param FTr Face transformation (SetAllIntPoints must have been called)
    /// @return +1.0 if face normal aligns with ref_normal_, -1.0 otherwise
+   /// Field mode: the face's oriented normal from the field's
+   /// prescribed-slip census replaces ref_normal_ (FTr->ElementNo is the
+   /// local face index for interior and shared faces).
    real_t ComputeSkeletonDirichletSign(
       FaceElementTransformations *FTr) const
    {
       Vector nor(3);
       CalcOrtho(FTr->Jacobian(), nor);
+      const real_t *ref = ref_normal_.GetData();
+#ifdef MFEM_USE_MPI
+      if (field_mode_) { ref = frame_field_->CreepNormal(FTr->ElementNo); }
+#endif
       real_t dot_ref = 0.0;
-      for (int d = 0; d < ref_normal_.Size(); d++)
+      for (int d = 0; d < 3; d++)
       {
-         dot_ref += nor(d) * ref_normal_(d);
+         dot_ref += nor(d) * ref[d];
       }
       return (dot_ref < 0.0) ? -1.0 : 1.0;
+   }
+
+   /// Reference normal handed to FaultBasis::ComputeOrientedFrame for
+   /// fault face `bi` (basis order: interior faces, then shared): the
+   /// constant ref_normal_, or in field mode the face's oriented normal.
+   void FaceRefNormal_(int bi, Vector &ref) const
+   {
+      ref.SetSize(3);
+      if (field_mode_)
+      {
+         for (int d = 0; d < 3; d++) { ref(d) = face_ref_[3 * bi + d]; }
+      }
+      else { ref = ref_normal_; }
+   }
+
+   /// BR2 slip sign at a quadrature point of fault face `bi` from the
+   /// Elem1-outward normal nor_q: +1 when nor_q opposes the reference
+   /// normal.  With the constant (0, -1, 0) this is the historical
+   /// (nor_q(1) > 0).
+   real_t SlipSignBR2_(int bi, const Vector &nor_q) const
+   {
+      if (!field_mode_) { return (nor_q(1) > 0) ? 1.0 : -1.0; }
+      const real_t *n = &face_ref_[3 * bi];
+      const real_t c = nor_q(0) * n[0] + nor_q(1) * n[1] + nor_q(2) * n[2];
+      return (c < 0.0) ? 1.0 : -1.0;
    }
 
 

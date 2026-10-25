@@ -835,7 +835,14 @@
          ref_normal = 0.0;
          ref_normal(1) = -1.0;  // Y = fault-normal, pointing -Y
          ref_normal_ = ref_normal;
+         up_.SetSize(3);
+         up_ = 0.0;
+         up_(2) = 1.0;  // +Z = upward
       }
+      // Phase A: the fault orientation system (collective; replaces the two
+      // constants above in field mode).
+      SetupFrameField_();
+      const real_t *face_ref = field_mode_ ? face_ref_.data() : nullptr;
 
       // Compute FaultBasis for coordinate transforms
       if (num_fault_dofs_ > 0)
@@ -845,20 +852,21 @@
          //   Fault at Y = 0
          //   ref_normal = (0, -1, 0) matches Tandem's convention
          //   Up = (0, 0, 1)
+         // Field mode: each face's reference normal is its oriented normal n
+         // (face_ref) and up is the field's; ComputeOrientedFrame's
+         // arithmetic is unchanged.
          const Vector &ref_normal = ref_normal_;
+         const Vector &up = up_;
 
-         Vector up(3);
-         up = 0.0;
-         up(2) = 1.0;  // +Z = upward
-
-         fault_basis_.Compute(mesh_, fault_interior_faces_, ref_normal, up);
+         fault_basis_.Compute(mesh_, fault_interior_faces_, ref_normal, up,
+                              face_ref);
 
          // Append shared faces to FaultBasis
          if constexpr (IsParallelMesh<MeshType>::value)
          {
 #ifdef MFEM_USE_MPI
             fault_basis_.AppendSharedFaces(mesh_, fault_shared_faces_,
-                                           ref_normal, up);
+                                           ref_normal, up, face_ref);
 #endif
          }
 
@@ -889,16 +897,68 @@
             IntRules.Get(face_geom, face_quad_order);
 
          fault_basis_.ComputeQPBasis(mesh_, fault_interior_faces_,
-                                      ref_normal, up, face_ir);
+                                      ref_normal, up, face_ir, face_ref);
 
          if constexpr (IsParallelMesh<MeshType>::value)
          {
 #ifdef MFEM_USE_MPI
             fault_basis_.ComputeQPBasisShared(mesh_, fault_shared_faces_,
                                                ref_normal, up, face_ir,
-                                               fault_interior_faces_.Size());
+                                               fault_interior_faces_.Size(),
+                                               face_ref);
 #endif
          }
+      }
+   }
+
+   /// Phase A (2D in-plane design rev 3): take the fault orientation from
+   /// the FaultFrameSource.  Empty source: the constants (reference mode).
+   /// Collective on a ParMesh.
+   void SetupFrameField_()
+   {
+      field_mode_ = false;
+      face_ref_.clear();
+      if (frame_src_.Empty()) { return; }
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         if (frame_src_.field)
+         {
+            MFEM_VERIFY(frame_src_.field->SameFaces(fault_interior_faces_, fault_shared_faces_,
+                                                    dirichlet_interior_faces_,
+                                                    dirichlet_shared_faces_),
+                        "ElasticityDomainOperator: the fault frame field handed to this "
+                        "operator was built from other fault / interior Dirichlet faces "
+                        "(another mesh, boundary attributes or partition)");
+            frame_field_ = frame_src_.field;
+         }
+         else
+         {
+            int nf = num_fault_faces_;
+            MPI_Allreduce(MPI_IN_PLACE, &nf, 1, MPI_INT, MPI_SUM, mesh_.GetComm());
+            if (nf == 0) { return; }   // no fault anywhere: the constants
+            frame_field_ = std::make_shared<FaultFrameField>(
+               mesh_, fault_interior_faces_, fault_shared_faces_, dirichlet_interior_faces_,
+               dirichlet_shared_faces_, bdr_config_.dirichlet_attrs, *frame_src_.config);
+            if (Mpi::WorldRank() == 0) { frame_field_->Print(mfem::out); }
+         }
+         MFEM_VERIFY(frame_field_->NumFaultFaces() == num_fault_faces_,
+                     "ElasticityDomainOperator: " << frame_field_->NumFaultFaces()
+                     << " fault faces in the frame field, " << num_fault_faces_
+                     << " in the operator");
+         field_mode_ = true;
+         for (int d = 0; d < 3; d++) { up_(d) = frame_field_->Up()[d]; }
+         face_ref_.resize(3 * num_fault_faces_);
+         for (int fi = 0; fi < num_fault_faces_; fi++)
+         {
+            for (int d = 0; d < 3; d++) { face_ref_[3 * fi + d] = frame_field_->Normal(fi)[d]; }
+         }
+#endif
+      }
+      else
+      {
+         MFEM_ABORT("ElasticityDomainOperator: a FaultFrameSource needs a ParMesh "
+                    "(the orientation census is parallel)");
       }
    }
 

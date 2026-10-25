@@ -14,10 +14,34 @@
 
 #include "mfem.hpp"
 
+#include <memory>
+
 namespace mfem
 {
 namespace seas
 {
+
+// fault/fault_frame_field.hpp (MPI builds).
+class FaultFrameField;
+struct FaultFrameConfig;
+
+/// Where an ElasticityDomainOperator takes its fault orientation from
+/// (2D in-plane design rev 3, phase A: one orientation system for the
+/// quasi-dynamic and the dynamic operators).
+///
+/// Both empty (the default): the operator's historical constants, reference
+/// normal (0, -1, 0) and up (0, 0, 1), in the fault frames, the
+/// prescribed-slip sign and the BR2 slip sign (serial meshes, legacy drivers).
+/// `field`: read the orientation from this field; the operator checks that
+/// its own fault and interior Dirichlet face lists are the field's.
+/// `config`: build the field from the operator's own face lists (ParMesh
+/// only); FrameField() then hands it to the other operators of the run.
+struct FaultFrameSource
+{
+   std::shared_ptr<const FaultFrameField> field;
+   std::shared_ptr<const FaultFrameConfig> config;
+   bool Empty() const { return !field && !config; }
+};
 
 // Forward-declare enums (defined in antiplane_operator.hpp and
 // elasticity_operator.hpp respectively). We re-declare them here
@@ -40,6 +64,7 @@ struct DomainConfig
    bool check_residual = false;
    bool match_quad_order = false;
    real_t cfl_factor = 0.5;  ///< CFL stability factor for explicit time stepping
+   FaultFrameSource fault_frames;  ///< fault orientation (default: the constants)
 };
 
 } // namespace seas

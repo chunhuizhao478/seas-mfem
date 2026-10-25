@@ -271,12 +271,12 @@ void ElasticityDomainOperator<MeshType>::GetFaultDOFBasis(
    const IntegrationRule &nir = face_quad_->GetNodalRule();
    const int nbf = nbf_per_face_;
 
-   // Use the same up vector as the fault_basis_ initialiser
-   // (elasticity_operator_setup.inl:735-737) so per-DOF and per-face
-   // bases agree at constant-Jacobian faces.
-   Vector up(3);
-   up = 0.0;
-   up(2) = 1.0;
+   // Use the same up vector and reference normals as the fault_basis_
+   // initialiser (SetupFaultInfo) so per-DOF and per-face bases agree at
+   // constant-Jacobian faces: (0, 0, 1) and (0, -1, 0), or in field mode
+   // the field's up and each face's oriented normal.
+   const Vector &up = up_;
+   Vector ref;
 
    for (int i = 0; i < fault_interior_faces_.Size(); i++)
    {
@@ -284,7 +284,8 @@ void ElasticityDomainOperator<MeshType>::GetFaultDOFBasis(
       FaceElementTransformations *FTr =
          mesh_.GetInteriorFaceTransformations(face);
       if (FTr == nullptr) { continue; }
-      WriteFaceDOFBasis_(FTr, i * nbf, nbf, dim, nir, ref_normal_, up,
+      FaceRefNormal_(i, ref);
+      WriteFaceDOFBasis_(FTr, i * nbf, nbf, dim, nir, ref, up,
                          "face", face, dof_basis);
    }
 
@@ -298,8 +299,9 @@ void ElasticityDomainOperator<MeshType>::GetFaultDOFBasis(
             mesh_.GetSharedFaceTransformations(sf);
          if (FTr == nullptr) { continue; }
          const int face_idx = fault_interior_faces_.Size() + i;
+         FaceRefNormal_(face_idx, ref);
          WriteFaceDOFBasis_(FTr, face_idx * nbf, nbf, dim, nir,
-                            ref_normal_, up,
+                            ref, up,
                             "shared face", sf, dof_basis);
       }
 #endif
