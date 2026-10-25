@@ -1,0 +1,11 @@
+commit 8eef3333058893a47e875c2c9249661f83cfe771
+host i614-033.vista.tacc.utexas.edu  nodes 16  ranks 2304
+deck tpv31/configs/tpv31_nitsche.toml  mesh tpv31/mesh/tpv31_nitsche_200m.msh sha256 5bd0b52ddd5080c531e2fc1e96b7b5d86edee0b8957c55f11e7d5294c02b9a71  order 3  tfinal 15.0
+modules: ucc/1.9.0 ucx/1.22.0 cmake/4.1.1 xalt/3.1 TACC gcc/14.2.0 nvpl/26.9 cuda/12.6 openmpi/5.0.5 hypre/2.31.0 metis/5.1.0.3 phdf5/1.14.6 
+driver exit 0 after 6594 s
+=== done: 211157 steps, t = 15.0001 s; max|V| 3.05114 m/s; max|V|dt/Dc 0.00120414; sigma_n_eff in [1.23904e+07, 1.03092e+08] Pa; sigma_pc in [1.24107e+07, 1.03087e+08] Pa; wall 6584.63 s ===
+  fault ParaView output: 299 frames in /scratch/10024/zhaochun/nitsche_benchmarks/tpv31_200m_p3_1096106/fault.vtkhdf; on rank 0 61.5447 s (0.205835 s/frame: pack 1.11803e-06, gather + HDF write 0.205834 = gather 0.00583109 + write 0.199734; fast writer)
+  time in ode.Step per rank after step 1: min 5625.01 s, mean 6537.23 s, max 6542.87 s (30.986 ms/step at the max); step 1 8.03447 s (with the operator assembly); fast fault on, fused K/K_eta off, dense blocks on (314755 MB over all ranks)
+  fault work: 6.279 ms/step on the busiest rank; cost per step 34.82 us per tet, 12.57 us per fault-face side (w = 0.3612 tets)
+first node memory: peak in use 132.3 GB of 237.6 GB, peak committed 115.2 of 118.8 GiB (2 s samples)
+4.1G	/scratch/10024/zhaochun/nitsche_benchmarks/tpv31_200m_p3_1096106
