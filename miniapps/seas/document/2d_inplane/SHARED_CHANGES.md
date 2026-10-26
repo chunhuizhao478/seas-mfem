@@ -594,3 +594,72 @@ byte for byte with phase C's final run.  `2d-inplane-all` passes, the
 three phase D targets included.
 
 Known behaviour changes in 3D: none.
+
+## Phase E, part 1: the quasi-dynamic solve on 2D meshes (E1)
+
+The quasi-dynamic regime's static solve now runs on a 2D triangle mesh.
+Phases B and C took every piece it uses to 2D (the 2D spaces, the fault
+layout and frames, the stiffness, the slip and Dirichlet loads, the
+traction); `ElasticityDomainOperator::Solve` itself still refused a 2D mesh
+through `Require3D_`.  That call is removed.  The stage operators
+(`BuildQDStageOperators`, `--qd-operators matrix`) and the Green's function
+(`--qd-green`) are separate prebuilt paths and still refuse 2D, with a
+message that names them; the default regime, the face loops through
+`Solve`, is the one BP3-QD needs.
+
+New file (branch-owned): `tests/2d_inplane/test_2d_dislocation.cpp` (make
+target `test-2d-dislocation`, part of `2d-inplane-all`): a uniform dip-slip
+patch (W = 2 km about 2 km depth, slip 1 m) imposed through the QD
+operator's slip embedding on a sheared 2D triangle grid, against Okada
+(1992) in the middle plane of a 2000 km long patch (plane strain to 7e-7 m
+and 1e-6 of mu |b| / W, P0), for dips 30, 60 and 90 degrees:
+
+- P1, thrust, p = 1 and 2, n = 4 and 8 cells along the patch: the surface
+  displacement error e_u and the stress part of the fault traction fall
+  with n at every dip and p (dip 60, p = 2: e_u 3.65e-3 to 4.33e-4, stress
+  part 0.055 to 0.014, the whole traction 0.54 to 0.023); the strike slot
+  of the slip and of the traction is exactly 0.
+- P2, normal sense: the tractions are the thrust case's negated, DOF by
+  DOF (6e-15 of the largest at most).
+- P3, ref_normal flipped: the driving traction reverses, the normal
+  traction stays (3e-15).
+- P4, the whole problem rotated by 30 degrees in the plane: the fault-local
+  tractions are unchanged (1e-14).
+
+This fixes the slip convention BP3 needs: the kernel's slip is the jump of
+the side the oriented normal points away from over the other, in the frame
+(d, s) with d down-dip for up = [0, 1] (design 10.2, case B).
+
+| Shared file | Change | Without the new inputs |
+|---|---|---|
+| `domain/elasticity_operator_traction.inl` | `Solve` no longer calls `Require3D_` | on a 3D mesh `Require3D_` passed: the same instructions run |
+| `domain/elasticity_operator.hpp` | `Require3D_`'s comment and message: the stage operators and the Green's function are 3D only, the 2D regime runs on the face loops | message text only |
+
+Test changes (branch-owned): `test_2d_fault_layout` refusal 5 now builds the
+QD stage operators on a 2D mesh (it called `Solve`, which no longer
+refuses); `test_2d_nitsche` N2 accepts a coded C(p) within the bisection's
+1 % bracket below the measured value, because the measurement differs by
+platform inside that bracket (p = 3: 0.461572 in the cloud container,
+0.464472 on the Mac, coded 0.461); the check that C(p) is at most the
+measurement is unchanged.
+
+3D parity against the runs of review 8's binaries (b0ce3cb6's code; same
+container, all 31 binaries rebuilt from clean): TPV205 and TPV104 on 2
+ranks, the cycle QD and dynamic regimes on 1 rank and the 15 unit tests
+byte for byte (apart from the commit stamp; the logs differ in the same
+timing lines as at D2); the cycle QD regime on 2 ranks 2.5e-9 and the BP5
+quick check on 8 ranks 1.1e-7 (MUMPS run to run; C1 measured 1.05e-7
+between two runs of one binary); the cycle dynamic regime on 2 ranks byte
+for byte but one off-fault station file at 2.2e-13, the run-to-run
+difference D2 measured.  TPV205 1000 m with `--lts rate2` on 2 ranks
+(1 s): byte for byte.  The fully-dynamic-cycle
+tests pass; their 1-rank logs are identical apart from timings, and the
+2-rank P3 switch checkpoint differs by 2.9e-11, the size of the test's
+own second QD run in the same process (t 4.6e-11; D2: 6.9e-12 and
+7.6e-12).  The first try of the 2-rank P3 test was killed by the
+container's 14.3 GB memory limit (out of memory, not a failing check);
+run again alone, it passes.  TPV205-2D at p = 1, 12 s on 4 ranks:
+byte for byte with phase C's final run.  `2d-inplane-all` passes (956 PASSED lines, no FAILED), the
+new target included.
+
+Known behaviour changes in 3D: none.

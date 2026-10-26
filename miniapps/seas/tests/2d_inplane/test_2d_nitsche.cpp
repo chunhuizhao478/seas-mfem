@@ -341,8 +341,14 @@ static void TestCFL()
       }
       TEST_ASSERT(rel <= 0.0101, "N2 p = " << p << ": bisection agrees with 2/omega_max to 1%");
       TEST_ASSERT(rel8 <= 0.01, "N2 p = " << p << ": C_eig on the 8 x 8 grid within 1% of 4 x 4");
-      TEST_ASSERT(c2 <= cmin && c2 >= cmin - 1e-3, "N2 p = " << p << ": the 2D C(p) is the "
-                  "measured min(C_eig, bisection) rounded down to 3 decimals");
+      // The bisection stops at a 1% bracket and its blow-up test near the
+      // limit depends on how round-off seeds the top mode, so its result
+      // differs by platform within that 1% (p = 3: 0.461572 in the cloud
+      // container, 0.464472 on the Mac); the column holds the smallest
+      // measurement, rounded down.  Check that it is safe here and no
+      // further below this platform's measurement than the bracket.
+      TEST_ASSERT(c2 <= cmin && c2 >= 0.99 * cmin, "N2 p = " << p << ": the 2D C(p) is at most "
+                  "the measured min(C_eig, bisection) and within the bisection's 1% of it");
    }
 }
 

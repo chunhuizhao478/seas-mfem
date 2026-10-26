@@ -41,8 +41,9 @@
 //   seas_test_2d_fault_layout             (1, 2 or 4 ranks)
 //   seas_test_2d_fault_layout --refuse N  one refusal, must exit non-zero:
 //     1 a quadrilateral mesh in LoadScaledMesh, 2 a 2D fault without the
-//     frame field, 3 up off the plane, 4 ref_normal off the plane, 5 a 2D
-//     solve (phase E), 6 up parallel to n in the QD basis, 7 BR2 in 2D.
+//     frame field, 3 up off the plane, 4 ref_normal off the plane, 5 the
+//     QD stage operators in 2D (the solve itself opens in phase E), 6 up
+//     parallel to n in the QD basis, 7 BR2 in 2D.
 //
 // Scope (Chunhui Zhao, 2026-10-25).
 
@@ -896,10 +897,7 @@ static int Refuse(int n, MPI_Comm comm)
          std::unique_ptr<Mesh> s(ShearBox(60.0));
          ParMesh pm(comm, *s);
          auto op = MakeOp(pm, 1, Source(ref, upB));
-         Vector slip(2 * op->GetNumFaultDOFs());
-         slip = 0.0;
-         ParGridFunction u(&op->GetFESpace());
-         op->Solve(0.0, slip, u);
+         op->BuildQDStageOperators(false);
          break;
       }
       case 6:

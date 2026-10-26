@@ -517,7 +517,6 @@ template <typename MeshType>
 void ElasticityDomainOperator<MeshType>::Solve(
    real_t time, const Vector &slip_bc, GridFuncType &displacement)
 {
-   Require3D_("Solve");
    MFEM_VERIFY(!assemble_matrix_only_,
                "Solve() after AssembleMatrixOnly(): no solver was set up");
    if (!stiffness_assembled_)

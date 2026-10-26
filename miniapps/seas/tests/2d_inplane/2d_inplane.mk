@@ -15,6 +15,7 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-thermal-pressurization  # phase D: the TP module
 #   make -f tests/2d_inplane/2d_inplane.mk test-normal-stress-hook  # phase D: the hook, TP on a rupture
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d-driver-tp        # phase D: the driver, TPV105-2D
+#   make -f tests/2d_inplane/2d_inplane.mk test-2d-dislocation      # phase E: plane-strain dislocation
 #   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
 # The 3D parity set (every phase must leave it bit for bit unchanged) is the
 # script tests/2d_inplane/parity_3d.sh (see its header).
@@ -99,6 +100,26 @@ test-okada-dislocation: seas_test_okada_dislocation
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_okada_dislocation
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_okada_dislocation --quick
 
+# Phase E: the static dislocation check in 2D, plane strain, against Okada
+# (1992) in the middle plane of a 2000 km long patch: the full set on 2
+# ranks, the n = 4 cases on 1 rank.
+TEST_DISL2D_SRC = tests/2d_inplane/test_2d_dislocation.cpp
+TEST_DISL2D_OBJ = $(TEST_DISL2D_SRC:.cpp=.o)
+$(TEST_DISL2D_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(INPLANE_HEADERS) \
+                         tests/2d_inplane/okada92.hpp $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_2d_dislocation: $(TEST_DISL2D_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_DISL2D_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-2d-dislocation: seas_test_2d_dislocation
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_2d_dislocation
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_2d_dislocation --quick
+
 # Phase B: the 2D switch on 2D triangle meshes built in the test (loader,
 # censuses, slot rule, fault DOF layout).
 TEST_2D_FAULT_LAYOUT_SRC = tests/2d_inplane/test_2d_fault_layout.cpp
@@ -116,7 +137,7 @@ seas_test_2d_fault_layout: $(TEST_2D_FAULT_LAYOUT_OBJ)
 
 # L1, C1-C3, S1, D1 on 1, 2 and 4 ranks; then each refusal must exit
 # non-zero with its message.
-LAYOUT_2D_REFUSALS = 1:triangle meshes only|2:needs the fault frame field|3:must lie in the mesh plane ([fault_geometry] up|4:FaultFrameField (2D): ref_normal|5:not available on a 2D mesh yet|6:up vector is nearly collinear|7:BR2 is 3D only
+LAYOUT_2D_REFUSALS = 1:triangle meshes only|2:needs the fault frame field|3:must lie in the mesh plane ([fault_geometry] up|4:FaultFrameField (2D): ref_normal|5:not available on a 2D mesh (the quasi-dynamic stage operators|6:up vector is nearly collinear|7:BR2 is 3D only
 test-2d-fault-layout: seas_test_2d_fault_layout
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_2d_fault_layout
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_2d_fault_layout
@@ -346,8 +367,8 @@ test-2d-driver-tp: seas_nitsche_dyn_driver
 
 2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
                 test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
-                test-normal-stress-hook test-2d-driver-tp
+                test-normal-stress-hook test-2d-driver-tp test-2d-dislocation
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
-        test-normal-stress-hook test-2d-driver-tp 2d-inplane-all
+        test-normal-stress-hook test-2d-driver-tp test-2d-dislocation 2d-inplane-all
