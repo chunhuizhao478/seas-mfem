@@ -29,8 +29,13 @@
 //       table: BP5's vectors give band_sign +1; plane_normal left out takes
 //       ref_normal (0, -1, 0) and gives band_sign -1, with the same plate
 //       motion when slip_dir is reversed (bit for bit with BP5's values)
+//   L7  a 2-D point (phase E): with BP3's vectors (dip 60, thrust: p = 0,
+//       m = (sin 60, cos 60), s = (-cos 60, sin 60), b = 1 km, z = 0), the
+//       value at (x, y) has 2 entries, equal bit for bit to the first two
+//       of the value at (x, y, 0), at points beyond, on and inside the band,
+//       at t = 0, 1 s and 1500 yr
 //
-// Modes: (default) L1-L6;  --refuse N (N = 1..6) writes a deck that
+// Modes: (default) L1-L7;  --refuse N (N = 1..6) writes a deck that
 // CycleConfig::Load must refuse and loads it (the makefile checks the exit
 // status and the message):
 //   1 kind "bp5" with another key        "takes no other key"
@@ -386,6 +391,46 @@ static void TestDeck()
    TEST_ASSERT(!c0.loading.Plate(), "L6 no [cycle.loading]: kind \"bp5\"");
 }
 
+static void TestPoint2D()
+{
+   if (g_rank == 0) { std::cout << "\n=== L7: the plate function on a 2-D point ===\n"; }
+   cycle::LoadingConfig L;
+   L.kind = "plate";
+   L.plane_point = {{0.0, 0.0, 0.0}};
+   L.plane_normal = {{0.8660254037844386, 0.5, 0.0}};
+   L.slip_dir = {{-0.5, 0.8660254037844386, 0.0}};
+   L.band = 1000.0;
+   L.band_sign = -1.0;   // sgn(-m . ref), ref = (1, 0, 0)
+   const real_t Vp = 1.0e-9;
+   const DirichletFunc f = cycle::MakePlateLoading(L, Vp);
+   long n = 0, bad = 0, sizes = 0;
+   Vector x2(2), x3(3), u2, u3;
+   // along the plane normal: beyond, on and inside the band, either side
+   for (real_t d : {-5.0e5, -1000.5, -1000.0, -10.0, 0.0, 10.0, 1000.0, 1000.5, 5.0e5})
+   {
+      for (real_t along : {-3.0e4, 0.0, 4.0e4})
+      {
+         x2(0) = d * L.plane_normal[0] - along * L.slip_dir[0];
+         x2(1) = d * L.plane_normal[1] - along * L.slip_dir[1];
+         x3(0) = x2(0); x3(1) = x2(1); x3(2) = 0.0;
+         for (real_t t : {0.0, 1.0, 1500.0 * kYear})
+         {
+            f(x2, t, u2);
+            f(x3, t, u3);
+            n++;
+            if (u2.Size() != 2 || u3.Size() != 3) { sizes++; continue; }
+            if (std::memcmp(u2.GetData(), u3.GetData(), 2 * sizeof(real_t)) != 0 || u3(2) != 0.0)
+            {
+               bad++;
+            }
+         }
+      }
+   }
+   TEST_ASSERT(sizes == 0 && bad == 0, "L7 (x, y): 2 entries, bit for bit the first two of "
+               "(x, y, 0) (" << n << " point-times, " << sizes << " wrong sizes, " << bad
+               << " differ)");
+}
+
 static int Refuse(int n)
 {
    std::string text;
@@ -440,6 +485,7 @@ int main(int argc, char *argv[])
    TestFunction();
    TestOperatorSign(comm);
    TestDeck();
+   TestPoint2D();
    if (g_rank == 0)
    {
       std::cout << "\ntest_plate_loading: " << (num_tests - num_failed) << " / " << num_tests

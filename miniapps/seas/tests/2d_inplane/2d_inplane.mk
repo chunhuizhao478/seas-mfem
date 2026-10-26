@@ -16,6 +16,7 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-normal-stress-hook  # phase D: the hook, TP on a rupture
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d-driver-tp        # phase D: the driver, TPV105-2D
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d-dislocation      # phase E: plane-strain dislocation
+#   make -f tests/2d_inplane/2d_inplane.mk test-prestress-bp3       # phase E: BP3 prestress, decks, outputs
 #   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
 # The 3D parity set (every phase must leave it bit for bit unchanged) is the
 # script tests/2d_inplane/parity_3d.sh (see its header).
@@ -119,6 +120,35 @@ seas_test_2d_dislocation: $(TEST_DISL2D_OBJ)
 test-2d-dislocation: seas_test_2d_dislocation
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_2d_dislocation
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_2d_dislocation --quick
+
+# Phase E: BP3's prestress ([cycle.prestress].a = "amax"), the initial
+# state of the BP3 decks and their outputs at t = 0, and the station
+# location on segment faces (the deck loader, the QD phase and the output
+# writers: the cycle's flags and objects, as test-2d-deck).
+TEST_PRESTRESS_BP3_SRC = tests/2d_inplane/test_prestress_bp3.cpp
+TEST_PRESTRESS_BP3_OBJ = $(TEST_PRESTRESS_BP3_SRC:.cpp=.o)
+$(TEST_PRESTRESS_BP3_OBJ): %.o: $(SRC)%.cpp $(CYCLE_HEADERS) $(CYCLE_STAMP) \
+                                $(CYCLE_SHARED_HEADERS) $(INPLANE_HEADERS) \
+                                $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
+
+seas_test_prestress_bp3: $(TEST_PRESTRESS_BP3_OBJ) $(CYCLE_LINK_OBJS)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PRESTRESS_BP3_OBJ) $(CYCLE_LINK_OBJS) \
+	    $(CYCLE_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# B1-B5 on 1 and 2 ranks; then each refusal must exit non-zero with its message.
+PRESTRESS_BP3_REFUSALS = 1:needs ic = "gold"|2:must be "local" or "amax"|3:needs a_max > 0|4:needs eta_V_init = true|5:takes no axis2 or half2 on a 2-D mesh|6:needs axis2 and half2 on a 3-D mesh|7:half2 is required|8:from its node (DOF order != basis order)
+test-prestress-bp3: seas_test_prestress_bp3
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_prestress_bp3
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_prestress_bp3
+	@list='$(PRESTRESS_BP3_REFUSALS)'; set -f; IFS='|'; for r in $$list; do n=$${r%%:*}; msg=$${r#*:}; \
+	   out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_prestress_bp3 --refuse $$n 2>&1); rc=$$?; \
+	   if [ $$rc -ne 0 ] && printf '%s' "$$out" | grep -qF "$$msg"; then \
+	      echo "  PASSED: refusal $$n: exit $$rc, \"$$msg\""; \
+	   else printf '%s\n' "$$out" | tail -15; echo "  FAILED: refusal $$n: exit $$rc, \"$$msg\" not found"; exit 1; fi; \
+	done
 
 # Phase B: the 2D switch on 2D triangle meshes built in the test (loader,
 # censuses, slot rule, fault DOF layout).
@@ -367,8 +397,9 @@ test-2d-driver-tp: seas_nitsche_dyn_driver
 
 2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
                 test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
-                test-normal-stress-hook test-2d-driver-tp test-2d-dislocation
+                test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
-        test-normal-stress-hook test-2d-driver-tp test-2d-dislocation 2d-inplane-all
+        test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
+        2d-inplane-all

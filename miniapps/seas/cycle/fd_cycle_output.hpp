@@ -28,6 +28,9 @@
 //   tau_s  = -(E(tau_a_s) + E(tau_b_s) + eta E(V_strike)) / 1e6   [MPa]
 //   tau_d  = -(E(tau_a_d) + E(tau_b_d) + eta E(V_dip)) / 1e6
 //   row    = t, slip_s, slip_d, log10 V_s, log10 V_d, tau_s, tau_d, log10 theta
+// and with [cycle.output] station_sigma_n a ninth column E(sigma_n) / 1e6,
+// sigma_n_eff compression positive [MPa] (the friction solve's: BP3's
+// normal stress).
 // E is the station evaluation on owned fault DOFs given by a regime adapter
 // (StationLocation, from LocateOnFaces): a face-basis interpolation when the
 // station lies on an owned fault face, else the nearest owned DOF.  Each
@@ -112,29 +115,44 @@ struct StationLocation
 /// first face it finds instead.  Without face blocks (nbf < 3, or N not a
 /// multiple of nbf) every point gets the nearest DOF, keyed (0, x2, x3) by
 /// that DOF's position.
+///
+/// face_dim = 1: the fault of a 2-D mesh, a line of segment faces of nbf =
+/// p + 1 DOFs (H1_SegmentElement, GaussLobatto: DOFs 0 and 1 at the end
+/// points, then the interior nodes from DOF 0's end).  A point on an owned
+/// segment (reference coordinate in [-1e-10, 1 + 1e-10] and off the line by
+/// at most 1e-10 of the segment's length) gets that segment's basis at the
+/// point; the centre in the key is the mid point of the two ends.  Without
+/// segment blocks (nbf < 2, or N not a multiple of nbf) every point gets the
+/// nearest DOF.
 inline std::vector<StationLocation> LocateOnFaces(
    const Vector &x2, const Vector &x3, int nbf,
-   const std::vector<std::array<real_t, 2>> &pts)
+   const std::vector<std::array<real_t, 2>> &pts, int face_dim = 2)
 {
    MFEM_VERIFY(x2.Size() == x3.Size(), "LocateOnFaces: " << x2.Size() << " x2 and "
                << x3.Size() << " x3 values");
+   MFEM_VERIFY(face_dim == 1 || face_dim == 2, "LocateOnFaces: faces of dimension "
+               << face_dim << " (1: segments of a 2-D mesh, 2: triangles of a 3-D mesh)");
    const int N = x2.Size();
    std::vector<StationLocation> out(pts.size());
    if (N == 0) { return out; }
+   const int nv = face_dim + 1;   // vertices per face: DOFs 0 .. nv - 1
    int order = -1;
-   if (nbf >= 3 && N % nbf == 0)
+   if (face_dim == 2 && nbf >= 3 && N % nbf == 0)
    {
       const int p = static_cast<int>(std::llround((std::sqrt(1.0 + 8.0 * nbf) - 3.0) / 2.0));
       if ((p + 1) * (p + 2) / 2 == nbf) { order = p; }
    }
+   if (face_dim == 1 && nbf >= 2 && N % nbf == 0) { order = nbf - 1; }
    const int nf = (order >= 1) ? N / nbf : 0;
    std::vector<std::array<real_t, 2>> centre(nf);
    for (int f = 0; f < nf; f++)
    {
       std::array<std::array<real_t, 2>, 3> v;
-      for (int k = 0; k < 3; k++) { v[k] = {{x2(f * nbf + k), x3(f * nbf + k)}}; }
-      std::sort(v.begin(), v.end());
-      centre[f] = {{(v[0][0] + v[1][0] + v[2][0]) / 3.0, (v[0][1] + v[1][1] + v[2][1]) / 3.0}};
+      for (int k = 0; k < nv; k++) { v[k] = {{x2(f * nbf + k), x3(f * nbf + k)}}; }
+      std::sort(v.begin(), v.begin() + nv);
+      std::array<real_t, 2> c = {{0.0, 0.0}};
+      for (int k = 0; k < nv; k++) { c[0] += v[k][0]; c[1] += v[k][1]; }
+      centre[f] = {{c[0] / nv, c[1] / nv}};
    }
    auto key_of = [&](int f, const std::array<real_t, 2> &p)
    {
@@ -142,11 +160,12 @@ inline std::vector<StationLocation> LocateOnFaces(
       return std::array<real_t, 3> {{std::sqrt(d2 * d2 + d3 * d3), centre[f][0],
                                      centre[f][1]}};
    };
-   std::unique_ptr<H1_TriangleElement> fe;
+   std::unique_ptr<FiniteElement> fe;
    Vector shape;
    if (nf > 0)
    {
-      fe.reset(new H1_TriangleElement(order, BasisType::GaussLobatto));
+      if (face_dim == 2) { fe.reset(new H1_TriangleElement(order, BasisType::GaussLobatto)); }
+      else { fe.reset(new H1_SegmentElement(order, BasisType::GaussLobatto)); }
       shape.SetSize(nbf);
    }
    const real_t inf = std::numeric_limits<real_t>::max();
@@ -171,15 +190,45 @@ inline std::vector<StationLocation> LocateOnFaces(
       {
          const int b = f * nbf;
          const real_t ax = x2(b + 1) - x2(b), az = x3(b + 1) - x3(b);
-         const real_t bx = x2(b + 2) - x2(b), bz = x3(b + 2) - x3(b);
          const real_t px = p[0] - x2(b), pz = p[1] - x3(b);
-         const real_t det = ax * bz - az * bx;
-         if (std::abs(det) < 1e-14) { continue; }
-         const real_t r = (px * bz - pz * bx) / det, q = (ax * pz - az * px) / det;
          const real_t tol = 1e-10;
-         if (1.0 - r - q < -tol || r < -tol || q < -tol) { continue; }
+         real_t r = 0.0, q = 0.0;
+         if (face_dim == 2)
+         {
+            const real_t bx = x2(b + 2) - x2(b), bz = x3(b + 2) - x3(b);
+            const real_t det = ax * bz - az * bx;
+            if (std::abs(det) < 1e-14) { continue; }
+            r = (px * bz - pz * bx) / det;
+            q = (ax * pz - az * px) / det;
+            if (1.0 - r - q < -tol || r < -tol || q < -tol) { continue; }
+         }
+         else
+         {
+            const real_t len2 = ax * ax + az * az;
+            if (len2 < 1e-14) { continue; }
+            r = (px * ax + pz * az) / len2;
+            // the distance off the segment's line over its length
+            const real_t off = std::abs(ax * pz - az * px) / len2;
+            if (r < -tol || r > 1.0 + tol || off > tol) { continue; }
+         }
          const std::array<real_t, 3> k = key_of(f, p);
          if (L.exact && !(k < L.key)) { continue; }
+         if (face_dim == 1)
+         {
+            // The interior DOFs must sit at the segment's nodes, in the
+            // basis's order, for the weights to interpolate.
+            const IntegrationRule &nodes = fe->GetNodes();
+            const real_t len = std::sqrt(ax * ax + az * az);
+            for (int j = 2; j < nbf; j++)
+            {
+               const real_t xi = nodes.IntPoint(j).x;
+               const real_t e = std::hypot(x2(b + j) - (x2(b) + xi * ax),
+                                           x3(b + j) - (x3(b) + xi * az));
+               MFEM_VERIFY(e <= 1e-8 * len, "LocateOnFaces: DOF " << j << " of the "
+                           "fault segment at (" << centre[f][0] << ", " << centre[f][1]
+                           << ") is " << e << " m from its node (DOF order != basis order)");
+            }
+         }
          IntegrationPoint ip;
          ip.x = r;
          ip.y = q;
@@ -347,8 +396,10 @@ class FdCycleOutput
 public:
    static constexpr real_t kOutputTimeTolerance = 0.99;
    /// Columns of a station row: t, slip_s, slip_d, log10 V_s, log10 V_d,
-   /// tau_s, tau_d (MPa), log10 theta.
+   /// tau_s, tau_d (MPa), log10 theta; with station_sigma_n also sigma_n
+   /// (MPa): NumStationColumns.
    static constexpr int kStationColumns = 8;
+   int NumStationColumns() const { return kStationColumns + (cfg_.station_sigma_n ? 1 : 0); }
 
    /// What a checkpoint keeps to continue the files.
    struct State
@@ -386,10 +437,11 @@ public:
 
       if (restart) { state_ = *restart; }
       restarted_ = (restart != nullptr);
-      const std::vector<std::string> columns = {
+      std::vector<std::string> columns = {
          "time(s)", "slip_strike(m)", "slip_dip(m)",
          "log10(V_strike)(m/s)", "log10(V_dip)(m/s)",
          "tau_strike(MPa)", "tau_dip(MPa)", "log10(state)(s)"};
+      if (cfg_.station_sigma_n) { columns.push_back("sigma_n(MPa)"); }
       for (int s = 0; s < ns; s++)
       {
          MFEM_VERIFY(gmin[s] < std::numeric_limits<real_t>::max(),
@@ -455,7 +507,7 @@ public:
          fill(f);
          for (size_t k = 0; k < owned_.size(); k++)
          {
-            stations_[k]->Row(StationRow_(t, f, locs_[owned_[k]]));
+            stations_[k]->Row(StationRow_(t, f, locs_[owned_[k]], cfg_.station_sigma_n));
          }
       }
       state_.last_write_time = t;
@@ -464,20 +516,21 @@ public:
    }
 
    /// The rows Write would write now, for every station in deck order
-   /// (kStationColumns values each), on the root; zeros on the other ranks.
-   /// Writes nothing and leaves the cadence alone.  Collective.
+   /// (NumStationColumns values each), on the root; zeros on the other
+   /// ranks.  Writes nothing and leaves the cadence alone.  Collective.
    std::vector<real_t> Sample(real_t t, const FieldsFn &fill)
    {
       const int ns = static_cast<int>(cfg_.stations.size());
-      std::vector<real_t> mine(static_cast<size_t>(kStationColumns * ns), 0.0);
+      const int nc = NumStationColumns();
+      std::vector<real_t> mine(static_cast<size_t>(nc * ns), 0.0);
       if (!owned_.empty())
       {
          StationFields f;
          fill(f);
          for (int s : owned_)
          {
-            const std::vector<real_t> r = StationRow_(t, f, locs_[s]);
-            std::copy(r.begin(), r.end(), mine.begin() + kStationColumns * s);
+            const std::vector<real_t> r = StationRow_(t, f, locs_[s], cfg_.station_sigma_n);
+            std::copy(r.begin(), r.end(), mine.begin() + nc * s);
          }
       }
       std::vector<real_t> all(mine.size(), 0.0);
@@ -640,9 +693,10 @@ public:
    }
 
 private:
-   /// One station row, term by term as ParallelBP5BenchmarkOutput::Write.
+   /// One station row, term by term as ParallelBP5BenchmarkOutput::Write;
+   /// `sigma_n`: the ninth column.
    static std::vector<real_t> StationRow_(real_t t, const StationFields &f,
-                                          const StationLocation &L)
+                                          const StationLocation &L, bool sigma_n)
    {
       auto safe_log10 = [](real_t v) -> real_t
       {
@@ -658,6 +712,11 @@ private:
       const real_t tau_s = -(Eval(f.tau_a_strike, L) + Eval(f.tau_b_strike, L)
                              + f.eta * Eval(f.V_strike, L)) / 1e6;
       const real_t th = Eval(f.theta, L);
+      if (sigma_n)
+      {
+         return {t, ss, sd, safe_log10(vs), safe_log10(vd), tau_s, tau_d, safe_log10(th),
+                 Eval(f.sigma_n, L) / 1e6};
+      }
       return {t, ss, sd, safe_log10(vs), safe_log10(vd), tau_s, tau_d, safe_log10(th)};
    }
 

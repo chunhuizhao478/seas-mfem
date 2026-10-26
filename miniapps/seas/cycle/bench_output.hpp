@@ -7,9 +7,11 @@
 //                            over A [N m/s]; a row with every station row
 //   _<name>.txt              one per [[cycle.benchmark.volume_station]]: t,
 //                            u.e1, u.e2, u.e3 [m], v.e1, v.e2, v.e3 [m/s]
-//                            (e_i: volume_axes); a row with every station row
+//                            (e_i: volume_axes; on a 2-D mesh t, u.e1,
+//                            u.e2, v.e1, v.e2); a row with every station row
 //   _profile_<name>_<q>.txt  one per [[cycle.benchmark.profile]] and q in
-//                            slip_2, slip_3, stress_2, stress_3: a first row
+//                            slip_2, slip_3, stress_2, stress_3 (and
+//                            sigma_n with profile_sigma_n): a first row
 //                            "0 0 s_1 .. s_n" (s: the coordinate the profile
 //                            lists, x2 or x3 [m]), then rows t, log10 max V
 //                            (whole fault), q at each point; a row every
@@ -46,8 +48,12 @@
 //   that resolution.
 // Off-fault values: the displacement and velocity fields of the regime at
 // each station point (ParMesh::FindPoints; the lowest rank among those that
-// find it writes the file).  In the QD regime the velocity is the exact
-// quasi-static du/dt (QDPhase::Velocity), in the dynamic regime U'.
+// find it writes the file).  A station with `toward` w is found at x + delta
+// w/|w| (delta = 1e-9 of the mesh's bounding box diagonal) and evaluated at
+// x in that element: the limit at x from that side (a station on the
+// fault trace, where the displacement jumps).  In the QD regime the
+// velocity is the exact quasi-static du/dt (QDPhase::Velocity), in the
+// dynamic regime U'.
 //
 // Restart: GetState holds the profile clock, the file sizes and the open
 // event's per-DOF arrays (checkpoint block FD_CYCLE_V4); a writer built with
@@ -104,9 +110,9 @@ public:
    using SpeedFn = std::function<void(Vector &)>;
 
    static constexpr real_t kNever = 1.0e9;
-   static constexpr int kVolumeColumns = 7;
+   static constexpr int kVolumeColumns = 7;   ///< 3-D; 2-D: 5
    static constexpr int kEventColumns = 7;
-   static const char *const kProfileQuantities[4];
+   static const char *const kProfileQuantities[5];
 
    struct State
    {
@@ -233,19 +239,28 @@ public:
                             const_cast<real_t *>(u->GetData()));
          ParGridFunction vg(const_cast<ParFiniteElementSpace *>(&fes_),
                             const_cast<real_t *>(v->GetData()));
-         Vector uv(3), vv(3);
+         const int n = cfg_.volume_dim;
+         Vector uv(n), vv(n);
          for (size_t i = 0; i < vol_files_.size(); i++)
          {
             const int s = vol_mine_[i];
             ug.GetVectorValue(vol_elem_[s], vol_ip_[s], uv);
             vg.GetVectorValue(vol_elem_[s], vol_ip_[s], vv);
-            std::vector<real_t> row(kVolumeColumns);
+            std::vector<real_t> row(1 + 2 * n);
             row[0] = t;
-            for (int a = 0; a < 3; a++)
+            for (int a = 0; a < n; a++)
             {
                const std::array<real_t, 3> &e = cfg_.volume_axes[a];
-               row[1 + a] = uv(0) * e[0] + uv(1) * e[1] + uv(2) * e[2];
-               row[4 + a] = vv(0) * e[0] + vv(1) * e[1] + vv(2) * e[2];
+               if (n == 3)
+               {
+                  row[1 + a] = uv(0) * e[0] + uv(1) * e[1] + uv(2) * e[2];
+                  row[4 + a] = vv(0) * e[0] + vv(1) * e[1] + vv(2) * e[2];
+               }
+               else
+               {
+                  row[1 + a] = uv(0) * e[0] + uv(1) * e[1];
+                  row[3 + a] = vv(0) * e[0] + vv(1) * e[1];
+               }
             }
             vol_files_[i]->Row(row);
             vol_files_[i]->Flush();
@@ -266,18 +281,20 @@ public:
       StationFields f;
       fill(f);
       const int np = static_cast<int>(geom_.profile_locs.size());
-      std::vector<real_t> mine(4 * static_cast<size_t>(np), 0.0), all(mine.size(), 0.0);
+      const int nqt = NumProfileQuantities_();
+      std::vector<real_t> mine(nqt * static_cast<size_t>(np), 0.0), all(mine.size(), 0.0);
       for (int i = 0; i < np; i++)
       {
          if (prof_owner_[i] != rank_) { continue; }
          const StationLocation &L = geom_.profile_locs[i];
-         real_t *r = &mine[4 * static_cast<size_t>(i)];
+         real_t *r = &mine[nqt * static_cast<size_t>(i)];
          r[0] = FdCycleOutput::Eval(f.slip_strike, L);
          r[1] = FdCycleOutput::Eval(f.slip_dip, L);
          r[2] = -(FdCycleOutput::Eval(f.tau_a_strike, L) + FdCycleOutput::Eval(f.tau_b_strike, L)
                   + f.eta * FdCycleOutput::Eval(f.V_strike, L)) / 1e6;
          r[3] = -(FdCycleOutput::Eval(f.tau_a_dip, L) + FdCycleOutput::Eval(f.tau_b_dip, L)
                   + f.eta * FdCycleOutput::Eval(f.V_dip, L)) / 1e6;
+         if (nqt == 5) { r[4] = FdCycleOutput::Eval(f.sigma_n, L) / 1e6; }
       }
       // Each point has one owner, so the sum is that owner's values.
       MPI_Reduce(mine.data(), all.data(), static_cast<int>(mine.size()),
@@ -289,14 +306,14 @@ public:
          for (size_t p = 0; p < cfg_.profiles.size(); p++)
          {
             const int n = cfg_.profiles[p].points;
-            for (int q = 0; q < 4; q++)
+            for (int q = 0; q < nqt; q++)
             {
                std::vector<real_t> row(2 + n);
                row[0] = t;
                row[1] = lv;
-               for (int i = 0; i < n; i++) { row[2 + i] = all[4 * static_cast<size_t>(first + i) + q]; }
-               prof_files_[4 * p + q]->Row(row);
-               prof_files_[4 * p + q]->Flush();
+               for (int i = 0; i < n; i++) { row[2 + i] = all[nqt * static_cast<size_t>(first + i) + q]; }
+               prof_files_[nqt * p + q]->Row(row);
+               prof_files_[nqt * p + q]->Flush();
             }
             first += n;
          }
@@ -389,6 +406,8 @@ public:
    }
 
 private:
+   int NumProfileQuantities_() const { return cfg_.profile_sigma_n ? 5 : 4; }
+
    bool InA_(real_t x2, real_t x3) const
    {
       // A boundary point counts as inside: tolerance relative to the region.
@@ -521,10 +540,34 @@ private:
       if (nv > 0)
       {
          ParMesh &pm = *fes_.GetParMesh();
-         DenseMatrix pts(3, nv);
+         const int sdim = pm.SpaceDimension();
+         MFEM_VERIFY(sdim == cfg_.volume_dim, "BenchmarkOutput: " << cfg_.volume_dim
+                     << " volume_axes on a " << sdim << "-D mesh");
+         // One-sided stations: found at x + delta w / |w| (see the file comment).
+         real_t delta = 0.0;
+         {
+            // The global box, so that every rank shifts by the same delta.
+            Vector lo, hi;
+            pm.GetBoundingBox(lo, hi, 1);
+            Vector glo(sdim), ghi(sdim);
+            MPI_Allreduce(lo.GetData(), glo.GetData(), sdim, MPITypeMap<real_t>::mpi_type,
+                          MPI_MIN, comm_);
+            MPI_Allreduce(hi.GetData(), ghi.GetData(), sdim, MPITypeMap<real_t>::mpi_type,
+                          MPI_MAX, comm_);
+            real_t d2 = 0.0;
+            for (int d = 0; d < sdim; d++) { d2 += (ghi(d) - glo(d)) * (ghi(d) - glo(d)); }
+            delta = 1e-9 * std::sqrt(d2);
+         }
+         DenseMatrix pts(sdim, nv);
          for (int s = 0; s < nv; s++)
          {
-            for (int d = 0; d < 3; d++) { pts(d, s) = cfg_.volume_stations[s].x[d]; }
+            const StationSpec &st = cfg_.volume_stations[s];
+            const real_t wn = std::sqrt(st.toward[0] * st.toward[0] + st.toward[1] * st.toward[1]
+                                        + st.toward[2] * st.toward[2]);
+            for (int d = 0; d < sdim; d++)
+            {
+               pts(d, s) = st.x[d] + ((wn > 0.0) ? delta * st.toward[d] / wn : 0.0);
+            }
          }
          Array<int> elem;
          Array<IntegrationPoint> ips;
@@ -536,6 +579,22 @@ private:
          {
             cand[s] = (elem[s] >= 0) ? rank_ : std::numeric_limits<int>::max();
             if (elem[s] >= 0) { vol_elem_[s] = elem[s]; vol_ip_[s] = ips[s]; }
+            const StationSpec &st = cfg_.volume_stations[s];
+            const bool sided = st.toward[0] != 0.0 || st.toward[1] != 0.0 || st.toward[2] != 0.0;
+            if (elem[s] >= 0 && sided)
+            {
+               // x itself, in the element found from its side.
+               ElementTransformation *T = pm.GetElementTransformation(elem[s]);
+               InverseElementTransformation inv(T);
+               Vector x(sdim);
+               for (int d = 0; d < sdim; d++) { x(d) = st.x[d]; }
+               IntegrationPoint ip;
+               const int res = inv.Transform(x, ip);
+               MFEM_VERIFY(res == InverseElementTransformation::Inside, "BenchmarkOutput: "
+                           "volume station " << st.name << " is not on the boundary of the "
+                           "element found " << delta << " m toward its side");
+               vol_ip_[s] = ip;
+            }
          }
          MPI_Allreduce(cand.data(), vol_owner_.data(), nv, MPI_INT, MPI_MIN, comm_);
          for (int s = 0; s < nv; s++)
@@ -547,14 +606,35 @@ private:
             if (vol_owner_[s] != rank_) { continue; }
             vol_mine_.push_back(s);
             std::ostringstream d;
-            d << "fd_cycle off-fault time series at " << st.name << " (x=" << st.x[0] << " m, y="
-              << st.x[1] << " m, z=" << st.x[2] << " m); components along e1 = ("
-              << Vec_(cfg_.volume_axes[0]) << "), e2 = (" << Vec_(cfg_.volume_axes[1])
-              << "), e3 = (" << Vec_(cfg_.volume_axes[2]) << "); QD velocity: quasi-static "
-              "du/dt, commit " << commit;
-            vol_files_.push_back(NewOrReopen_(rs, "_" + st.name + ".txt", d.str(),
-                                              {"time(s)", "disp_1(m)", "disp_2(m)", "disp_3(m)",
-                                               "vel_1(m/s)", "vel_2(m/s)", "vel_3(m/s)"}));
+            if (sdim == 3)
+            {
+               d << "fd_cycle off-fault time series at " << st.name << " (x=" << st.x[0]
+                 << " m, y=" << st.x[1] << " m, z=" << st.x[2] << " m); components along e1 = ("
+                 << Vec_(cfg_.volume_axes[0]) << "), e2 = (" << Vec_(cfg_.volume_axes[1])
+                 << "), e3 = (" << Vec_(cfg_.volume_axes[2]) << "); QD velocity: quasi-static "
+                 "du/dt, commit " << commit;
+               vol_files_.push_back(NewOrReopen_(rs, "_" + st.name + ".txt", d.str(),
+                                                 {"time(s)", "disp_1(m)", "disp_2(m)",
+                                                  "disp_3(m)", "vel_1(m/s)", "vel_2(m/s)",
+                                                  "vel_3(m/s)"}));
+            }
+            else
+            {
+               d << "fd_cycle off-fault time series at " << st.name << " (x=" << st.x[0]
+                 << " m, y=" << st.x[1] << " m";
+               if (st.toward[0] != 0.0 || st.toward[1] != 0.0)
+               {
+                  d << ", the limit from the side of (" << st.toward[0] << ", " << st.toward[1]
+                    << ")";
+               }
+               d << "); components along e1 = (" << cfg_.volume_axes[0][0] << ", "
+                 << cfg_.volume_axes[0][1] << "), e2 = (" << cfg_.volume_axes[1][0] << ", "
+                 << cfg_.volume_axes[1][1] << "); QD velocity: quasi-static du/dt, commit "
+                 << commit;
+               vol_files_.push_back(NewOrReopen_(rs, "_" + st.name + ".txt", d.str(),
+                                                 {"time(s)", "disp_1(m)", "disp_2(m)",
+                                                  "vel_1(m/s)", "vel_2(m/s)"}));
+            }
          }
       }
 
@@ -593,7 +673,7 @@ private:
                const real_t a = p.from[p.coordinate] + s * (p.to[p.coordinate] - p.from[p.coordinate]);
                pos << (i ? " " : "") << a;
             }
-            for (int q = 0; q < 4; q++)
+            for (int q = 0; q < NumProfileQuantities_(); q++)
             {
                std::ostringstream d;
                d << "fd_cycle profile " << p.name << ", " << kProfileQuantities[q]
@@ -659,8 +739,9 @@ private:
    State state_;
 };
 
-inline const char *const BenchmarkOutput::kProfileQuantities[4] = {"slip_2", "slip_3",
-                                                                   "stress_2", "stress_3"};
+inline const char *const BenchmarkOutput::kProfileQuantities[5] = {"slip_2", "slip_3",
+                                                                   "stress_2", "stress_3",
+                                                                   "sigma_n"};
 
 } // namespace cycle
 } // namespace seas

@@ -29,7 +29,8 @@
 // bit for bit (tests/2d_inplane/test_plate_loading.cpp).  Components of s
 // that are exactly 0 are written as +0.0, as the BP5 function writes them,
 // so no -0.0 appears.  u(x, t) = t u(x, 1), as QDPhase::CheckLinearLoading_
-// requires.
+// requires.  x and u have the mesh's dimension: on a 2-D mesh x = (x, y)
+// and the deck's vectors have z = 0 (phase E: x(2) was read past the end).
 //
 // Scope (Chunhui Zhao, 2026-10-25).
 
@@ -55,14 +56,17 @@ inline DirichletFunc MakePlateLoading(const LoadingConfig &L, real_t Vp)
    const real_t b = L.band, band_sign = L.band_sign;
    return [Vp, p, m, s, b, band_sign](const Vector &x, real_t t, Vector &u)
    {
-      u.SetSize(3);
+      const int dim = x.Size();
+      u.SetSize(dim);
       u = 0.0;
-      const real_t d = (x(0) - p[0]) * m[0] + (x(1) - p[1]) * m[1] + (x(2) - p[2]) * m[2];
+      const real_t d = (dim == 3)
+                       ? (x(0) - p[0]) * m[0] + (x(1) - p[1]) * m[1] + (x(2) - p[2]) * m[2]
+                       : (x(0) - p[0]) * m[0] + (x(1) - p[1]) * m[1];
       real_t Vh = Vp * t;
       if (d > b)       { Vh *= 0.5; }
       else if (d < -b) { Vh *= -0.5; }
       else             { Vh *= band_sign; }
-      for (int i = 0; i < 3; i++)
+      for (int i = 0; i < dim; i++)
       {
          if (s[i] != 0.0) { u(i) = Vh * s[i]; }
       }

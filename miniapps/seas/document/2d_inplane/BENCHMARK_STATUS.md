@@ -8,7 +8,7 @@ the repo.
 |---|---|---|---|---|
 | G1 | TPV205-2D (slip weakening, plane strain) | **completed** 2026-10-26 | `tpv205/gold/nitsche-2d-kv0p1_p2_cd_pc_100m_cloud_gitb0ce3cb` (p2, 100 m, b0ce3cb6) | `tpv205/benchmark_data/PYLITH2D_200m` |
 | G2 | TPV105-2D (rate and state, thermal pressurization) | **completed** 2026-10-26 | `tpv105/gold/nitsche-2d-kv0p1_p2_cd_pc_tp_100m_cloud_gitb0ce3cb` (p2, 100 m, b0ce3cb6) | `tpv105/benchmark_data/MDSBI2D_50m`, `tpv105/benchmark_data/SPECFEM2D_50m` |
-| G3 | BP3-QD (dipping fault, quasi-dynamic cycles) | phase E, not started | - | SEAS platform BP3-QD (on the Mac, not in the repo) |
+| G3 | BP3-QD (dipping fault, quasi-dynamic cycles) | phase E: the 2D quasi-dynamic solve and the decks, inputs and outputs in the branch (`config/fd_cycle/bp3_qd_*.toml`, `cycle/scec_bp3_export.py`); the 25 m runs not started | - | SEAS platform BP3-QD (on the Mac, not in the repo) |
 | G4 | BP3-FD (fully dynamic cycles) | phase F, after G3 | - | - |
 
 Chunhui Zhao, 2026-10-26: "I think we can gold tpv205-2d, tpv105-2d results p=2, and mark as

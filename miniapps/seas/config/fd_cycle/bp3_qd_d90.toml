@@ -1,0 +1,259 @@
+# bp3_qd_d90.toml — seas_fd_cycle_driver, SCEC BP3-QD, dip 90 deg (2D
+# in-plane design rev 3, phase E, gate G3).  The QD regime only.
+#
+# Run from miniapps/seas:
+#   mpirun -np N ./seas_fd_cycle_driver --deck config/fd_cycle/bp3_qd_d90.toml
+#
+# BP3 (SCEC SEAS description, 1 Oct 2021): plane strain, a free surface,
+# a planar fault dipping 90 deg from the surface to the down-dip distance
+# W_f = 40 km (rate and state, aging law), creep at V_L below.  The mesh is
+# a vertical section (x, y), y up, the surface y = 0; the fault runs from
+# (0, 0) down along t_d = (cos 90, -sin 90) = (0, -1), and BP3's Omega+ is
+# the side x > 0, into which the oriented normal n = (sin 90, cos 90) =
+# (1, 0) points ([fault_geometry] ref_normal = [1, 0] pins it, as Tandem's
+# bp3.toml).  With up = [0, 1] in the plane the slip is in the dip slot,
+# d = t_d (design 10.2, case B).  The kernel's slip is the jump of the side
+# n points away from (x < 0, BP3's Omega-) over the other (phase A's
+# convention, test_2d_dislocation.cpp): slip_d = (u(x < 0) - u(x > 0)) . t_d,
+# which is BP3's delta (eq. 6) itself.  As the
+# platform's d90 results (delta > 0), the side x > 0 moves up: slip_d > 0,
+# V_init_dip = +V_p below.
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "SCEC BP3-QD, dip 90 deg, QD regime (seas_fd_cycle_driver, phase E)."
+
+# BP3 Table 1: rho = 2670 kg/m^3, cs = 3.464 km/s, nu = 0.25 (lambda = mu).
+[material_constant_fallback]
+lambda = 32038120320.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+# bp3/mesh/bp3.geo at dip 90, 25 m on the fault, in km; mesh_scale below
+# converts to m.  Tags: 3 fault (0-40 km down-dip), 5 Dirichlet (the two
+# sides and the creep segment below 40 km), 1 natural (surface and bottom).
+[mesh]
+path  = "bp3/mesh/bp3_d90_25m.msh"
+order = 1
+
+[velocity]
+use_sidecar = false
+
+# The shear prestress is BuildPrestress's (a = "amax"); only sigma_n is read.
+[stress]
+kind          = "fault_local_prestress"
+tau_strike_pa = 0.0
+tau_dip_pa    = 0.0
+sigma_n_pa    = 50.0e6
+
+# The dynamic regime's numerics; the QD regime reads none of them, the
+# shared loader requires the block.
+[numerics]
+
+# 1500 yr of 365 days (BP3; Tandem's bp3.toml), dt_initial as the BP5 decks.
+[time]
+tfinal     = 4.7304e10
+dt_initial = 0.01
+
+[output]
+output_dir = "."
+
+[boundary]
+fault_attr    = 3
+natural_attrs = [1]
+
+[fault_geometry]
+ref_normal      = [1.0, 0.0]
+up              = [0.0, 1.0]
+kind            = "vertical_dip_slip"
+orientation     = "propagated"
+pin_by          = "reference"
+tangent         = "pointwise"
+junction_policy = "refuse"
+pin_min_margin  = 0.1
+
+# BP3 Table 1 scalars; a, Dc and V_init come from [cycle.fields].
+[friction.rate_state]
+a_default       = 0.010
+b_default       = 0.015
+Dc_default      = 0.008
+V_0_default     = 1.0e-6
+f_0_default     = 0.6
+V_init_default  = 1.0e-9
+sigma_n_default = 50.0e6
+state_evolution = "aging_law"
+eta             = "auto"         # 0.5 sqrt(mu rho) = mu / (2 cs)
+
+# BP3-QD eqs 25-26: tau0 = sigma_n a_max asinh(...) + eta V_init and theta0
+# by inverting the law at V_init with the local a (Tandem bp3.lua): the
+# "gold" IC set (the kernel's inversion) with a = "amax".
+[cycle]
+ic                   = "gold"
+switching            = false
+qd_radiation_damping = true
+mesh_scale           = 1000.0
+plate_rate           = 1.0e-9
+
+[cycle.qd]
+solver        = "mumps"
+petsc_options = "tests/verification/petsc_ts_rk45_tandem.cfg"
+ts_atol       = 1.0e-7
+ts_rtol       = 1.0e-50
+
+[cycle.prestress]
+V_background = 1.0e-9            # psi_bg = f0 + b ln(V0 / V_init)
+eta_V_init   = true              # eq. 25
+a            = "amax"            # BP3: a_max = 0.025 in tau0 (design D5)
+
+# The plate motion: the sides x beyond the band move rigidly by
+# +-(V_p t / 2) s and the creep segment slips V_p t s, with s up, (0, 1),
+# on the side x > 0; the plane is the fault's, normal n.
+[cycle.loading]
+kind         = "plate"
+plane_point  = [0.0, 0.0]
+plane_normal = [1.0, 0.0]
+slip_dir     = [0.0, 1.0]
+band         = 1000.0
+
+# V_init: the side x > 0 up at V_p (kernel dip slot, d down).
+[cycle.fields]
+V_init_dip = 1.0e-9
+
+# a: a0 = 0.010 for down-dip distance x_d < H = 15 km, rising linearly to
+# a_max = 0.025 over h = 3 km (BP3 eq. 18); the segment is centred at the
+# trace, so its half above the surface lies outside the mesh.
+[cycle.fields.a]
+center  = [0.0, 0.0]
+axis1   = [0.0, -1.0]
+half1   = 15.0e3
+taper   = 3.0e3
+inside  = 0.010
+outside = 0.025
+
+# Dc = L = 0.008 m everywhere.
+[cycle.fields.Dc]
+center  = [0.0, 0.0]
+axis1   = [0.0, -1.0]
+half1   = 0.0
+inside  = 0.008
+outside = 0.008
+
+# The kernel strike slot is out of the plane: 0 everywhere.
+[cycle.fields.V_init]
+center  = [0.0, 0.0]
+axis1   = [0.0, -1.0]
+half1   = 0.0
+inside  = 0.0
+outside = 0.0
+
+# Plane coordinates on the fault: x2 = down-dip distance x_d, x3 = 0.
+# Rows every 0.1 yr (365 days) and every 0.1 s while max V > 1e-3 m/s
+# (BP3 section 4.1); station_sigma_n adds the normal stress column.
+[cycle.output]
+prefix          = "bp3_qd_d90"
+fast_V          = 1.0e-3
+dt_fast         = 0.1
+dt_slow         = 3153600.0
+event_V         = 1.0e-3
+event_dwell     = 10.0
+plane_origin    = [0.0, 0.0]
+plane_axis1     = [0.0, -1.0]
+plane_axis2     = [1.0, 0.0]
+station_sigma_n = true
+
+# The 12 on-fault stations of BP3 section 4.1, x = x_d t_d (x_d down-dip).
+[[cycle.output.station]]
+name = "fltst_dp000"
+x    = [0.0, 0.0]
+[[cycle.output.station]]
+name = "fltst_dp025"
+x    = [0.0, -2500.0]
+[[cycle.output.station]]
+name = "fltst_dp050"
+x    = [0.0, -5000.0]
+[[cycle.output.station]]
+name = "fltst_dp075"
+x    = [0.0, -7500.0]
+[[cycle.output.station]]
+name = "fltst_dp100"
+x    = [0.0, -10000.0]
+[[cycle.output.station]]
+name = "fltst_dp125"
+x    = [0.0, -12500.0]
+[[cycle.output.station]]
+name = "fltst_dp150"
+x    = [0.0, -15000.0]
+[[cycle.output.station]]
+name = "fltst_dp175"
+x    = [0.0, -17500.0]
+[[cycle.output.station]]
+name = "fltst_dp200"
+x    = [0.0, -20000.0]
+[[cycle.output.station]]
+name = "fltst_dp250"
+x    = [0.0, -25000.0]
+[[cycle.output.station]]
+name = "fltst_dp300"
+x    = [0.0, -30000.0]
+[[cycle.output.station]]
+name = "fltst_dp350"
+x    = [0.0, -35000.0]
+
+# BP3 sections 4.2-4.3: the surface stations (displacement and velocity,
+# e2 = (0, -1): disp_2 and vel_2 positive downward) and the slip, shear and
+# normal stress profiles at x_d = 0, 0.5, .., 40 km, every 5 yr (365 days)
+# and every 1 s while max V > 1e-3 m/s.  The domain A of the source file
+# is the rate-and-state fault, 0 <= x_d <= 40 km.
+[cycle.benchmark]
+region_x2       = [0.0, 40.0e3]
+region_x3       = [-1.0, 1.0]
+rupture_V       = 1.0e-3
+profile_dt_slow = 157680000.0
+profile_dt_fast = 1.0
+profile_sigma_n = true
+volume_axes     = [[1.0, 0.0], [0.0, -1.0]]
+
+# x = 0+ and 0- sit on the fault trace: the limit from the side of +x
+# (the hanging wall, BP3's Omega+) and of -x.
+[[cycle.benchmark.volume_station]]
+name   = "srfst_fn-32"
+x      = [-32000.0, 0.0]
+[[cycle.benchmark.volume_station]]
+name   = "srfst_fn-16"
+x      = [-16000.0, 0.0]
+[[cycle.benchmark.volume_station]]
+name   = "srfst_fn-08"
+x      = [-8000.0, 0.0]
+[[cycle.benchmark.volume_station]]
+name   = "srfst_fn+00"
+x      = [0.0, 0.0]
+toward = [1.0, 0.0]
+[[cycle.benchmark.volume_station]]
+name   = "srfst_fn-00"
+x      = [0.0, 0.0]
+toward = [-1.0, 0.0]
+[[cycle.benchmark.volume_station]]
+name   = "srfst_fn+08"
+x      = [8000.0, 0.0]
+[[cycle.benchmark.volume_station]]
+name   = "srfst_fn+16"
+x      = [16000.0, 0.0]
+[[cycle.benchmark.volume_station]]
+name   = "srfst_fn+32"
+x      = [32000.0, 0.0]
+
+[[cycle.benchmark.profile]]
+name       = "dip"
+from       = [0.0, 0.0]
+to         = [40.0e3, 0.0]
+points     = 81
+coordinate = "x2"
+
+[cycle.checkpoint]
+every_qd_steps = 1000

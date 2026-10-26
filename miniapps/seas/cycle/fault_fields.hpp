@@ -5,15 +5,18 @@
 //
 // RectTaperField is a generic field on a fault: a rectangle in the fault
 // plane, given in global XYZ by a centre, two unit in-plane axes and two
-// half-lengths, with a linear taper of width w in the max norm.  It carries
-// no benchmark code; the deck gives every number.
+// half-lengths, with a linear taper of width w in the max norm.  On a 2-D
+// mesh the fault is a line and the rectangle a segment: one axis and one
+// half-length (2D in-plane design rev 3, section 5.5).  It carries no
+// benchmark code; the deck gives every number.
 //
 // BuildFaultParams turns the deck's rate-and-state block and its fields into
 // per-DOF parameters on the owned fault DOFs.  a and Dc come from
 // RectTaperFields through the shared resolver's field callables
 // (spatial::RateStateSidecarFields), so the resolver's validation and its
 // eta = "auto" path run unchanged.  The initial slip rate has two kernel
-// components: strike from a RectTaperField, dip a constant (V_zero).
+// components: strike from a RectTaperField, dip a constant (V_zero in BP5;
+// on a 2-D BP3 mesh the in-plane slip rate, of either sign).
 //
 // No solver header (rule M4): the DOF table comes from the QD adapter.
 
@@ -51,12 +54,22 @@ struct RectTaperSpec
    real_t inside = 0.0;     ///< value inside the rectangle
    real_t outside = 0.0;    ///< value beyond the taper
    bool set = false;        ///< the deck gave this field
+   /// false: a segment on a fault line (2-D), axis2 and half2 unused
+   bool two_axes = true;
 
    /// Refuses non-unit or non-orthogonal axes, negative lengths.
    void Validate(const std::string &name) const
    {
       auto dot = [](const std::array<real_t, 3> &u, const std::array<real_t, 3> &v)
       { return u[0] * v[0] + u[1] * v[1] + u[2] * v[2]; };
+      if (!two_axes)
+      {
+         MFEM_VERIFY(std::abs(dot(axis1, axis1) - 1.0) < 1e-12,
+                     "[cycle.fields." << name << "] axis1 must be a unit vector");
+         MFEM_VERIFY(half1 >= 0.0 && taper >= 0.0 && eps >= 0.0,
+                     "[cycle.fields." << name << "] half1, taper and eps must be >= 0");
+         return;
+      }
       MFEM_VERIFY(std::abs(dot(axis1, axis1) - 1.0) < 1e-12 &&
                   std::abs(dot(axis2, axis2) - 1.0) < 1e-12,
                   "[cycle.fields." << name << "] axis1 and axis2 must be unit vectors");
@@ -69,6 +82,7 @@ struct RectTaperSpec
 
 /// The field value at global point x:
 ///   r1 = |(x - c).e1| - h1,  r2 = |(x - c).e2| - h2,  r = max(r1, r2)
+///   (one axis, a fault line: r = r1)
 ///   w = 0:  inside if r <= eps, else outside            (sharp rectangle)
 ///   w > 0:  inside + (outside - inside) * clamp(r / w, 0, 1)
 /// The clamped ends return inside and outside exactly.
@@ -77,9 +91,13 @@ inline real_t RectTaperField(const RectTaperSpec &f, const real_t x[3])
    const real_t d[3] = {x[0] - f.center[0], x[1] - f.center[1], x[2] - f.center[2]};
    const real_t r1 = std::abs(d[0] * f.axis1[0] + d[1] * f.axis1[1] + d[2] * f.axis1[2])
                      - f.half1;
-   const real_t r2 = std::abs(d[0] * f.axis2[0] + d[1] * f.axis2[1] + d[2] * f.axis2[2])
-                     - f.half2;
-   const real_t r = std::max(r1, r2);
+   real_t r = r1;
+   if (f.two_axes)
+   {
+      const real_t r2 = std::abs(d[0] * f.axis2[0] + d[1] * f.axis2[1] + d[2] * f.axis2[2])
+                        - f.half2;
+      r = std::max(r1, r2);
+   }
    if (f.taper == 0.0) { return (r <= f.eps) ? f.inside : f.outside; }
    const real_t s = r / f.taper;
    if (s <= 0.0) { return f.inside; }
@@ -103,7 +121,7 @@ struct FaultFieldsConfig
    RectTaperSpec a;           ///< direct effect a
    RectTaperSpec Dc;          ///< critical slip distance
    RectTaperSpec V_init;      ///< initial slip rate, kernel strike component
-   real_t V_init_dip = 0.0;   ///< initial slip rate, kernel dip component
+   real_t V_init_dip = 0.0;   ///< initial slip rate, kernel dip component (either sign)
 };
 
 /// Per-DOF parameters on the owned fault DOFs.
@@ -168,7 +186,7 @@ inline FaultParams BuildFaultParams(const FaultDOFTable &table,
       const real_t *x = table.coords.GetData() + 3 * i;
       const real_t vs = RectTaperField(cfg.V_init, x);
       const real_t vd = cfg.V_init_dip;
-      MFEM_VERIFY(vs > 0.0 || vd > 0.0, "BuildFaultParams: V_init = 0 at DOF " << i);
+      MFEM_VERIFY(vs != 0.0 || vd != 0.0, "BuildFaultParams: V_init = 0 at DOF " << i);
       out.V_init(2 * i) = vd;
       out.V_init(2 * i + 1) = vs;
       out.rs.V_init(i) = std::sqrt(vd * vd + vs * vs);

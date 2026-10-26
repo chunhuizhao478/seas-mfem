@@ -76,12 +76,22 @@
 //                   of tau_i - eta V.  One tau0 for both regimes, the whole
 //                   run; checkpoints record the IC set as
 //                   "scec_fd+eta_V_init" (IcLabel)          [ic == "gold"]
-//   [cycle.fields]  V_init_dip, and the RectTaperFields a, Dc, V_init:
-//                   center, axis1, axis2 (3-vectors, global XYZ), half1,
-//                   half2, taper, eps, inside, outside               [required]
+//                   a: "local" (the DOF's own a in tau0, BP5) or "amax"
+//                   (BP3: a_max = the global maximum of a in tau0, psi0 by
+//                   the kernel's inversion; needs ic = "gold"; cycle/
+//                   prestress.hpp; IC set "gold+a_max")            ["local"]
+//   [cycle.fields]  V_init_dip (the kernel dip component, either sign: on
+//                   a 2-D BP3 mesh the in-plane slip rate, d down-dip), and
+//                   the RectTaperFields a, Dc, V_init: center, axis1, axis2
+//                   (3-vectors, global XYZ), half1, half2, taper, eps,
+//                   inside, outside.  On a 2-D mesh the fault is a line:
+//                   axis2 and half2 are left out and the taper runs along
+//                   axis1 alone (CheckDimension)                   [required]
 //   [cycle.output]  prefix, fast_V, dt_fast, dt_slow, event_V,
 //                   event_dwell, plane_origin, plane_axis1, plane_axis2,
-//                   and [[cycle.output.station]] name, x (global XYZ)
+//                   station_sigma_n (a ninth station column, the normal
+//                   stress; BP3) [false], and [[cycle.output.station]]
+//                   name, x (global XYZ)
 //   [cycle.checkpoint] every_qd_steps (0 = no checkpoint; else also one at
 //                   the end of a run, as seas_bp5_full) [0]
 //   [cycle.snapshots.fault], [cycle.snapshots.surface]  whole-field
@@ -112,13 +122,17 @@
 //                   catalog holds the DOFs that reached it        [event_V]
 //                   profile_dt_slow, profile_dt_fast: the profile row
 //                   cadence, dt_fast while max V > fast_V   [5 yr, 1 s]
-//                   volume_axes: 3 unit vectors e1, e2, e3 (global XYZ);
-//                   an off-fault row holds u . e_i and v . e_i
-//                                          [required with volume stations]
-//                   [[cycle.benchmark.volume_station]] name, x (global XYZ)
+//                   volume_axes: 3 unit vectors e1, e2, e3 (global XYZ; 2
+//                   unit 2-vectors on a 2-D mesh); an off-fault row holds
+//                   u . e_i and v . e_i     [required with volume stations]
+//                   [[cycle.benchmark.volume_station]] name, x (global
+//                   XYZ), toward (optional: the limit at x from the side
+//                   it points to, for a station on the fault trace)
 //                   [[cycle.benchmark.profile]] name, from, to (plane
 //                   coordinates [x2, x3]), points (>= 2), coordinate ("x2"
 //                   or "x3": the one the first row lists)
+//                   profile_sigma_n: a fifth profile file, the normal
+//                   stress (BP3) [false]
 //   [cycle.lts]     local time stepping of the dynamic regime (the Nitsche
 //                   driver's --lts rate2, solver/nitsche_lts_run.hpp):
 //                   mode ["off" | "rate2"], cluster_cap [4], fault_buffer
@@ -175,6 +189,7 @@
 #include <array>
 #include <cmath>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace mfem
@@ -184,11 +199,15 @@ namespace seas
 namespace cycle
 {
 
-/// One on-fault station, global XYZ [m].
+/// One on-fault station, global XYZ [m].  A volume station may name a
+/// side (`toward`, [[cycle.benchmark.volume_station]]): the values are the
+/// limit at x from the side the vector points to (a station on the fault
+/// trace, BP3's x = 0+ and 0-); zero: no side.
 struct StationSpec
 {
    std::string name;
    std::array<real_t, 3> x = {{0.0, 0.0, 0.0}};
+   std::array<real_t, 3> toward = {{0.0, 0.0, 0.0}};
 };
 
 /// [cycle.output]
@@ -211,6 +230,9 @@ struct OutputConfig
    std::array<real_t, 3> plane_origin = {{0.0, 0.0, 0.0}};
    std::array<real_t, 3> plane_axis1 = {{1.0, 0.0, 0.0}};
    std::array<real_t, 3> plane_axis2 = {{0.0, 0.0, -1.0}};
+   /// A ninth station column: sigma_n_eff, compression positive [MPa]
+   /// (BP3's normal stress; BP5's files keep their eight columns).
+   bool station_sigma_n = false;
    std::vector<StationSpec> stations;
 };
 
@@ -285,9 +307,14 @@ struct BenchmarkConfig
    real_t rupture_V = -1.0;   ///< < 0: [cycle.output].event_V
    real_t profile_dt_slow = 5.0 * 365.25 * 24.0 * 3600.0;
    real_t profile_dt_fast = 1.0;
+   /// e_1 .. e_n, n = volume_dim (the mesh dimension), padded with zeros.
    std::array<std::array<real_t, 3>, 3> volume_axes = {};
+   int volume_dim = 3;
    std::vector<StationSpec> volume_stations;
    std::vector<ProfileSpec> profiles;
+   /// A fifth profile quantity: sigma_n_eff, compression positive [MPa]
+   /// (BP3's normal_stress.dat).
+   bool profile_sigma_n = false;
 };
 
 /// [cycle.lts]: local time stepping of the dynamic regime.
@@ -399,6 +426,7 @@ struct CycleConfig
    /// a restart refuses a deck with the other prestress.
    std::string IcLabel() const
    {
+      if (prestress.AMax()) { return ic + "+a_max"; }
       return (prestress.include_eta && !IsGold()) ? ic + "+eta_V_init" : ic;
    }
 
@@ -420,6 +448,17 @@ struct CycleConfig
                      << ((dim == 2) ? "[x, y]" : "[x, y, z]"));
       }
       spatial::CheckFaultGeometryDimension(shared.fault_geometry, dim);
+      // [cycle.fields]: two axes on a fault plane, one on a fault line.
+      const std::pair<const char *, const RectTaperSpec *> fl[] =
+      {{"a", &fields.a}, {"Dc", &fields.Dc}, {"V_init", &fields.V_init}};
+      for (const auto &f : fl)
+      {
+         MFEM_VERIFY(!f.second->set || f.second->two_axes == (dim == 3),
+                     "[cycle.fields." << f.first << "] "
+                     << ((dim == 3) ? "needs axis2 and half2 on a 3-D mesh (the fault is a "
+                         "plane)" : "takes no axis2 or half2 on a 2-D mesh (the fault is a "
+                         "line: the taper runs along axis1)"));
+      }
    }
 };
 
@@ -579,9 +618,12 @@ inline RectTaperSpec Field(std::vector<DeckVector> &rec, const toml::value &fiel
                      "inside", "outside"});
    f.center = Vec3(rec, t, sec, "center", f.center, true);
    f.axis1 = Vec3(rec, t, sec, "axis1", f.axis1, true);
-   f.axis2 = Vec3(rec, t, sec, "axis2", f.axis2, true);
+   // axis2 and half2 together (a fault plane) or neither (a fault line, 2-D;
+   // CheckDimension matches the choice to the mesh).
+   f.two_axes = t.contains("axis2") || t.contains("half2");
+   f.axis2 = Vec3(rec, t, sec, "axis2", f.axis2, f.two_axes);
    f.half1 = Real(t, sec, "half1", 0.0, true);
-   f.half2 = Real(t, sec, "half2", 0.0, true);
+   f.half2 = Real(t, sec, "half2", 0.0, f.two_axes);
    f.taper = Real(t, sec, "taper", 0.0);
    f.eps = Real(t, sec, "eps", 0.0);
    f.inside = Real(t, sec, "inside", 0.0, true);
@@ -764,13 +806,22 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
    MFEM_VERIFY(cy.contains("prestress"), "[cycle.prestress] is required");
    {
       const toml::value &p = cy.at("prestress");
-      OnlyKeys(p, "cycle.prestress", {"V_background", "eta_V_init"});
+      OnlyKeys(p, "cycle.prestress", {"V_background", "eta_V_init", "a"});
       c.prestress.V_background = Real(p, "cycle.prestress", "V_background", 0.0, true);
       MFEM_VERIFY(c.prestress.V_background > 0.0, "[cycle.prestress].V_background must be > 0");
       c.prestress.include_eta = Bool(p, "cycle.prestress", "eta_V_init", c.IsGold());
       MFEM_VERIFY(c.prestress.include_eta || !c.IsGold(),
                   "[cycle.prestress].eta_V_init = false with ic = \"gold\": the gold IC set "
                   "(Tandem convention) adds eta |V_init| to tau0");
+      c.prestress.a = Str(p, "cycle.prestress", "a", c.prestress.a);
+      MFEM_VERIFY(c.prestress.a == "local" || c.prestress.AMax(),
+                  "[cycle.prestress].a must be \"local\" or \"amax\"; got \""
+                  << c.prestress.a << "\"");
+      MFEM_VERIFY(!c.prestress.AMax() || c.IsGold(),
+                  "[cycle.prestress].a = \"amax\" needs ic = \"gold\": its psi0 inverts the "
+                  "friction law at V_init with the local a (BP3 eqs 23, 26), the kernel's "
+                  "inversion mode; \"scec_fd\" sets the uniform psi0 = f0 + b ln(V0 / V_bg), "
+                  "which with the a_max tau0 is out of equilibrium where a < a_max");
    }
 
    MFEM_VERIFY(cy.contains("fields"), "[cycle.fields] is required");
@@ -778,7 +829,6 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       const toml::value &f = cy.at("fields");
       OnlyKeys(f, "cycle.fields", {"V_init_dip", "a", "Dc", "V_init"});
       c.fields.V_init_dip = Real(f, "cycle.fields", "V_init_dip", 0.0, true);
-      MFEM_VERIFY(c.fields.V_init_dip >= 0.0, "[cycle.fields].V_init_dip must be >= 0");
       c.fields.a = Field(c.deck_vectors, f, "a");
       c.fields.Dc = Field(c.deck_vectors, f, "Dc");
       c.fields.V_init = Field(c.deck_vectors, f, "V_init");
@@ -791,7 +841,8 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       const std::string sec = "cycle.output";
       const toml::value &o = cy.at("output");
       OnlyKeys(o, sec, {"prefix", "fast_V", "dt_fast", "dt_slow", "event_V", "event_dwell",
-                        "plane_origin", "plane_axis1", "plane_axis2", "station"});
+                        "plane_origin", "plane_axis1", "plane_axis2", "station_sigma_n",
+                        "station"});
       OutputConfig &oc = c.output;
       oc.prefix = Str(o, sec, "prefix", "", true);
       oc.fast_V = Real(o, sec, "fast_V", oc.fast_V);
@@ -802,6 +853,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       oc.plane_origin = Vec3(c.deck_vectors, o, sec, "plane_origin", oc.plane_origin);
       oc.plane_axis1 = Vec3(c.deck_vectors, o, sec, "plane_axis1", oc.plane_axis1);
       oc.plane_axis2 = Vec3(c.deck_vectors, o, sec, "plane_axis2", oc.plane_axis2);
+      oc.station_sigma_n = Bool(o, sec, "station_sigma_n", oc.station_sigma_n);
       MFEM_VERIFY(oc.dt_fast > 0.0 && oc.dt_slow > 0.0 && oc.fast_V > 0.0 &&
                   oc.event_V > 0.0 && oc.event_dwell >= 0.0,
                   "[cycle.output] fast_V, dt_fast, dt_slow, event_V must be > 0, "
@@ -874,7 +926,8 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       const std::string sec = "cycle.benchmark";
       const toml::value &b = cy.at("benchmark");
       OnlyKeys(b, sec, {"enabled", "region_x2", "region_x3", "rupture_V", "profile_dt_slow",
-                        "profile_dt_fast", "volume_axes", "volume_station", "profile"});
+                        "profile_dt_fast", "volume_axes", "volume_station", "profile",
+                        "profile_sigma_n"});
       BenchmarkConfig &bc = c.bench;
       bc.enabled = Bool(b, sec, "enabled", true);
       auto range = [&](const std::string &key)
@@ -900,6 +953,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       bc.rupture_V = Real(b, sec, "rupture_V", c.output.event_V);
       bc.profile_dt_slow = Real(b, sec, "profile_dt_slow", bc.profile_dt_slow);
       bc.profile_dt_fast = Real(b, sec, "profile_dt_fast", bc.profile_dt_fast);
+      bc.profile_sigma_n = Bool(b, sec, "profile_sigma_n", bc.profile_sigma_n);
       MFEM_VERIFY(bc.rupture_V > 0.0 && bc.profile_dt_slow > 0.0 && bc.profile_dt_fast > 0.0,
                   "[" << sec << "] rupture_V, profile_dt_slow, profile_dt_fast must be > 0");
       if (b.contains("volume_station"))
@@ -909,25 +963,35 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
          for (const toml::value &st : b.at("volume_station").as_array())
          {
             const std::string ssec = sec + ".volume_station";
-            OnlyKeys(st, ssec, {"name", "x"});
+            OnlyKeys(st, ssec, {"name", "x", "toward"});
             StationSpec sp;
             sp.name = Str(st, ssec, "name", "", true);
             sp.x = Vec3(c.deck_vectors, st, ssec, "x", sp.x, true);
+            sp.toward = Vec3(c.deck_vectors, st, ssec, "toward", sp.toward);
+            if (st.contains("toward"))
+            {
+               const std::array<real_t, 3> &w = sp.toward;
+               MFEM_VERIFY(w[0] * w[0] + w[1] * w[1] + w[2] * w[2] > 0.0,
+                           "[[" << ssec << "]] " << sp.name << ": toward must not be zero");
+            }
             bc.volume_stations.push_back(sp);
          }
       }
       if (!bc.volume_stations.empty())
       {
          MFEM_VERIFY(b.contains("volume_axes") && b.at("volume_axes").is_array() &&
-                     b.at("volume_axes").as_array().size() == 3,
-                     "[" << sec << "].volume_axes (3 unit vectors) is required with "
-                     "volume stations");
+                     (b.at("volume_axes").as_array().size() == 3 ||
+                      b.at("volume_axes").as_array().size() == 2),
+                     "[" << sec << "].volume_axes (3 unit vectors; 2 on a 2-D mesh) is "
+                     "required with volume stations");
          const auto &ax = b.at("volume_axes").as_array();
-         for (int i = 0; i < 3; i++)
+         const int n = static_cast<int>(ax.size());
+         bc.volume_dim = n;
+         for (int i = 0; i < n; i++)
          {
-            MFEM_VERIFY(ax[i].is_array() && ax[i].as_array().size() == 3,
-                        "[" << sec << "].volume_axes[" << i << "] must be 3 numbers");
-            for (int d = 0; d < 3; d++)
+            MFEM_VERIFY(ax[i].is_array() && static_cast<int>(ax[i].as_array().size()) == n,
+                        "[" << sec << "].volume_axes[" << i << "] must be " << n << " numbers");
+            for (int d = 0; d < n; d++)
             {
                const toml::value &e = ax[i].as_array()[d];
                MFEM_VERIFY(e.is_floating() || e.is_integer(),
@@ -936,11 +1000,11 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
                                                       : static_cast<real_t>(e.as_integer());
             }
          }
-         // three 3-vectors: the BP5 volume stations are 3-D only
-         c.deck_vectors.push_back({"[" + sec + "].volume_axes", 3});
-         for (int i = 0; i < 3; i++)
+         // n n-vectors: three on a 3-D mesh (BP5), two on a 2-D mesh (BP3)
+         c.deck_vectors.push_back({"[" + sec + "].volume_axes", n});
+         for (int i = 0; i < n; i++)
          {
-            for (int j = 0; j < 3; j++)
+            for (int j = 0; j < n; j++)
             {
                const real_t d = bc.volume_axes[i][0] * bc.volume_axes[j][0] +
                                 bc.volume_axes[i][1] * bc.volume_axes[j][1] +

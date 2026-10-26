@@ -24,7 +24,8 @@
 //   mesh  = LoadScaledMesh([mesh].path, [cycle].mesh_scale);  ParMesh
 //   qd    = QDPhase(mesh, cfg)                       # domain + geometry (H1a ctor)
 //   par   = BuildFaultParams(qd.Table(), [friction.rate_state], [cycle.fields])
-//   pre   = BuildPrestress(par, ic set, [cycle.prestress].eta_V_init)
+//   pre   = BuildPrestress(par, ic set, [cycle.prestress].eta_V_init, .a)
+//           (a = "amax": a_max = GlobalMaxA(par), one allreduce)
 //   qd.Setup(par, pre)                               # H1a, H1b, kernel, IC
 //   out   = FdCycleOutput(cfg.output, qd.LocateStations())
 //   restart: Checkpoint read, files truncated to the checkpoint, TS step set
@@ -185,7 +186,7 @@ void ProbeSwitch(const MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::QD
                                                          : nullptr, xmax);
    if (!mpi.IsRoot()) { return; }
 
-   const int nc = cycle::FdCycleOutput::kStationColumns;
+   const int nc = out.NumStationColumns();
    const std::vector<cycle::StationSpec> &st = cfg.output.stations;
    for (size_t s = 0; s < st.size(); s++)
    {
@@ -808,7 +809,14 @@ int main(int argc, char *argv[])
       const spatial::PorePressureSpec no_pp;
       const cycle::FaultParams par = cycle::BuildFaultParams(
          qd.Table(), *s.rate_state, cfg.fields, material, pmesh, no_pp);
-      const cycle::Prestress pre = cycle::BuildPrestress(par, cfg.prestress);
+      // [cycle.prestress].a = "amax" (BP3): a_max over every rank's DOFs.
+      cycle::PrestressConfig pcfg = cfg.prestress;
+      if (pcfg.AMax())
+      {
+         pcfg.a_max = cycle::GlobalMaxA(par, mpi.GetComm());
+         if (root) { std::cout << "  prestress: a = \"amax\", a_max = " << pcfg.a_max << "\n"; }
+      }
+      const cycle::Prestress pre = cycle::BuildPrestress(par, pcfg);
       qd.Setup(par, pre);
 
       // psi0 of the kernel against BuildPrestress's (a check value).

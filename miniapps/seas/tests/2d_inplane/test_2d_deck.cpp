@@ -11,8 +11,10 @@
 //       with 3 entries, [fault_geometry] ref_normal and up 3 entries, and
 //       CheckDimension(3) passes
 //   K2  its 2-D form (every vector [x, y]; ref_normal [0, -1]; up [0, 0, 1],
-//       out of the plane): the same keys with 2 entries, z = 0 in every
-//       padded vector, the in-plane entries as written, up_entries 3, and
+//       out of the plane; the fields' axis2 and half2 left out, since a
+//       fault line takes one axis, phase E): the same keys but those three
+//       axis2, with 2 entries, z = 0 in every padded vector, the in-plane
+//       entries as written, one-axis fields, up_entries 3, and
 //       CheckDimension(2) passes
 //   K3  up in the plane ([0, 1] with ref_normal [1, 0], a vertical section)
 //       and up = [0, 0, -1] also pass CheckDimension(2)
@@ -70,6 +72,7 @@ static int g_rank = 0;
 
 static const char *kDeck = "config/fd_cycle/bp5_fd_first_event.toml";
 static const int kDeckVectors = 22;   // 3 fields x 3, 3 output plane, 10 stations
+static const int kDeckVectors2D = kDeckVectors - 3;   // the fields without axis2
 
 static std::string ReadFile(const std::string &p)
 {
@@ -112,13 +115,15 @@ static const std::string kRef3 = "ref_normal      = [0.0, -1.0, 0.0]";
 static const std::string kUp3 = "up              = [0.0,  0.0, 1.0]";
 
 // The deck's 2-D form: every 3-number array [a, b, c] -> [a, b]; then the
-// axes that drop to zero get in-plane values (axis2 = [0, 1] across the
-// fault line, plane_axis2 = [0, -1]) and up goes back to [0, 0, 1].
+// fields lose axis2 and half2 (a fault line takes one axis, phase E:
+// CheckDimension refuses them on a 2-D mesh), plane_axis2, which drops to
+// zero, gets the in-plane value [0, -1], and up goes back to [0, 0, 1].
 static std::string To2D(const std::string &deck)
 {
    const std::regex v3(R"(\[\s*([^,\]\s]+)\s*,\s*([^,\]\s]+)\s*,\s*([^,\]\s]+)\s*\])");
    std::string t = std::regex_replace(deck, v3, "[$1, $2]");
-   t = std::regex_replace(t, std::regex(R"(axis2   = \[0\.0, 0\.0\])"), "axis2   = [0.0, 1.0]");
+   t = std::regex_replace(t, std::regex(R"(\naxis2   = \[0\.0, 0\.0\])"), "");
+   t = std::regex_replace(t, std::regex(R"(\nhalf2   = [^\n]*)"), "");
    t = ReplaceLine(t, "plane_axis2  = [0.0, 0.0]", "plane_axis2  = [0.0, -1.0]");
    t = ReplaceLine(t, "up              = [0.0, 0.0]", kUp3);
    return t;
@@ -147,15 +152,24 @@ static void TestDeck3D2D()
    const std::string d2 = To2D(deck);
    const cycle::CycleConfig c2 = LoadText("k2", d2);
    const spatial::FaultGeometrySpec &g2 = c2.shared.fault_geometry;
-   bool keys = c2.deck_vectors.size() == c3.deck_vectors.size();
+   // the 3-D deck's keys but the fields' axis2, in the same order
+   std::vector<std::string> want;
+   for (const cycle::DeckVector &v : c3.deck_vectors)
+   {
+      const bool field_axis2 = v.key.rfind("[cycle.fields.", 0) == 0
+                               && v.key.size() > 7 && v.key.substr(v.key.size() - 7) == "].axis2";
+      if (!field_axis2) { want.push_back(v.key); }
+   }
+   bool keys = static_cast<int>(want.size()) == kDeckVectors2D
+               && c2.deck_vectors.size() == want.size();
    for (size_t i = 0; keys && i < c2.deck_vectors.size(); i++)
    {
-      keys = (c2.deck_vectors[i].key == c3.deck_vectors[i].key);
+      keys = (c2.deck_vectors[i].key == want[i]);
    }
    TEST_ASSERT(keys && AllEntries(c2, 2), "K2 the same " << c2.deck_vectors.size()
-               << " keys, all with 2 entries");
-   // padded: z = 0, x and y as the 3-D deck wrote them (axis2 and
-   // plane_axis2 set by To2D)
+               << " keys but the fields' axis2, all with 2 entries");
+   // padded: z = 0, x and y as the 3-D deck wrote them (plane_axis2 set by
+   // To2D); the fields have one axis
    bool pad = true;
    for (size_t i = 0; i < c3.output.stations.size(); i++)
    {
@@ -164,12 +178,12 @@ static void TestDeck3D2D()
    }
    for (const cycle::RectTaperSpec *f : {&c2.fields.a, &c2.fields.Dc, &c2.fields.V_init})
    {
-      pad = pad && f->center[2] == 0.0 && f->axis1[2] == 0.0 && f->axis2[0] == 0.0
-            && f->axis2[1] == 1.0 && f->axis2[2] == 0.0;
+      pad = pad && f->center[2] == 0.0 && f->axis1[2] == 0.0 && !f->two_axes;
    }
    pad = pad && c2.output.plane_axis2[0] == 0.0 && c2.output.plane_axis2[1] == -1.0
          && c2.output.plane_axis2[2] == 0.0;
-   TEST_ASSERT(pad, "K2 every padded vector has z = 0 and the in-plane entries as written");
+   TEST_ASSERT(pad, "K2 every padded vector has z = 0 and the in-plane entries as written; "
+               "the fields have one axis");
    TEST_ASSERT(g2.ref_normal_entries == 2 && g2.up_entries == 3 && g2.ref_normal[0] == 0.0
                && g2.ref_normal[1] == -1.0 && g2.ref_normal[2] == 0.0 && g2.up[2] == 1.0,
                "K2 [fault_geometry] ref_normal [0, -1] (2 entries, padded), up [0, 0, 1] (3)");
@@ -194,7 +208,7 @@ static void TestUpChoices()
    const cycle::CycleConfig cb = LoadText("k3b", t);
    const spatial::FaultGeometrySpec &gb = cb.shared.fault_geometry;
    TEST_ASSERT(gb.up_entries == 2 && gb.up[0] == 0.0 && gb.up[1] == 1.0 && gb.up[2] == 0.0
-               && AllEntries(cb, 2) && cb.deck_vectors.size() == kDeckVectors + 3,
+               && AllEntries(cb, 2) && cb.deck_vectors.size() == kDeckVectors2D + 3,
                "K3 up [0, 1]: 2 entries, padded (0, 1, 0); the 3 [cycle.loading] vectors with 2");
    cb.CheckDimension(2);
    TEST_ASSERT(true, "K3 up in the plane: CheckDimension(2) passes");

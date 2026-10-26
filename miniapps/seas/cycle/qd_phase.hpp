@@ -336,7 +336,7 @@ public:
    /// Write forms them: V re-solved from (traction, state) and the normal
    /// traction the solver used, both from the last right-hand-side
    /// evaluation (station sigma_n fix ef70517 of gpu-qd-bp5).  sigma_n is
-   /// SigmaN (for the snapshots; the station rows do not use it).
+   /// SigmaN (the snapshots, and the station column of station_sigma_n).
    void FillStationFields(StationFields &f) const
    {
       const Vector &trac = op_->GetTraction();
@@ -383,7 +383,9 @@ public:
       return LocatePlanePoints(oc, pts);
    }
 
-   /// Points given in plane coordinates (x2, x3), located as the stations.
+   /// Points given in plane coordinates (x2, x3), located as the stations
+   /// (on a 2-D mesh the fault faces are segments; x3 is the distance off
+   /// the fault line, 0 for a point on it).
    std::vector<StationLocation> LocatePlanePoints(
       const OutputConfig &oc, const std::vector<std::array<real_t, 2>> &pts) const
    {
@@ -395,7 +397,7 @@ public:
          x2(i) = Project_(x, oc.plane_origin, oc.plane_axis1);
          x3(i) = Project_(x, oc.plane_origin, oc.plane_axis2);
       }
-      return LocateOnFaces(x2, x3, dom_->GetNbfPerFace(), pts);
+      return LocateOnFaces(x2, x3, dom_->GetNbfPerFace(), pts, dom_->Dimension() - 1);
    }
 
    /// The fault data of BenchmarkOutput (bench_output.hpp) on the owned
@@ -438,7 +440,11 @@ public:
       const int nf = fint.Size() + fsh.Size();
       const int per = 3 * nq + 3;
       Vector loc(per * nbf * nf);
-      Vector nor(3), x(3);
+      // A 2-D mesh: the face is a segment, the normal and the points have 2
+      // components, padded with z = 0 as the DOF table's positions.
+      const int sdim = pmesh_.SpaceDimension();
+      Vector nor(sdim), x(sdim);
+      real_t xp[3] = {0.0, 0.0, 0.0};
       for (int f = 0; f < nf; f++)
       {
          FaceElementTransformations *T = (f < fint.Size())
@@ -452,9 +458,10 @@ public:
             T->SetAllIntPoints(&ip);
             CalcOrtho(T->Jacobian(), nor);
             T->Transform(ip, x);
+            for (int d = 0; d < sdim; d++) { xp[d] = x(d); }
             fd[q] = ip.weight * nor.Norml2();
-            fd[nq + q] = Project_(x.GetData(), oc.plane_origin, oc.plane_axis1);
-            fd[2 * nq + q] = Project_(x.GetData(), oc.plane_origin, oc.plane_axis2);
+            fd[nq + q] = Project_(xp, oc.plane_origin, oc.plane_axis1);
+            fd[2 * nq + q] = Project_(xp, oc.plane_origin, oc.plane_axis2);
          }
          for (int k = 0; k < nbf; k++)
          {
@@ -463,7 +470,7 @@ public:
             const IntegrationPoint &np = nodes.IntPoint(k);
             T->SetAllIntPoints(&np);
             T->Transform(np, x);
-            for (int d = 0; d < 3; d++) { r[3 * nq + d] = x(d); }
+            for (int d = 0; d < 3; d++) { r[3 * nq + d] = (d < sdim) ? x(d) : 0.0; }
          }
       }
       Vector own;

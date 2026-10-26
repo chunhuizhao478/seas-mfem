@@ -663,3 +663,128 @@ byte for byte with phase C's final run.  `2d-inplane-all` passes (956 PASSED lin
 new target included.
 
 Known behaviour changes in 3D: none.
+
+## Phase E, part 2: the BP3-QD inputs and outputs (E2)
+
+What SCEC BP3-QD needs beyond E1's solve, on 2D triangle meshes, and its
+upload files.
+
+Inputs:
+
+- `[cycle.prestress].a = "amax"` (design decision D5, derivation 10.4):
+  BP3's eqs 25-26, as Tandem's bp3.lua. tau0 uses a_max, the global
+  maximum of a (`GlobalMaxA`, one allreduce); psi0 is the kernel's
+  inversion of the law at V_init with the DOF's own a. The result is a
+  uniform tau0, equilibrium at V_init everywhere, and steady state only
+  where a = a_max. It needs ic = "gold" (refused with "scec_fd", whose
+  uniform psi0 is out of equilibrium where a < a_max) and eta_V_init = true.
+  The IC label is "gold+a_max". "local", the default, is BP5's arithmetic,
+  unchanged to the character.
+- `[cycle.fields]` on a 2D mesh: the fault is a line. The RectTaperFields
+  take axis1 and half1 alone, and the taper runs along axis1.
+  `CheckDimension` refuses axis2/half2 on a 2D mesh and their absence on a
+  3D one.
+- `V_init_dip` may be negative (BP3's normal sense). The `>= 0` refusal is
+  removed, and `BuildFaultParams` refuses only V_init = 0.
+- `MakePlateLoading` takes a 2D point. Before, it read x(2) past the end.
+- The five decks `config/fd_cycle/bp3_qd_{d30_thrust,d30_normal,
+  d60_thrust,d60_normal,d90}.toml` on the committed 25 m meshes.
+- The 1 km meshes `bp3/mesh/bp3_d{30,60,90}_1km.msh`, for the tests (gmsh
+  4.15.2: `gmsh -2 bp3.geo -format msh22 -setnumber dip D -setnumber Lf 1.0
+  -setnumber Ls 1.0`). sha256:
+  - d30 2697cd43f15a88318c93d2ffeab4c8fba071069cd134a24b69727ecdffd313bc
+  - d60 5f0322411ce33d3ffcf5616c74b90888b7ab0976298f5a55f8779ed6366def8f
+  - d90 5ac66662e448c1e31f5932a91919f001136abf975485866e353674def444c89d
+
+Outputs:
+
+- `LocateOnFaces` finds stations on segment faces (face_dim = 1, the fault
+  of a 2D mesh, `H1_SegmentElement` GaussLobatto). A point on an owned
+  segment gets that segment's basis at the point. It verifies that the
+  interior DOFs sit at the basis's nodes; if they do not, it refuses with
+  "DOF order != basis order". The triangle branch's arithmetic is unchanged.
+- `[cycle.output].station_sigma_n` adds a ninth station column, sigma_n
+  (MPa, compression positive, the friction solve's). The BP5 files keep
+  their eight columns.
+- `[cycle.benchmark]` on a 2D mesh:
+  - volume_axes takes two 2-vectors, and the off-fault rows are t, u.e1,
+    u.e2, v.e1, v.e2.
+  - A volume station may name a side (`toward`, for BP3's 0+ and 0-
+    stations on the fault trace). It is found at x + delta w/|w|, with delta
+    = 1e-9 of the mesh's bounding-box diagonal, and evaluated at x in that
+    element.
+  - `profile_sigma_n` adds a fifth profile file, sigma_n.
+  - In 2D the fault "area" in the source and global files is the fault
+    length (m), and the moment rate is per unit length.
+- `cycle/scec_bp3_export.py` writes the SCEC upload files (sections 4.1 to
+  4.3) from a run: 12 fltst_dpXXX, 8 srfst_fnXX, and slip.dat,
+  shear_stress.dat and normal_stress.dat. It uses the description's headers
+  and number formats, and refuses a file whose strike slot is not zero.
+
+Two corrections to design rev 3, both found by the tests above:
+
+- **The slip sign.** On the BP3 decks (ref_normal [1, 0], up [0, 1]) the
+  oriented normal points into the hanging wall. The kernel's slip_d =
+  (u_FW - u_HW).t_d is BP3's delta itself: thrust is slip_d > 0 and
+  V_init_dip = +V_p. Rev 3 section 10.2 wrote delta = -slip_d, and said the
+  phase E dislocation test would fix the exact map. The test (E1, P1-P3)
+  shows the sign is +.
+- **The plate-loading plane normal.** Rev 3 section 5.6 gave plane_normal
+  the reference normal as its default. For BP3 that is the vertical x = 0
+  (ref_normal [1, 0]), which is the fault plane only at dip 90. The decks
+  give the fault's normal n instead. The side (x - p).m > band is then the
+  hanging wall, and it moves by +V_p t/2 along slip_dir (up-dip for thrust,
+  down-dip for normal). This is a deck choice; the loading code is
+  unchanged apart from the 2D point.
+
+| Shared file | Change | Without the new inputs |
+|---|---|---|
+| `cycle/prestress.hpp` | a = "amax", `GlobalMaxA` | "local": the same expression, unchanged |
+| `cycle/cycle_config.hpp` | keys a, station_sigma_n, toward, profile_sigma_n; 2 volume_axes; one-axis fields; V_init_dip of either sign | a 3D deck loads as before; V_init_dip < 0 is no longer refused |
+| `cycle/fault_fields.hpp` | one-axis taper; V_init = 0 refused instead of V_init <= 0 | two axes: the same arithmetic |
+| `cycle/loading.hpp` | the 2D point | 3D: the same expression |
+| `cycle/fd_cycle_output.hpp` | segment faces; the ninth column | triangles: the same arithmetic; 8 columns |
+| `cycle/bench_output.hpp` | 2D rows, `toward`, the sigma_n profile | 3D: the same rows and text |
+| `cycle/qd_phase.hpp` | stations on segments; the benchmark geometry in 2D | 3D: the same call |
+| `drivers/fd_cycle_driver.cpp` | a_max before BuildPrestress; the column count | "local": as before |
+
+New tests (branch-owned): `test_prestress_bp3` (make target
+`test-prestress-bp3`, in `2d-inplane-all`). It checks B1 to B5 and eight
+refusals:
+
+- B1, B2: the two prestress modes against closed forms.
+- B3: each deck on its 1 km mesh at p = 1 and 2, with the kernel's
+  initial state.
+- B4: the outputs at t = 0. The 12 stations and 81 profile points sit on
+  segments at distance 0. The rows give slip 0, V = V_p, tau = the
+  closed form and sigma_n = 50 MPa. The fault length is 40 km. The surface
+  velocity is +-V_p/2 along slip_dir, to 1e-8.
+- B5: segment location at p = 1, 2, 3.
+
+`test_plate_loading` gains L7: the 2D point, bit for bit the first two
+entries of the 3D value.  `test_2d_deck` K2 (phase B) wrote a 2D form of
+the BP5 first-event deck whose fields kept axis2 and half2; the new
+`CheckDimension` rule refused it ("[cycle.fields.a] takes no axis2 or
+half2 on a 2-D mesh").  The 2D form now leaves them out, so K2 reads 19
+vector keys (the 22 less the fields' three axis2) and checks the fields
+have one axis; K3 counts the same way.
+
+3D parity against review 9's runs (E1's binaries, same container): every
+parity binary was rebuilt from the working tree, and only
+seas_fd_cycle_driver and the three cycle test binaries changed, so only
+their runs were repeated.  The cycle QD and dynamic regimes on 1 rank are
+byte for byte (apart from the commit stamp; the logs differ only in paths
+and timings).  On 2 ranks the QD regime differs by up to 2.6e-9 and the
+dynamic regime's off-fault stations by up to 4.0e-9.  That is MUMPS's run
+to run noise: rerun back to back, the two binaries differ by 8.5e-10 in QD
+(one binary's own two runs: 7.2e-10 and 1.2e-9) and match byte for byte
+in the dynamic run (one binary's own two runs: up to 7.7e-9).  The
+fully-dynamic-cycle tests pass (13 runs; the 1-rank logs identical apart
+from paths and timings; the 2-rank P3 checkpoint 7.9e-12).  The
+2d-inplane-all suite passes: 1274 PASSED lines, no FAILED.
+
+Known behaviour changes in 3D:
+
+- A deck with V_init_dip < 0, or a V_init field with negative values, is
+  no longer refused.
+- Nothing else.
