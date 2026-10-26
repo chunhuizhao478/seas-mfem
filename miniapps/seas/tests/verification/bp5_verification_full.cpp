@@ -119,6 +119,7 @@
 #endif
 #include "../../solver/seas_operator.hpp"
 #include "../../solver/time_stepper.hpp"
+#include "../../solver/ts_rock4.hpp"        // QD speed S3: -ts_type rock4
 #include "../../domain/elasticity_operator.hpp"
 #include "../../fault/fault_geometry.hpp"
 #include "../../fault/rate_state_fault.hpp"
@@ -3212,6 +3213,8 @@ int main(int argc, char *argv[])
    BP5MonitorCtx petsc_mon_ctx{};  // zero-initialized
    if (use_petsc_ts)
    {
+      // QD speed S3: make -ts_type rock4 known before any options are read
+      seas::TSRock4Register();
       // No prefix: options file uses unprefixed names (-ts_type, etc.)
       // so the solver must also be unprefixed.
       petsc_ode = std::make_unique<PetscODESolver>(mpi.GetComm(), "");
@@ -3241,9 +3244,11 @@ int main(int argc, char *argv[])
       // tableau or step controller.  The monitor reads V_max, traction and
       // slip rate from the operator's caches, which the last stage
       // evaluation of the step left.  That stage is at the accepted state
-      // only for an RK tableau with the FSAL property (3bs, 5dp, 5bs, 6vr);
-      // with any other (7vr, 8vr, another TS type) event detection and
-      // output would read an inner stage, so the run stops.
+      // only for an RK tableau with the FSAL property (3bs, 5dp, 5bs, 6vr)
+      // or for rock4 (QD speed S3, solver/ts_rock4.hpp: its last right-hand
+      // side is at the new solution); with any other (7vr, 8vr, another TS
+      // type) event detection and output would read an inner stage, so the
+      // run stops.
       {
          TSType ts_type = nullptr;
          ierr = TSGetType(ts, &ts_type);
@@ -3251,6 +3256,7 @@ int main(int argc, char *argv[])
          PetscBool is_rk = PETSC_FALSE;
          ierr = PetscStrcmp(ts_type, TSRK, &is_rk);
          MFEM_VERIFY(ierr == PETSC_SUCCESS, "PetscStrcmp failed");
+         const bool is_rock4 = seas::TSIsRock4(ts);
          TSRKType rk_type = nullptr;
          PetscBool fsal = PETSC_FALSE;
          if (is_rk)
@@ -3261,12 +3267,12 @@ int main(int argc, char *argv[])
                                   nullptr, nullptr, nullptr, &fsal);
             MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSRKGetTableau failed");
          }
-         MFEM_VERIFY(is_rk && fsal,
+         MFEM_VERIFY((is_rk && fsal) || is_rock4,
                      "PETSc TS " << ts_type << (is_rk ? " " : "")
                      << (is_rk ? rk_type : "") << ": the monitor needs an "
                      "RK tableau with the FSAL property (3bs, 5dp, 5bs, "
-                     "6vr), because it reads the operator's caches from the "
-                     "last stage of each step");
+                     "6vr) or rock4, because it reads the operator's caches "
+                     "from the last stage of each step");
          TSAdapt tsad;
          ierr = TSGetAdapt(ts, &tsad);
          MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSGetAdapt failed");
@@ -3278,7 +3284,8 @@ int main(int argc, char *argv[])
          MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSGetTolerances failed");
          if (mpi.IsRoot())
          {
-            std::cout << "  [TS] rk " << rk_type << " (FSAL), adapt "
+            std::cout << "  [TS] " << (is_rock4 ? "rock4" : "rk ")
+                      << (is_rock4 ? "" : rk_type) << " (FSAL), adapt "
                       << adapt_type << ", atol " << std::scientific
                       << std::setprecision(3) << atol << ", rtol " << rtol
                       << std::defaultfloat << "\n";
@@ -3637,6 +3644,24 @@ int main(int argc, char *argv[])
          // line reports the cumulative count across the restart seam.
          step_rejections = restart_rejections_carryover
                          + static_cast<int>(rejects);
+         // QD speed S3: what rock4 spent (this Run only)
+         if (seas::TSIsRock4(ts) && mpi.IsRoot())
+         {
+            const seas::Rock4Stats rs = seas::TSRock4GetStats(ts);
+            std::cout << "[TS] rock4: " << rs.steps << " steps, "
+                      << rs.rejected << " rejected, stages "
+                      << std::fixed << std::setprecision(2)
+                      << static_cast<double>(rs.stages_sum) /
+                         std::max(1LL, rs.steps)
+                      << " mean / " << rs.stages_max << " max, "
+                      << "right-hand sides " << rs.f_stage << " in steps + "
+                      << rs.f_eig << " in " << rs.eig_estimates
+                      << " spectral radius estimates (" << rs.eig_unconverged
+                      << " unconverged), h cut to the stage cap "
+                      << rs.h_cut << " times, last rho " << std::scientific
+                      << std::setprecision(4) << rs.eig_last
+                      << std::defaultfloat << " 1/s\n";
+         }
       }
 
       // Copy monitor state back for summary

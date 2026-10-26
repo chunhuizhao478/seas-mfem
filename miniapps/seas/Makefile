@@ -897,7 +897,9 @@ FAULT_HEADERS = fault/fault_geometry.hpp \
 SOLVER_HEADERS = solver/seas_operator.hpp \
                  solver/seas_bdrload_operator.hpp \
                  solver/time_stepper.hpp \
-                 solver/qd_linear_solver.hpp
+                 solver/qd_linear_solver.hpp \
+                 solver/ts_rock4.hpp \
+                 solver/rock4_tables.hpp
 
 # Phase 5: I/O
 IO_HEADERS = io/probe_output.hpp \
@@ -1075,6 +1077,10 @@ TEST_QD_HMAT_LAYOUT_OBJ = $(TEST_QD_HMAT_LAYOUT_SRC:.cpp=.o)
 TEST_QD_NODE_SLIP_SRC = tests/parallel/test_qd_node_slip.cpp
 TEST_QD_NODE_SLIP_OBJ = $(TEST_QD_NODE_SLIP_SRC:.cpp=.o)
 
+# QD speed S3: the PETSc TS type rock4 on linear and nonlinear test problems
+TEST_TS_ROCK4_SRC = tests/parallel/test_ts_rock4.cpp
+TEST_TS_ROCK4_OBJ = $(TEST_TS_ROCK4_SRC:.cpp=.o)
+
 # GPU plan G3a: cuDSS against MUMPS on the BP5 stiffness
 TEST_CUDSS_VS_MUMPS_SRC = tests/parallel/test_cudss_vs_mumps.cpp
 TEST_CUDSS_VS_MUMPS_OBJ = $(TEST_CUDSS_VS_MUMPS_SRC:.cpp=.o)
@@ -1130,6 +1136,7 @@ PAR_MINIAPPS = seas_test_mpi_context seas_test_parallel_utils \
                seas_test_qd_stage_operators \
                seas_test_qd_hmatrix_layout \
                seas_test_qd_node_slip \
+               seas_test_ts_rock4 \
                seas_test_bp5_parallel_smoke \
                seas_test_parallel_wave_operator
 # Long-running parallel simulations (built by `make all`, not run by `make test`)
@@ -5905,6 +5912,23 @@ test-qd-node-slip: seas_test_qd_node_slip
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_qd_node_slip
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 3 ./seas_test_qd_node_slip
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 8 ./seas_test_qd_node_slip
+
+# QD speed S3: ROCK4's order (every method of 5 to 124 stages), stability,
+# stiff steps, first same as last and the stage cap (needs MFEM with PETSc;
+# skips without)
+seas_test_ts_rock4: $(TEST_TS_ROCK4_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_TS_ROCK4_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+$(TEST_TS_ROCK4_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+test-ts-rock4: seas_test_ts_rock4
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_ts_rock4
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_ts_rock4
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 3 ./seas_test_ts_rock4
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_ts_rock4
 
 # GPU plan G3a: cuDSS against MUMPS (a GPU build; on 1 and 2 GPUs)
 seas_test_cudss_vs_mumps: $(TEST_CUDSS_VS_MUMPS_OBJ)
