@@ -81,6 +81,16 @@
 // same_step (test only, P3 test (b)): the same split and clusters, but every
 // cluster steps at dt0 and ends at every tick; equal to global stepping up to
 // round-off.
+//
+// Phase timers (slow-parts study, Chunhui Zhao 2026-10-25): every piece of a
+// tick adds its MPI_Wtime span to Phases() on this rank: the kicks, the
+// drift, PostHalo (packing and the sends), the fault closure, MultInterior
+// per cluster, WaitHalo, the Dirichlet data, FinishForce_ per cluster (with
+// its shared blocks, fault loads, absorbing terms and mass apply also on
+// their own) and FaultStep's record reduction (an Allreduce, so mostly the
+// wait for the slowest rank).  At most about 35 clock reads per tick; they
+// change no arithmetic.  ResetPhaseSeconds() starts them again (the driver
+// calls it after step 1, which builds the fault face operators).
 
 #ifndef MFEM_SEAS_NITSCHE_LTS_RUN_HPP
 #define MFEM_SEAS_NITSCHE_LTS_RUN_HPP
@@ -1005,6 +1015,7 @@ public:
       a_.assign(nc_, Vector(n));
       for (Vector &a : a_) { a = 0.0; }
       if (has_dirichlet_) { FD_.SetSize(n); }
+      ResetPhaseSeconds();
    }
 
    int NumClusters() const { return nc_; }
@@ -1019,6 +1030,31 @@ public:
    int TicksPerFaultStep() const { return same_ ? 1 : (1 << cf_); }
    const NitscheLtsBlocks &Blocks() const { return blocks_; }
    long long Ticks() const { return ticks_; }
+
+   /// Seconds per piece of the ticks on this rank (file comment, "Phase
+   /// timers").  finish[c] holds shared, fault_loads, absorb and mass of c,
+   /// with the sign flip of the patch rows and the Dirichlet data between
+   /// them; the four are summed over the clusters.
+   struct PhaseSeconds
+   {
+      double kick = 0.0, drift = 0.0, post = 0.0, fault = 0.0, wait = 0.0, dirichlet = 0.0;
+      double shared = 0.0, fault_loads = 0.0, absorb = 0.0, mass = 0.0, reduce = 0.0;
+      std::vector<double> interior, finish;   ///< per cluster
+   };
+   const PhaseSeconds &Phases() const { return ph_; }
+   void ResetPhaseSeconds()
+   {
+      ph_ = PhaseSeconds();
+      ph_.interior.assign(nc_, 0.0);
+      ph_.finish.assign(nc_, 0.0);
+   }
+   /// Absorbing elements of cluster c on this rank (the elements whose
+   /// C_e v term FinishForce_ subtracts).
+   int AbsorbingElements(int c) const
+   {
+      const auto it = abs_elems_.find(c);
+      return it == abs_elems_.end() ? 0 : static_cast<int>(it->second.size());
+   }
    /// Patch elements kicked since construction (start and end kicks), the
    /// work count of the element updates.
    long long PatchUpdates() const { return patch_updates_; }
@@ -1042,7 +1078,12 @@ public:
       const int need = op_.HasFault() ? cf_ : 0;
       int top;
       do { top = Tick_(u, v, t); } while (top < need);
-      if (m_ == 0 && op_.HasFault()) { op_.LtsReduceRecord(); }   // once per sync interval
+      if (m_ == 0 && op_.HasFault())   // once per sync interval
+      {
+         const double w = MPI_Wtime();
+         op_.LtsReduceRecord();
+         ph_.reduce += MPI_Wtime() - w;
+      }
       return m_ == 0;
    }
 
@@ -1052,22 +1093,50 @@ private:
    /// One tick; returns the top cluster that ended a step.
    int Tick_(Vector &u, Vector &v, real_t &t)
    {
+      double w = MPI_Wtime();
+      const auto lap = [&w](double &acc)
+      {
+         const double now = MPI_Wtime();
+         acc += now - w;
+         w = now;
+      };
       for (int c = 0; c <= L_; c++)
       {
          if (same_ || m_ % (1 << c) == 0) { Kick_(c, v); }
       }
+      lap(ph_.kick);
       u.Add(dt0_, v);
       t = t0_ + (m_ + 1) * dt0_;
       int top = 0;
       if (same_) { top = L_; }
       else { while (top < L_ && (m_ + 1) % (1 << (top + 1)) == 0) { top++; } }
+      lap(ph_.drift);
       blocks_.PostHalo(top, u, kv_ ? &v : nullptr);
-      if (op_.HasFault() && cf_ <= top) { op_.LtsAdvanceFault(u, t, kv_ ? &v : nullptr); }
-      for (int c = 0; c <= top; c++) { blocks_.MultInterior(c, u, kv_ ? &v : nullptr, a_[c]); }
+      lap(ph_.post);
+      if (op_.HasFault() && cf_ <= top)
+      {
+         op_.LtsAdvanceFault(u, t, kv_ ? &v : nullptr);
+         lap(ph_.fault);
+      }
+      for (int c = 0; c <= top; c++)
+      {
+         blocks_.MultInterior(c, u, kv_ ? &v : nullptr, a_[c]);
+         lap(ph_.interior[c]);
+      }
       blocks_.WaitHalo();
-      if (has_dirichlet_) { op_.Elasticity().AssembleDirichletOnlyRHS(FD_, t); }
-      for (int c = 0; c <= top; c++) { FinishForce_(c, top, v, t); }
+      lap(ph_.wait);
+      if (has_dirichlet_)
+      {
+         op_.Elasticity().AssembleDirichletOnlyRHS(FD_, t);
+         lap(ph_.dirichlet);
+      }
+      for (int c = 0; c <= top; c++)
+      {
+         FinishForce_(c, top, v, t);
+         lap(ph_.finish[c]);
+      }
       for (int c = 0; c <= top; c++) { Kick_(c, v); }
+      lap(ph_.kick);
       ticks_++;
       if (++m_ == TicksPerSync()) { m_ = 0; t0_ = t; }
       return top;
@@ -1079,14 +1148,22 @@ private:
    void FinishForce_(int c, int top, const Vector &v, real_t t)
    {
       Vector &a = a_[c];
+      double w = MPI_Wtime(), now;
       blocks_.AddShared(c, a);
+      now = MPI_Wtime();
+      ph_.shared += now - w;
       const std::vector<int> &pe = blocks_.Patch(c);
       for (int e : pe)
       {
          const int *ie = blocks_.ElementDofs(e);
          for (int k = 0; k < nb_; k++) { a(ie[k]) = -a(ie[k]); }
       }
-      if (op_.HasFault() && c == cf_) { op_.LtsAddFaultLoads(a); }
+      if (op_.HasFault() && c == cf_)
+      {
+         w = MPI_Wtime();
+         op_.LtsAddFaultLoads(a);
+         ph_.fault_loads += MPI_Wtime() - w;
+      }
       if (has_dirichlet_)
       {
          if (top < 0) { op_.Elasticity().AssembleDirichletOnlyRHS(FD_, t); }
@@ -1096,6 +1173,7 @@ private:
             for (int k = 0; k < nb_; k++) { a(ie[k]) += FD_(ie[k]); }
          }
       }
+      w = MPI_Wtime();
       auto it = abs_elems_.find(c);
       if (it != abs_elems_.end())
       {
@@ -1111,7 +1189,10 @@ private:
             }
          }
       }
+      now = MPI_Wtime();
+      ph_.absorb += now - w;
       ApplyMass_(pe, top, a);
+      ph_.mass += MPI_Wtime() - now;
    }
 
    void ApplyMass_(const std::vector<int> &pe, int top, Vector &a) const
@@ -1178,6 +1259,7 @@ private:
    real_t t0_ = 0.0;
    int m_ = 0;
    long long ticks_ = 0, patch_updates_ = 0;
+   PhaseSeconds ph_;
 };
 
 #endif // MFEM_USE_MPI

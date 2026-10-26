@@ -75,6 +75,11 @@
 // elements, interior and shared face blocks) with the node name.  The log
 // gives max/mean of each, their correlation with the non-wait time, and a
 // least-squares fit non-wait = a kicks + b sides + c (8 ranks or more).
+// Slow-parts study (Chunhui Zhao 2026-10-25): the rows also hold the
+// seconds of each piece of the ticks after step 1 (NitscheLtsRun phase
+// timers, ph_* columns; ph_untimed is the step time they leave out) and the
+// absorbing elements per cluster; the log gives each piece's mean, max and
+// the slowest rank's value.
 //
 // Partition weights (L2 note rev1, Chunhui Zhao 2026-10-25): with --lts
 // rate2 on more than one part, --lts-partition-weight tets (default) gives
@@ -717,9 +722,12 @@ void RankBalanceReport(const NitscheLtsRun &run, const std::vector<int> &cl, int
    const int nc = run.NumClusters();
    const int nranks = Mpi::WorldSize();
    // per rank: 11 scalars, then per cluster tets, patch elements, interior
-   // face blocks, shared face blocks
+   // face blocks, shared face blocks; then the phase seconds (11 scalars,
+   // per cluster interior and finish) and the absorbing elements per cluster
    enum { kStep, kStep1, kWait, kLoop, kFault, kKicks, kTets, kSides, kHalo, kNbr, kRounds, kN };
-   const int nv = kN + 4 * nc;
+   enum { pKick, pDrift, pPost, pFault, pWait, pDir, pShared, pFLoads, pAbsorb, pMass, pReduce, pN };
+   const int kPh = kN + 4 * nc, kAbs = kPh + pN + 2 * nc;
+   const int nv = kAbs + nc;
    std::vector<double> v(nv, 0.0);
    v[kStep] = step_sec;
    v[kStep1] = step1_sec;
@@ -738,6 +746,16 @@ void RankBalanceReport(const NitscheLtsRun &run, const std::vector<int> &cl, int
       const std::array<long long, 3> k = B.ClusterCounts(c);
       for (int j = 0; j < 3; j++) { v[kN + (j + 1) * nc + c] = static_cast<double>(k[j]); }
    }
+   const NitscheLtsRun::PhaseSeconds &ph = run.Phases();
+   const double phv[pN] = {ph.kick, ph.drift, ph.post, ph.fault, ph.wait, ph.dirichlet,
+                           ph.shared, ph.fault_loads, ph.absorb, ph.mass, ph.reduce};
+   for (int j = 0; j < pN; j++) { v[kPh + j] = phv[j]; }
+   for (int c = 0; c < nc; c++)
+   {
+      v[kPh + pN + c] = ph.interior[c];
+      v[kPh + pN + nc + c] = ph.finish[c];
+      v[kAbs + c] = run.AbsorbingElements(c);
+   }
    constexpr int kName = 64;
    char name[MPI_MAX_PROCESSOR_NAME + kName] = {0};
    int len = 0;
@@ -754,7 +772,11 @@ void RankBalanceReport(const NitscheLtsRun &run, const std::vector<int> &cl, int
    f << std::setprecision(10) << "# per-rank balance (fault-writer note rev1, L1): step_sec = "
      "ode.Step after step 1, wait_sec = WaitHalo (step 1 included), nonwait_sec = step_sec - "
      "wait_sec, outside_sec = loop_sec - step_sec - step1_sec, kicks = patch elements kicked, "
-     "fault_sides = 2 interior + shared fault faces\n";
+     "fault_sides = 2 interior + shared fault faces; ph_* = seconds of each piece of the ticks "
+     "after step 1 (NitscheLtsRun phase timers; ph_fin_c holds ph_shared, ph_fault_loads, "
+     "ph_absorb and ph_mass, which are summed over the clusters), ph_untimed = step_sec - the sum "
+     "of ph_kick, ph_drift, ph_post, ph_fault, ph_int_c, ph_wait, ph_dirichlet, ph_fin_c and "
+     "ph_reduce; abs_c = absorbing elements\n";
    f << "rank,node,step_sec,step1_sec,wait_sec,nonwait_sec,loop_sec,outside_sec,fault_sec,"
         "kicks,tets,fault_sides,halo_values,halo_rounds,neighbour_ranks";
    const char *kind[4] = {"tets", "patch", "iface", "sface"};
@@ -762,7 +784,23 @@ void RankBalanceReport(const NitscheLtsRun &run, const std::vector<int> &cl, int
    {
       for (int c = 0; c < nc; c++) { f << "," << kind[j] << "_c" << c; }
    }
+   const char *phname[pN] = {"kick", "drift", "post", "fault", "wait", "dirichlet", "shared",
+                             "fault_loads", "absorb", "mass", "reduce"};
+   for (int j = 0; j < pN; j++) { f << ",ph_" << phname[j]; }
+   f << ",ph_untimed";
+   for (int c = 0; c < nc; c++) { f << ",ph_int_c" << c; }
+   for (int c = 0; c < nc; c++) { f << ",ph_fin_c" << c; }
+   for (int c = 0; c < nc; c++) { f << ",abs_c" << c; }
    f << "\n";
+   // the pieces that add up to the step time (ph_fin_c holds shared .. mass)
+   const auto timed = [&](int r)
+   {
+      double sum = at(r, kPh + pKick) + at(r, kPh + pDrift) + at(r, kPh + pPost)
+                   + at(r, kPh + pFault) + at(r, kPh + pWait) + at(r, kPh + pDir)
+                   + at(r, kPh + pReduce);
+      for (int j = kPh + pN; j < kAbs; j++) { sum += at(r, j); }
+      return sum;
+   };
    std::vector<double> work(nranks), kicks(nranks), tets(nranks), sides(nranks);
    for (int r = 0; r < nranks; r++)
    {
@@ -776,7 +814,11 @@ void RankBalanceReport(const NitscheLtsRun &run, const std::vector<int> &cl, int
         << static_cast<long long>(kicks[r]) << "," << static_cast<long long>(tets[r]) << ","
         << static_cast<long long>(sides[r]) << "," << static_cast<long long>(at(r, kHalo)) << ","
         << static_cast<long long>(at(r, kRounds)) << "," << static_cast<long long>(at(r, kNbr));
-      for (int j = kN; j < nv; j++) { f << "," << static_cast<long long>(at(r, j)); }
+      for (int j = kN; j < kPh; j++) { f << "," << static_cast<long long>(at(r, j)); }
+      for (int j = kPh; j < kPh + pN; j++) { f << "," << at(r, j); }
+      f << "," << at(r, kStep) - timed(r);
+      for (int j = kPh + pN; j < kAbs; j++) { f << "," << at(r, j); }
+      for (int j = kAbs; j < nv; j++) { f << "," << static_cast<long long>(at(r, j)); }
       f << "\n";
    }
    // max / mean, the correlation of each count with the non-wait time, and
@@ -846,6 +888,32 @@ void RankBalanceReport(const NitscheLtsRun &run, const std::vector<int> &cl, int
    std::vector<int> order(nranks);
    for (int r = 0; r < nranks; r++) { order[r] = r; }
    std::sort(order.begin(), order.end(), [&](int a, int b) { return work[a] > work[b]; });
+   {
+      // each piece: mean over the ranks / max / the slowest rank's (by non-wait)
+      const int rs = order[0];
+      const auto piece = [&](const std::string &name, auto val)
+      {
+         double sm = 0.0, mx = 0.0;
+         for (int r = 0; r < nranks; r++) { sm += val(r); mx = std::max(mx, val(r)); }
+         std::cout << " " << name << " " << sm / nranks << "/" << mx << "/" << val(rs);
+      };
+      std::cout << std::setprecision(4) << "  rank balance phases (s after step 1, mean/max/slowest "
+                "rank r" << rs << "):";
+      for (int j = 0; j < pN; j++)
+      {
+         piece(phname[j], [&](int r) { return at(r, kPh + j); });
+      }
+      for (int c = 0; c < nc; c++)
+      {
+         piece("int_c" + std::to_string(c), [&](int r) { return at(r, kPh + pN + c); });
+      }
+      for (int c = 0; c < nc; c++)
+      {
+         piece("fin_c" + std::to_string(c), [&](int r) { return at(r, kPh + pN + nc + c); });
+      }
+      piece("untimed", [&](int r) { return at(r, kStep) - timed(r); });
+      std::cout << "\n";
+   }
    std::cout << "  slowest ranks (non-wait s, tets, patch kicks, fault sides, node):";
    for (int i = 0; i < std::min(nranks, 3); i++)
    {
@@ -2264,7 +2332,12 @@ int main(int argc, char *argv[])
       }
       else { ode.Step(U, Ud, t, h); }
       const double ds = std::chrono::duration<double>(std::chrono::steady_clock::now() - ts0).count();
-      if (s == 1) { step1_sec = ds; fault_sec1 = op.FaultSeconds(); }
+      if (s == 1)
+      {
+         step1_sec = ds;
+         fault_sec1 = op.FaultSeconds();
+         if (lts_run) { lts_run->ResetPhaseSeconds(); }
+      }
       else { step_sec += ds; }
       // with LTS the record is reduced over the ranks once per sync interval
       // (extremes over its fault steps); between sync points it is this

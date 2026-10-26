@@ -19,6 +19,10 @@
 # V3 (v3_*.sbatch, L2 note rev1, Chunhui Zhao 2026-10-25) marks a variant roundoff when its stations are
 # compared with GOLD's but meant to agree at round-off only (another partition), and needs no
 # FAULT_COMPARE.
+# S1 (s1_*.sbatch, slow-parts study, Chunhui Zhao 2026-10-25) may give a variant a fifth field, a
+# launcher put between ibrun and the driver (perf_wrap.sh, bind_spread.sh), and may define the shell
+# functions before_variant and after_variant, called with the variant's name and output folder around
+# its run.
 export LC_ALL=C LANG=C
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1      # one thread per MPI rank
 ROOT=$(cd "$SLURM_SUBMIT_DIR/../../../.." && pwd)    # repository root
@@ -59,18 +63,19 @@ mkdir -p $BASE
 T0=$(date +%s)
 rc_all=0
 for spec in "${VARIANTS[@]}"; do
-   IFS='|' read -r v DECK FLAGS COMPARE <<< "$spec"
+   IFS='|' read -r v DECK FLAGS COMPARE LAUNCH <<< "$spec"
    OUT=$BASE/$v; mkdir -p $OUT
    cp "$DECK" $OUT/
+   declare -F before_variant > /dev/null && before_variant "$v" "$OUT"
    # memory in use on this (the first) node, which also holds rank 0 and the fault output
    ( while :; do echo "$(date +%s) $(awk '/^MemTotal|^MemAvailable/{print $2}' /proc/meminfo | tr '\n' ' ')"; sleep 2; done ) > $OUT/meminfo_kB.log &
    MON=$!
    s=$(date +%s)
-   ibrun ./seas_nitsche_dyn_driver --config "$DECK" --mesh "$MESH" --order $ORDER --tfinal $TFINAL \
+   ibrun $LAUNCH ./seas_nitsche_dyn_driver --config "$DECK" --mesh "$MESH" --order $ORDER --tfinal $TFINAL \
          --output-dir $OUT --log-every 1000 --lts rate2 $FLAGS > $OUT/driver.log 2>&1
    rc=$?; kill $MON 2>/dev/null; wait $MON 2>/dev/null
    [ $rc -eq 0 ] || rc_all=$rc
-   echo "=== $v: deck $DECK, flags [--lts rate2 $FLAGS], 0 -> $TFINAL s: driver exit $rc, $(( $(date +%s) - s )) s in the job"
+   echo "=== $v: deck $DECK, flags [--lts rate2 $FLAGS]${LAUNCH:+, through $LAUNCH}, 0 -> $TFINAL s: driver exit $rc, $(( $(date +%s) - s )) s in the job"
    grep -a "partition:\|LTS\|fault ParaView output:\|time in ode.Step per rank\|fault work:\|rank balance\|slowest ranks\|halo\|setup (wall\|station output:\|=== done" $OUT/driver.log || tail -20 $OUT/driver.log
    grep -a "^ *step [0-9]* t = " $OUT/driver.log | awk '{print "   " $0}'
    awk '{u=($2-$3)/1048576; if(u>m)m=u; t=$2/1048576} END{printf "first node memory: peak in use %.1f GB of %.1f GB (2 s samples)\n", m, t}' $OUT/meminfo_kB.log
@@ -80,6 +85,7 @@ for spec in "${VARIANTS[@]}"; do
       echo "--- $v stations against the first $TFINAL s of $GOLD ($what) ---"
       python3 -I jobs/vista_profiling/compare_stations.py $GOLD $OUT --tmax $TFINAL --time-tol 2e-9 --groups
    fi
+   declare -F after_variant > /dev/null && after_variant "$v" "$OUT"
 done
 for spec in "${FAULT_COMPARE[@]}"; do
    IFS='|' read -r A B CFLAGS <<< "$spec"
