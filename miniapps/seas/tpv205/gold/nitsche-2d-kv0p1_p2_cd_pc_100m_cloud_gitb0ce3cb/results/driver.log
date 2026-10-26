@@ -1,0 +1,90 @@
+=== seas_nitsche_dyn_driver (plan N-07) on 4 rank(s) ===
+  deck tpv205/configs/tpv205_2d_nitsche.toml
+  SCEC TPV205-2D (linear slip weakening, plane strain) via the Nitsche dynamic-rupture driver on a 2-D triangle mesh.
+  prestress regions (last match wins over the background):
+    1: x [-1500, 1500] y [-inf, inf] z [-inf, inf] m: sigma_xx yy zz xy yz xz = 0 -1.2e+08 0 8.16e+07 0 0 Pa
+    2: x [-9000, -6000] y [-inf, inf] z [-inf, inf] m: sigma_xx yy zz xy yz xz = 0 -1.2e+08 0 7.8e+07 0 0 Pa
+    3: x [6000, 9000] y [-inf, inf] z [-inf, inf] m: sigma_xx yy zz xy yz xz = 0 -1.2e+08 0 6.2e+07 0 0 Pa
+
+=== Y=0 Face Classification Audit ===
+  Fault (attr=3):      300
+  Dirichlet (attr=5):  0
+  NONE (interior):     2
+  NONE (shared):       0
+  *** WARNING: 2 y=0 faces have NO BC! These enforce zero jump via DG penalty, conflicting with fault slip.
+=====================================
+
+  Tag validation: 300 fault keys (exact), 0 Dirichlet keys (exact, 0 recoverable) (OK)
+  Fault faces: 25 interior + 0 shared (this rank)
+  Dirichlet faces: 0 interior + 0 shared (this rank)
+  Owned fault layout: global_shared_faces=0, global_owned_dofs=900, global_local_dofs=900, faces_with_nontrivial_perm=131
+  FaultFrameField (one orientation for QD and dynamic): ref_normal (0, -1, 0), up (0, 0, 1)
+    fault: 300 faces, 1 patch(es), 0 junction vertices, 2 tips, flipped vs raw 130, pin margin 1, side margin 1, F6 frames 0
+    prescribed slip: 0 faces
+  AUDIT: shared-face agreement OK (0 paired, 0 single-rank)
+
+=== Y=0 Face Classification Audit ===
+  Fault (attr=3):      300
+  Dirichlet (attr=5):  0
+  NONE (interior):     2
+  NONE (shared):       0
+  *** WARNING: 2 y=0 faces have NO BC! These enforce zero jump via DG penalty, conflicting with fault slip.
+=====================================
+
+  Tag validation: 300 fault keys (exact), 0 Dirichlet keys (exact, 0 recoverable) (OK)
+  Fault faces: 25 interior + 0 shared (this rank)
+  Dirichlet faces: 0 interior + 0 shared (this rank)
+  Owned fault layout: global_shared_faces=0, global_owned_dofs=900, global_local_dofs=900, faces_with_nontrivial_perm=131
+  AUDIT: shared-face agreement OK (0 paired, 0 single-rank)
+  Kelvin-Voigt: eta_bar = 0.1, scale node (h_e inscribed), beta 0.000194012 .. 0.0135369 s (dt = 0.000306626 s), whole domain, 40526 of 40526 elements
+  friction parameters over the owned fault DOFs: Dc [0.4, 0.4] mu_s [0.677, 0.677] mu_d [0.525, 0.525] cohesion [0, 0]; DOFs with a barrier mu_s (>= 1e6): 0
+  stations from tpv205/stations/tpv205_2d_fault_stations.csv (7), nearest fault node in 3-D, snap_tolerance_m 100:
+    x2_-12_x3_7.5: requested (-12000, 0, 0), snapped (-11999.99986, 0, 0), distance 0.0001405458806 m
+    x2_-7.5_x3_7.5: requested (-7500, 0, 0), snapped (-7500, 0, 0), distance 1.221087587e-08 m
+    x2_-4.5_x3_7.5: requested (-4500, 0, 0), snapped (-4500.002192, 0, 0), distance 0.002192408425 m
+    x2_0_x3_7.5: requested (0, 0, 0), snapped (-4.57475835e-09, 0, 0), distance 4.57475835e-09 m
+    x2_4.5_x3_7.5: requested (4500, 0, 0), snapped (4500.002192, 0, 0), distance 0.002192403372 m
+    x2_7.5_x3_7.5: requested (7500, 0, 0), snapped (7500, 0, 0), distance 1.221087587e-08 m
+    x2_12_x3_7.5: requested (12000, 0, 0), snapped (11999.99986, 0, 0), distance 0.0001405458806 m
+  mesh tpv205/mesh/tpv205_2d_100m.msh: 40526 triangles; p = 2; law slip_weakening (linear); fault faces 300, shared fault faces 0
+  dt = 0.0003066261374 s (CFL walk: cfl 0.5 x C(p) 0.365 -> 0.0003066261374; dt_max 0.05), 39136 steps to t = 12 s; penalty_factor 1; energy balance off
+  Prakash-Clifton regularization of the law's normal stress: v_star = 1 m/s, length = 0.01 m (L/v_star = 0.01 s); sigma*^0 = initial sigma_n
+  [K-DIAG] Volume elements:            40526
+  [K-DIAG] Interior faces (K):         60330
+  [K-DIAG] Shared faces (K):           782 (each face counted by both ranks)
+  [K-DIAG] Bdr faces w/ K (Dirichlet): 0 (true one-sided, attr 5)
+  [K-DIAG] Bdr faces (all attrs):      136 (true one-sided, any attr)
+  [K-DIAG] Bdr elements total:         91 (local rank, includes interior)
+  [K-DIAG]   attr 105: 136 bdr faces (NO K integrator)
+  [K-DIAG] Total K contributions:  101638 (vol + interior + shared + bdr_dir)
+  [K-DIAG] Volume elements:            40526
+  [K-DIAG] Interior faces (K):         60330
+  [K-DIAG] Shared faces (K):           782 (each face counted by both ranks)
+  [K-DIAG] Bdr faces w/ K (Dirichlet): 0 (true one-sided, attr 5)
+  [K-DIAG] Bdr faces (all attrs):      136 (true one-sided, any attr)
+  [K-DIAG] Bdr elements total:         91 (local rank, includes interior)
+  [K-DIAG]   attr 105: 136 bdr faces (NO K integrator)
+  [K-DIAG] Total K contributions:  101638 (vol + interior + shared + bdr_dir)
+  step 2000 t = 0.613252  max|V| = 3.24219  max|V|dt/Dc = 0.00248535  sigma_n_eff in [1.19491e+08, 1.20858e+08]  sigma_pc in [1.19526e+08, 1.20894e+08]  wall 30.5943 s
+  step 4000 t = 1.2265  max|V| = 4.09573  max|V|dt/Dc = 0.00313965  sigma_n_eff in [1.19386e+08, 1.2063e+08]  sigma_pc in [1.19317e+08, 1.20635e+08]  wall 56.8679 s
+  step 6000 t = 1.83976  max|V| = 4.83561  max|V|dt/Dc = 0.00370681  sigma_n_eff in [1.18277e+08, 1.21231e+08]  sigma_pc in [1.18777e+08, 1.2123e+08]  wall 82.9524 s
+  step 8000 t = 2.45301  max|V| = 5.12907  max|V|dt/Dc = 0.00393177  sigma_n_eff in [1.19431e+08, 1.21163e+08]  sigma_pc in [1.19512e+08, 1.21265e+08]  wall 109.544 s
+  step 10000 t = 3.06626  max|V| = 7.14505  max|V|dt/Dc = 0.00547715  sigma_n_eff in [1.19613e+08, 1.2087e+08]  sigma_pc in [1.19611e+08, 1.20872e+08]  wall 136.008 s
+  step 12000 t = 3.67951  max|V| = 3.5223  max|V|dt/Dc = 0.00270008  sigma_n_eff in [1.14874e+08, 1.22196e+08]  sigma_pc in [1.14885e+08, 1.22215e+08]  wall 162.278 s
+  step 14000 t = 4.29277  max|V| = 4.62579  max|V|dt/Dc = 0.00354597  sigma_n_eff in [1.14553e+08, 1.22479e+08]  sigma_pc in [1.14531e+08, 1.2245e+08]  wall 188.824 s
+  step 16000 t = 4.90602  max|V| = 6.55812  max|V|dt/Dc = 0.00502723  sigma_n_eff in [1.13671e+08, 1.23093e+08]  sigma_pc in [1.13467e+08, 1.23039e+08]  wall 215.465 s
+  step 18000 t = 5.51927  max|V| = 2.6733  max|V|dt/Dc = 0.00204926  sigma_n_eff in [1.1247e+08, 1.23613e+08]  sigma_pc in [1.1247e+08, 1.23589e+08]  wall 243.007 s
+  step 20000 t = 6.13252  max|V| = 1.10303  max|V|dt/Dc = 0.000845544  sigma_n_eff in [1.1241e+08, 1.24219e+08]  sigma_pc in [1.12387e+08, 1.24185e+08]  wall 269.891 s
+  step 22000 t = 6.74578  max|V| = 1.09621  max|V|dt/Dc = 0.000840316  sigma_n_eff in [1.12418e+08, 1.24299e+08]  sigma_pc in [1.12415e+08, 1.24318e+08]  wall 298.667 s
+  step 24000 t = 7.35903  max|V| = 0.977342  max|V|dt/Dc = 0.000749197  sigma_n_eff in [1.12431e+08, 1.24425e+08]  sigma_pc in [1.12438e+08, 1.24438e+08]  wall 325.962 s
+  step 26000 t = 7.97228  max|V| = 0.863466  max|V|dt/Dc = 0.000661903  sigma_n_eff in [1.12221e+08, 1.24535e+08]  sigma_pc in [1.1222e+08, 1.24558e+08]  wall 353.501 s
+  step 28000 t = 8.58553  max|V| = 0.612589  max|V|dt/Dc = 0.00046959  sigma_n_eff in [1.1198e+08, 1.24548e+08]  sigma_pc in [1.11984e+08, 1.24543e+08]  wall 381.809 s
+  step 30000 t = 9.19878  max|V| = 0.563554  max|V|dt/Dc = 0.000432001  sigma_n_eff in [1.11858e+08, 1.24632e+08]  sigma_pc in [1.11852e+08, 1.2462e+08]  wall 408.179 s
+  step 32000 t = 9.81204  max|V| = 0.53261  max|V|dt/Dc = 0.000408281  sigma_n_eff in [1.11735e+08, 1.24594e+08]  sigma_pc in [1.11733e+08, 1.24587e+08]  wall 434.248 s
+  step 34000 t = 10.4253  max|V| = 0.488678  max|V|dt/Dc = 0.000374604  sigma_n_eff in [1.117e+08, 1.24629e+08]  sigma_pc in [1.11701e+08, 1.24623e+08]  wall 460.453 s
+  step 36000 t = 11.0385  max|V| = 0.455641  max|V|dt/Dc = 0.000349279  sigma_n_eff in [1.11728e+08, 1.24586e+08]  sigma_pc in [1.11728e+08, 1.24584e+08]  wall 487.859 s
+  step 38000 t = 11.6518  max|V| = 0.43285  max|V|dt/Dc = 0.000331808  sigma_n_eff in [1.11642e+08, 1.24537e+08]  sigma_pc in [1.11644e+08, 1.24537e+08]  wall 516.912 s
+  step 39136 t = 12.0001  max|V| = 0.425409  max|V|dt/Dc = 0.000326104  sigma_n_eff in [1.11677e+08, 1.24547e+08]  sigma_pc in [1.11681e+08, 1.24541e+08]  wall 532.66 s
+  time in ode.Step per rank after step 1: min 500.845 s, mean 506.733 s, max 513.022 s (13.109 ms/step at the max); step 1 3.81867 s (with the operator assembly); fast fault on, fused K/K_eta off, dense blocks on (193.93 MB over all ranks)
+  fault work: 0.2167 ms/step on the busiest rank; cost per step 1.265 us per triangle, 0.8713 us per fault-face side (w = 0.6887 triangles)
+=== done: 39136 steps, t = 12.0001 s; max|V| 7.96667 m/s; max|V|dt/Dc 0.00610697; sigma_n_eff in [1.11642e+08, 1.24669e+08] Pa; sigma_pc in [1.11643e+08, 1.24665e+08] Pa; wall 532.661 s ===

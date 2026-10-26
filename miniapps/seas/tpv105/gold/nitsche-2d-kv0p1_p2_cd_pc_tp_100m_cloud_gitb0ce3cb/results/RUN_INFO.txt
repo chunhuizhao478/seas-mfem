@@ -1,0 +1,7 @@
+commit b0ce3cb6d0b0a437ac773d2f61f27241b1771838
+mesh tpv105/mesh/tpv105_2d_100m.msh 184a4d1b0f3ff570f2ac149a8be4e5199f59301fa97b95bf0f45c0108bd92565
+deck tpv105/configs/tpv105_2d_nitsche.toml
+args --order 2 --log-every 2000
+binary seas_nitsche_dyn_driver sha256 e7fd5b6f7cdf248bf9064d3d895b88858d31dff7e423b008d4b0f20564d171bf (built at the commit by jobs/run_gold_cloud.sh)
+host Claude Code cloud container, Intel Xeon @ 2.10GHz, 4 cores, 15 GiB; Open MPI 4.1.6, mpirun -np 4 --bind-to none, OMP_NUM_THREADS=1
+start Mon Oct 26 16:42:12 UTC 2026  end Mon Oct 26 16:59:20 UTC 2026  (1028 s; driver wall 1027 s)

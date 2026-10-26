@@ -1,0 +1,16 @@
+TPV205-2D, window 0 to 12 s; arrival = first |V| > 1 mm/s; slip at the window end
+station          source          arrival s  peak m/s   slip m  d_arr s  d_slip %  d_peak %
+x2_-12_x3_7.5    PyLith2D_200m      2.8800    6.3641   4.1861   (tpv205_pylith2d_x2_-12.0_x3_7.5.txt)
+                 gold_p2_100m       2.8065    6.7390   4.2449  -0.0735     +1.40      +5.9
+x2_-7.5_x3_7.5   PyLith2D_200m      1.9200    4.8502   6.8683   (tpv205_pylith2d_x2_-7.5_x3_7.5.txt)
+                 gold_p2_100m       1.8373    5.1915   6.9163  -0.0827     +0.70      +7.0
+x2_-4.5_x3_7.5   PyLith2D_200m      1.5000    3.5588   7.2208   (tpv205_pylith2d_x2_-4.5_x3_7.5.txt)
+                 gold_p2_100m       1.5255    4.5832   7.2338  +0.0255     +0.18     +28.8
+x2_0_x3_7.5      PyLith2D_200m      0.0600    3.8201   8.1723   (tpv205_pylith2d_x2_0_x3_7.5.txt)
+                 gold_p2_100m       0.0003    3.6647   8.2426  -0.0597     +0.86      -4.1
+x2_4.5_x3_7.5    PyLith2D_200m      1.5000    3.5631   6.3657   (tpv205_pylith2d_x2_4.5_x3_7.5.txt)
+                 gold_p2_100m       1.5264    4.5850   6.4133  +0.0264     +0.75     +28.7
+x2_7.5_x3_7.5    PyLith2D_200m      2.7600    1.6483   4.7332   (tpv205_pylith2d_x2_7.5_x3_7.5.txt)
+                 gold_p2_100m       2.6563    2.1415   4.8780  -0.1037     +3.06     +29.9
+x2_12_x3_7.5     PyLith2D_200m      4.3200    3.2132   3.5075   (tpv205_pylith2d_x2_12.0_x3_7.5.txt)
+                 gold_p2_100m       4.3618    5.4585   3.6228  +0.0418     +3.29     +69.9
