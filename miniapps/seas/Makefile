@@ -875,6 +875,7 @@ DOMAIN_HEADERS = common/seas_types.hpp \
                  domain/qd_stage_operators.hpp \
                  domain/qd_green_operator.hpp \
                  domain/qd_hmatrix_operator.hpp \
+                 domain/qd_node_slip.hpp \
                  domain/matrix_stats.hpp \
                  domain/elasticity_operator_fault_ops.inl \
                  domain/fused_stiffness_pair.hpp \
@@ -1070,6 +1071,10 @@ TEST_QD_STAGE_OPS_OBJ = $(TEST_QD_STAGE_OPS_SRC:.cpp=.o)
 TEST_QD_HMAT_LAYOUT_SRC = tests/parallel/test_qd_hmatrix_layout.cpp
 TEST_QD_HMAT_LAYOUT_OBJ = $(TEST_QD_HMAT_LAYOUT_SRC:.cpp=.o)
 
+# QD speed item B: the node slip copy against MPI_Allgatherv
+TEST_QD_NODE_SLIP_SRC = tests/parallel/test_qd_node_slip.cpp
+TEST_QD_NODE_SLIP_OBJ = $(TEST_QD_NODE_SLIP_SRC:.cpp=.o)
+
 # GPU plan G3a: cuDSS against MUMPS on the BP5 stiffness
 TEST_CUDSS_VS_MUMPS_SRC = tests/parallel/test_cudss_vs_mumps.cpp
 TEST_CUDSS_VS_MUMPS_OBJ = $(TEST_CUDSS_VS_MUMPS_SRC:.cpp=.o)
@@ -1124,6 +1129,7 @@ PAR_MINIAPPS = seas_test_mpi_context seas_test_parallel_utils \
                seas_test_parallel_elasticity \
                seas_test_qd_stage_operators \
                seas_test_qd_hmatrix_layout \
+               seas_test_qd_node_slip \
                seas_test_bp5_parallel_smoke \
                seas_test_parallel_wave_operator
 # Long-running parallel simulations (built by `make all`, not run by `make test`)
@@ -5883,6 +5889,22 @@ test-qd-hmatrix-layout: seas_test_qd_hmatrix_layout
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_qd_hmatrix_layout
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 3 ./seas_test_qd_hmatrix_layout
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 8 ./seas_test_qd_hmatrix_layout
+
+# QD speed item B: the node slip copy byte for byte against MPI_Allgatherv,
+# with machine nodes and fake nodes of 1, 2 and 4 ranks inside the test
+seas_test_qd_node_slip: $(TEST_QD_NODE_SLIP_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_QD_NODE_SLIP_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+$(TEST_QD_NODE_SLIP_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+test-qd-node-slip: seas_test_qd_node_slip
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_qd_node_slip
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_qd_node_slip
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 3 ./seas_test_qd_node_slip
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 8 ./seas_test_qd_node_slip
 
 # GPU plan G3a: cuDSS against MUMPS (a GPU build; on 1 and 2 GPUs)
 seas_test_cudss_vs_mumps: $(TEST_CUDSS_VS_MUMPS_OBJ)

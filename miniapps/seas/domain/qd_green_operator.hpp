@@ -28,7 +28,8 @@
 // product does not inherit the fault ranks' load imbalance; an H-matrix
 // read in the bytes layout re-cuts them by bytes (SetRowLayout).  Columns
 // are the global slip index 2·g + c.  A stage:
-//   1. all-gather the owned slip into δ_all (2·N_f values),
+//   1. all-gather the owned slip into δ_all (2·N_f values): one copy per
+//      node in shared memory (item B, qd_node_slip.hpp) or one per rank,
 //   2. y = G_rows·δ_all + t·T_D,rows on this rank's rows,
 //   3. send each value to the rank that owns its fault DOF.
 // The owned layouts are those of the stage operators: shear 2·o + c,
@@ -67,6 +68,9 @@ struct QDGreenConfig
    /// Row layout of the H-matrix (item C): "bytes" (even bytes per rank,
    /// Vᵀ split; needs hcache_path) or "count" (even fault DOFs per rank).
    std::string layout = "bytes";
+   /// Slip gather of a stage (item B, qd_node_slip.hpp): "node" (one copy
+   /// per node in shared memory) or "rank" (MPI_Allgatherv to every rank).
+   std::string gather = "node";
 };
 
 } // namespace seas
@@ -76,12 +80,15 @@ struct QDGreenConfig
 
 #include "../common/stage_timers.hpp"
 #include "qd_hmatrix_operator.hpp"
+#include "qd_node_slip.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <iomanip>
 #include <memory>
+#include <sstream>
 #include <vector>
 
 namespace mfem
@@ -94,11 +101,12 @@ class QDGreenOperator
 public:
    /// @a nf_glob fault DOFs in all; this rank owns @a nown of them, global
    /// indices [fault_first, fault_first + nown).  With @a dense false the
-   /// dense rows are not allocated (G comes from an H-matrix file).
-   /// Collective.
+   /// dense rows are not allocated (G comes from an H-matrix file).  With
+   /// @a node_gather each node holds one slip copy in shared memory (item
+   /// B); otherwise each rank all-gathers its own.  Collective.
    QDGreenOperator(MPI_Comm comm, HYPRE_BigInt nf_glob,
                    HYPRE_BigInt fault_first, int nown, bool with_normal,
-                   bool dense = true)
+                   bool dense = true, bool node_gather = false)
       : comm_(comm), nf_(nf_glob), ncols_(2 * nf_glob),
         ncomp_(with_normal ? 3 : 2), nown_(nown)
    {
@@ -136,7 +144,11 @@ public:
          slip_displs_[r] = static_cast<int>(2 * own_lo_[r]);
       }
       MapRows();
-      delta_all_.SetSize(static_cast<int>(ncols_));
+      if (node_gather)
+      {
+         node_slip_.reset(new QDNodeSlip(comm_, own_lo_, own_n_, nf_));
+      }
+      else { delta_all_.SetSize(static_cast<int>(ncols_)); }
    }
 
    /// QD speed item C (--qd-green-layout bytes): hold the rows of fault
@@ -170,6 +182,17 @@ public:
    double LocalBytes() const
    {
       return h_ ? h_->LocalBytes() : double(G_.size()) * sizeof(real_t);
+   }
+   /// One line on the slip gather for the run log (print on rank 0).
+   /// Collective.
+   std::string GatherSummary() const
+   {
+      if (node_slip_) { return node_slip_->Summary(); }
+      std::ostringstream o;
+      o << "[QD-GREEN] slip gather rank: MPI_Allgatherv, one copy of "
+        << std::fixed << std::setprecision(3)
+        << 2.0 * nf_ * sizeof(real_t) / 1.0e6 << " MB per rank\n";
+      return o.str();
    }
 
    // QD speed item 4: access for QDHMatrix, which starts from this row
@@ -302,8 +325,9 @@ public:
 
    /// [T; T_n] = G·δ + t·T_D on owned fault DOFs.  @a slip_owned: 2·nown;
    /// @a T_owned: 2·nown; @a Tn_owned: nown (with elastic sigma_n) or
-   /// nullptr.  Times the all-gather as SlipExpand, the product as Solve
-   /// and the return to the owners as Traction.  Collective.
+   /// nullptr.  Times the all-gather (node or rank) as SlipExpand, the
+   /// product as Solve and the return to the owners as Traction.
+   /// Collective.
    void Apply(real_t t, const Vector &slip_owned, Vector &T_owned,
               Vector *Tn_owned, StageTimers *timers) const
    {
@@ -313,18 +337,23 @@ public:
       MFEM_VERIFY(Tn_owned == nullptr || ncomp_ == 3,
                   "QD Green: normal traction requested, but G was built "
                   "without the normal rows");
+      const real_t *d = nullptr;
       {
          ScopedStageTimer timer(timers, StageTimers::SlipExpand);
          const real_t *s = slip_owned.HostRead();
-         MPI_Allgatherv(s, 2 * nown_, MPITypeMap<real_t>::mpi_type,
-                        delta_all_.HostWrite(), slip_counts_.data(),
-                        slip_displs_.data(), MPITypeMap<real_t>::mpi_type,
-                        comm_);
+         if (node_slip_) { d = node_slip_->Gather(s); }
+         else
+         {
+            MPI_Allgatherv(s, 2 * nown_, MPITypeMap<real_t>::mpi_type,
+                           delta_all_.HostWrite(), slip_counts_.data(),
+                           slip_displs_.data(), MPITypeMap<real_t>::mpi_type,
+                           comm_);
+            d = delta_all_.HostRead();
+         }
       }
       {
          ScopedStageTimer timer(timers, StageTimers::Solve);
          y_.resize(static_cast<size_t>(nb_) * ncomp_);
-         const real_t *d = delta_all_.HostRead();
          const size_t nrows = y_.size();
          if (h_)
          {
@@ -898,7 +927,8 @@ private:
    bool have_loading_ = false;
    std::vector<real_t> keys_;   ///< 6 per owned fault DOF (SetKeys)
    std::unique_ptr<QDHMatrix> h_;   ///< item 4: compressed G, or null
-   mutable Vector delta_all_;
+   std::unique_ptr<QDNodeSlip> node_slip_;   ///< item B, or null (rank)
+   mutable Vector delta_all_;   ///< rank gather only
    mutable std::vector<real_t> y_, send_, recv_;
 };
 

@@ -190,9 +190,11 @@ public:
    void Mult(const real_t *delta_all, real_t *y) const
    {
       const size_t nrow = static_cast<size_t>(nb_) * ncomp_;
-      for (long long p = 0; p < nf_; p++)
+      // Read δ_all in order (it may be a node's shared copy, item B) and
+      // scatter into this rank's tree-ordered copy
+      for (long long g = 0; g < nf_; g++)
       {
-         const long long g = perm_[p];
+         const long long p = tree_pos_[g];
          xt_[2 * p] = delta_all[2 * g];
          xt_[2 * p + 1] = delta_all[2 * g + 1];
       }

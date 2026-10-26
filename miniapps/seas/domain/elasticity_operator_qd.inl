@@ -706,8 +706,12 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
       MFEM_VERIFY(config.hcache_path.empty() || compress,
                   "--qd-green-hcache needs --qd-green-compress");
       const double mem_node = config.compress_mem_gib * 1073741824.0;
+      MFEM_VERIFY(config.gather == "node" || config.gather == "rank",
+                  "--qd-green-gather: node or rank, got '" << config.gather
+                  << "'");
       auto green = std::unique_ptr<QDGreenOperator>(new QDGreenOperator(
-         comm, nf_glob, fault_first, nown, with_normal, !compress));
+         comm, nf_glob, fault_first, nown, with_normal, !compress,
+         config.gather == "node"));
       if (!config.cache_path.empty() || compress)
       {
          // Position key of each owned fault DOF (node, face centroid), so
@@ -920,6 +924,7 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
       MPI_Reduce(&bytes, &btot, 1, MPI_DOUBLE, MPI_SUM, 0, comm);
       double tm[4] = {t_built, t_solve, t_cols, t_ready}, tmax[4];
       MPI_Reduce(tm, tmax, 4, MPI_DOUBLE, MPI_MAX, 0, comm);
+      const std::string gsummary = qd_green_->GatherSummary();
       if (rank == 0)
       {
          std::ostringstream o;
@@ -957,6 +962,7 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
               << std::fixed << std::setprecision(1) << tmax[3]
               << " s after the start of the build\n";
          }
+         o << gsummary;
          o << "[QD-GREEN] check against the solve path (t = 100 yr, test "
            << "slip): max rel. difference shear " << std::scientific
            << std::setprecision(3) << rel_s;

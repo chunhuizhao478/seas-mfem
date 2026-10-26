@@ -104,6 +104,11 @@
 //                              a compress run reads its file back);
 //                              count = equal fault DOFs per rank, V^T
 //                              whole.  Results are bitwise the same.
+//   --qd-green-gather G        Slip gather of a stage (QD speed item B):
+//                              node = one slip copy per node in shared
+//                              memory, exchanged between nodes (default);
+//                              rank = MPI_Allgatherv to every rank.
+//                              Results are bitwise the same.
 
 #include "mfem.hpp"
 #ifdef MFEM_USE_PETSC
@@ -1380,6 +1385,10 @@ int main(int argc, char *argv[])
       {
          qd_green_config.layout = argv[++i];
       }
+      if (arg == "--qd-green-gather" && i + 1 < argc)
+      {
+         qd_green_config.gather = argv[++i];
+      }
       if (arg == "--device-id" && i + 1 < argc)
       {
          device_id_override = std::atoi(argv[++i]);
@@ -1735,6 +1744,10 @@ int main(int argc, char *argv[])
       else if (c.layout != "bytes" && c.layout != "count")
       {
          bad = "--qd-green-layout: bytes or count, got '" + c.layout + "'";
+      }
+      else if (c.gather != "node" && c.gather != "rank")
+      {
+         bad = "--qd-green-gather: node or rank, got '" + c.gather + "'";
       }
       if (!bad.empty())
       {
@@ -2334,7 +2347,8 @@ int main(int argc, char *argv[])
       if (qd_green)
       {
          std::cout << ", check every " << qd_green_check << " stages"
-                   << (qd_green_check > 0 ? "" : " (off)");
+                   << (qd_green_check > 0 ? "" : " (off)") << ", gather "
+                   << qd_green_config.gather;
          if (qd_green_config.compress > 0.0)
          {
             std::cout << ", H-matrix eps " << qd_green_config.compress
