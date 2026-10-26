@@ -46,6 +46,11 @@
 #        hcount, hbytes  hgreen with --qd-green-layout count or bytes (QD
 #                 speed item C), reading HCACHE only: the job stops before
 #                 its first run when HCACHE does not exist;
+#        hrank, hnode  hbytes with --qd-green-gather rank or node (QD speed
+#                 item B: the slip all-gather to every rank, or one copy
+#                 per node in shared memory), reading HCACHE only;
+#        hnode8, hnode16  hnode with SEAS_QD_HMAT_PIECE_DIV=8 or 16 (V^T cut
+#                 into smaller pieces than the default divisor 4);
 #      repeating a mode measures the run-to-run spread;
 #   3. timing_summary.txt: one line per run (s/step, solve ms/call and the
 #      other parts) from the end-of-run [STAGE-TIMERS] table, then the
@@ -65,6 +70,11 @@
 #      job fails.  With LAYOUT_REF_JOB=<job id> the first hcount run is
 #      also compared with that earlier job's hgreen run, over the lines
 #      both files have (reported, not gated).
+#   5. gather_compare.txt (QD speed item B), for each hnode* run that
+#      follows an hrank run: every output file must be byte-identical to
+#      the hrank run's, as in 4; otherwise the job fails.  Each run's log
+#      must also hold its gather line ("[QD-GREEN] slip gather node: N
+#      node(s)" with N this job's nodes, or "[QD-GREEN] slip gather rank:").
 #
 # Ranks per node below 144 leave cores idle: the BLAS (NVPL *_seq) and
 # MUMPS of the G0 build are sequential, so threads per rank would not be
@@ -118,10 +128,10 @@ GREEN_CACHE="${GREEN_CACHE:-${SCRATCH:-${WORK}}/seas-qd-green/bp5_prod_p${ORDER}
 HEPS="${HEPS:-1e-10}"
 HMEM="${HMEM:-64}"
 HCACHE="${HCACHE:-${SCRATCH:-${WORK}}/seas-qd-green/bp5_prod_p${ORDER}_h${HEPS}.bin}"
-if [[ " ${MODES} " == *" hcount "* || " ${MODES} " == *" hbytes "* ]] \
+if [[ " ${MODES} " =~ \ (hcount|hbytes|hrank|hnode|hnode8|hnode16)\  ]] \
    && [ ! -f "${HCACHE}" ]; then
-   echo "ERROR: MODES='${MODES}': no H file ${HCACHE}; hcount and hbytes" \
-        "only read it." >&2
+   echo "ERROR: MODES='${MODES}': no H file ${HCACHE}; hcount, hbytes," \
+        "hrank and hnode* only read it." >&2
    exit 1
 fi
 LOG_VIEW="${LOG_VIEW:-0}"
@@ -171,6 +181,7 @@ for MODE in ${MODES}; do
    OUT="${OUT_ROOT}/${TAG}"
    PFX="qd_speed_${TAG}"
    mkdir -p "${OUT}"
+   PIECE_DIV=""
    case "${MODE}" in
       loops|matrix) OPS=(--qd-operators "${MODE}") ;;
       default)      OPS=() ;;
@@ -185,6 +196,13 @@ for MODE in ${MODES}; do
                          --qd-green-compress "${HEPS}" --qd-green-hcache "${HCACHE}"
                          --qd-green-compress-mem "${HMEM}"
                          --qd-green-layout "${MODE#h}") ;;
+      hrank|hnode|hnode8|hnode16)
+                    gather="${MODE#h}"; gather="${gather%%[0-9]*}"
+                    PIECE_DIV="${MODE#hnode}"; [ "${PIECE_DIV}" != "${MODE}" ] || PIECE_DIV=""
+                    OPS=(--qd-green --qd-green-cache "${GREEN_CACHE}"
+                         --qd-green-compress "${HEPS}" --qd-green-hcache "${HCACHE}"
+                         --qd-green-compress-mem "${HMEM}"
+                         --qd-green-layout bytes --qd-green-gather "${gather}") ;;
       *) echo "ERROR: unknown mode ${MODE}" >&2; overall=1; continue ;;
    esac
    echo "=== ${TAG}: start $(date -u +%T) ==="
@@ -193,6 +211,9 @@ for MODE in ${MODES}; do
       if [ "${LOG_VIEW}" = 1 ]; then
          export PETSC_OPTIONS="-log_view ascii:${OUT}/petsc_log.txt"
       fi
+      # The H-matrix test hooks: only hnode8 and hnode16 set one
+      unset SEAS_QD_HMAT_NODE_SIZE SEAS_QD_HMAT_PIECE_DIV
+      if [ -n "${PIECE_DIV}" ]; then export SEAS_QD_HMAT_PIECE_DIV="${PIECE_DIV}"; fi
       ibrun ./seas_bp5_full --mesh "${G0_MESH_PROD}" "${G0_V63_FLAGS[@]}" \
             --order "${ORDER}" "${OPS[@]}" --max-steps "${RUN_STEPS}" \
             --stage-timers 100 --checkpoint-interval 0 \
@@ -246,6 +267,26 @@ for MODE in ${MODES}; do
          overall=1
       fi
    fi
+   case "${MODE}" in
+      hrank|hnode|hnode8|hnode16)
+         if ! grep -q "\[QD-HMAT\] read from " "${OUT}/qd_green.txt"; then
+            echo "ERROR: ${TAG}: no '[QD-HMAT] read from' line: the H file was not read." >&2
+            overall=1
+         fi
+         if ! grep -q "\[QD-HMAT\] layout bytes " "${OUT}/qd_green.txt"; then
+            echo "ERROR: ${TAG}: no '[QD-HMAT] layout bytes' line." >&2
+            overall=1
+         fi
+         if [ "${MODE}" = hrank ]; then
+            want="[QD-GREEN] slip gather rank: "
+         else
+            want="[QD-GREEN] slip gather node: ${NNODES} node(s), "
+         fi
+         if ! grep -qF "${want}" "${OUT}/qd_green.txt"; then
+            echo "ERROR: ${TAG}: no '${want}' line." >&2
+            overall=1
+         fi ;;
+   esac
 done
 
 # ---- 3. Summary ----
@@ -330,6 +371,35 @@ if [ -n "${LAYOUT_REF_JOB}" ] && [ -n "${first_count}" ]; then
       done >> "${CMP}"
    fi
 fi
+if [ -s "${CMP}" ]; then cat "${CMP}"; else rm -f "${CMP}"; fi
+
+# ---- 5. Slip gather: node against rank (QD speed item B) ----
+CMP="${OUT_ROOT}/gather_compare.txt"
+: > "${CMP}"
+k=0
+last_rank=""
+for MODE in ${MODES}; do
+   k=$((k + 1))
+   TAG="run${k}_${MODE}"
+   case "${MODE}" in
+      hrank) last_rank="${TAG}" ;;
+      hnode|hnode8|hnode16)
+         [ -n "${last_rank}" ] || continue
+         echo "${TAG} against ${last_rank}:" >> "${CMP}"
+         if same_files "${OUT_ROOT}/${last_rank}" "qd_speed_${last_rank}" \
+                       "${OUT_ROOT}/${TAG}" "qd_speed_${TAG}" >> "${CMP}"; then
+            echo "  PASS: byte-identical" >> "${CMP}"
+         else
+            echo "  FAIL" >> "${CMP}"
+            overall=1
+         fi
+         # Reported: the gather line and the V^T pieces of this run
+         grep -F "[QD-GREEN] slip gather" "${OUT_ROOT}/${TAG}/qd_green.txt" \
+            | tail -n 1 | sed 's/^/  /' >> "${CMP}"
+         sed -n 's/.*\(V^T in [0-9]* pieces\).*/  \1/p' \
+            "${OUT_ROOT}/${TAG}/qd_green.txt" | tail -n 1 >> "${CMP}" ;;
+   esac
+done
 if [ -s "${CMP}" ]; then cat "${CMP}"; else rm -f "${CMP}"; fi
 echo "QD speed timing overall: $([ "${overall}" = 0 ] && echo PASS || echo FAIL)"
 exit "${overall}"

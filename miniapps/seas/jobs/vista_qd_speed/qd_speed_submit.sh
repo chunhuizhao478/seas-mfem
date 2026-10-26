@@ -83,6 +83,19 @@
 #             c_p2_n4_r576  p = 2, 200 steps, 4 nodes    (with 1086777)
 #           EXCLUDE (default i617-131) keeps those jobs off nodes that
 #           failed at startup.
+#   gather  QD speed item B (qd-b-design-rev1 section 7): the timing script
+#           with MODES="hrank hnode hnode8 hnode16", so each job runs the
+#           bytes layout with the slip all-gather to every rank, then with
+#           one slip copy per node, then that with V^T piece divisors 8 and
+#           16, on the same nodes; every node run's output files must be
+#           byte-identical to the rank run's.  The H files are only read,
+#           and the step stops unless they exist.  Not in the default
+#           STEPS; B_LAYOUTS limits it:
+#             b_n1_r144     p = 1, 1,000 steps, 1 node
+#             b_n2_r288     p = 1, 1,000 steps, 2 nodes
+#             b_n4_r576     p = 1, 1,000 steps, 4 nodes
+#             b_p2_n4_r576  p = 2, 200 steps, 4 nodes
+#           EXCLUDE applies as for layout.
 # Layouts (nodes x ranks, CPUs per rank):
 #   n1_r144  1 x 144, 1   loops and the new default, twice each
 #   n1_r72   1 x 72,  2   default
@@ -109,6 +122,7 @@ HGREEN_LAYOUTS="${HGREEN_LAYOUTS:-h_n1_r144 h_n2_r288 h_n4_r576}"
 HEVENT_LAYOUTS="${HEVENT_LAYOUTS:-e_n1_r144_hgreen e_n4_r576_hgreen}"
 INTEGRATOR_RUNS="${INTEGRATOR_RUNS:-a0 a1 a2 a3 a4}"
 C_LAYOUTS="${C_LAYOUTS:-c_n1_r144 c_n2_r288 c_n4_r576 c_p2_n4_r576}"
+B_LAYOUTS="${B_LAYOUTS:-b_n1_r144 b_n2_r288 b_n4_r576 b_p2_n4_r576}"
 EXCLUDE="${EXCLUDE:-i617-131}"
 
 if [ ! -f jobs/vista_qd_speed/qd_speed_timing.sbatch ]; then
@@ -337,6 +351,39 @@ if has layout; then
       [ "${order}" = 1 ] || hfile="${HCACHE_P2}"
       sub "layout ${name}" "${DEP[@]}" -J qd_layout --exclude="${EXCLUDE}" \
           --export="ALL,MODES=hcount hbytes,ORDER=${order},RUN_STEPS=${steps},LOG_VIEW=1,LAYOUT_REF_JOB=${ref},HEPS=${HEPS},HCACHE=${hfile}" \
+          -N "${nodes}" -n "${ranks}" --ntasks-per-node="$((ranks / nodes))" -c 1 \
+          -t "${hh}:${mm}:${ss}" jobs/vista_qd_speed/qd_speed_timing.sbatch
+   done
+fi
+
+if has gather; then
+   HCACHE_P2="$(dirname "${GREEN_CACHE_P1}")/bp5_prod_p2_h${HEPS}.bin"
+   # name:order:steps:nodes:ranks:walltime.  Each job reads the H file four
+   # times (p = 1 about 10 s, p = 2 about 19 s) and runs four timing runs
+   # (item C's bytes layout: p = 1 0.04-0.11 s/step, p = 2 0.14 s/step).
+   B_SPECS="b_n1_r144:1:1000:1:144:00:45:00
+            b_n2_r288:1:1000:2:288:00:30:00
+            b_n4_r576:1:1000:4:576:00:30:00
+            b_p2_n4_r576:2:200:4:576:00:45:00"
+   # Every H file first, so a missing one submits none of these jobs
+   for spec in ${B_SPECS}; do
+      IFS=: read -r name order _ <<< "${spec}"
+      [[ " ${B_LAYOUTS} " == *" ${name} "* ]] || continue
+      hfile="${HCACHE_P1}"
+      [ "${order}" = 1 ] || hfile="${HCACHE_P2}"
+      if [ ! -f "${hfile}" ]; then
+         echo "ERROR: gather ${name}: no H file ${hfile}; these jobs only" \
+              "read it." >&2
+         exit 1
+      fi
+   done
+   for spec in ${B_SPECS}; do
+      IFS=: read -r name order steps nodes ranks hh mm ss <<< "${spec}"
+      [[ " ${B_LAYOUTS} " == *" ${name} "* ]] || continue
+      hfile="${HCACHE_P1}"
+      [ "${order}" = 1 ] || hfile="${HCACHE_P2}"
+      sub "gather ${name}" "${DEP[@]}" -J qd_gather --exclude="${EXCLUDE}" \
+          --export="ALL,MODES=hrank hnode hnode8 hnode16,ORDER=${order},RUN_STEPS=${steps},HEPS=${HEPS},HCACHE=${hfile}" \
           -N "${nodes}" -n "${ranks}" --ntasks-per-node="$((ranks / nodes))" -c 1 \
           -t "${hh}:${mm}:${ss}" jobs/vista_qd_speed/qd_speed_timing.sbatch
    done

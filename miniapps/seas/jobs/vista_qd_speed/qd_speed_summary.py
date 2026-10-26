@@ -10,13 +10,14 @@ seas_bp5_full --stage-timers) gives the loop wall per accepted step and each
 part's time; gemv_bw.txt gives the layout's bandwidth.  One line per run:
 
   layout, mode, exit code, s/step, stages/step, then per part the slowest
-  rank's ms per call (solve, slip_rhs + dirichlet_rhs, traction, friction)
-  and the share of the loop wall, matrix_setup (assembly + factorization)
-  and the GEMV bandwidth per node.
+  rank's ms per call (solve, slip_expand, slip_rhs + dirichlet_rhs,
+  traction, friction) and the share of the loop wall, matrix_setup
+  (assembly + factorization) and the GEMV bandwidth per node.
 
 Times are the slowest rank's (the table's "max s" column), as the table
 prints them.  A run without a table (stopped early) is listed with its exit
-code only.  In a green run (--qd-green) "solve" is the G product; the
+code only.  In a green run (--qd-green) "solve" is the G product and
+"gath" the slip all-gather (QD speed item B: node or rank); the
 [QD-GREEN] lines of those runs (qd_green.txt: G size, build or read time,
 check against the solve path) follow the table.
 """
@@ -73,7 +74,7 @@ def main(argv):
         print(__doc__, file=sys.stderr)
         return 2
     cols = ("layout", "mode", "exit", "s/step", "st/step", "solve ms",
-            "rhs ms", "trac ms", "fric ms", "solve %", "face %", "setup s",
+            "gath ms", "rhs ms", "trac ms", "fric ms", "solve %", "face %", "setup s",
             "GB/s/node")
     print("  ".join(f"{c:>10}" for c in cols))
     green = []
@@ -111,7 +112,8 @@ def main(argv):
             rhs = ms("slip_rhs") + ms("dirichlet_rhs")
             vals = (layout, mode, ec, f"{t['s_per_step']:.4f}",
                     f"{t['stages'] / max(t['steps'], 1):.2f}",
-                    f"{ms('solve'):.2f}", f"{rhs:.2f}", f"{ms('traction'):.2f}",
+                    f"{ms('solve'):.2f}", f"{ms('slip_expand'):.2f}",
+                    f"{rhs:.2f}", f"{ms('traction'):.2f}",
                     f"{ms('friction'):.2f}", f"{share('solve'):.1f}",
                     f"{share('slip_expand', 'slip_rhs', 'dirichlet_rhs', 'traction'):.1f}",
                     f"{t.get('setup', 0.0):.1f}", bw)
