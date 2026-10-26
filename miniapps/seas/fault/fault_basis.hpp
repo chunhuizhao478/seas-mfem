@@ -55,8 +55,11 @@ struct FaultBasisData
 ///   5. dip = strike x n  (unit since strike _|_ n)
 ///   6. tangent1 = dip, tangent2 = strike  (Tandem convention)
 ///
-/// For 2D (dim=2): Single tangent computed as 90-degree rotation of normal,
-/// with sign chosen so that "up" direction is consistent.
+/// For 2D (dim=2; 2D in-plane design rev 3, derivation 10.2): the same rule
+/// on the padded normal (nx, ny, 0) and up vector, so one of tangent1 /
+/// tangent2 lies in the plane and the other is +-e_z: up in the plane puts
+/// the in-plane tangent in slot 1 (dip), up = +-e_z puts it in slot 2
+/// (strike).  The out-of-plane slot is an exact zero in every projection.
 ///
 /// Reference: Tandem src/geometry/Curvilinear.cpp:facetBasis()
 class FaultBasis
@@ -235,7 +238,8 @@ public:
    /// Dimension of the mesh (2 or 3).
    int Dimension() const { return dim_; }
 
-   /// Number of tangential components (1 for 2D, 2 for 3D).
+   /// Number of tangential directions in the fault (1 for 2D, 2 for 3D).
+   /// The storage and ProjectTraction / EmbedSlip keep two slots in both.
    int NumTangentComponents() const { return dim_ - 1; }
 
    /// Get basis data for face fi.
@@ -249,9 +253,9 @@ public:
 
    /// Project global traction vector to fault-local tangential components.
    ///
-   /// For 3D: tau_local[0] = traction . tangent1 (dip)
-   ///         tau_local[1] = traction . tangent2 (strike)
-   /// For 2D: tau_local[0] = traction . tangent1
+   /// tau_local[0] = traction . tangent1 (dip)
+   /// tau_local[1] = traction . tangent2 (strike)
+   /// (2D: traction has 2 entries; the slot whose tangent is +-e_z is 0.)
    ///
    /// NOTE: tangent vectors already contain the sign_flipped negation
    /// (Tandem convention).  No additional sign correction is needed.
@@ -267,20 +271,17 @@ public:
       {
          tau_local[0] += traction_global[d] * b.tangent1[d];
       }
-      if (dim_ == 3)
+      tau_local[1] = 0.0;
+      for (int d = 0; d < dim_; d++)
       {
-         tau_local[1] = 0.0;
-         for (int d = 0; d < dim_; d++)
-         {
-            tau_local[1] += traction_global[d] * b.tangent2[d];
-         }
+         tau_local[1] += traction_global[d] * b.tangent2[d];
       }
    }
 
    /// Embed fault-local slip into global displacement jump vector.
    ///
-   /// For 3D: delta_u = slip[0]*tangent1 + slip[1]*tangent2
-   /// For 2D: delta_u = slip[0]*tangent1
+   /// delta_u = slip[0]*tangent1 + slip[1]*tangent2 (dim_ entries; 2D:
+   /// the +-e_z tangent adds an exact 0 to both in-plane entries)
    void EmbedSlip(int fi, const real_t *slip_local,
                   real_t *delta_u_global) const
    {
@@ -292,12 +293,9 @@ public:
       {
          delta_u_global[d] = slip_local[0] * b.tangent1[d];
       }
-      if (dim_ == 3)
+      for (int d = 0; d < dim_; d++)
       {
-         for (int d = 0; d < dim_; d++)
-         {
-            delta_u_global[d] += slip_local[1] * b.tangent2[d];
-         }
+         delta_u_global[d] += slip_local[1] * b.tangent2[d];
       }
    }
 
@@ -317,12 +315,9 @@ public:
          {
             delta_u_global[d] = slip_local[0] * qd.tangent1[d];
          }
-         if (dim_ == 3)
+         for (int d = 0; d < dim_; d++)
          {
-            for (int d = 0; d < dim_; d++)
-            {
-               delta_u_global[d] += slip_local[1] * qd.tangent2[d];
-            }
+            delta_u_global[d] += slip_local[1] * qd.tangent2[d];
          }
       }
       else
@@ -455,13 +450,18 @@ public:
       }
       for (int d = 0; d < dim; d++) { normal[d] = n_raw(d); }
 
-      // Step 4: Compute tangent frame from ref-aligned normal
-      if (dim == 3)
+      // Step 4: Compute tangent frame from ref-aligned normal.  2D (2D
+      // in-plane design rev 3, derivation 10.2): the same rule on the padded
+      // normal (nx, ny, 0) and up (a 2-entry up is padded with z = 0); the
+      // old 2D branch (in-plane tangent always in slot 1, no degeneracy
+      // guard) is replaced, so both regimes use one rule.
       {
+         const real_t nz = (dim == 3) ? n_raw(2) : 0.0;
+         const real_t uz = (up.Size() > 2) ? up(2) : 0.0;
          // strike = normalize(up × n_ref) (Tandem facetBasis:287)
          real_t s[3];
-         s[0] = up(1) * n_raw(2) - up(2) * n_raw(1);
-         s[1] = up(2) * n_raw(0) - up(0) * n_raw(2);
+         s[0] = up(1) * nz - uz * n_raw(1);
+         s[1] = uz * n_raw(0) - up(0) * nz;
          s[2] = up(0) * n_raw(1) - up(1) * n_raw(0);
          real_t s_len = std::sqrt(s[0]*s[0] + s[1]*s[1] + s[2]*s[2]);
          MFEM_VERIFY(s_len > 1e-12,
@@ -472,8 +472,8 @@ public:
 
          // dip = strike × n_ref (Tandem facetBasis:291)
          real_t dv[3];
-         dv[0] = s[1] * n_raw(2) - s[2] * n_raw(1);
-         dv[1] = s[2] * n_raw(0) - s[0] * n_raw(2);
+         dv[0] = s[1] * nz - s[2] * n_raw(1);
+         dv[1] = s[2] * n_raw(0) - s[0] * nz;
          dv[2] = s[0] * n_raw(1) - s[1] * n_raw(0);
 
          // R-003 (v9.1.0, plan §3.4 H-V91-B1): normalize dip explicitly.
@@ -491,13 +491,6 @@ public:
          dv[0] *= d_inv; dv[1] *= d_inv; dv[2] *= d_inv;
 
          for (int d = 0; d < 3; d++) { tangent1[d] = dv[d]; tangent2[d] = s[d]; }
-      }
-      else // dim == 2
-      {
-         real_t cross = up(0) * n_raw(1) - up(1) * n_raw(0);
-         real_t sv = (cross >= 0.0) ? 1.0 : -1.0;
-         tangent1[0] = -sv * n_raw(1);
-         tangent1[1] =  sv * n_raw(0);
       }
 
       // Step 5: Negate ALL if sign_flipped (Tandem AdapterBase.cpp:78-84)

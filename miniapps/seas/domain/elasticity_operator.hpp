@@ -260,8 +260,11 @@ public:
 
    ~ElasticityDomainOperator() override = default;
 
-   int NumComponents() const override { return 3; }
-   int Dimension() const override { return 3; }
+   int NumComponents() const override { return dim_; }
+   int Dimension() const override { return dim_; }
+   /// 2 in both dimensions: the fault-local storage keeps two tangential
+   /// slots (rule R2); whether the 2D kernel keeps them (decision D2) is
+   /// phase E of the 2D in-plane design, which is also where 2D solves start.
    int NumSlipComponents() const override { return 2; }
 
    void Solve(real_t time, const Vector &slip_bc,
@@ -538,7 +541,14 @@ private:
    /// Common initialization shared by both constructors.
    void InitOperator()
    {
-      MFEM_VERIFY(mesh_.Dimension() == 3, "ElasticityDomainOperator requires 3D mesh");
+      // 2D in-plane design rev 3, phase B: the dimension comes from the mesh.
+      dim_ = mesh_.Dimension();
+      MFEM_VERIFY((dim_ == 2 || dim_ == 3) && mesh_.SpaceDimension() == dim_,
+                  "ElasticityDomainOperator requires a 2D or 3D mesh in its own space "
+                  "(Dimension " << dim_ << ", SpaceDimension " << mesh_.SpaceDimension()
+                  << ")");
+      MFEM_VERIFY(dim_ == 3 || method_ == DGMethod::IP,
+                  "ElasticityDomainOperator: a 2D mesh needs DGMethod::IP (BR2 is 3D only)");
 
       epsilon_ = -1.0;  // SIPG
 
@@ -562,6 +572,7 @@ private:
 
    MeshType &mesh_;
    int order_;
+   int dim_ = 3;   ///< mesh dimension (2 or 3), set by InitOperator
 
    // Constitutive model: model_ is always valid (non-owning pointer).
    // owned_model_ is set only when the legacy constructor creates it.
@@ -838,18 +849,29 @@ private:
    real_t ComputeSkeletonDirichletSign(
       FaceElementTransformations *FTr) const
    {
-      Vector nor(3);
+      Vector nor(dim_);
       CalcOrtho(FTr->Jacobian(), nor);
       const real_t *ref = ref_normal_.GetData();
 #ifdef MFEM_USE_MPI
       if (field_mode_) { ref = frame_field_->CreepNormal(FTr->ElementNo); }
 #endif
       real_t dot_ref = 0.0;
-      for (int d = 0; d < 3; d++)
+      for (int d = 0; d < dim_; d++)
       {
          dot_ref += nor(d) * ref[d];
       }
       return (dot_ref < 0.0) ? -1.0 : 1.0;
+   }
+
+   /// 2D in-plane design rev 3: phase B builds the 2D spaces, the fault
+   /// layout and the frames; the stiffness, the slip and Dirichlet loads and
+   /// the traction in 2D are phase E.  Every solve entry point refuses 2D.
+   void Require3D_(const char *what) const
+   {
+      MFEM_VERIFY(dim_ == 3, "ElasticityDomainOperator::" << what << ": not available "
+                  "on a 2D mesh yet (the 2D quasi-dynamic solve is phase E of the 2D "
+                  "in-plane design; phase B sets up the 2D spaces, fault layout and "
+                  "frames only)");
    }
 
    /// Reference normal handed to FaultBasis::ComputeOrientedFrame for

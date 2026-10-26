@@ -8,6 +8,7 @@
 
    void AssembleStiffness() const
    {
+      Require3D_("AssembleStiffness");
       // In parallel, exchange face neighbor data before assembly.
       // ParBilinearForm::AssembleSharedFaces needs this to access
       // face neighbor elements and DOFs.

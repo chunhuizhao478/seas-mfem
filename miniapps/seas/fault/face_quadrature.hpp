@@ -14,6 +14,7 @@
 
 #include "mfem.hpp"
 #include <cmath>
+#include <memory>
 
 namespace mfem
 {
@@ -34,6 +35,10 @@ namespace seas
 /// Design:
 ///   - face_order = 0  → nbf = 1 (constant, equivalent to face averaging)
 ///   - face_order ≥ 1  → nbf = (p+1)(p+2)/2 via H1_TriangleElement
+///   - SEGMENT faces (2D meshes; 2D in-plane design rev 3, phase B):
+///     nbf = p+1 via H1_SegmentElement with the same basis type, the
+///     quadrature rule from IntRules.Get(SEGMENT, 2p+1); everything downstream
+///     indexes by nbf and nq.
 ///
 /// Usage in SEAS:
 ///   - IP elasticity: face_order=vol_order, nbf=(p+1)(p+2)/2 → matches Tandem
@@ -51,20 +56,29 @@ public:
    /// @param vol_order Volume polynomial order (controls quadrature rule to match
    ///                  the DG face integral rule used in AssembleSlipContribution
    ///                  and ComputeTraction)
-   /// @param face_geom Face geometry type (default: TRIANGLE for tet meshes)
+   /// @param face_geom Face geometry type (default: TRIANGLE for tet meshes;
+   ///                  SEGMENT for 2D triangle meshes)
    /// @param basis_type BasisType for face DOF nodes (default: GaussLobatto).
    ///                   v50g: ClosedUniform has 50× better mass matrix conditioning
    ///                   at p=4 on triangles (cond=58 vs 2901 for GaussLobatto).
    FaceQuadrature(int face_order, int vol_order,
                   Geometry::Type face_geom = Geometry::TRIANGLE,
                   int basis_type = BasisType::GaussLobatto)
-       : order_(face_order),
-         face_fe_(std::max(face_order, 1), basis_type)
+       : order_(face_order)
    {
       MFEM_VERIFY(face_order >= 0, "FaceQuadrature requires face_order >= 0");
       MFEM_VERIFY(vol_order >= 1, "FaceQuadrature requires vol_order >= 1");
-      MFEM_VERIFY(face_geom == Geometry::TRIANGLE,
-                  "FaceQuadrature currently supports TRIANGLE faces only");
+      MFEM_VERIFY(face_geom == Geometry::TRIANGLE || face_geom == Geometry::SEGMENT,
+                  "FaceQuadrature supports TRIANGLE (3D) and SEGMENT (2D) faces only; got "
+                  << Geometry::Name[face_geom]);
+      if (face_geom == Geometry::TRIANGLE)
+      {
+         face_fe_ = std::make_unique<H1_TriangleElement>(std::max(face_order, 1), basis_type);
+      }
+      else
+      {
+         face_fe_ = std::make_unique<H1_SegmentElement>(std::max(face_order, 1), basis_type);
+      }
 
       // Quadrature rule: 2*vol_order+1 matches the DG face integral rule
       // used in both ComputeTraction and AssembleSlipContribution.
@@ -96,6 +110,7 @@ public:
 
          // Reference mass matrix: M_ref = Σ_q w_q × 1 × 1 = Σ w_q = area_ref
          // For the reference triangle with vertices (0,0),(1,0),(0,1): area = 1/2
+         // (reference segment [0,1]: length 1)
          // M_ref_inv = 1/area_ref
          M_ref_inv_.SetSize(1);
          real_t M_ref_00 = 0.0;
@@ -107,25 +122,34 @@ public:
 
          // Nodal rule: single point at face centroid
          nodal_ir_order0_.SetSize(1);
-         nodal_ir_order0_.IntPoint(0).x = 1.0 / 3.0;
-         nodal_ir_order0_.IntPoint(0).y = 1.0 / 3.0;
-         nodal_ir_order0_.IntPoint(0).weight = 0.5;
+         if (face_geom == Geometry::TRIANGLE)
+         {
+            nodal_ir_order0_.IntPoint(0).x = 1.0 / 3.0;
+            nodal_ir_order0_.IntPoint(0).y = 1.0 / 3.0;
+            nodal_ir_order0_.IntPoint(0).weight = 0.5;
+         }
+         else
+         {
+            nodal_ir_order0_.IntPoint(0).x = 0.5;
+            nodal_ir_order0_.IntPoint(0).weight = 1.0;
+         }
       }
       else
       {
          // ================================================================
          // Order ≥ 1: use H1 triangle element (GaussLobatto nodes)
-         // nbf = (p+1)(p+2)/2 for triangles
+         // nbf = (p+1)(p+2)/2 for triangles (p+1 for segments)
          // Matches Tandem's NodalRefElement<2>(PolynomialDegree)
+         // (NodalRefElement<1> in 2D)
          // ================================================================
-         nbf_ = face_fe_.GetDof();
+         nbf_ = face_fe_->GetDof();
 
          // Evaluate basis functions at quadrature points: e_q_[nbf × nq]
          e_q_.SetSize(nbf_, nq_);
          Vector shape(nbf_);
          for (int q = 0; q < nq_; q++)
          {
-            face_fe_.CalcShape(ir_.IntPoint(q), shape);
+            face_fe_->CalcShape(ir_.IntPoint(q), shape);
             for (int k = 0; k < nbf_; k++)
             {
                e_q_(k, q) = shape(k);
@@ -157,7 +181,7 @@ public:
 
    /// Number of basis functions per face.
    /// Order 0: 1 (constant).
-   /// Order p ≥ 1: (p+1)(p+2)/2 for triangles.
+   /// Order p ≥ 1: (p+1)(p+2)/2 for triangles, p+1 for segments.
    int NumBasisFunctions() const { return nbf_; }
 
    /// Number of quadrature points (determined by 2*vol_order+1 rule).
@@ -175,11 +199,12 @@ public:
    const IntegrationRule &GetQuadRule() const { return ir_; }
 
    /// Nodal integration rule (node positions on reference face).
-   /// For order 0: single centroid point (1/3, 1/3).
-   /// For order ≥ 1: GaussLobatto nodes from H1_TriangleElement.
+   /// For order 0: single centroid point (1/3, 1/3) (segment: 1/2).
+   /// For order ≥ 1: GaussLobatto nodes from H1_TriangleElement
+   /// (H1_SegmentElement: the two end points first, then the interior nodes).
    const IntegrationRule &GetNodalRule() const
    {
-      return (order_ == 0) ? nodal_ir_order0_ : face_fe_.GetNodes();
+      return (order_ == 0) ? nodal_ir_order0_ : face_fe_->GetNodes();
    }
 
    /// @brief Interpolate nodal values to quadrature points.
@@ -270,10 +295,11 @@ public:
 
 private:
    int order_;  ///< Face polynomial order (0 = constant, ≥1 = H1)
-   int nbf_;    ///< Number of basis functions: 1 or (p+1)(p+2)/2
+   int nbf_;    ///< Number of basis functions: 1, (p+1)(p+2)/2 or p+1
    int nq_;     ///< Number of quadrature points
 
-   H1_TriangleElement face_fe_;       ///< Face finite element (used for order >= 1)
+   std::unique_ptr<NodalFiniteElement> face_fe_;   ///< Face finite element (order >= 1;
+                                                   ///< triangle or segment)
    DenseMatrix e_q_;                  ///< Basis at quad points [nbf × nq]
    DenseMatrix M_ref_inv_;            ///< Reference mass matrix inverse [nbf × nbf]
    IntegrationRule ir_;               ///< Face quadrature rule

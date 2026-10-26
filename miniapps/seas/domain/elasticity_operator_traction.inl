@@ -35,7 +35,8 @@ void ElasticityDomainOperator<MeshType>::GetFaultDepths(Vector &depths) const
             FTr->Elem1->Transform(FTr->GetElement1IntPoint(), coords);
 
             // Depth: -Z (Z is negative downward in Tandem, depth is positive)
-            fault_depths_(i * nbf + kk) = -coords(2);
+            // 2D: -y, the last coordinate (a vertical section, y up, as BP3)
+            fault_depths_(i * nbf + kk) = -coords(coords.Size() - 1);
          }
       }
 
@@ -58,7 +59,7 @@ void ElasticityDomainOperator<MeshType>::GetFaultDepths(Vector &depths) const
                Vector coords(3);
                FTr->Elem1->Transform(FTr->GetElement1IntPoint(), coords);
 
-               fault_depths_(face_idx * nbf + kk) = -coords(2);
+               fault_depths_(face_idx * nbf + kk) = -coords(coords.Size() - 1);
             }
          }
 #endif
@@ -103,8 +104,9 @@ void ElasticityDomainOperator<MeshType>::GetFaultCoords2D(
             FTr->Elem1->Transform(FTr->GetElement1IntPoint(), coords);
 
             // Tandem: X=along-strike=coords(0), depth=-Z=-coords(2)
+            // (2D: depth = -coords(1), as GetFaultDepths)
             fault_x2_(i * nbf + kk) = coords(0);
-            fault_x3_(i * nbf + kk) = -coords(2);
+            fault_x3_(i * nbf + kk) = -coords(coords.Size() - 1);
          }
       }
 
@@ -128,7 +130,7 @@ void ElasticityDomainOperator<MeshType>::GetFaultCoords2D(
                FTr->Elem1->Transform(FTr->GetElement1IntPoint(), coords);
 
                fault_x2_(face_idx * nbf + kk) = coords(0);
-               fault_x3_(face_idx * nbf + kk) = -coords(2);
+               fault_x3_(face_idx * nbf + kk) = -coords(coords.Size() - 1);
             }
          }
 #endif
@@ -164,7 +166,7 @@ inline void WriteFaceDOFCoords3D_(
       const int dof_idx = face_dof_offset + kk;
       dof_coords_3d(3 * dof_idx + 0) = coords(0);
       dof_coords_3d(3 * dof_idx + 1) = coords(1);
-      dof_coords_3d(3 * dof_idx + 2) = coords(2);
+      dof_coords_3d(3 * dof_idx + 2) = (coords.Size() > 2) ? coords(2) : 0.0;   // 2D: z = 0
    }
 }
 
@@ -263,9 +265,11 @@ void ElasticityDomainOperator<MeshType>::GetFaultDOFBasis(
 
    if (num_fault_dofs_ == 0) { return; }
 
+   // 2D (2D in-plane design rev 3, phase B): the padded frame of
+   // ComputeOrientedFrame, one tangent in the plane and the other +-e_z.
    const int dim = mesh_.Dimension();
-   MFEM_VERIFY(dim == 3,
-               "GetFaultDOFBasis: 3-D mesh required for per-DOF "
+   MFEM_VERIFY(dim == 2 || dim == 3,
+               "GetFaultDOFBasis: 2-D or 3-D mesh required for per-DOF "
                "(n, t1, t2) accessor (got dim = " << dim << ")");
 
    const IntegrationRule &nir = face_quad_->GetNodalRule();
@@ -656,6 +660,7 @@ template <typename MeshType>
 void ElasticityDomainOperator<MeshType>::AssembleSlipOnlyRHS(
    Vector &rhs, const Vector &slip_bc) const
 {
+   Require3D_("AssembleSlipOnlyRHS");
    rhs.SetSize(fes_->GetVSize());
    rhs = 0.0;
 
@@ -677,6 +682,7 @@ template <typename MeshType>
 void ElasticityDomainOperator<MeshType>::AssembleDirichletOnlyRHS(
    Vector &rhs, real_t time) const
 {
+   Require3D_("AssembleDirichletOnlyRHS");
    rhs.SetSize(fes_->GetVSize());
    rhs = 0.0;
    AssembleDirichletLoading(rhs, time);
@@ -724,6 +730,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
    Vector *normal_stress_out,
    Vector *normal_correction_out)
 {
+   Require3D_("ComputeTraction");
    int dim = 3;
    traction.SetSize(2 * num_fault_dofs_);
    traction = 0.0;

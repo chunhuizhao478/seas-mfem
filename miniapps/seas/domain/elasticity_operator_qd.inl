@@ -93,6 +93,7 @@ template <typename MeshType>
 void ElasticityDomainOperator<MeshType>::BuildQDStageOperators(
    bool with_normal)
 {
+   Require3D_("BuildQDStageOperators");
    if constexpr (!IsParallelMesh<MeshType>::value)
    {
       MFEM_ABORT("--qd-operators matrix needs a parallel mesh (with_normal = "
@@ -621,6 +622,7 @@ template <typename MeshType>
 void ElasticityDomainOperator<MeshType>::BuildQDGreen(
    const QDGreenConfig &config)
 {
+   Require3D_("BuildQDGreen");
    if constexpr (!IsParallelMesh<MeshType>::value)
    {
       MFEM_ABORT("--qd-green needs a parallel mesh (block = "

@@ -43,7 +43,22 @@
 // BP5 tet mesh).  Not implemented here: the plus_region pin, F8 transport,
 // curved-face representation, junction policies beyond the census.
 //
-// Scope (Chunhui Zhao, 2026-10-14): tetrahedral meshes only.
+// Edge mode (2D in-plane design rev 3, phase B, section 5.3): on a 2D
+// triangle mesh the fault faces are straight segments and every rule above
+// runs one dimension down, with the same code.  A face is keyed by its two
+// vertex keys (slot 2 of a key is -1); the census entities of J1 are the
+// vertices (m = 1: a free tip, m = 2: adjacency O1, m >= 3: a junction, a
+// branch of the fault line); the canonical cycle of O3 runs k0 -> k1, so
+// tau_f(v) = +1 at the head k1 and -1 at the tail k0, and s_g = -s_f tau_f
+// tau_g is the same rule; nC = t x e_z / |t| with t = x(k1) - x(k0), the
+// right-hand normal of the segment extruded along +z, and the face's length
+// takes the place of its area in the pin; J3 runs on the triangles around
+// the fault; S3 uses the triangle's centroid, whose expected margin is
+// h_perp / 3 with h_perp = 2 A_T / L.  Vectors keep three slots and the z
+// entries are exact zeros (rule R2).
+//
+// Scope (Chunhui Zhao, 2026-10-14): tetrahedral meshes only.  Extended
+// (Chunhui Zhao, 2026-10-25, 2D design phase B): triangle meshes in 2D.
 
 #ifndef MFEM_SEAS_FAULT_ORIENTATION_HPP
 #define MFEM_SEAS_FAULT_ORIENTATION_HPP
@@ -84,7 +99,8 @@ struct FaultOrientationReport
 {
    int faces = 0;              ///< global fault faces
    int components = 0;         ///< patches
-   int junction_edges = 0;     ///< edges with m >= 3
+   int junction_edges = 0;     ///< edges with m >= 3 (2D: vertices)
+   int tip_edges = 0;          ///< edges with m = 1 (2D: free tip vertices)
    real_t flipped_vs_raw = 0;  ///< faces with n_raw . n < 0 (shared faces count 1/2)
    real_t min_pin_margin = 1;  ///< min over patches of |c| (J6)
    real_t max_face_departure = 0;   ///< max d_F (S3(b))
@@ -104,6 +120,11 @@ public:
       : pm_(pm), cfg_(cfg)
    {
       comm_ = pm.GetComm();
+      dim_ = pm.Dimension();
+      MFEM_VERIFY((dim_ == 2 || dim_ == 3) && pm.SpaceDimension() == dim_,
+                  "FaultOrientation: needs a 2D or 3D mesh in its own space (Dimension "
+                  << dim_ << ", SpaceDimension " << pm.SpaceDimension() << ")");
+      nv_ = dim_;   // vertices per fault face: triangle 3, segment 2
       pm.ExchangeFaceNbrData();
       n_int_ = interior_faces.Size();
       const int nloc = n_int_ + shared_faces.Size();
@@ -123,6 +144,11 @@ public:
       Local_();
    }
 
+   /// Mesh dimension (2: segment faces, 3: triangular faces).
+   int Dimension() const { return dim_; }
+   /// Vertices per fault face (2 or 3); FaceVertexData fills this many.
+   int FaceVertices() const { return nv_; }
+
    // ---- per local fault face fi (interior faces first, then shared) ----
    int NumLocalFaces() const { return static_cast<int>(local_face_.size()); }
    const real_t *Normal(int fi) const { return gface_[lglob_[fi]].n; }
@@ -132,7 +158,8 @@ public:
    int PlusElement(int fi) const { return plus_elem_[fi]; }
    real_t SideMargin(int fi) const { return side_margin_[fi]; }
    const Key3 &FaceKey(int fi) const { return gface_[lglob_[fi]].key; }
-   /// The face's vertices (keys + coordinates) for the F6 fallback.
+   /// The face's vertices (keys + coordinates) for the F6 fallback; the first
+   /// FaceVertices() entries are the vertices (2D: key[2] = -1, x[2] = 0).
    void FaceVertexData(int fi, long long key[3], real_t x[3][3]) const
    {
       const GFace &g = gface_[lglob_[fi]];
@@ -161,7 +188,7 @@ private:
    {
       Key3 gid;                 // sorted MFEM global ids (gather / dedupe only)
       Key3 key;                 // sorted partition-invariant vertex keys
-      real_t x[3][3];           // coordinates, in key order
+      real_t x[3][3];           // coordinates, in key order (2D: x[2] = 0, z = 0)
       int attr = -1;            // persistent id (J5a)
       real_t nC[3];             // right-hand normal of the canonical cycle
       real_t area = 0;
@@ -184,21 +211,28 @@ private:
             face_attr[pm_.GetBdrElementFaceIndex(be)] = a;
          }
       }
-      // record: 3 gids, 9 coords, attr
+      // record: 3 gids, 9 coords, attr (2D: gid 2 = -1, vertex 2 and z = 0)
       const int R = 13;
+      const Geometry::Type fgeom = (dim_ == 3) ? Geometry::TRIANGLE : Geometry::SEGMENT;
       std::vector<double> loc;
       for (int fi = 0; fi < NumLocalFaces(); fi++)
       {
          const int f = local_face_[fi];
-         MFEM_VERIFY(pm_.GetFaceGeometry(f) == Geometry::TRIANGLE,
+         MFEM_VERIFY(pm_.GetFaceGeometry(f) == fgeom,
                      "FaultOrientation: fault face " << f << " is a "
-                     << Geometry::Name[pm_.GetFaceGeometry(f)]
-                     << "; triangular fault faces only.");
+                     << Geometry::Name[pm_.GetFaceGeometry(f)] << "; "
+                     << ((dim_ == 3) ? "triangular" : "segment") << " fault faces only.");
          Array<int> fv;
          pm_.GetFaceVertices(f, fv);
-         for (int a = 0; a < 3; a++) { loc.push_back(static_cast<double>(gv[fv[a]])); }
          for (int a = 0; a < 3; a++)
-            for (int d = 0; d < 3; d++) { loc.push_back(pm_.GetVertex(fv[a])[d]); }
+         {
+            loc.push_back((a < nv_) ? static_cast<double>(gv[fv[a]]) : -1.0);
+         }
+         for (int a = 0; a < 3; a++)
+            for (int d = 0; d < 3; d++)
+            {
+               loc.push_back((a < nv_ && d < dim_) ? pm_.GetVertex(fv[a])[d] : 0.0);
+            }
          auto it = face_attr.find(f);
          loc.push_back(it == face_attr.end() ? -1.0 : static_cast<double>(it->second));
       }
@@ -217,7 +251,7 @@ private:
          long long g[3] = {std::llround(all[o]), std::llround(all[o + 1]),
                            std::llround(all[o + 2])};
          int ord[3] = {0, 1, 2};
-         std::sort(ord, ord + 3, [&](int a, int b) { return g[a] < g[b]; });
+         std::sort(ord, ord + nv_, [&](int a, int b) { return g[a] < g[b]; });
          Key3 k = {g[ord[0]], g[ord[1]], g[ord[2]]};
          const int attr = static_cast<int>(std::llround(all[o + 12]));
          auto it = seen.find(k);
@@ -240,8 +274,8 @@ private:
       {
          Array<int> fv;
          pm_.GetFaceVertices(local_face_[fi], fv);
-         long long g[3] = {gv[fv[0]], gv[fv[1]], gv[fv[2]]};
-         std::sort(g, g + 3);
+         long long g[3] = {gv[fv[0]], gv[fv[1]], (nv_ == 3) ? gv[fv[2]] : -1};
+         std::sort(g, g + nv_);
          lglob_[fi] = seen.at(Key3{g[0], g[1], g[2]});
       }
    }
@@ -251,7 +285,7 @@ private:
    {
       std::map<long long, std::array<real_t, 3>> vx;
       for (const GFace &F : gface_)
-         for (int a = 0; a < 3; a++) { vx[F.gid[a]] = {F.x[a][0], F.x[a][1], F.x[a][2]}; }
+         for (int a = 0; a < nv_; a++) { vx[F.gid[a]] = {F.x[a][0], F.x[a][1], F.x[a][2]}; }
       // key = rank in lexicographic (x, y, z) order (see the header note)
       std::map<long long, long long> key;
       std::vector<std::pair<std::array<real_t, 3>, long long>> v;
@@ -260,15 +294,28 @@ private:
       for (size_t i = 0; i < v.size(); i++) { key[v[i].second] = static_cast<long long>(i); }
       for (GFace &F : gface_)
       {
-         long long k[3] = {key[F.gid[0]], key[F.gid[1]], key[F.gid[2]]};
+         long long k[3] = {key[F.gid[0]], key[F.gid[1]], (nv_ == 3) ? key[F.gid[2]] : -1};
          real_t xs[3][3];
          int ord[3] = {0, 1, 2};
-         std::sort(ord, ord + 3, [&](int a, int b) { return k[a] < k[b]; });
+         std::sort(ord, ord + nv_, [&](int a, int b) { return k[a] < k[b]; });
          for (int a = 0; a < 3; a++)
             for (int d = 0; d < 3; d++) { xs[a][d] = F.x[ord[a]][d]; }
          F.key = {k[ord[0]], k[ord[1]], k[ord[2]]};
          for (int a = 0; a < 3; a++)
             for (int d = 0; d < 3; d++) { F.x[a][d] = xs[a][d]; }
+         if (nv_ == 2)
+         {
+            // segment k0 -> k1: nC = t x e_z / |t| (the segment extruded
+            // along +z), length in place of the area
+            const real_t t0 = F.x[1][0] - F.x[0][0], t1 = F.x[1][1] - F.x[0][1];
+            const real_t tl = std::sqrt(t0 * t0 + t1 * t1);
+            MFEM_VERIFY(tl > 0.0, "FaultOrientation: degenerate fault segment");
+            F.nC[0] = t1 / tl;
+            F.nC[1] = -t0 / tl;
+            F.nC[2] = 0.0;
+            F.area = tl;
+            continue;
+         }
          // canonical cycle (k0 < k1 < k2): right-hand normal, area
          real_t e1[3], e2[3], c[3];
          for (int d = 0; d < 3; d++) { e1[d] = F.x[1][d] - F.x[0][d]; e2[d] = F.x[2][d] - F.x[0][d]; }
@@ -293,25 +340,40 @@ private:
       rep_.faces = static_cast<int>(gface_.size());
    }
 
-   // canonical-cycle edge direction tau_f(e) for edge (a, b), a < b, of face F
+   // canonical-cycle edge direction tau_f(e) for edge (a, b), a < b, of face F;
+   // 2D: the entity is the vertex a (b = -1), tau = +1 at the head k1 of the
+   // segment k0 -> k1 and -1 at its tail k0
    static int Tau_(const GFace &F, long long a, long long b)
    {
+      if (b < 0) { return (a == F.key[1]) ? +1 : -1; }
       // cycle k0 -> k1 -> k2 -> k0
       if (a == F.key[0] && b == F.key[2]) { return -1; }
       return +1;
    }
 
    // --------------------------------------------------------- J1 census
+   // entities: the edges of the triangles (3D), the vertices of the
+   // segments, keyed (v, -1) (2D)
    void Census_()
    {
       for (int g = 0; g < static_cast<int>(gface_.size()); g++)
       {
          const Key3 &k = gface_[g].key;
+         if (nv_ == 2)
+         {
+            edges_[{k[0], -1}].push_back(g);
+            edges_[{k[1], -1}].push_back(g);
+            continue;
+         }
          edges_[{k[0], k[1]}].push_back(g);
          edges_[{k[1], k[2]}].push_back(g);
          edges_[{k[0], k[2]}].push_back(g);
       }
-      for (const auto &e : edges_) { if (e.second.size() >= 3) { rep_.junction_edges++; } }
+      for (const auto &e : edges_)
+      {
+         if (e.second.size() >= 3) { rep_.junction_edges++; }
+         if (e.second.size() == 1) { rep_.tip_edges++; }
+      }
    }
 
    // ------------------------------------------------ O1-O3, O5, O6
@@ -352,7 +414,7 @@ private:
                {
                   MFEM_VERIFY(gface_[g].s == sg,
                      "FaultOrientation (O6): patch " << patch << " is not "
-                     "orientable; inconsistent loop at the edge between "
+                     "orientable; inconsistent loop at the edge (2D: vertex) between "
                      "faces with keys (" << gface_[f].key[0] << ","
                      << gface_[f].key[1] << "," << gface_[f].key[2] << ") and ("
                      << gface_[g].key[0] << "," << gface_[g].key[1] << ","
@@ -399,7 +461,8 @@ private:
             real_t cf[3], v = 0.0;
             for (int d = 0; d < 3; d++)
             {
-               cf[d] = (F.x[0][d] + F.x[1][d] + F.x[2][d]) / 3.0;
+               cf[d] = (nv_ == 3) ? (F.x[0][d] + F.x[1][d] + F.x[2][d]) / 3.0
+                                  : (F.x[0][d] + F.x[1][d]) / 2.0;
                v += (cf[d] - cfg_.pin_point[d]) * F.s * F.nC[d];
             }
             MFEM_VERIFY(v != 0.0, "FaultOrientation: point pin undecided for patch " << p);
@@ -413,23 +476,36 @@ private:
    }
 
    // ------------------------------------------------------------- J3 parity
+   // Elements are simplices with nev = dim + 1 vertices; a face drops one
+   // vertex (Key3, 2D: slot 2 = -1); the entities whose fans J3 walks are
+   // the interior edges of S (3D) or its interior vertices (2D, keyed
+   // (v, -1)).  Gathered element records hold 4 sorted ids (2D: slot 3 = -1).
    void Parity_()
    {
       Array<HYPRE_BigInt> gv;
       pm_.GetGlobalVertexIndices(gv);
+      const int nev = dim_ + 1;
       // fault edges (by MFEM gid pairs, consistent within the run) with m >= 2
       std::map<std::pair<long long, long long>, int> edge_m;
       std::set<Key3> fault_tri;
       for (const GFace &F : gface_)
       {
          fault_tri.insert(F.gid);
+         if (nv_ == 2)
+         {
+            edge_m[{F.gid[0], -1}]++;
+            edge_m[{F.gid[1], -1}]++;
+            continue;
+         }
          edge_m[{F.gid[0], F.gid[1]}]++;
          edge_m[{F.gid[1], F.gid[2]}]++;
          edge_m[{F.gid[0], F.gid[2]}]++;
       }
       std::set<long long> fverts;
-      for (const GFace &F : gface_) { for (int a = 0; a < 3; a++) { fverts.insert(F.gid[a]); } }
-      // local elements touching the fault (a fault face or an interior fault edge)
+      for (const GFace &F : gface_) { for (int a = 0; a < nv_; a++) { fverts.insert(F.gid[a]); } }
+      // local elements touching the fault (a fault face or an interior fault
+      // edge; 2D: an interior fault vertex, so one fault vertex can suffice)
+      const int nf_min = (dim_ == 3) ? 2 : 1;
       std::vector<double> loc;
       for (int e = 0; e < pm_.GetNE(); e++)
       {
@@ -438,23 +514,38 @@ private:
          std::vector<long long> g;
          int nf = 0;
          for (int a = 0; a < ev.Size(); a++) { g.push_back(gv[ev[a]]); if (fverts.count(gv[ev[a]])) { nf++; } }
-         if (nf < 2) { continue; }
+         if (nf < nf_min) { continue; }
+         MFEM_VERIFY(ev.Size() == nev,
+                     "FaultOrientation (J3): element " << e << " next to the fault is a "
+                     << Geometry::Name[pm_.GetElementBaseGeometry(e)] << "; "
+                     << ((dim_ == 3) ? "tetrahedra" : "triangles") << " only.");
          std::sort(g.begin(), g.end());
          bool touch = false;
-         for (int a = 0; a < 4 && !touch; a++)
-            for (int b = a + 1; b < 4 && !touch; b++)
+         if (nv_ == 2)
+         {
+            for (int a = 0; a < nev && !touch; a++)
             {
-               auto it = edge_m.find({g[a], g[b]});
+               auto it = edge_m.find({g[a], -1});
                if (it != edge_m.end() && it->second >= 2) { touch = true; }
             }
-         for (int a = 0; a < 4 && !touch; a++)
-         {
-            Key3 t;
-            int c = 0;
-            for (int b = 0; b < 4; b++) { if (b != a) { t[c++] = g[b]; } }
-            if (fault_tri.count(t)) { touch = true; }
          }
-         if (touch) { for (int a = 0; a < 4; a++) { loc.push_back(static_cast<double>(g[a])); } }
+         else
+         {
+            for (int a = 0; a < 4 && !touch; a++)
+               for (int b = a + 1; b < 4 && !touch; b++)
+               {
+                  auto it = edge_m.find({g[a], g[b]});
+                  if (it != edge_m.end() && it->second >= 2) { touch = true; }
+               }
+         }
+         for (int a = 0; a < nev && !touch; a++)
+         {
+            if (fault_tri.count(DropVertex_(g.data(), nev, a))) { touch = true; }
+         }
+         if (touch)
+         {
+            for (int a = 0; a < 4; a++) { loc.push_back((a < nev) ? static_cast<double>(g[a]) : -1.0); }
+         }
       }
       int nl = static_cast<int>(loc.size()), np = 0;
       MPI_Comm_size(comm_, &np);
@@ -476,26 +567,37 @@ private:
       for (const GFace &F : gface_) { patch_of[F.gid] = F.patch; }
       for (int p = -1; p < rep_.components; p++)
       {
-         const bool ok = ParityOK_(E, patch_of, p);
+         const bool ok = ParityOK_(E, patch_of, p, nev);
          if (p < 0) { rep_.parity_global_ok = ok; }
          else if (!ok) { rep_.parity_per_patch_ok = false; }
       }
    }
 
+   // The face of the sorted simplex g (nev vertices) opposite vertex a, as a
+   // Key3 (2D: slot 2 = -1).
+   static Key3 DropVertex_(const long long *g, int nev, int a)
+   {
+      Key3 t = {-1, -1, -1};
+      int c = 0;
+      for (int b = 0; b < nev; b++) { if (b != a) { t[c++] = g[b]; } }
+      return t;
+   }
+
    // J3 parity BFS for S = patch p (p < 0: all faces).
    static bool ParityOK_(const std::vector<std::array<long long, 4>> &E,
-                         const std::map<Key3, int> &patch_of, int p)
+                         const std::map<Key3, int> &patch_of, int p, int nev)
    {
       auto inS = [&](const Key3 &t) {
          auto it = patch_of.find(t);
          return it != patch_of.end() && (p < 0 || it->second == p);
       };
-      // interior edges of S: in >= 2 faces of S
+      // interior edges of S: in >= 2 faces of S (2D: interior vertices)
       std::map<std::pair<long long, long long>, int> em;
       for (const auto &kv : patch_of)
       {
          if (!inS(kv.first)) { continue; }
          const Key3 &k = kv.first;
+         if (nev == 3) { em[{k[0], -1}]++; em[{k[1], -1}]++; continue; }
          em[{k[0], k[1]}]++; em[{k[1], k[2]}]++; em[{k[0], k[2]}]++;
       }
       // N_S
@@ -504,31 +606,35 @@ private:
       {
          const auto &g = E[i];
          bool in = false;
-         for (int a = 0; a < 4 && !in; a++)
+         for (int a = 0; a < nev && !in; a++)
          {
-            Key3 t; int c = 0;
-            for (int b = 0; b < 4; b++) { if (b != a) { t[c++] = g[b]; } }
-            if (inS(t)) { in = true; }
+            if (inS(DropVertex_(g.data(), nev, a))) { in = true; }
          }
-         for (int a = 0; a < 4 && !in; a++)
-            for (int b = a + 1; b < 4 && !in; b++)
+         if (nev == 3)
+         {
+            for (int a = 0; a < nev && !in; a++)
             {
-               auto it = em.find({g[a], g[b]});
+               auto it = em.find({g[a], -1});
                if (it != em.end() && it->second >= 2) { in = true; }
             }
+         }
+         else
+         {
+            for (int a = 0; a < 4 && !in; a++)
+               for (int b = a + 1; b < 4 && !in; b++)
+               {
+                  auto it = em.find({g[a], g[b]});
+                  if (it != em.end() && it->second >= 2) { in = true; }
+               }
+         }
          if (in) { N.push_back(i); }
       }
-      // H_S edges via shared triangles
+      // H_S edges via shared faces
       std::map<Key3, std::vector<int>> tri;
       for (int idx = 0; idx < static_cast<int>(N.size()); idx++)
       {
          const auto &g = E[N[idx]];
-         for (int a = 0; a < 4; a++)
-         {
-            Key3 t; int c = 0;
-            for (int b = 0; b < 4; b++) { if (b != a) { t[c++] = g[b]; } }
-            tri[t].push_back(idx);
-         }
+         for (int a = 0; a < nev; a++) { tri[DropVertex_(g.data(), nev, a)].push_back(idx); }
       }
       std::vector<std::vector<std::pair<int, int>>> adj(N.size());
       for (const auto &kv : tri)
@@ -565,6 +671,7 @@ private:
       plus_elem_.assign(nloc, -1);
       side_margin_.assign(nloc, 0.0);
       real_t flipped = 0.0, max_dF = 0.0, min_side = 1e300;
+      const Geometry::Type egeom = (dim_ == 3) ? Geometry::TETRAHEDRON : Geometry::TRIANGLE;
       for (int fi = 0; fi < nloc; fi++)
       {
          const bool shared = (fi >= n_int_);
@@ -577,39 +684,47 @@ private:
          // face centre image and the oriented normal there
          const IntegrationPoint &ipc = Geometries.GetCenter(Tr->GetGeometryType());
          Tr->SetAllIntPoints(&ipc);
-         Vector cF(3), nr(3);
+         // (2D: cF and the mapped normals have 2 entries, nr is padded)
+         Vector cF(dim_), nr2(dim_), nr(3);
          Tr->Transform(ipc, cF);
-         CalcOrtho(Tr->Jacobian(), nr);
+         CalcOrtho(Tr->Jacobian(), nr2);
+         nr = 0.0;
+         for (int d = 0; d < dim_; d++) { nr(d) = nr2(d); }
          real_t nc[3];
          Orient(fi, nr.GetData(), nc);
          const real_t s_c = (nr * Vector(const_cast<real_t *>(G.n), 3) >= 0.0) ? 1.0 : -1.0;
          if (nr * Vector(const_cast<real_t *>(G.n), 3) < 0.0) { flipped += shared ? 0.5 : 1.0; }
          // S3(b): planarity and normal agreement over quadrature + vertices
          real_t dF = 0.0, diam = 0.0;
-         for (int a = 0; a < 3; a++)
-            for (int b = a + 1; b < 3; b++)
+         for (int a = 0; a < nv_; a++)
+            for (int b = a + 1; b < nv_; b++)
             {
                real_t l = 0;
                for (int d = 0; d < 3; d++) { l += (G.x[a][d] - G.x[b][d]) * (G.x[a][d] - G.x[b][d]); }
                diam = std::max(diam, std::sqrt(l));
             }
          const IntegrationRule &ir = IntRules.Get(Tr->GetGeometryType(), 6);
-         for (int q = 0; q < ir.GetNPoints() + 3; q++)
+         for (int q = 0; q < ir.GetNPoints() + nv_; q++)
          {
             IntegrationPoint ip;
             if (q < ir.GetNPoints()) { ip = ir.IntPoint(q); }
-            else { const int a = q - ir.GetNPoints(); ip.Set2(a == 1 ? 1.0 : 0.0, a == 2 ? 1.0 : 0.0); }
+            else if (nv_ == 3)
+            {
+               const int a = q - ir.GetNPoints();
+               ip.Set2(a == 1 ? 1.0 : 0.0, a == 2 ? 1.0 : 0.0);
+            }
+            else { ip.Set1w(q - ir.GetNPoints() == 1 ? 1.0 : 0.0, 1.0); }
             Tr->SetAllIntPoints(&ip);
-            Vector xq(3), nq(3);
+            Vector xq(dim_), nq(dim_);
             Tr->Transform(ip, xq);
             real_t dep = 0.0;
-            for (int d = 0; d < 3; d++) { dep += (xq(d) - cF(d)) * nc[d]; }
+            for (int d = 0; d < dim_; d++) { dep += (xq(d) - cF(d)) * nc[d]; }
             dF = std::max(dF, std::abs(dep));
             CalcOrtho(Tr->Jacobian(), nq);
             // n(x_q): the mapped normal with the centre's orientation sign
             // s_c (the face map's normal is continuous on the face).
             real_t agree = 0.0;
-            for (int d = 0; d < 3; d++) { agree += s_c * nq(d) / nq.Norml2() * nc[d]; }
+            for (int d = 0; d < dim_; d++) { agree += s_c * nq(d) / nq.Norml2() * nc[d]; }
             MFEM_VERIFY(agree > 0.0,
                "FaultOrientation (S3(b)): face " << f << " (keys " << G.key[0] << ","
                << G.key[1] << "," << G.key[2] << "): mapped normal disagrees with "
@@ -627,24 +742,29 @@ private:
             real_t ce[3] = {0, 0, 0};
             if (local)
             {
+               MFEM_VERIFY(pm_.GetElementBaseGeometry(e) == egeom,
+                           "FaultOrientation (S3): element " << e << " at fault face " << f
+                           << " is a " << Geometry::Name[pm_.GetElementBaseGeometry(e)]
+                           << "; " << ((dim_ == 3) ? "tetrahedra" : "triangles") << " only.");
                pm_.GetElementVertices(e, ev);
                for (int a = 0; a < ev.Size(); a++)
-                  for (int d = 0; d < 3; d++) { ce[d] += pm_.GetVertex(ev[a])[d] / ev.Size(); }
+                  for (int d = 0; d < dim_; d++) { ce[d] += pm_.GetVertex(ev[a])[d] / ev.Size(); }
             }
             else
             {
                const IntegrationPoint &ipe = Geometries.GetCenter(T->GetGeometryType());
-               Vector x(3);
+               Vector x(dim_);
                T->Transform(ipe, x);
-               for (int d = 0; d < 3; d++) { ce[d] = x(d); }
+               for (int d = 0; d < dim_; d++) { ce[d] = x(d); }
             }
-            // tet: h_perp = 3 V / A_face, expected centroid margin h_perp / 4
+            // tet: h_perp = 3 V / A_face, expected centroid margin h_perp / 4;
+            // triangle: h_perp = 2 A_T / L, expected margin h_perp / 3
             const IntegrationPoint &ipe = Geometries.GetCenter(T->GetGeometryType());
             T->SetIntPoint(&ipe);
-            const real_t V = T->Weight() / 6.0;
-            hq = 3.0 * V / G.area / 4.0;
+            const real_t V = (dim_ == 3) ? T->Weight() / 6.0 : T->Weight() / 2.0;
+            hq = (dim_ == 3) ? 3.0 * V / G.area / 4.0 : 2.0 * V / G.area / 3.0;
             real_t m = 0.0;
-            for (int d = 0; d < 3; d++) { m += (ce[d] - cF(d)) * nc[d]; }
+            for (int d = 0; d < dim_; d++) { m += (ce[d] - cF(d)) * nc[d]; }
             return m;
          };
          real_t h1, h2;
@@ -684,6 +804,8 @@ private:
    ParMesh &pm_;
    FaultOrientationConfig cfg_;
    MPI_Comm comm_;
+   int dim_ = 3;   ///< mesh dimension
+   int nv_ = 3;    ///< vertices per fault face (3D: 3, 2D: 2)
    int n_int_ = 0;
    std::vector<int> local_face_;
    std::vector<int> shared_index_;

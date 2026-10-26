@@ -44,8 +44,18 @@
 // and a prescribed-slip face meeting at a junction edge (three or more faces
 // of the two sets) is refused too (junction_policy "refuse").
 //
+// 2D (phase B, Chunhui Zhao, 2026-10-25): on a triangle mesh the faces are
+// segments and FaultOrientation runs its edge mode (tips and junctions are
+// vertices).  The frame is the padded F1 rule of derivation 10.2, the same
+// call as in 3D: up must lie in the mesh plane (BP3: up = [0, 1], the slip in
+// the dip slot) or be +-e_z (TPV205-2D: up = [0, 0, 1], the slip in the
+// strike slot), so that one tangential slot is an exact zero; the field
+// refuses any other up, and a ref_normal or pin point off the plane.  The
+// seam rule's shared entity is the vertex where a fault segment meets a
+// prescribed-slip segment (BP3: x_d = W_f).
+//
 // Scope (Chunhui Zhao, 2026-10-24): tetrahedral meshes, planar triangular
-// faces (the scope of FaultOrientation); the 2D edge census is phase B.
+// faces (the scope of FaultOrientation); 2D triangle meshes from phase B.
 
 #ifndef MFEM_SEAS_FAULT_FRAME_FIELD_HPP
 #define MFEM_SEAS_FAULT_FRAME_FIELD_HPP
@@ -115,6 +125,8 @@ public:
       creep_int_.assign(creep_int.begin(), creep_int.end());
       creep_sh_.assign(creep_sh.begin(), creep_sh.end());
       MPI_Comm comm = pm.GetComm();
+      dim_ = pm.Dimension();
+      if (dim_ == 2) { Check2D_(cfg); }
 
       // The fault census: the call NitscheWaveOperator::SetupFault_ made
       // before phase A (same faces, same order, same configuration).
@@ -150,7 +162,7 @@ public:
       for (int fi = 0; fi < nf; fi++)
       {
          fault_frame::FaceVertices fv;
-         fv.nv = 3;
+         fv.nv = fault_->FaceVertices();
          fault_->FaceVertexData(fi, fv.key, fv.x);
          const bool ok = fault_frame::ComputeFrame(fault_->Normal(fi), cfg.up, eps_deg, fv,
                                                    frame_[fi]);
@@ -166,9 +178,11 @@ public:
          sigma_[fi] = (fault_->PlusElement(fi) == Tr->Elem1No) ? 1.0 : -1.0;
          const IntegrationPoint &ipc = Geometries.GetCenter(Tr->GetGeometryType());
          Tr->SetAllIntPoints(&ipc);
-         Vector nr(3);
-         CalcOrtho(Tr->Jacobian(), nr);
-         const real_t c = fault_frame::Dot(nr.GetData(), fault_->Normal(fi));
+         Vector nr2(dim_);
+         CalcOrtho(Tr->Jacobian(), nr2);
+         real_t nr[3] = {0.0, 0.0, 0.0};
+         for (int d = 0; d < dim_; d++) { nr[d] = nr2(d); }
+         const real_t c = fault_frame::Dot(nr, fault_->Normal(fi));
          MFEM_VERIFY((c > 0.0) == (sigma_[fi] > 0.0),
                      "FaultFrameField: on local fault face " << fi << " the S3 plus element ("
                      << fault_->PlusElement(fi) << ", Elem1 = " << Tr->Elem1No << ") and the "
@@ -181,6 +195,8 @@ public:
 
    const FaultFrameConfig &Config() const { return cfg_; }
    const real_t *Up() const { return cfg_.up; }
+   /// Mesh dimension (2 or 3).
+   int Dimension() const { return dim_; }
 
    // ---- fault faces, operator order fi (interior faces first, then shared) ----
    const FaultOrientation &FaultCensus() const { return *fault_; }
@@ -232,7 +248,10 @@ public:
          << r[0] << ", " << r[1] << ", " << r[2] << "), up (" << cfg_.up[0] << ", "
          << cfg_.up[1] << ", " << cfg_.up[2] << ")\n"
          << "    fault: " << rep_.fault.faces << " faces, " << rep_.fault.components
-         << " patch(es), " << rep_.fault.junction_edges << " junction edges, flipped vs raw "
+         << " patch(es), " << rep_.fault.junction_edges
+         << ((dim_ == 2) ? " junction vertices, " : " junction edges, ");
+      if (dim_ == 2) { os << rep_.fault.tip_edges << " tips, "; }
+      os << "flipped vs raw "
          << rep_.fault.flipped_vs_raw << ", pin margin " << rep_.fault.min_pin_margin
          << ", side margin " << rep_.fault.min_side_margin << ", F6 frames "
          << rep_.frame_fallbacks << "\n"
@@ -281,6 +300,7 @@ private:
 
       using P3 = std::array<real_t, 3>;
       struct SF { int type; P3 x[3]; real_t n[3]; };
+      const int nv = fault_->FaceVertices();          // 2D: x[2] = 0 is padding
       std::map<std::array<real_t, 10>, int> seen;   // (type, sorted vertices)
       std::vector<SF> F;
       for (size_t o = 0; o + R <= all.size(); o += R)
@@ -290,17 +310,28 @@ private:
          for (int a = 0; a < 3; a++)
             for (int d = 0; d < 3; d++) { f.x[a][d] = all[o + 1 + 3 * a + d]; }
          for (int d = 0; d < 3; d++) { f.n[d] = all[o + 10 + d]; }
-         std::sort(f.x, f.x + 3);
+         std::sort(f.x, f.x + nv);
          std::array<real_t, 10> k;
          k[0] = f.type;
          for (int a = 0; a < 3; a++)
             for (int d = 0; d < 3; d++) { k[1 + 3 * a + d] = f.x[a][d]; }
          if (seen.emplace(k, static_cast<int>(F.size())).second) { F.push_back(f); }
       }
-      // edges by their (sorted) vertex pair -> (face, third vertex)
+      // edges by their (sorted) vertex pair -> (face, third vertex); 2D: the
+      // shared entity is a vertex a (key (a, 0)) and the other vertex of the
+      // segment plays the third vertex's part
       std::map<std::array<real_t, 6>, std::vector<std::pair<int, int>>> E;
       for (int g = 0; g < static_cast<int>(F.size()); g++)
       {
+         if (nv == 2)
+         {
+            for (int i = 0; i < 2; i++)
+            {
+               const P3 &a = F[g].x[i];
+               E[{a[0], a[1], a[2], 0.0, 0.0, 0.0}].push_back({g, 1 - i});
+            }
+            continue;
+         }
          const int pairs[3][3] = {{0, 1, 2}, {0, 2, 1}, {1, 2, 0}};
          for (const auto &pr : pairs)
          {
@@ -317,6 +348,7 @@ private:
          if (nf + nc > 2) { junction++; continue; }
          seam++;
          // direction in which face g runs the edge a -> b under its normal
+         // (2D: b - a = e_z, the segment extruded along +z as in its census)
          const real_t a[3] = {e.first[0], e.first[1], e.first[2]};
          const real_t b[3] = {e.first[3], e.first[4], e.first[5]};
          auto dir = [&](const std::pair<int, int> &fr) {
@@ -324,7 +356,7 @@ private:
             real_t ab[3], ar[3], c[3];
             for (int d = 0; d < 3; d++)
             {
-               ab[d] = b[d] - a[d];
+               ab[d] = (nv == 2) ? ((d == 2) ? 1.0 : 0.0) : b[d] - a[d];
                ar[d] = f.x[fr.second][d] - a[d];
             }
             fault_frame::Cross(ab, ar, c);
@@ -332,17 +364,39 @@ private:
          };
          if (dir(e.second[0]) * dir(e.second[1]) >= 0.0) { bad++; }
       }
-      MFEM_VERIFY(junction == 0, "FaultFrameField: " << junction << " edges where fault and "
+      MFEM_VERIFY(junction == 0, "FaultFrameField: " << junction << " edges (2D: vertices) "
+                  "where fault and "
                   "prescribed-slip faces meet three or more at a time (a junction between "
                   "the fault and the creep surface; junction_policy \"refuse\")");
       MFEM_VERIFY(bad == 0, "FaultFrameField (seam rule): on " << bad << " of " << seam
-                  << " edges shared by a fault face and a prescribed-slip face the two "
+                  << " edges (2D: vertices) shared by a fault face and a prescribed-slip "
+                  "face the two "
                   "censuses orient the faces inconsistently; the one pin "
                   "([fault_geometry] ref_normal) does not give the fault and the creep "
                   "surface the same side. Refusing the run.");
       rep_.seam_edges = seam;
    }
 
+   // 2D: the inputs that must lie in the mesh plane (derivation 10.2).  up in
+   // the plane gives s = -+e_z (slip in the dip slot), up = +-e_z gives d =
+   // -+e_z (slip in the strike slot); any other up mixes the slots.
+   static void Check2D_(const FaultFrameConfig &cfg)
+   {
+      const real_t *u = cfg.up, *r = cfg.orientation.ref_normal;
+      MFEM_VERIFY((u[2] == 0.0 && (u[0] != 0.0 || u[1] != 0.0))
+                  || (u[0] == 0.0 && u[1] == 0.0 && u[2] != 0.0),
+                  "FaultFrameField (2D): up = (" << u[0] << ", " << u[1] << ", " << u[2]
+                  << ") must lie in the mesh plane ([fault_geometry] up = [ux, uy]) or be "
+                  "+-e_z (up = [0, 0, 1]), so that one tangential slot is an exact zero");
+      MFEM_VERIFY(r[2] == 0.0, "FaultFrameField (2D): ref_normal = (" << r[0] << ", "
+                  << r[1] << ", " << r[2] << ") must lie in the mesh plane");
+      const real_t *q = cfg.orientation.pin_point;
+      MFEM_VERIFY(cfg.orientation.pin != FaultOrientationConfig::Pin::Point || q[2] == 0.0,
+                  "FaultFrameField (2D): the pin point must lie in the mesh plane (z = "
+                  << q[2] << ")");
+   }
+
+   int dim_ = 3;
    FaultFrameConfig cfg_;
    std::vector<int> fault_int_, fault_sh_, creep_int_, creep_sh_;
    std::unique_ptr<FaultOrientation> fault_, creep_;

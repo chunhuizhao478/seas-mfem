@@ -348,21 +348,27 @@ void Test2DDegeneracy()
    real_t n_t1 = Dot3(b.normal, b.tangent1, 2);
    TEST_NEAR(n_t1, 0.0, 1e-12, "2D n . t1 = 0");
 
-   // ProjectTraction: scalar output
+   // ProjectTraction: two slots in 2D too (2D in-plane design rev 3, rule
+   // R2); t2 = up x n = e_z, so the second slot is an exact 0
    real_t traction[2] = {3.0, 7.0};
-   real_t tau_local[1];
+   real_t tau_local[2];
    fb.ProjectTraction(0, traction, tau_local);
    // tau = traction . t1 = (3,7).(0,1) = 7
    TEST_NEAR(tau_local[0], 7.0, 1e-12,
              "2D ProjectTraction: scalar traction = 7");
+   TEST_ASSERT(tau_local[1] == 0.0, "2D ProjectTraction: out-of-plane slot exactly 0");
 
    // EmbedSlip
-   real_t slip[1] = {5.0};
+   real_t slip[2] = {5.0, 0.0};
    real_t du[2];
    fb.EmbedSlip(0, slip, du);
    // du = 5*(0,1) = (0,5)
    TEST_NEAR(du[0], 0.0, 1e-12, "2D EmbedSlip: du[0] = 0");
    TEST_NEAR(du[1], 5.0, 1e-12, "2D EmbedSlip: du[1] = 5");
+   real_t slip_z[2] = {5.0, 9.0}, du_z[2];
+   fb.EmbedSlip(0, slip_z, du_z);
+   TEST_ASSERT(du_z[0] == du[0] && du_z[1] == du[1],
+               "2D EmbedSlip: the out-of-plane slot adds nothing (bit for bit)");
 
    // NormalStress
    real_t sigma_n = fb.NormalStress(0, traction);
@@ -609,7 +615,7 @@ void TestMultiFace2D()
 
    // ProjectTraction/EmbedSlip for different face indices
    real_t traction[2] = {3.0, 7.0};
-   real_t tau0[1], tau2[1];
+   real_t tau0[2], tau2[2];   // two slots in 2D too (rule R2)
    fb.ProjectTraction(0, traction, tau0);
    fb.ProjectTraction(2, traction, tau2);
    TEST_NEAR(tau0[0], tau2[0], 1e-12,

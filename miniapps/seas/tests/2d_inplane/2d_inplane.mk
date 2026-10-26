@@ -8,7 +8,8 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-fault-frame-field   # phase A: A1 + A6 (rotation)
 #   make -f tests/2d_inplane/2d_inplane.mk test-plate-loading       # phase A: A4 ([cycle.loading])
 #   make -f tests/2d_inplane/2d_inplane.mk test-okada-dislocation   # phase A: the Okada check
-#   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every phase A test above
+#   make -f tests/2d_inplane/2d_inplane.mk test-2d-fault-layout     # phase B: the 2D switch
+#   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
 # The 3D parity set (every phase must leave it bit for bit unchanged) is the
 # script tests/2d_inplane/parity_3d.sh (see its header).
 
@@ -17,7 +18,9 @@ include cycle/cycle.mk
 INPLANE_HEADERS = fault/fault_frame_field.hpp fault/fault_orientation.hpp fault/fault_frame.hpp \
                   fault/fault_basis.hpp domain/domain_config.hpp domain/elasticity_operator.hpp \
                   domain/elasticity_operator_setup.inl domain/elasticity_operator_traction.inl \
-                  domain/elasticity_operator_assembly.inl tests/2d_inplane/frame_box.hpp
+                  domain/elasticity_operator_assembly.inl domain/elasticity_operator_fault_ops.inl \
+                  domain/elasticity_operator_penalty.inl domain/elasticity_operator_qd.inl \
+                  fault/face_quadrature.hpp cycle/scaled_mesh.hpp tests/2d_inplane/frame_box.hpp
 
 TEST_FAULT_FRAME_FIELD_SRC = tests/2d_inplane/test_fault_frame_field.cpp
 TEST_FAULT_FRAME_FIELD_OBJ = $(TEST_FAULT_FRAME_FIELD_SRC:.cpp=.o)
@@ -90,6 +93,36 @@ test-okada-dislocation: seas_test_okada_dislocation
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_okada_dislocation
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_okada_dislocation --quick
 
-2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation
+# Phase B: the 2D switch on 2D triangle meshes built in the test (loader,
+# censuses, slot rule, fault DOF layout).
+TEST_2D_FAULT_LAYOUT_SRC = tests/2d_inplane/test_2d_fault_layout.cpp
+TEST_2D_FAULT_LAYOUT_OBJ = $(TEST_2D_FAULT_LAYOUT_SRC:.cpp=.o)
+$(TEST_2D_FAULT_LAYOUT_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(INPLANE_HEADERS) \
+                                  $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
 
-.PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation 2d-inplane-all
+seas_test_2d_fault_layout: $(TEST_2D_FAULT_LAYOUT_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_2D_FAULT_LAYOUT_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# L1, C1-C3, S1, D1 on 1, 2 and 4 ranks; then each refusal must exit
+# non-zero with its message.
+LAYOUT_2D_REFUSALS = 1:triangle meshes only|2:needs the fault frame field|3:must lie in the mesh plane ([fault_geometry] up|4:FaultFrameField (2D): ref_normal|5:not available on a 2D mesh yet|6:up vector is nearly collinear|7:BR2 is 3D only
+test-2d-fault-layout: seas_test_2d_fault_layout
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_2d_fault_layout
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_2d_fault_layout
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_2d_fault_layout
+	@list='$(LAYOUT_2D_REFUSALS)'; set -f; IFS='|'; for r in $$list; do n=$${r%%:*}; msg=$${r#*:}; \
+	   out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_2d_fault_layout --refuse $$n 2>&1); rc=$$?; \
+	   if [ $$rc -ne 0 ] && printf '%s' "$$out" | grep -qF "$$msg"; then \
+	      echo "  PASSED: refusal $$n: exit $$rc, \"$$msg\""; \
+	   else printf '%s\n' "$$out" | tail -15; echo "  FAILED: refusal $$n: exit $$rc, \"$$msg\" not found"; exit 1; fi; \
+	done; rm -f test_2d_fault_layout_quad.mesh
+
+2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout
+
+.PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
+        2d-inplane-all

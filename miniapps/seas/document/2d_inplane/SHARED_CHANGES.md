@@ -140,3 +140,73 @@ checkpoint's volume displacement matches within each tet (3123 of 62874
 tets list their DOFs in another order on the rotated mesh: MFEM's
 Mesh::MarkTetMeshForRefinement orders a tet's vertices by edge length, and
 equal lengths differ in the last bit after the rotation).
+
+## Phase B, part 1: the dimension switch (code and tests)
+
+The dimension now comes from the mesh (design rev 3, sections 5.1 to 5.3,
+rules R1 to R4).  On a 2D triangle mesh in the (x, y) plane the mesh loader,
+the orientation census, the frame field, the face quadrature, the fault DOF
+layout and the frames run with the same code, one dimension down; every
+fault-local vector keeps its three slots and the out-of-plane entries are
+exact zeros (rule R2).  The 2D stiffness, loads, traction and solves are
+phase E: each of those entry points refuses a 2D mesh with a message that
+names the phase.  `NumSlipComponents()` stays 2 (decision D2 is open).
+
+New file (branch-owned): `tests/2d_inplane/test_2d_fault_layout.cpp` (and
+its make target `test-2d-fault-layout`).
+
+| Shared file | Change | 3D |
+|---|---|---|
+| `fault/fault_orientation.hpp` | edge mode: a segment face keyed by two vertex keys (slot 2 = -1); census entities are vertices (m = 1 a tip, m >= 3 a junction; new report field `tip_edges`); tau = +1 at the head k1, -1 at the tail k0; nC = t x e_z / \|t\|, length for area; point pin at the segment midpoint; J3 parity written for simplices with dim + 1 vertices (`DropVertex_`); S3 margin with the triangle's expected h_perp / 3; the gathered coordinates padded with z = 0 | the same arithmetic in the same order; new: J3 refuses a non-simplex element next to the fault (before, it read its first 4 vertices) |
+| `fault/fault_frame.hpp` | `FaceVertices` with 2 vertices: the F6 fallback uses the segment's one edge | unchanged (3 edges) |
+| `fault/face_quadrature.hpp` | the nodal face element is an `H1_SegmentElement` on SEGMENT faces (p + 1 nodes; order 0: the midpoint) | `H1_TriangleElement`, as before |
+| `fault/fault_basis.hpp` | `ComputeOrientedFrame`: one rule in both dimensions on the padded normal (nx, ny, 0) and up (z = 0 for a 2-entry up); the old 2D branch (tangent1 = 90-degree rotation of n, no degeneracy guard) is removed; `ProjectTraction`, `EmbedSlip`, `EmbedSlipQP` fill and read both slots in 2D too | the same products: `n_raw(2)` and `up(2)` are read as before |
+| `domain/elasticity_operator.hpp` | `dim_` from the mesh (2 or 3, SpaceDimension = Dimension; BR2 refused in 2D); `NumComponents()` and `Dimension()` return it; `ComputeSkeletonDirichletSign` loops over `dim_`; `Require3D_` | `dim_ = 3` |
+| `domain/elasticity_operator_setup.inl` | DG space with `dim_` components; fault-face geometry checks, the face quadrature and the IP layout on SEGMENT faces in 2D (barycentric match (1 - x, x) for p >= 2); a 2D mesh with fault or prescribed-slip faces needs the frame field (no constants); the y = 0 audit pads z = 0 | TRIANGLE everywhere, as before |
+| `domain/elasticity_operator_traction.inl` | depth and x3 from the last coordinate (2D: -y); DOF coordinates padded with z = 0; `GetFaultDOFBasis` takes 2 or 3; `Require3D_` in `ComputeTraction`, `AssembleSlipOnlyRHS`, `AssembleDirichletOnlyRHS` | `-coords(2)`, as before |
+| `domain/elasticity_operator_{assembly,fault_ops,qd,penalty}.inl` | `Require3D_` at the top of `AssembleStiffness`, `BuildFaultFaceOps`, `BuildQDStageOperators`, `BuildQDGreen`, `GetFaultFacePenalties` | no-op |
+| `cycle/scaled_mesh.hpp` | `LoadScaledMesh` reads a 2D triangle mesh (in its own space) or a 3D tetrahedral one and scales `dim` coordinates; `BdrAttrCount::triangles` renamed `simplex_faces` (segments in 2D; no user outside this file); `CountBoundary` loops over the space dimension; `FaultDOFsPerFace(order, dim = 3)` | the same reads and products |
+| `tests/unit/test_fault_basis.cpp` | the two 2D cases pass 2-slot arrays to `ProjectTraction` / `EmbedSlip` (they passed 1-slot arrays, which the 2-slot calls would overrun), and check that the out-of-plane slot is exactly 0 and adds nothing to the jump; expected values unchanged | - |
+
+The slot rule (derivation 10.2).  With up in the plane (BP3: up = [0, 1],
+y up) the frame is s = up x n / \|up x n\| = -+e_z and d = s x n = the
+down-dip tangent: slip lives in the dip slot (tangent1).  With up = [0, 0, 1]
+(TPV205-2D, TPV105-2D: a horizontal slice) s = e_z x n lies in the plane and
+d = -e_z: slip lives in the strike slot (tangent2).  A fault parallel to up
+has no frame: the dynamic field uses the F6 fallback, the QD basis refuses
+(`ComputeOrientedFrame`'s degeneracy guard), as in 3D.
+
+How it was checked (cloud container, 10-25).  test_2d_fault_layout, 58 of 58
+on 1 rank and 55 of 55 on each rank at 2 and 4 (the F6 check runs on rank 0
+alone), and seven refusals: the loader on a 2D triangle mesh
+(counts, tags, scale bit for bit); a BP3-shaped fault (free surface to
+W_f, its creep segment below) at dips 30, 60 and 90 degrees: one patch, 2
+tips, 0 junctions, 1 seam vertex, n = (sin, cos, 0) to 4.5e-16, the plus
+element on the footwall, the report the same at every rank count; a
+Y-shaped fault: 1 junction vertex, 3 tips, 3 patches; the 2D slice of the
+phase A box: the same fault census, normals, frames (bit for bit) and plus
+side as the 3D box; the F6 fallback where a segment is parallel to an
+in-plane up (s along the segment, d = +-e_z); up = [0, 1] and [0, 0, 1]: the out-of-plane slot exactly
+0 in the frames, `GetFaultDOFBasis`, `ProjectTraction` and `EmbedSlip`, and
+the kernel triad = sigma_f (n, d, s); the fault DOF layout at p = 1, 2, 3:
+p + 1 nodes per segment, every segment owned once, the owned -> local
+scatter exact on ghost copies, and the (position, n, d, s) table at 2 and 4
+ranks equal to the 1-rank one.  Refusals: a quadrilateral mesh, a 2D fault
+without the frame field, up off the plane, ref_normal off the plane, a 2D
+solve, up parallel to n in the QD basis, BR2 in 2D.
+
+3D parity against phase A (0322c7e7, same container, clean rebuild of both
+sets): TPV205 and TPV104 on 2 ranks, the cycle QD and dynamic regimes on 1
+rank and the dynamic regime on 2 ranks byte for byte apart from the commit
+stamp; cycle QD on 2 ranks 4.0e-9 (repeat runs of one binary set: up to
+3.7e-9; part 2 against the base: 4.8e-9); BP5 quick check on 8 ranks 4.4e-8 (repeat runs: up to 9.3e-8); the
+unit tests pass, test_fault_basis with its 2 new checks (221 of 221) and
+otherwise the same output.  The fully-dynamic-cycle tests pass; their logs
+are the same on 1 rank apart from timings and differ at rounding level on 2.
+The 2-rank P3 run was killed once by the container's 14.3 GB memory limit;
+rerun alone, it passes with both binary sets, and both reach the limit
+(page cache included), so it sits at the edge of this container either way.
+
+Known behaviour changes in 3D: (1) J3 refuses an element next to the fault
+that is not a tetrahedron (before, it read the element's first 4 vertices);
+(2) `BdrAttrCount::triangles` is renamed `simplex_faces`.

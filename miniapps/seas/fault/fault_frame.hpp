@@ -25,7 +25,13 @@
 //     FromKernel: T = eps_f (tau1^k t1^k + tau2^k t2^k - sigma_n n_k)
 //   Not wired into the Nitsche operator until P6.
 //
-// Scope (Chunhui Zhao, 2026-10-14): tetrahedral meshes, planar fault faces.
+// 2D (2D in-plane design rev 3, derivation 10.2): the same functions on
+// padded 3-vectors.  A segment face has nv = 2 and one F6 edge, itself; with
+// n = (nx, ny, 0) and up in the plane or +-e_z, one of (d, s) is +-e_z and
+// the other lies in the plane, so the out-of-plane slot is an exact zero.
+//
+// Scope (Chunhui Zhao, 2026-10-14): tetrahedral meshes, planar fault faces;
+// 2D triangle meshes (segment faces) from phase B of the 2D design.
 
 #ifndef MFEM_SEAS_FAULT_FRAME_HPP
 #define MFEM_SEAS_FAULT_FRAME_HPP
@@ -77,7 +83,8 @@ inline real_t DegeneracyThreshold(real_t kappa_F, real_t eps_ang = 1e-6,
 }
 
 /// Face data needed by the F6 fallback: the face's vertex keys
-/// (partition-invariant) and coordinates.  nv = 3 for a triangle.
+/// (partition-invariant) and coordinates.  nv = 3 for a triangle, 2 for a
+/// segment (2D).
 struct FaceVertices
 {
    int nv = 3;
@@ -102,9 +109,11 @@ inline bool ComputeFrame(const real_t n[3], const real_t up[3], real_t eps_deg,
       fr.fallback = false;
       return true;
    }
-   // F6(a): edges sorted by their sorted key pair, directed small -> large.
+   // F6(a): edges sorted by their sorted key pair, directed small -> large
+   // (a segment has the one edge 0-1).
    std::vector<std::pair<std::pair<long long, long long>, std::pair<int, int>>> edges;
-   for (int i = 0; i < fv.nv; i++)
+   const int ne = (fv.nv == 2) ? 1 : fv.nv;
+   for (int i = 0; i < ne; i++)
    {
       const int j = (i + 1) % fv.nv;
       int a = i, b = j;

@@ -17,6 +17,7 @@ template <typename MeshType>
 void ElasticityDomainOperator<MeshType>::GetFaultFacePenalties(
    Vector &sigma_F_face, Vector &spread) const
 {
+   Require3D_("GetFaultFacePenalties");
    MFEM_VERIFY(method_ == DGMethod::IP,
                "GetFaultFacePenalties: IP method only (sigma_F is the "
                "interior-penalty coefficient)");

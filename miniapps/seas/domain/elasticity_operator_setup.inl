@@ -8,9 +8,9 @@
 
    void SetupFESpace()
    {
-      fec_ = std::make_unique<DG_FECollection>(order_, 3, BasisType::GaussLobatto);
-      // Vector DG space with 3 components, byNODES ordering
-      fes_ = std::make_unique<FESpaceType>(&mesh_, fec_.get(), 3, Ordering::byNODES);
+      fec_ = std::make_unique<DG_FECollection>(order_, dim_, BasisType::GaussLobatto);
+      // Vector DG space with dim components (3D: 3), byNODES ordering
+      fes_ = std::make_unique<FESpaceType>(&mesh_, fec_.get(), dim_, Ordering::byNODES);
       // Scalar DG space for BR2 mass matrix inverses
       scalar_fes_ = std::make_unique<FiniteElementSpace>(&mesh_, fec_.get());
    }
@@ -306,6 +306,7 @@
       }
 
       // ---- Phase 4b: Audit y=0 face classification ----
+      // (A BP5 diagnostic; in 2D the face centres have 2 entries, z = 0.)
       // Detect interior faces on y=0 that are FacetBC::None (unclassified).
       // These faces get DG penalty enforcing zero jump, conflicting with
       // adjacent fault slip or Dirichlet displacement.
@@ -337,7 +338,7 @@
             if (face_bc_[f] == FacetBC::None)
             {
                local_y0_none++;
-               none_faces.push_back({fc(0), fc(1), fc(2),
+               none_faces.push_back({fc(0), fc(1), (fc.Size() > 2) ? fc(2) : 0.0,
                                      static_cast<double>(f)});
             }
             else if (face_bc_[f] == FacetBC::Fault) { local_y0_fault++; }
@@ -367,7 +368,7 @@
                if (std::abs(fc(1)) > 1.0) { continue; }
 
                local_y0_none_shared++;
-               none_faces.push_back({fc(0), fc(1), fc(2),
+               none_faces.push_back({fc(0), fc(1), (fc.Size() > 2) ? fc(2) : 0.0,
                                      static_cast<double>(lf)});
             }
 #endif
@@ -428,7 +429,7 @@
                Vector fc(3);
                FTr->Face->Transform(ip, fc);
                ofs << fc(0) << "," << fc(1) << ","
-                   << fc(2) << "," << f << ",Fault\n";
+                   << ((fc.Size() > 2) ? fc(2) : 0.0) << "," << f << ",Fault\n";
             }
             for (int di = 0; di < dirichlet_interior_faces_.Size(); di++)
             {
@@ -441,7 +442,7 @@
                Vector fc(3);
                FTr->Face->Transform(ip, fc);
                ofs << fc(0) << "," << fc(1) << ","
-                   << fc(2) << "," << f << ",Dirichlet\n";
+                   << ((fc.Size() > 2) ? fc(2) : 0.0) << "," << f << ",Dirichlet\n";
             }
          }
       }
@@ -707,18 +708,22 @@
       // Tandem's fault discretization even at p=1.
       // BR2: keep the legacy face-averaged path (nbf=1).
       //
-      // The IP fault DOF layout below is hard-wired to TRIANGLE faces. On a
-      // non-triangular fault face (e.g. a hex mesh) its nodal points cover
-      // only half of the face and ComputeTraction returns silently wrong
-      // values (measured 21% error on the TPV102 hex box), so refuse it.
+      // The IP fault DOF layout below is hard-wired to simplex faces
+      // (TRIANGLE in 3D, SEGMENT in 2D: 2D in-plane design rev 3, phase B).
+      // On a non-triangular fault face (e.g. a hex mesh) its nodal points
+      // cover only half of the face and ComputeTraction returns silently
+      // wrong values (measured 21% error on the TPV102 hex box), so refuse it.
+      const Geometry::Type fault_geom =
+         (dim_ == 3) ? Geometry::TRIANGLE : Geometry::SEGMENT;
       if (method_ == DGMethod::IP)
       {
          for (int i = 0; i < fault_interior_faces_.Size(); i++)
          {
             const int f = fault_interior_faces_[i];
-            MFEM_VERIFY(mesh_.GetFaceGeometry(f) == Geometry::TRIANGLE,
+            MFEM_VERIFY(mesh_.GetFaceGeometry(f) == fault_geom,
                "ERROR: DGMethod::IP requires triangular fault faces "
-               "(tetrahedral mesh); fault face " << f << " has geometry "
+               "(tetrahedral mesh; 2D: segment faces of a triangle mesh); fault face "
+               << f << " has geometry "
                << Geometry::Name[mesh_.GetFaceGeometry(f)] << ".");
          }
          if constexpr (IsParallelMesh<MeshType>::value)
@@ -727,10 +732,10 @@
             for (int i = 0; i < fault_shared_faces_.Size(); i++)
             {
                const int f = mesh_.GetSharedFace(fault_shared_faces_[i]);
-               MFEM_VERIFY(mesh_.GetFaceGeometry(f) == Geometry::TRIANGLE,
+               MFEM_VERIFY(mesh_.GetFaceGeometry(f) == fault_geom,
                   "ERROR: DGMethod::IP requires triangular fault faces "
-                  "(tetrahedral mesh); shared fault face " << f
-                  << " has geometry "
+                  "(tetrahedral mesh; 2D: segment faces of a triangle mesh); shared "
+                  "fault face " << f << " has geometry "
                   << Geometry::Name[mesh_.GetFaceGeometry(f)] << ".");
             }
 #endif
@@ -739,23 +744,24 @@
       int face_fe_order = (method_ == DGMethod::IP) ? order_ : 0;
       face_quad_ = std::make_unique<FaceQuadrature>(face_fe_order,
                                                      std::max(order_, 1),
-                                                     Geometry::TRIANGLE,
+                                                     fault_geom,
                                                      face_basis_type_);
       nbf_per_face_ = face_quad_->NumBasisFunctions();
 
       // The IP layout maps the sorted face vertices onto triangle nodes
-      // (BuildOwnedFaultLayout). A quadrilateral fault face has 4 vertices
-      // for 3 slots at p=1, so its owned->local map would index past the
-      // fault vectors. BR2 (nbf=1) does not use the vertex permutation.
+      // (BuildOwnedFaultLayout; 2D: segment nodes). A quadrilateral fault
+      // face has 4 vertices for 3 slots at p=1, so its owned->local map
+      // would index past the fault vectors. BR2 (nbf=1) does not use the
+      // vertex permutation.
       if (nbf_per_face_ > 1)
       {
          auto verify_triangle = [&](int face, const char *kind)
          {
             const Geometry::Type g = mesh_.GetFaceGeometry(face);
-            MFEM_VERIFY(g == Geometry::TRIANGLE,
+            MFEM_VERIFY(g == fault_geom,
                         "IP fault layout needs triangular fault faces "
-                        "(tetrahedral mesh); " << kind << " fault face "
-                        << face << " is " << Geometry::Name[g]);
+                        "(tetrahedral mesh; 2D: segment faces); " << kind
+                        << " fault face " << face << " is " << Geometry::Name[g]);
          };
          for (int i = 0; i < fault_interior_faces_.Size(); i++)
          {
@@ -827,6 +833,24 @@
          fault_dofs_[i] = i;
       }
 
+      // 2D: no constants.  The fault and the prescribed-slip faces take their
+      // orientation from the frame field only (collective, rank-independent).
+      if (dim_ == 2 && frame_src_.Empty())
+      {
+         int nf = num_fault_faces_ + dirichlet_interior_faces_.Size()
+                  + dirichlet_shared_faces_.Size();
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            MPI_Allreduce(MPI_IN_PLACE, &nf, 1, MPI_INT, MPI_SUM, mesh_.GetComm());
+#endif
+         }
+         MFEM_VERIFY(nf == 0, "ElasticityDomainOperator: a 2D mesh with fault or "
+                     "prescribed-slip faces needs the fault frame field ([fault_geometry] "
+                     "ref_normal and up, handed in as a FaultFrameSource); the constant "
+                     "reference normal (0, -1, 0) and up (0, 0, 1) are BP5's 3D inputs");
+      }
+
       // ref_normal_ is needed by ComputeSkeletonDirichletSign for ALL
       // ranks that have shared Dirichlet faces, even ranks with zero fault
       // DOFs. Set it unconditionally BEFORE the fault DOF guard.
@@ -875,7 +899,7 @@
          // Detect face geometry from the first available fault face (interior
          // or shared), so ranks with only shared faces get the right rule.
          const int face_quad_order = 2 * order_ + 1;
-         Geometry::Type face_geom = Geometry::TRIANGLE;  // default for tets
+         Geometry::Type face_geom = fault_geom;  // default: TRIANGLE for tets
          if (fault_interior_faces_.Size() > 0)
          {
             auto *ftr0 = mesh_.GetInteriorFaceTransformations(
@@ -1329,17 +1353,27 @@
             // (Decision, Chunhui Zhao, 2026-10-14: fix it in P6.)
             if (nbf_per_face_ > nv)
             {
-               MFEM_VERIFY(nv == 3, "canonical face-DOF permutation: "
-                           "triangular fault faces only (face " << fi
+               // 2D (phase B): a segment's nodes by their barycentric pair
+               // (1 - x, x); the permutation is the identity or the reversal.
+               MFEM_VERIFY(nv == 3 || (nv == 2 && dim_ == 2),
+                           "canonical face-DOF permutation: "
+                           "triangular fault faces only (2D: segments) (face " << fi
                            << " has " << nv << " vertices)");
                const IntegrationRule &nir = face_quad_->GetNodalRule();
                MFEM_VERIFY(nir.GetNPoints() == nbf_per_face_,
                            "canonical face-DOF permutation: nodal rule has "
                            << nir.GetNPoints() << " points, nbf = "
                            << nbf_per_face_);
-               auto bary = [&nir](int j, real_t l[3])
+               auto bary = [&nir, nv](int j, real_t l[3])
                {
                   const IntegrationPoint &ip = nir.IntPoint(j);
+                  if (nv == 2)
+                  {
+                     l[0] = 1.0 - ip.x;
+                     l[1] = ip.x;
+                     l[2] = 0.0;
+                     return;
+                  }
                   l[0] = 1.0 - ip.x - ip.y;
                   l[1] = ip.x;
                   l[2] = ip.y;
@@ -1355,7 +1389,7 @@
                      real_t lj[3];
                      bary(j, lj);
                      bool same = true;
-                     for (int i = 0; i < 3; i++)
+                     for (int i = 0; i < nv; i++)
                      {
                         if (std::abs(lj[gid_idx[i].second] - lk[i]) > tol)
                         {

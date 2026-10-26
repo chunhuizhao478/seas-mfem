@@ -70,6 +70,7 @@ void ElasticityDomainOperator<MeshType>::FaultFaceTractionKernel_(
 template <typename MeshType>
 void ElasticityDomainOperator<MeshType>::BuildFaultFaceOps()
 {
+   Require3D_("BuildFaultFaceOps");
    MFEM_VERIFY(method_ == DGMethod::IP, "BuildFaultFaceOps: IP method only");
    const int nfi = fault_interior_faces_.Size(), nfs = fault_shared_faces_.Size();
    const int nbf = nbf_per_face_, nf = nfi + nfs;
