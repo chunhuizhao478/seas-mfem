@@ -480,3 +480,36 @@ passes, `test-2d-driver` included.
 
 Known behaviour changes in 3D: none in a run; the no-HDF5 refusal comes
 after the mesh read.
+
+## Phase D, part 1: the thermal pressurization module (D1)
+
+Thermal pressurization (TPV105, design rev 3 section 5.9, derivation 10.5)
+as a module of its own, `fault/thermal_pressurization.hpp` (branch-owned):
+per fault point a 1-D grid across the fault, temperature and pore pressure
+by finite volumes with an exactly integrated Gaussian source, backward Euler
+(default) or Crank-Nicolson, two tridiagonal solves per point per step.  It
+is not yet called by any operator or driver: the hook into the fault step,
+the deck keys and the station columns are part 2.
+
+New files (branch-owned): `fault/thermal_pressurization.hpp`,
+`tests/2d_inplane/test_thermal_pressurization.cpp` (make target
+`test-thermal-pressurization`, part of `2d-inplane-all`).
+
+No shared file changes; nothing in the 3D path includes the new header, so
+the 3D parity set is not affected (not rerun for this part).
+
+How it was checked (cloud container, 10-26).  test_thermal_pressurization
+19 of 19 and its 7 refusals: the grid; zero heating and Lambda = 0 leave T
+and p exactly unchanged; the heat content equals the heat put in to 2.1e-13;
+the analytic formulas reduce to Rice's sqrt(t) law (h -> 0) and to
+p = Lambda theta (alpha_hy -> 0); TPV105 parameters with a constant 30 MW/m^2
+source and with the source switched off at 2 s, on a fine grid (dz0 0.1 mm,
+growth 1.01, dt 0.1 ms, Crank-Nicolson), T and p at z = 0, h, 2h, 5h within
+3.0e-5 of the fault value from 0.01 to 15 s; space error ratios 3.75 and 3.94
+per halving; time ratios 2.00 (backward Euler) and 4.00 (Crank-Nicolson); at
+the production settings (growth 1.05, z_max 0.4 m, the 2D 100 m steps) T and
+p on the fault within 6.1e-4 with dz0 = h/10 and 3.4e-4 with dz0 = h/20;
+three points equal three one-point runs bit for bit, and a GetState /
+SetState restart continues a run bit for bit.
+
+Known behaviour changes in 3D: none.

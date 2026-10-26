@@ -12,6 +12,7 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d-deck             # phase B: 2D deck vectors
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d-nitsche          # phase C: 2D Nitsche operator
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d-driver           # phase C: the driver, TPV205-2D
+#   make -f tests/2d_inplane/2d_inplane.mk test-thermal-pressurization  # phase D: the TP module
 #   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
 # The 3D parity set (every phase must leave it bit for bit unchanged) is the
 # script tests/2d_inplane/parity_3d.sh (see its header).
@@ -246,8 +247,31 @@ test-2d-driver: seas_nitsche_dyn_driver
 	   else printf '%s\n' "$$out" | tail -15; echo "  FAILED: refusal $$n: exit $$rc, \"$$msg\" not found"; exit 1; fi; \
 	 done; rm -rf $$d
 
+# Phase D (part 1): the thermal pressurization module alone (P1-P8 against
+# the analytic solutions of the 1-D problem), then each refusal must exit
+# non-zero with its message.
+TEST_TP_SRC = tests/2d_inplane/test_thermal_pressurization.cpp
+TEST_TP_OBJ = $(TEST_TP_SRC:.cpp=.o)
+$(TEST_TP_OBJ): %.o: $(SRC)%.cpp fault/thermal_pressurization.hpp $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+seas_test_thermal_pressurization: $(TEST_TP_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_TP_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+TP_REFUSALS = 1:ThermalPressurization::Advance: dt = 0|2:the shear heating must be finite and >= 0|3:the shear heating must be finite and >= 0|4:need dz0 > 0, growth >= 1 and z_max > dz0|5:need alpha_th, alpha_hy, rho_c, h > 0|6:has no parameters (SetParameters)|7:ThermalPressurization::SetState: size
+test-thermal-pressurization: seas_test_thermal_pressurization
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_thermal_pressurization
+	@list='$(TP_REFUSALS)'; set -f; IFS='|'; for r in $$list; do n=$${r%%:*}; msg=$${r#*:}; \
+	   out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_thermal_pressurization --refuse $$n 2>&1); rc=$$?; \
+	   if [ $$rc -ne 0 ] && printf '%s' "$$out" | grep -qF "$$msg"; then \
+	      echo "  PASSED: refusal $$n: exit $$rc, \"$$msg\""; \
+	   else printf '%s\n' "$$out" | tail -15; echo "  FAILED: refusal $$n: exit $$rc, \"$$msg\" not found"; exit 1; fi; \
+	done
+
 2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
-                test-2d-deck test-2d-nitsche test-2d-driver
+                test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
-        test-2d-deck test-2d-nitsche test-2d-driver 2d-inplane-all
+        test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization 2d-inplane-all
