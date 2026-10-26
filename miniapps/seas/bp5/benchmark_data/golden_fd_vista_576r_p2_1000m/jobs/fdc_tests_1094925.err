@@ -1,0 +1,18 @@
+
+Lmod is automatically replacing "nvidia/24.7" with "gcc/13.2.0".
+
+
+Due to MODULEPATH changes, the following have been reloaded:
+  1) openmpi/5.0.5
+
+The following have been reloaded with a version change:
+  1) nvpl/24.7 => nvpl/26.9
+
+
+The following have been reloaded with a version change:
+  1) openmpi/5.0.5 => openmpi/5.0.11
+
+
+The following have been reloaded with a version change:
+  1) cmake/4.1.1 => cmake/3.31.5
+

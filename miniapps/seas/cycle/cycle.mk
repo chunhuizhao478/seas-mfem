@@ -34,7 +34,8 @@ include Makefile
 .DEFAULT_GOAL := cycle-all
 
 CYCLE_OWNED_PATHS = cycle drivers/fd_cycle_driver.cpp tests/cycle config/fd_cycle \
-                    jobs/fd_cycle document/fd_cycle_dev
+                    jobs/fd_cycle document/fd_cycle_dev \
+                    bp5/benchmark_data/golden_fd_vista_576r_p2_1000m
 CYCLE_GIT_HEAD  := $(shell git rev-parse HEAD 2>/dev/null)
 CYCLE_GIT_DIRTY := $(shell { git status --porcelain --untracked-files=no; \
                              git status --porcelain --untracked-files=all -- $(CYCLE_OWNED_PATHS); \
@@ -238,7 +239,7 @@ test-cycle-bench-run: seas_fd_cycle_driver
 # diffs HEAD against their merge base, so a merge of that branch adds nothing
 # to the list.
 CYCLE_BASE ?= origin/nitsche-dynamic-rupture
-CYCLE_OWNED_RE = ^miniapps/seas/(cycle/|drivers/fd_cycle_driver\.cpp$$|tests/cycle/|config/fd_cycle/|jobs/fd_cycle/|document/fd_cycle_dev/)
+CYCLE_OWNED_RE = ^miniapps/seas/(cycle/|drivers/fd_cycle_driver\.cpp$$|tests/cycle/|config/fd_cycle/|jobs/fd_cycle/|document/fd_cycle_dev/|bp5/benchmark_data/golden_fd_vista_576r_p2_1000m/)
 CYCLE_HOOK_FILES = miniapps/seas/fault/fault_geometry.hpp \
                    miniapps/seas/domain/nitsche_wave_operator.hpp
 CYCLE_HOOK_GREP = grep -xF $(foreach f,$(CYCLE_HOOK_FILES),-e $(f))

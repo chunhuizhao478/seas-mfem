@@ -1,0 +1,366 @@
+# bp5_fd_p2_1800yr.toml — seas_fd_cycle_driver, SCEC BP5-FD to 1800 yr
+# (the description's t_f) at p = 2 on the 1000 m mesh, with the trunk's
+# speed-ups and every output of the description (section 4), for the SCEC
+# upload.  bp5_fd_1500yr.toml (the first event dynamic from t = 0 at
+# V_i = 0.03 m/s, then QD and dynamic phases switched on max V) with:
+#   [mesh] order = 2   (the p = 2 event 1, job 6508804: p = 1 at 1000 m is
+#                      under-resolved)
+#   [time] tfinal = 1800 yr
+#   QD regime    stage operators, the Green's function as an H-matrix
+#                (eps 1e-10), rk 5dp at atol 1e-8: the QD thread's
+#                recommended p = 2 settings (Vista 1086777, 1087923-25)
+#   dynamic      the trunk's Nitsche kernels at global stepping (cfl
+#                0.5); local time stepping stays off ([cycle.lts])
+#   [cycle.benchmark]  global.dat (source), the 9 off-fault stations, the
+#                      strike and depth profiles, the catalog and the
+#                      rupture times (cycle/bench_output.hpp); the upload
+#                      files come from cycle/scec_bp5_export.py
+# Snapshots as bp5_fd_1500yr.toml.  At p = 2 a fault snapshot holds twice
+# the points of p = 1 (about 3.6 MB) and a surface snapshot about 0.5 MB,
+# so about 80 GB if seven events of 270 s each give 19,000 snapshots
+# (inferred from the p = 1 counts).
+#
+# Run from miniapps/seas, in 45 h links of a job chain (jobs/fd_cycle/
+# vista_p2_1800yr.sbatch):
+#   mpirun -np N ./seas_fd_cycle_driver --deck config/fd_cycle/bp5_fd_p2_1800yr.toml
+#          --output-dir RUN --qd-green-hcache H --wall-limit 162000   # first link
+#   ... --output-dir RUN --qd-green-hcache H --restart RUN/bp5_fd_p2_1800yr
+#          --wall-limit 162000                                         # next
+# H: the H-matrix file; the first run that does not find it builds and
+# writes it (about 80 min on 4 Vista nodes), later runs read it (about
+# 20 s).  A restart needs the rank count of the run it continues.
+#
+# Same problem, mesh and IC set as bp5_scec_fd.toml (the QD-only deck):
+#   - V_i = 0.03 m/s in the nucleation patch (BP5 section 3);
+#   - tau0 = sigma_n a asinh(V/(2 V0) exp(psi0/a)) + eta V_i
+#     ([cycle.prestress].eta_V_init = true);
+#   - psi0 = f0 + b ln(V0 / V_init) everywhere (eq. 18), not from stress
+#     equilibrium.
+# The fault is the plane y = 0, strike along +x, depth = -z.
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "SCEC BP5-FD, scec_fd IC set with eta V_i in tau0, switched cycles to 1800 yr at p = 2 with the QD and dynamic speed-ups and the SCEC section 4 outputs (seas_fd_cycle_driver)."
+
+# BP5: rho = 2670 kg/m^3, cs = 3.464 km/s, nu = 0.25 (lambda = mu).
+[material_constant_fallback]
+lambda = 32038120320.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+# Tandem's exact BP5 mesh, in km; mesh_scale below converts to m.
+[mesh]
+path  = "bp5/mesh/reference/bp5_tandem_exact.msh"
+order = 2
+
+[velocity]
+use_sidecar = false
+
+# The shear prestress is BuildPrestress's steady state; only sigma_n is read.
+[stress]
+kind          = "fault_local_prestress"
+tau_strike_pa = 0.0
+tau_dip_pa    = 0.0
+sigma_n_pa    = 25.0e6
+
+# The dynamic regime's numerics: the kv0p1 values of
+# tpv102/configs/tpv102_nitsche_pc_p1_kv0p1.toml (plan 6.1).  cfl is the
+# fraction of the measured C(p): dt = cfl C(p) h_min / (p^2 c_p), 1.72 ms at
+# p = 1 and 0.81 ms at p = 2 on this mesh (the step of the fault's LTS
+# cluster; larger clusters step 2, 4, 8 times that).  Kelvin-Voigt (Day et al. 2005 A8) in every element:
+# beta_e = kv_eta (1/3) (h_e / p) / c_s with h_e = 6 V / A.  The penalty is
+# [cycle].penalty_factor, shared with the QD regime.
+[numerics]
+cfl       = 0.5
+kv_eta    = 0.1
+kv_scale  = "node"
+kv_length = "inscribed"
+
+# 1800 yr of 365.25 days (BP5's t_f); dt_initial as seas_bp5_full
+# --tandem-time-stepping, also the first QD step after each switch back
+# (plan 6.3).
+[time]
+tfinal     = 5.680368e10
+dt_initial = 0.01
+
+[output]
+output_dir = "."
+
+# Fault 3; free surface 1 (natural).  The legacy QD constructor holds the
+# far-field and creep boundaries (attribute 5) as Dirichlet (plan 3.4).
+[boundary]
+fault_attr    = 3
+natural_attrs = [1]
+
+# The dynamic regime's fault frame: the oriented normal is -y (the
+# reference), strike = up x n = +x, dip = strike x n = -z.  Only these
+# orientation, pin, tangent and junction values are implemented.
+[fault_geometry]
+ref_normal      = [0.0, -1.0, 0.0]
+up              = [0.0,  0.0, 1.0]
+kind            = "vertical_strike_slip"
+orientation     = "propagated"
+pin_by          = "reference"
+tangent         = "pointwise"
+junction_policy = "refuse"
+pin_min_margin  = 0.1
+
+# BP5 eqs. 14-17: scalar values; a, Dc and V_init come from [cycle.fields].
+[friction.rate_state]
+a_default       = 0.004
+b_default       = 0.03
+Dc_default      = 0.14
+V_0_default     = 1.0e-6
+f_0_default     = 0.6
+V_init_default  = 1.0e-9
+sigma_n_default = 25.0e6
+state_evolution = "aging_law"
+eta             = "auto"         # 0.5 sqrt(mu rho) = mu / (2 cs); QD regime only
+
+# Prakash-Clifton regularization of the normal stress the dynamic law sees
+# (SeisSol TPV6/7 values, as the TPV102 decks).
+[friction.prakash_clifton]
+v_star = 1.0      # m/s
+length = 0.01     # m
+
+[cycle]
+ic                   = "scec_fd"
+switching            = true
+qd_radiation_damping = true
+mesh_scale           = 1000.0
+plate_rate           = 1.0e-9
+penalty_factor       = 1.0       # both regimes' K
+
+# Start dynamic when max V > V_on (0.03 m/s > 0.01 at t = 0);
+# the phase ends once max V has stayed below V_off for T_dwell (the spec's
+# event end), and a phase longer than T_max stops the run.  No phase limit:
+# the run switches back to QD and continues to tfinal.
+[cycle.switch]
+V_on               = 1.0e-2
+V_off              = 1.0e-3
+T_dwell            = 10.0
+T_min              = 0.0
+T_max              = 1200.0
+max_dynamic_phases = 0
+
+# rk 5dp at atol 1e-8 (QD speed-up v2 item A: event 2 within 0.12 s of the
+# 1e-10 reference, against 1.7 s at 1e-7, for 0.2% more stages; Chunhui
+# Zhao 2026-10-21); ts_atol repeats the options file's value.  Each stage
+# runs through the stage operators and the Green's function T = G delta +
+# t T_D (QD speed items 1, 3, 4).
+[cycle.qd]
+solver        = "mumps"
+petsc_options = "tests/verification/petsc_ts_rk5dp_atol1e-8.cfg"
+ts_atol       = 1.0e-8
+ts_rtol       = 1.0e-50
+operators     = "matrix"
+
+# G as an H-matrix (eps 1e-10: 37.9 GiB at p = 2, 0.222 s per QD step on 4
+# Vista nodes, job 1086777).  No dense G file (cache = ""): it would be
+# 140 GiB.  hcache: the run's --qd-green-hcache overrides it.  Every 10000
+# stages the solve path runs too and the largest difference is reported at
+# the end.
+[cycle.qd.green]
+compress         = 1.0e-10
+hcache           = "bp5_fd_p2_h1e-10.bin"
+leaf             = 64
+eta              = 2.0
+compress_mem_gib = 64.0
+check_every      = 10000
+
+# Local time stepping of the dynamic regime: off.  With mode = "rate2"
+# (the trunk's defaults below; the mesh then cut with
+# BuildLtsAwarePartition for both regimes) the dynamic phases run about
+# 1.4 times faster, but against global stepping at half the step the
+# off-fault stations move by 2.0% (displacement) and 3.3% (velocity) of
+# their size near a wave front, 8 times global stepping's own step error
+# there; on the fault and in the source rows both are equally close
+# (p = 1, first event, 1 s; test_cycle_bench_run.sh's runs).
+[cycle.lts]
+mode         = "off"
+cluster_cap  = 4
+fault_buffer = 3
+
+[cycle.prestress]
+V_background = 1.0e-9            # psi0 = f0 + b ln(V0 / V_bg), eq. 18
+eta_V_init   = true              # tau0 += eta |V_init|: the patch starts at V_i
+
+[cycle.fields]
+V_init_dip = 1.0e-20             # kernel dip component (V_zero)
+
+# a: a0 = 0.004 in the 60 km x 12 km velocity-weakening core (depth 4-16 km),
+# amax = 0.04 beyond a 2 km linear transition (eq. 14).
+[cycle.fields.a]
+center  = [0.0, 0.0, -10.0e3]
+axis1   = [1.0, 0.0, 0.0]
+axis2   = [0.0, 0.0, 1.0]
+half1   = 30.0e3
+half2   = 6.0e3
+taper   = 2.0e3
+inside  = 0.004
+outside = 0.04
+
+# Dc: 0.13 m in the 12 km x 12 km nucleation patch (x = -30..-18 km,
+# depth 4-16 km), 0.14 m elsewhere; edges included within 1 mm (Tandem's
+# bp5_outside scenario).
+[cycle.fields.Dc]
+center  = [-24.0e3, 0.0, -10.0e3]
+axis1   = [1.0, 0.0, 0.0]
+axis2   = [0.0, 0.0, 1.0]
+half1   = 6.0e3
+half2   = 6.0e3
+taper   = 0.0
+eps     = 1.0e-3
+inside  = 0.13
+outside = 0.14
+
+# Initial slip rate (kernel strike component): V_i = 0.03 m/s in the
+# nucleation patch (SCEC), V_init = 1e-9 m/s elsewhere.
+[cycle.fields.V_init]
+center  = [-24.0e3, 0.0, -10.0e3]
+axis1   = [1.0, 0.0, 0.0]
+axis2   = [0.0, 0.0, 1.0]
+half1   = 6.0e3
+half2   = 6.0e3
+taper   = 0.0
+eps     = 1.0e-3
+inside  = 0.03
+outside = 1.0e-9
+
+# Station files on the spec's cadence (BP5 section 4.1): 0.1 s rows while
+# max V > 1e-3 m/s, else 0.1 yr; in the dynamic regime the global file gets
+# a row with each station row.  Stations in global XYZ (x2 = x, x3 = -z),
+# file names as the SCEC upload.
+[cycle.output]
+prefix       = "bp5_fd_p2_1800yr"
+fast_V       = 1.0e-3
+dt_fast      = 0.1
+dt_slow      = 3155760.0
+event_V      = 1.0e-3
+event_dwell  = 10.0
+plane_origin = [0.0, 0.0, 0.0]
+plane_axis1  = [1.0, 0.0, 0.0]
+plane_axis2  = [0.0, 0.0, -1.0]
+
+[[cycle.output.station]]
+name = "fltst_strk-36dp+00"
+x    = [-36.0e3, 0.0, 0.0]
+[[cycle.output.station]]
+name = "fltst_strk-16dp+00"
+x    = [-16.0e3, 0.0, 0.0]
+[[cycle.output.station]]
+name = "fltst_strk+00dp+00"
+x    = [0.0, 0.0, 0.0]
+[[cycle.output.station]]
+name = "fltst_strk+16dp+00"
+x    = [16.0e3, 0.0, 0.0]
+[[cycle.output.station]]
+name = "fltst_strk+36dp+00"
+x    = [36.0e3, 0.0, 0.0]
+[[cycle.output.station]]
+name = "fltst_strk-24dp+10"
+x    = [-24.0e3, 0.0, -10.0e3]
+[[cycle.output.station]]
+name = "fltst_strk-16dp+10"
+x    = [-16.0e3, 0.0, -10.0e3]
+[[cycle.output.station]]
+name = "fltst_strk+00dp+10"
+x    = [0.0, 0.0, -10.0e3]
+[[cycle.output.station]]
+name = "fltst_strk+16dp+10"
+x    = [16.0e3, 0.0, -10.0e3]
+[[cycle.output.station]]
+name = "fltst_strk+00dp+22"
+x    = [0.0, 0.0, -22.0e3]
+
+# The SCEC outputs of section 4 besides the stations above
+# (cycle/bench_output.hpp), from the steps the station files use:
+#   domain A (sections 4.3, 4.6): |x2| <= l/2 + 2 h_t = 34 km,
+#            0 <= x3 <= H + h_s + 3 h_t = 20 km
+#   rupture_V: 1 mm/s (section 4.6); profiles every 5 yr, and every 1 s
+#   while max V > fast_V (section 4.5)
+#   volume_axes: x1 = +y (the + side), x2 = +x, x3 = -z, so disp_1 > 0 is
+#   extension, disp_2 > 0 right-lateral and disp_3 > 0 downward on the
+#   + side (section 4.2)
+[cycle.benchmark]
+region_x2       = [-34.0e3, 34.0e3]
+region_x3       = [0.0, 20.0e3]
+rupture_V       = 1.0e-3
+profile_dt_slow = 1.5778800e8
+profile_dt_fast = 1.0
+volume_axes     = [[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]]
+
+# Off-fault stations (section 4.2), global XYZ = (x2, x1, -x3).
+[[cycle.benchmark.volume_station]]
+name = "blkst_strk-16fn+08dp+00"
+x    = [-16.0e3, 8.0e3, 0.0]
+[[cycle.benchmark.volume_station]]
+name = "blkst_strk+00fn+08dp+00"
+x    = [0.0, 8.0e3, 0.0]
+[[cycle.benchmark.volume_station]]
+name = "blkst_strk+16fn+08dp+00"
+x    = [16.0e3, 8.0e3, 0.0]
+[[cycle.benchmark.volume_station]]
+name = "blkst_strk+00fn+16dp+00"
+x    = [0.0, 16.0e3, 0.0]
+[[cycle.benchmark.volume_station]]
+name = "blkst_strk+00fn+32dp+00"
+x    = [0.0, 32.0e3, 0.0]
+[[cycle.benchmark.volume_station]]
+name = "blkst_strk+00fn+48dp+00"
+x    = [0.0, 48.0e3, 0.0]
+[[cycle.benchmark.volume_station]]
+name = "blkst_strk+00fn+08dp+10"
+x    = [0.0, 8.0e3, -10.0e3]
+[[cycle.benchmark.volume_station]]
+name = "blkst_strk+00fn+16dp+10"
+x    = [0.0, 16.0e3, -10.0e3]
+[[cycle.benchmark.volume_station]]
+name = "blkst_strk+00fn+32dp+10"
+x    = [0.0, 32.0e3, -10.0e3]
+
+# Profiles (section 4.5), plane coordinates [x2, x3] in m, 1 km apart:
+# along strike at x3 = 10 km from -38 to 38 km, along dip at x2 = 0 from
+# 0 to 40 km.
+[[cycle.benchmark.profile]]
+name       = "strike"
+from       = [-38.0e3, 10.0e3]
+to         = [38.0e3, 10.0e3]
+points     = 77
+coordinate = "x2"
+[[cycle.benchmark.profile]]
+name       = "depth"
+from       = [0.0, 0.0]
+to         = [0.0, 40.0e3]
+points     = 41
+coordinate = "x3"
+
+# QD checkpoints only: one at each switch back, then every 500 QD steps.
+[cycle.checkpoint]
+every_qd_steps = 500
+
+# Whole-field snapshots (cycle/snapshots.hpp): a snapshot at the first QD
+# step at or after each multiple of dt_qd since t = 0 (10 yr), at the first
+# dynamic step at or after each multiple of dt_dyn since the phase started
+# (0.1 s), and one at every switch and at the end.
+[cycle.snapshots.fault]
+dt_qd  = 3.15576e8
+dt_dyn = 0.1
+
+# The free surface: attribute 1 on the plane z = 0 (attribute 1 also holds
+# the bottom of the mesh, z = -100 km).
+[cycle.snapshots.surface]
+dt_qd        = 3.15576e8
+dt_dyn       = 0.1
+attrs        = [1]
+plane_normal = [0.0, 0.0, 1.0]
+plane_offset = 0.0
+
+[cycle.snapshots.volume]
+enabled = false

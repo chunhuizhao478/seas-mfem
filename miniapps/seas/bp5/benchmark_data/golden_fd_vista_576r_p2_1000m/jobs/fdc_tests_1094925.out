@@ -1,0 +1,195 @@
+part: tests
+host i617-112.vista.tacc.utexas.edu  cpu Model name: Neoverse-V2  logs /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/build_1094925
+python 3.11.8 numpy 1.26.4 h5py 3.14.0
+commit 3926e9c81c126214d9c12d4d9136d0ebec2f7d34, binaries from the build job at 3926e9c81c126214d9c12d4d9136d0ebec2f7d34
+test-cycle-params-parity exit 0 in 2 s
+  PASSED (gold)
+  PASSED (scec_fd)
+test_cycle_params_parity: PASSED (0 failing checks)
+test-cycle-p3 exit 0 in 1548 s
+  ok   catalog_matches_controller mac_dt            phase ends at step 11317 (t = 19.461064027 s), catalog closes at step 11317
+  ok   catalog_matches_controller mac_dt row        rows 1, t_end vs first time below: relative 2.85e-14
+  ok   catalog_matches_controller round_dt          phase ends at step 10101 (t = 10.101 s), catalog closes at step 10101
+  ok   catalog_matches_controller round_dt row      rows 1, t_end vs first time below: relative 6.87e-16
+  ok   catalog_matches_controller dwell_0           phase ends at step 51 (t = 0.051 s), catalog closes at step 51
+  ok   catalog_matches_controller dwell_0 row       rows 1, t_end vs first time below: relative 8.16e-16
+  ok   catalog_matches_controller t0_100yr          phase ends at step 7816 (t = 3155760013.44 s), catalog closes at step 7816
+  ok   catalog_matches_controller t0_100yr row      rows 1, t_end vs first time below: relative 5.74e-15
+  control: the same QD solve twice: displacement 0.000e+00, traction 0.000e+00 (max rel diff)
+  ok   W's time after Enter is t_s                  t0 + tau with tau = 0
+  ok   slip: QD -> W -> QD                          max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   psi: QD -> W -> QD                           max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   QD state after Reenter vs before             max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   re-entry solve: max V                        rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   re-entry solve: slip rate                    max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   re-entry solve: traction                     max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   re-entry solve: normal traction              max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   re-entry solve: displacement                 max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   TS after Reenter: step counter and dt        step 0, dt = dt_init
+  A: max V 1.574249e-02 m/s at t_K = 9.342192e-02 s; dynamic to t = 1.278146e-01 s (max V 1.855321e-02); QD balance 2.067330e-02 m/s; 10 QD steps to t = 2.877498e-01 s
+  ok   A: M QD steps after the switch               step 15
+  ok   B (fresh QD run): state vs A                 max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   B (fresh QD run): t vs A                     rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   B (fresh QD run): next dt vs A               rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   B (fresh QD run): step and rejections vs A   step 15, rejections 3
+  ok   C: checkpoint block                          step, t and dynamic phases read back
+  ok   C (restart from the switch checkpoint): state vs A max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   C (restart from the switch checkpoint): t vs A rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   C (restart from the switch checkpoint): next dt vs A rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   C (restart from the switch checkpoint): step and rejections vs A step 15, rejections 3
+test_cycle_p3: PASSED (0 failing checks)
+  ok   catalog_matches_controller mac_dt            phase ends at step 11317 (t = 19.461064027 s), catalog closes at step 11317
+  ok   catalog_matches_controller mac_dt row        rows 1, t_end vs first time below: relative 2.85e-14
+  ok   catalog_matches_controller round_dt          phase ends at step 10101 (t = 10.101 s), catalog closes at step 10101
+  ok   catalog_matches_controller round_dt row      rows 1, t_end vs first time below: relative 6.87e-16
+  ok   catalog_matches_controller dwell_0           phase ends at step 51 (t = 0.051 s), catalog closes at step 51
+  ok   catalog_matches_controller dwell_0 row       rows 1, t_end vs first time below: relative 8.16e-16
+  ok   catalog_matches_controller t0_100yr          phase ends at step 7816 (t = 3155760013.44 s), catalog closes at step 7816
+  ok   catalog_matches_controller t0_100yr row      rows 1, t_end vs first time below: relative 5.74e-15
+  control: the same QD solve twice: displacement 0.000e+00, traction 0.000e+00 (max rel diff)
+  ok   W's time after Enter is t_s                  t0 + tau with tau = 0
+  ok   slip: QD -> W -> QD                          max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   psi: QD -> W -> QD                           max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   QD state after Reenter vs before             max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   re-entry solve: max V                        rel diff 0.000e+00 (tolerance 1.000e-12)
+  ok   re-entry solve: slip rate                    max rel diff 0.000e+00 (tolerance 1.000e-12)
+  ok   re-entry solve: traction                     max rel diff 0.000e+00 (tolerance 1.000e-12)
+  ok   re-entry solve: normal traction              max rel diff 0.000e+00 (tolerance 1.000e-12)
+  ok   re-entry solve: displacement                 max rel diff 0.000e+00 (tolerance 1.000e-12)
+  ok   TS after Reenter: step counter and dt        step 0, dt = dt_init
+  A: max V 1.574249e-02 m/s at t_K = 9.342192e-02 s; dynamic to t = 1.278146e-01 s (max V 1.855321e-02); QD balance 2.067330e-02 m/s; 10 QD steps to t = 2.877498e-01 s
+  ok   A: M QD steps after the switch               step 15
+  ok   B (fresh QD run): state vs A                 max rel diff 1.216e-13 (tolerance 1.000e-10)
+  ok   B (fresh QD run): t vs A                     rel diff 2.099e-11 (tolerance 1.000e-10)
+  ok   B (fresh QD run): next dt vs A               rel diff 2.396e-11 (tolerance 1.000e-08)
+  ok   B (fresh QD run): step and rejections vs A   step 15, rejections 3
+  ok   C: checkpoint block                          step, t and dynamic phases read back
+  ok   C (restart from the switch checkpoint): state vs A max rel diff 2.611e-14 (tolerance 1.000e-10)
+  ok   C (restart from the switch checkpoint): t vs A rel diff 4.504e-12 (tolerance 1.000e-10)
+  ok   C (restart from the switch checkpoint): next dt vs A rel diff 4.323e-10 (tolerance 1.000e-08)
+  ok   C (restart from the switch checkpoint): step and rejections vs A step 15, rejections 3
+test_cycle_p3: PASSED (0 failing checks)
+test-cycle-p2 exit 0 in 571 s
+test_cycle_p2 (frame_map): PASSED (0 failing checks)
+test_cycle_p2 (frame_map): PASSED (0 failing checks)
+test_cycle_p2 (frame_map): PASSED (0 failing checks)
+test_cycle_p2 (frame_map): PASSED (0 failing checks)
+test_cycle_p2 (frame_map): PASSED (0 failing checks)
+test_cycle_p2 (frame_map): PASSED (0 failing checks)
+test_cycle_p2 (frame_map): PASSED (0 failing checks)
+test_cycle_p2: PASSED (0 failing checks)
+test_cycle_restart.sh exit 0 in 1683 s
+PASSED: 13 file pairs compared
+test-cycle-p4 exit 0 in 468 s
+  ok   closure(T_h(u_s, d_s) + S0, psi, gamma eta) vs V_qd max |dV| / |V_qd| per DOF 3.065e-11 (tolerance 1.000e-08)
+  ok     direction: 1 - min cos(V, V_qd)             4.441e-16 (tolerance 1.000e-10)
+  ok   control: B differs from A                    U and slip rate
+  ok   A again, at Enter: U                         max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, at Enter: U'                        max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, at Enter: slip                      max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, at Enter: slip rate                 max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, at Enter: psi                       max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, at Enter: sigma* (Prakash-Clifton)  max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, at Enter: station fields            max rel diff (7 fields) 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, at Enter: time, tau, steps          t 10000000.000000 s, 0 steps
+  ok   A again, after the steps: U                  max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, after the steps: U'                 max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, after the steps: slip               max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, after the steps: slip rate          max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, after the steps: psi                max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, after the steps: sigma* (Prakash-Clifton) max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, after the steps: station fields     max rel diff (7 fields) 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, after the steps: time, tau, steps   t 10000000.034393 s, 20 steps
+test_cycle_p4: PASSED (0 failing checks)
+  ok   closure(T_h(u_s, d_s) + S0, psi, gamma eta) vs V_qd max |dV| / |V_qd| per DOF 2.795e-11 (tolerance 1.000e-08)
+  ok     direction: 1 - min cos(V, V_qd)             4.441e-16 (tolerance 1.000e-10)
+  ok   control: B differs from A                    U and slip rate
+  ok   A again, at Enter: U                         max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, at Enter: U'                        max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, at Enter: slip                      max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, at Enter: slip rate                 max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, at Enter: psi                       max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, at Enter: sigma* (Prakash-Clifton)  max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, at Enter: station fields            max rel diff (7 fields) 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, at Enter: time, tau, steps          t 10000000.000000 s, 0 steps
+  ok   A again, after the steps: U                  max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, after the steps: U'                 max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, after the steps: slip               max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, after the steps: slip rate          max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, after the steps: psi                max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, after the steps: sigma* (Prakash-Clifton) max rel diff 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, after the steps: station fields     max rel diff (7 fields) 0.000e+00 (tolerance 0.000e+00)
+  ok   A again, after the steps: time, tau, steps   t 10000000.034393 s, 20 steps
+test_cycle_p4: PASSED (0 failing checks)
+test-cycle-snapshots exit 0 in 1298 s
+NOTE: no python vtk: ParaView's reader (vtkHDFReader) is not checked
+A: exit 7 (expected 7), 231 s
+B: exit 0 (expected 0), 179 s
+C: exit 0 (expected 0), 186 s
+F: exit 0 (expected 0), 263 s
+D's wall limit: 184 s
+D: exit 8 (expected 8), 186 s
+E: exit 0 (expected 0), 125 s
+G: exit 7 (expected 7), 121 s
+test_cycle_snapshots: PASSED
+test-nitsche-pf exit 0 in 24 s
+=== Summary: 11/11 passed, 0 failed ===
+=== Summary: 11/11 passed, 0 failed ===
+test-nitsche-hook-spy exit 0 in 37 s
+=== Summary: 16/16 passed, 0 failed ===
+=== Summary: 16/16 passed, 0 failed ===
+=== Summary: 16/16 passed, 0 failed ===
+then echo "FAILED: --abort-reject did not abort"; exit 1; fi; \
+if grep -q "closure rejects the parameters" hook_spy_abort.log; then echo "PASSED: --abort-reject aborted: closure rejects the parameters"; \
+else echo "FAILED: --abort-reject aborted without 'closure rejects the parameters'"; exit 1; fi; rm -f hook_spy_abort.log
+PASSED: --abort-reject aborted: closure rejects the parameters
+test-cycle-bench exit 0 in 2 s
+  ok   UpdateEvents sequence                    010232040 (0 none 1 started 2 below 3 above 4 ended)
+  ok   UpdateEvents dwell 0: Ended at t         
+  ok   areas                                    fault 1000000.000000 m^2, A 500000.000000
+  ok   source row (face 1 outside A)            log10 Vmax_A 0.30103, moment rate 3e+16
+  ok   off-fault row (lowest rank writes)       u, v on (e1, e2, e3) exact
+  ok   profile rows and cadence                 4 rows
+  ok   catalog row across the restart           R 333333, tau 5 -> 3 MPa, slip 2 m
+  ok   rupture times (1e9 = never)              2 of 6 DOFs ruptured
+  ok   location vertex 0                        layout 0: face 2 (want 2), x2 0 m, on a face, 1 owner(s), centre (-333.333, -333.333) m
+  ok   location edge 0                          layout 0: face 1 (want 1), x2 0 m, on a face, 1 owner(s), centre (-333.333, 333.333) m
+  ok   location inside 0                        layout 0: face 0 (want 0), x2 500 m, on a face, 1 owner(s), centre (666.667, 333.333) m
+  ok   location outside 0                       layout 0: face 2 (want 2), x2 -1000 m, nearest DOF, 1 owner(s), centre (-333.333, -333.333) m
+  ok   location vertex 1                        layout 1: face 2 (want 2), x2 0 m, on a face, 1 owner(s), centre (-333.333, -333.333) m
+  ok   location edge 1                          layout 1: face 1 (want 1), x2 0 m, on a face, 1 owner(s), centre (-333.333, 333.333) m
+  ok   location inside 1                        layout 1: face 0 (want 0), x2 500 m, on a face, 1 owner(s), centre (666.667, 333.333) m
+  ok   location outside 1                       layout 1: face 2 (want 2), x2 -1000 m, nearest DOF, 1 owner(s), centre (-333.333, -333.333) m
+test_cycle_bench: PASSED (0 failures)
+  ok   UpdateEvents sequence                    010232040 (0 none 1 started 2 below 3 above 4 ended)
+  ok   UpdateEvents dwell 0: Ended at t         
+  ok   areas                                    fault 1000000.000000 m^2, A 500000.000000
+  ok   source row (face 1 outside A)            log10 Vmax_A 0.30103, moment rate 3e+16
+  ok   off-fault row (lowest rank writes)       u, v on (e1, e2, e3) exact
+  ok   profile rows and cadence                 4 rows
+  ok   catalog row across the restart           R 333333, tau 5 -> 3 MPa, slip 2 m
+  ok   rupture times (1e9 = never)              2 of 6 DOFs ruptured
+  ok   location vertex 0                        layout 0: face 2 (want 2), x2 0 m, on a face, 1 owner(s), centre (-333.333, -333.333) m
+  ok   location edge 0                          layout 0: face 1 (want 1), x2 0 m, on a face, 1 owner(s), centre (-333.333, 333.333) m
+  ok   location inside 0                        layout 0: face 0 (want 0), x2 500 m, on a face, 1 owner(s), centre (666.667, 333.333) m
+  ok   location outside 0                       layout 0: face 2 (want 2), x2 -1000 m, nearest DOF, 1 owner(s), centre (-333.333, -333.333) m
+  ok   location vertex 1                        layout 1: face 2 (want 2), x2 0 m, on a face, 1 owner(s), centre (-333.333, -333.333) m
+  ok   location edge 1                          layout 1: face 1 (want 1), x2 0 m, on a face, 1 owner(s), centre (-333.333, 333.333) m
+  ok   location inside 1                        layout 1: face 0 (want 0), x2 500 m, on a face, 1 owner(s), centre (666.667, 333.333) m
+  ok   location outside 1                       layout 1: face 2 (want 2), x2 -1000 m, nearest DOF, 1 owner(s), centre (-333.333, -333.333) m
+test_cycle_bench: PASSED (0 failures)
+test-cycle-bench-run exit 0 in 1482 s
+--- restart (QD only, 10 + 10 steps, 1 rank)
+PASSED: 33 file pairs compared
+--- velocity: the off-fault rows of the restart test's full run
+PASSED: 9 off-fault files (9 expected)
+--- matrix: 10 QD steps through the stage operators against the face loops (1 rank)
+qd_matrix: exit 0 in 182 s on 1 rank(s)
+PASSED: 20 file pairs compared
+--- lts: the first event dynamic, LTS rate 2 against global stepping, 4 ranks
+lts: exit 0 in 177 s on 4 rank(s)
+gts: exit 0 in 129 s on 4 rank(s)
+PASSED: 11 file pairs compared (scale: per quantity and file kind)
+PASSED: 9 file pairs compared (scale: per quantity and file kind)
+test_cycle_bench_run: PASSED
+total 7116 s, failing steps: 0

@@ -1,0 +1,245 @@
+commit 3926e9c81c126214d9c12d4d9136d0ebec2f7d34, binaries built at 3926e9c81c126214d9c12d4d9136d0ebec2f7d34
+--- qd_green.toml against config/fd_cycle/bp5_fd_p2_1800yr.toml
+145c145
+< V_on               = 1.0e-2
+---
+> V_on               = 1.0e2
+--- qd_loops.toml against config/fd_cycle/bp5_fd_p2_1800yr.toml
+145c145
+< V_on               = 1.0e-2
+---
+> V_on               = 1.0e2
+162c162
+< operators     = "matrix"
+---
+> operators     = "loops"
+169a170
+> enabled          = false
+--- lts.toml against config/fd_cycle/bp5_fd_p2_1800yr.toml
+186c186
+< mode         = "off"
+---
+> mode         = "rate2"
+--- gts.toml against config/fd_cycle/bp5_fd_p2_1800yr.toml
+green: exit 0 in 151 s on 576 ranks
+    i614-111: peak committed 122.9 of 118.8 GiB
+    i614-113: peak committed 127.2 of 118.8 GiB
+    i618-142: peak committed 126.4 of 118.8 GiB
+    i618-143: peak committed 110.3 of 118.8 GiB
+  QD stages: matrix, Green's function H-matrix eps 0.000000 (cache '', hcache '/scratch/10024/zhaochun/seas-qd-green/bp5_fd_p2_h1e-10.bin', check every 10000 stages)
+  dynamic stepping: global (central difference)
+  benchmark output: 9 off-fault stations, 2 profiles
+  t_final: 5.68037e+10 s, dt_init: 0.01 s
+  output: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2check_1094926/green/bp5_fd_p2_1800yr_*
+  checkpoint every: 500 QD steps
+--
+[QD-GREEN] dense G would be 139.55 GiB; kept as an H-matrix (dense rows only while compressing)
+[QD-GREEN] G 167616 x 111744 (N_f 55872, shear + normal rows), 45.75 GiB in all as an H-matrix, 0.39 GiB largest rank
+[QD-GREEN] H-matrix read from /scratch/10024/zhaochun/seas-qd-green/bp5_fd_p2_h1e-10.bin (N_f 55872, order 2, penalty factor 1, 3 components, compressed on 576 ranks from G read from /scratch/10024/zhaochun/seas-qd-green/bp5_prod_p2.bin)
+[QD-HMAT] read from /scratch/10024/zhaochun/seas-qd-green/bp5_fd_p2_h1e-10.bin at eps 1.0e-10, leaf 64, eta 2.000: 2047 clusters, 25246 blocks (15756 admissible, 925 low rank, 24321 dense)
+[QD-HMAT] stored 37.853 GiB vs dense 139.550 GiB (x3.69 smaller); low-rank ranks median/p90/max 512/916/1156
+[QD-HMAT] on the ranks: dense rows 13.977 GiB, U rows 14.325 GiB, V 16.867 GiB (V copies on 4 node(s): +19.3%); largest rank 0.394 GiB, mean 0.078 GiB; w received per stage max 69135 values
+--
+[QD-GREEN] compressed G ready 17.3 s after the start of the build
+[QD-GREEN] check against the solve path (t = 100 yr, test slip): max rel. difference shear 3.318e-15, normal 8.102e-14 (tolerance 1.000e-08)
+  Initial V_max = 0.03, V_ref (max V_init) = 0.03
+  fault DOFs: 55872 (global)
+  initial V_max: 0.03 m/s
+--
+  profile points: 118, largest match distance 0 m
+  benchmark output: fault area 4e+09 m^2, domain A 1.35602e+09 m^2; off-fault stations blkst_strk-16fn+08dp+00 (rank 380) blkst_strk+00fn+08dp+00 (rank 401) blkst_strk+16fn+08dp+00 (rank 212) blkst_strk+00fn+16dp+00 (rank 204) blkst_strk+00fn+32dp+00 (rank 204) blkst_strk+00fn+48dp+00 (rank 310) blkst_strk+00fn+08dp+10 (rank 429) blkst_strk+00fn+16dp+10 (rank 310) blkst_strk+00fn+32dp+10 (rank 310)
+  fault snapshots: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2check_1094926/green/bp5_fd_p2_1800yr_fault_snapshots.vtkhdf (55872 points, 0 snapshots so far)
+  surface snapshots: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2check_1094926/green/bp5_fd_p2_1800yr_surface_snapshots.vtkhdf (11256 points, 0 snapshots so far)
+
+--
+[QD-GREEN] stages 1899, checks 0
+
+=== fd_cycle summary ===
+  commit: 3926e9c81c126214d9c12d4d9136d0ebec2f7d34
+  final time: 1.527e+00 s (4.840e-08 yr)
+  TS steps: 300
+loops: exit 0 in 2284 s on 576 ranks
+    i614-111: peak committed 127.8 of 118.8 GiB
+    i614-113: peak committed 122.9 of 118.8 GiB
+    i618-142: peak committed 115.2 of 118.8 GiB
+    i618-143: peak committed 123.2 of 118.8 GiB
+  QD stages: loops
+  dynamic stepping: global (central difference)
+  benchmark output: 9 off-fault stations, 2 profiles
+  t_final: 5.68037e+10 s, dt_init: 0.01 s
+  output: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2check_1094926/loops/bp5_fd_p2_1800yr_*
+  checkpoint every: 500 QD steps
+--
+  profile points: 118, largest match distance 0 m
+  benchmark output: fault area 4e+09 m^2, domain A 1.35602e+09 m^2; off-fault stations blkst_strk-16fn+08dp+00 (rank 380) blkst_strk+00fn+08dp+00 (rank 401) blkst_strk+16fn+08dp+00 (rank 212) blkst_strk+00fn+16dp+00 (rank 204) blkst_strk+00fn+32dp+00 (rank 204) blkst_strk+00fn+48dp+00 (rank 310) blkst_strk+00fn+08dp+10 (rank 429) blkst_strk+00fn+16dp+10 (rank 310) blkst_strk+00fn+32dp+10 (rank 310)
+  fault snapshots: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2check_1094926/loops/bp5_fd_p2_1800yr_fault_snapshots.vtkhdf (55872 points, 0 snapshots so far)
+  surface snapshots: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2check_1094926/loops/bp5_fd_p2_1800yr_surface_snapshots.vtkhdf (11256 points, 0 snapshots so far)
+
+--
+=== fd_cycle summary ===
+  commit: 3926e9c81c126214d9c12d4d9136d0ebec2f7d34
+  final time: 1.527e+00 s (4.840e-08 yr)
+  TS steps: 300
+loops144: exit 0 in 390 s on 144 ranks
+    i614-111: peak committed 262.2 of 118.8 GiB
+    i614-113: peak committed 4.5 of 118.8 GiB
+    i618-142: peak committed 1.5 of 118.8 GiB
+    i618-143: peak committed 1.1 of 118.8 GiB
+  QD stages: loops
+  dynamic stepping: global (central difference)
+  benchmark output: 9 off-fault stations, 2 profiles
+  t_final: 5.68037e+10 s, dt_init: 0.01 s
+  output: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2check_1094926/loops144/bp5_fd_p2_1800yr_*
+  checkpoint every: 500 QD steps
+--
+  profile points: 118, largest match distance 0 m
+  benchmark output: fault area 4e+09 m^2, domain A 1.35602e+09 m^2; off-fault stations blkst_strk-16fn+08dp+00 (rank 98) blkst_strk+00fn+08dp+00 (rank 50) blkst_strk+16fn+08dp+00 (rank 36) blkst_strk+00fn+16dp+00 (rank 50) blkst_strk+00fn+32dp+00 (rank 91) blkst_strk+00fn+48dp+00 (rank 91) blkst_strk+00fn+08dp+10 (rank 53) blkst_strk+00fn+16dp+10 (rank 91) blkst_strk+00fn+32dp+10 (rank 91)
+  fault snapshots: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2check_1094926/loops144/bp5_fd_p2_1800yr_fault_snapshots.vtkhdf (55872 points, 0 snapshots so far)
+  surface snapshots: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2check_1094926/loops144/bp5_fd_p2_1800yr_surface_snapshots.vtkhdf (11256 points, 0 snapshots so far)
+
+--
+=== fd_cycle summary ===
+  commit: 3926e9c81c126214d9c12d4d9136d0ebec2f7d34
+  final time: 1.527e+00 s (4.840e-08 yr)
+  TS steps: 300
+--- Green's function: green against loops
+  ok   bp5_fd_p2_1800yr_blkst_strk+00fn+08dp+00.txt: 17 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 2.7e-11 3.8e-11 5.9e-12 1.3e-10 1.9e-10 3.1e-11
+  ok   bp5_fd_p2_1800yr_blkst_strk+00fn+08dp+10.txt: 17 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 2.6e-11 3.1e-11 1.1e-12 1.3e-10 1.6e-10 4.0e-12
+  ok   bp5_fd_p2_1800yr_blkst_strk+00fn+16dp+00.txt: 17 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 3.4e-11 3.9e-11 3.8e-12 1.7e-10 1.9e-10 2.1e-11
+  ok   bp5_fd_p2_1800yr_blkst_strk+00fn+16dp+10.txt: 17 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 2.9e-11 3.3e-11 2.9e-12 1.5e-10 1.7e-10 1.2e-11
+  ok   bp5_fd_p2_1800yr_blkst_strk+00fn+32dp+00.txt: 17 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 2.1e-11 1.8e-11 7.3e-13 1.1e-10 9.3e-11 2.9e-12
+  ok   bp5_fd_p2_1800yr_blkst_strk+00fn+32dp+10.txt: 17 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 1.9e-11 1.6e-11 3.5e-12 9.3e-11 8.2e-11 1.7e-11
+  ok   bp5_fd_p2_1800yr_blkst_strk+00fn+48dp+00.txt: 17 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 1.0e-11 8.1e-12 1.3e-12 5.2e-11 4.1e-11 6.3e-12
+  ok   bp5_fd_p2_1800yr_blkst_strk+16fn+08dp+00.txt: 17 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 9.0e-12 1.1e-11 2.4e-13 4.5e-11 5.4e-11 9.7e-13
+  ok   bp5_fd_p2_1800yr_blkst_strk-16fn+08dp+00.txt: 17 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 9.4e-11 9.0e-11 3.0e-11 4.5e-10 4.4e-10 1.7e-10
+  ok   bp5_fd_p2_1800yr_fltst_strk+00dp+00.txt: 17 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 2.9e-20 1.1e-24 3.8e-20 5.5e-24 3.5e-13 1.9e-17 0.0e+00
+  ok   bp5_fd_p2_1800yr_fltst_strk+00dp+10.txt: 17 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 1.8e-19 8.7e-23 6.6e-20 4.2e-22 3.6e-13 7.2e-16 0.0e+00
+  ok   bp5_fd_p2_1800yr_fltst_strk+00dp+22.txt: 17 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 1.5e-20 1.1e-22 4.6e-20 5.5e-22 3.7e-13 1.3e-15 0.0e+00
+  ok   bp5_fd_p2_1800yr_fltst_strk+16dp+00.txt: 17 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 1.4e-20 5.2e-25 3.4e-20 1.1e-24 4.4e-13 2.5e-17 0.0e+00
+  ok   bp5_fd_p2_1800yr_fltst_strk+16dp+10.txt: 17 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 4.9e-20 3.2e-23 4.5e-20 1.5e-22 4.4e-13 3.6e-16 0.0e+00
+  ok   bp5_fd_p2_1800yr_fltst_strk+36dp+00.txt: 17 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 1.2e-20 1.9e-25 4.7e-20 4.3e-25 9.2e-14 1.2e-17 0.0e+00
+  ok   bp5_fd_p2_1800yr_fltst_strk-16dp+00.txt: 17 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 2.2e-19 3.0e-23 8.6e-20 1.7e-22 3.7e-13 1.3e-15 0.0e+00
+  ok   bp5_fd_p2_1800yr_fltst_strk-16dp+10.txt: 17 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 5.4e-18 4.1e-21 1.8e-18 2.0e-20 3.6e-13 1.5e-13 0.0e+00
+  ok   bp5_fd_p2_1800yr_fltst_strk-24dp+10.txt: 17 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 1.3e-10 1.2e-14 9.2e-11 6.6e-14 2.6e-12 2.8e-14 4.9e-11
+  ok   bp5_fd_p2_1800yr_fltst_strk-36dp+00.txt: 17 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 1.5e-19 2.2e-23 4.2e-20 1.1e-22 4.1e-13 6.1e-16 0.0e+00
+  ok   bp5_fd_p2_1800yr_source.txt: 17 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 9.5e-11 5.2e-10
+PASSED: 20 file pairs compared (scale: per quantity and file kind)
+--- 576 against 144 ranks: green against loops144
+  ok   bp5_fd_p2_1800yr_blkst_strk+00fn+08dp+00.txt: 16 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 5.5e-12 7.7e-12 1.2e-12 2.7e-11 3.8e-11 6.3e-12
+  ok   bp5_fd_p2_1800yr_blkst_strk+00fn+08dp+10.txt: 16 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 5.3e-12 6.4e-12 2.3e-13 2.7e-11 3.1e-11 8.1e-13
+  ok   bp5_fd_p2_1800yr_blkst_strk+00fn+16dp+00.txt: 16 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 6.8e-12 7.8e-12 7.7e-13 3.4e-11 3.9e-11 4.3e-12
+  ok   bp5_fd_p2_1800yr_blkst_strk+00fn+16dp+10.txt: 16 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 5.9e-12 6.7e-12 5.8e-13 2.9e-11 3.3e-11 2.5e-12
+  ok   bp5_fd_p2_1800yr_blkst_strk+00fn+32dp+00.txt: 16 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 4.3e-12 3.7e-12 1.5e-13 2.2e-11 1.9e-11 5.9e-13
+  ok   bp5_fd_p2_1800yr_blkst_strk+00fn+32dp+10.txt: 16 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 3.7e-12 3.3e-12 7.2e-13 1.9e-11 1.6e-11 3.4e-12
+  ok   bp5_fd_p2_1800yr_blkst_strk+00fn+48dp+00.txt: 16 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 2.1e-12 1.6e-12 2.6e-13 1.0e-11 8.2e-12 1.3e-12
+  ok   bp5_fd_p2_1800yr_blkst_strk+16fn+08dp+00.txt: 16 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 1.8e-12 2.2e-12 4.9e-14 9.0e-12 1.1e-11 2.0e-13
+  ok   bp5_fd_p2_1800yr_blkst_strk-16fn+08dp+00.txt: 16 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 1.9e-11 1.8e-11 6.1e-12 9.0e-11 8.8e-11 3.4e-11
+  ok   bp5_fd_p2_1800yr_fltst_strk+00dp+00.txt: 16 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 2.5e-20 7.6e-25 3.8e-20 1.1e-24 4.0e-13 3.1e-17 4.0e-15
+  ok   bp5_fd_p2_1800yr_fltst_strk+00dp+10.txt: 16 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 3.5e-20 1.8e-23 3.3e-20 8.5e-23 3.3e-13 1.4e-16 4.3e-15
+  ok   bp5_fd_p2_1800yr_fltst_strk+00dp+22.txt: 16 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 1.6e-20 2.3e-23 3.6e-20 1.1e-22 4.4e-13 2.7e-16 4.0e-15
+  ok   bp5_fd_p2_1800yr_fltst_strk+16dp+00.txt: 16 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 1.3e-20 1.5e-25 4.5e-20 3.5e-25 4.3e-13 9.3e-18 4.0e-15
+  ok   bp5_fd_p2_1800yr_fltst_strk+16dp+10.txt: 16 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 1.9e-20 6.4e-24 4.5e-20 3.1e-23 4.6e-13 7.6e-17 4.3e-15
+  ok   bp5_fd_p2_1800yr_fltst_strk+36dp+00.txt: 16 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 3.4e-21 2.0e-25 4.6e-20 3.1e-25 1.9e-14 8.3e-18 4.0e-15
+  ok   bp5_fd_p2_1800yr_fltst_strk-16dp+00.txt: 16 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 4.4e-20 6.1e-24 3.7e-20 3.5e-23 4.5e-13 2.7e-16 4.0e-15
+  ok   bp5_fd_p2_1800yr_fltst_strk-16dp+10.txt: 16 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 1.1e-18 8.4e-22 3.3e-19 4.0e-21 2.8e-13 3.0e-14 4.0e-15
+  ok   bp5_fd_p2_1800yr_fltst_strk-24dp+10.txt: 16 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 2.6e-11 2.5e-15 2.8e-11 2.1e-14 6.1e-13 7.5e-15 8.9e-12
+  ok   bp5_fd_p2_1800yr_fltst_strk-36dp+00.txt: 16 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 2.9e-20 4.4e-24 5.1e-20 2.3e-23 4.2e-13 1.3e-16 4.0e-15
+  ok   bp5_fd_p2_1800yr_source.txt: 16 rows in [0, 1.52749] s; max |a-b| / max |a| per column: 1.2e-11 1.0e-10
+PASSED: 20 file pairs compared (scale: per quantity and file kind)
+lts: exit 0 in 129 s on 576 ranks
+    i614-111: peak committed 119.5 of 118.8 GiB
+    i614-113: peak committed 124.5 of 118.8 GiB
+    i618-142: peak committed 121.4 of 118.8 GiB
+    i618-143: peak committed 123.0 of 118.8 GiB
+  QD stages: matrix, Green's function H-matrix eps 0.000000 (cache '', hcache '/scratch/10024/zhaochun/seas-qd-green/bp5_fd_p2_h1e-10.bin', check every 10000 stages)
+  dynamic stepping: LTS rate2, cluster cap 4, fault buffer 3
+  benchmark output: 9 off-fault stations, 2 profiles
+  t_final: 5.68037e+10 s, dt_init: 0.01 s
+  output: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2check_1094926/lts/bp5_fd_p2_1800yr_*
+  checkpoint every: 500 QD steps
+--
+  LTS: rate2, 4 clusters (cap 4), dt0 = 0.000806553 s; tets per cluster 43627 5670 6454 7123; ideal 1.28404x; fault (18624 tets, 24921 buffer tets in 3 layer(s)) in cluster 0 after 2 clustering(s); partition BuildLtsAwarePartition (fault weight 0), max/mean overall 1.187, per cluster 1.201 1.117 1.071 1.051, fault tets 1.794
+
+=== Y=0 Face Classification Audit ===
+  Fault (attr=3):      9312
+--
+[QD-GREEN] dense G would be 139.55 GiB; kept as an H-matrix (dense rows only while compressing)
+[QD-GREEN] G 167616 x 111744 (N_f 55872, shear + normal rows), 45.12 GiB in all as an H-matrix, 0.37 GiB largest rank
+[QD-GREEN] H-matrix read from /scratch/10024/zhaochun/seas-qd-green/bp5_fd_p2_h1e-10.bin (N_f 55872, order 2, penalty factor 1, 3 components, compressed on 576 ranks from G read from /scratch/10024/zhaochun/seas-qd-green/bp5_prod_p2.bin)
+[QD-HMAT] read from /scratch/10024/zhaochun/seas-qd-green/bp5_fd_p2_h1e-10.bin at eps 1.0e-10, leaf 64, eta 2.000: 2047 clusters, 25246 blocks (15756 admissible, 925 low rank, 24321 dense)
+[QD-HMAT] stored 37.853 GiB vs dense 139.550 GiB (x3.69 smaller); low-rank ranks median/p90/max 512/916/1156
+[QD-HMAT] on the ranks: dense rows 13.977 GiB, U rows 14.325 GiB, V 16.231 GiB (V copies on 4 node(s): +17.6%); largest rank 0.372 GiB, mean 0.077 GiB; w received per stage max 64772 values
+--
+[QD-GREEN] compressed G ready 16.7 s after the start of the build
+[QD-GREEN] check against the solve path (t = 100 yr, test slip): max rel. difference shear 4.118e-15, normal 8.483e-14 (tolerance 1.000e-08)
+  Initial V_max = 0.03, V_ref (max V_init) = 0.03
+  fault DOFs: 55872 (global)
+  initial V_max: 0.03 m/s
+--
+  profile points: 118, largest match distance 0 m
+  benchmark output: fault area 4e+09 m^2, domain A 1.35602e+09 m^2; off-fault stations blkst_strk-16fn+08dp+00 (rank 480) blkst_strk+00fn+08dp+00 (rank 256) blkst_strk+16fn+08dp+00 (rank 227) blkst_strk+00fn+16dp+00 (rank 238) blkst_strk+00fn+32dp+00 (rank 239) blkst_strk+00fn+48dp+00 (rank 522) blkst_strk+00fn+08dp+10 (rank 251) blkst_strk+00fn+16dp+10 (rank 247) blkst_strk+00fn+32dp+10 (rank 533)
+  fault snapshots: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2check_1094926/lts/bp5_fd_p2_1800yr_fault_snapshots.vtkhdf (55872 points, 0 snapshots so far)
+  surface snapshots: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2check_1094926/lts/bp5_fd_p2_1800yr_surface_snapshots.vtkhdf (11256 points, 0 snapshots so far)
+
+gts: exit 0 in 133 s on 576 ranks
+    i614-111: peak committed 129.7 of 118.8 GiB
+    i614-113: peak committed 124.8 of 118.8 GiB
+    i618-142: peak committed 114.7 of 118.8 GiB
+    i618-143: peak committed 119.0 of 118.8 GiB
+  QD stages: matrix, Green's function H-matrix eps 0.000000 (cache '', hcache '/scratch/10024/zhaochun/seas-qd-green/bp5_fd_p2_h1e-10.bin', check every 10000 stages)
+  dynamic stepping: global (central difference)
+  benchmark output: 9 off-fault stations, 2 profiles
+  t_final: 5.68037e+10 s, dt_init: 0.01 s
+  output: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2check_1094926/gts/bp5_fd_p2_1800yr_*
+  checkpoint every: 500 QD steps
+--
+[QD-GREEN] dense G would be 139.55 GiB; kept as an H-matrix (dense rows only while compressing)
+[QD-GREEN] G 167616 x 111744 (N_f 55872, shear + normal rows), 45.75 GiB in all as an H-matrix, 0.39 GiB largest rank
+[QD-GREEN] H-matrix read from /scratch/10024/zhaochun/seas-qd-green/bp5_fd_p2_h1e-10.bin (N_f 55872, order 2, penalty factor 1, 3 components, compressed on 576 ranks from G read from /scratch/10024/zhaochun/seas-qd-green/bp5_prod_p2.bin)
+[QD-HMAT] read from /scratch/10024/zhaochun/seas-qd-green/bp5_fd_p2_h1e-10.bin at eps 1.0e-10, leaf 64, eta 2.000: 2047 clusters, 25246 blocks (15756 admissible, 925 low rank, 24321 dense)
+[QD-HMAT] stored 37.853 GiB vs dense 139.550 GiB (x3.69 smaller); low-rank ranks median/p90/max 512/916/1156
+[QD-HMAT] on the ranks: dense rows 13.977 GiB, U rows 14.325 GiB, V 16.867 GiB (V copies on 4 node(s): +19.3%); largest rank 0.394 GiB, mean 0.078 GiB; w received per stage max 69135 values
+--
+[QD-GREEN] compressed G ready 16.3 s after the start of the build
+[QD-GREEN] check against the solve path (t = 100 yr, test slip): max rel. difference shear 3.813e-15, normal 6.381e-14 (tolerance 1.000e-08)
+  Initial V_max = 0.03, V_ref (max V_init) = 0.03
+  fault DOFs: 55872 (global)
+  initial V_max: 0.03 m/s
+--
+  profile points: 118, largest match distance 0 m
+  benchmark output: fault area 4e+09 m^2, domain A 1.35602e+09 m^2; off-fault stations blkst_strk-16fn+08dp+00 (rank 380) blkst_strk+00fn+08dp+00 (rank 401) blkst_strk+16fn+08dp+00 (rank 212) blkst_strk+00fn+16dp+00 (rank 204) blkst_strk+00fn+32dp+00 (rank 204) blkst_strk+00fn+48dp+00 (rank 310) blkst_strk+00fn+08dp+10 (rank 429) blkst_strk+00fn+16dp+10 (rank 310) blkst_strk+00fn+32dp+10 (rank 310)
+  fault snapshots: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2check_1094926/gts/bp5_fd_p2_1800yr_fault_snapshots.vtkhdf (55872 points, 0 snapshots so far)
+  surface snapshots: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2check_1094926/gts/bp5_fd_p2_1800yr_surface_snapshots.vtkhdf (11256 points, 0 snapshots so far)
+
+--- LTS against global stepping, on the fault: lts against gts
+  ok   bp5_fd_p2_1800yr_fltst_strk+00dp+00.txt: 48 rows in [1e-09, 5.00063] s; max |a-b| / max |a| per column: 3.2e-14 1.1e-15 9.5e-13 9.3e-14 9.7e-06 7.7e-06 1.5e-12
+  ok   bp5_fd_p2_1800yr_fltst_strk+00dp+10.txt: 48 rows in [1e-09, 5.00063] s; max |a-b| / max |a| per column: 6.0e-13 6.1e-16 1.5e-11 5.2e-14 1.1e-05 5.2e-06 2.5e-12
+  ok   bp5_fd_p2_1800yr_fltst_strk+00dp+22.txt: 48 rows in [1e-09, 5.00063] s; max |a-b| / max |a| per column: 1.7e-14 1.0e-15 3.3e-13 3.0e-14 2.2e-06 4.1e-06 1.9e-12
+  ok   bp5_fd_p2_1800yr_fltst_strk+16dp+00.txt: 48 rows in [1e-09, 5.00063] s; max |a-b| / max |a| per column: 4.6e-16 1.2e-17 1.5e-14 1.5e-15 2.0e-07 5.9e-08 0.0e+00
+  ok   bp5_fd_p2_1800yr_fltst_strk+16dp+10.txt: 48 rows in [1e-09, 5.00063] s; max |a-b| / max |a| per column: 2.1e-14 1.5e-17 6.5e-13 1.4e-15 6.8e-07 9.1e-08 3.9e-13
+  ok   bp5_fd_p2_1800yr_fltst_strk+36dp+00.txt: 48 rows in [1e-09, 5.00063] s; max |a-b| / max |a| per column: 8.5e-18 8.6e-20 9.7e-17 3.5e-18 4.1e-10 2.5e-10 0.0e+00
+  ok   bp5_fd_p2_1800yr_fltst_strk-16dp+00.txt: 48 rows in [1e-09, 5.00063] s; max |a-b| / max |a| per column: 1.9e-13 9.8e-15 6.6e-12 7.9e-13 6.1e-05 7.6e-05 2.8e-12
+  ok   bp5_fd_p2_1800yr_fltst_strk-16dp+10.txt: 48 rows in [1e-09, 5.00063] s; max |a-b| / max |a| per column: 3.5e-05 3.6e-08 7.3e-04 2.9e-06 3.3e-04 1.4e-04 1.5e-04
+  FAIL bp5_fd_p2_1800yr_fltst_strk-24dp+10.txt: 48 rows in [1e-09, 5.00063] s; max |a-b| / max |a| per column: 3.5e-04 2.1e-06 8.6e-03 1.8e-04 3.0e-04 3.4e-04 6.7e-04
+  ok   bp5_fd_p2_1800yr_fltst_strk-36dp+00.txt: 48 rows in [1e-09, 5.00063] s; max |a-b| / max |a| per column: 1.1e-13 3.1e-15 3.1e-12 3.0e-13 2.6e-05 2.6e-05 1.8e-12
+  FAIL bp5_fd_p2_1800yr_source.txt: 48 rows in [1e-09, 5.00063] s; max |a-b| / max |a| per column: 7.3e-03 1.4e-03
+FAILED: 11 file pairs compared (scale: per quantity and file kind)
+    (for the record only: the deck runs global stepping)
+--- LTS against global stepping, off the fault: lts against gts
+  ok   bp5_fd_p2_1800yr_blkst_strk+00fn+08dp+00.txt: 48 rows in [1e-09, 5.00063] s; max |a-b| / max |a| per column: 6.9e-05 1.4e-04 4.5e-05 9.2e-04 1.1e-03 5.1e-04
+  ok   bp5_fd_p2_1800yr_blkst_strk+00fn+08dp+10.txt: 48 rows in [1e-09, 5.00063] s; max |a-b| / max |a| per column: 4.5e-05 8.1e-05 3.1e-05 3.5e-04 5.6e-04 4.1e-04
+  ok   bp5_fd_p2_1800yr_blkst_strk+00fn+16dp+00.txt: 48 rows in [1e-09, 5.00063] s; max |a-b| / max |a| per column: 8.2e-05 1.2e-04 1.1e-04 5.0e-04 7.3e-04 9.3e-04
+  ok   bp5_fd_p2_1800yr_blkst_strk+00fn+16dp+10.txt: 48 rows in [1e-09, 5.00063] s; max |a-b| / max |a| per column: 5.7e-05 5.8e-05 1.1e-05 2.5e-04 2.7e-04 9.8e-05
+  ok   bp5_fd_p2_1800yr_blkst_strk+00fn+32dp+00.txt: 48 rows in [1e-09, 5.00063] s; max |a-b| / max |a| per column: 4.8e-05 2.4e-05 2.1e-05 3.8e-04 1.7e-04 1.5e-04
+  ok   bp5_fd_p2_1800yr_blkst_strk+00fn+32dp+10.txt: 48 rows in [1e-09, 5.00063] s; max |a-b| / max |a| per column: 1.3e-05 2.3e-05 3.0e-06 9.5e-05 1.7e-04 2.7e-05
+  ok   bp5_fd_p2_1800yr_blkst_strk+00fn+48dp+00.txt: 48 rows in [1e-09, 5.00063] s; max |a-b| / max |a| per column: 1.1e-05 7.1e-06 5.3e-06 8.7e-05 4.6e-05 4.8e-05
+  ok   bp5_fd_p2_1800yr_blkst_strk+16fn+08dp+00.txt: 48 rows in [1e-09, 5.00063] s; max |a-b| / max |a| per column: 3.1e-06 8.2e-06 2.2e-06 3.7e-05 1.1e-04 2.7e-05
+  ok   bp5_fd_p2_1800yr_blkst_strk-16fn+08dp+00.txt: 48 rows in [1e-09, 5.00063] s; max |a-b| / max |a| per column: 4.3e-04 4.4e-04 4.3e-04 6.7e-03 5.1e-03 6.7e-03
+PASSED: 9 file pairs compared (scale: per quantity and file kind)
+--- lts
+      step       tau [s]         max V    max VdT/Dc           sigma_n_eff [MPa]            sigma_PC [MPa]        s/step       max V at x, y, z [km]
+  end: max_dyn_steps at t = 5.161938 s (phase length 5.161938 s, 800 steps of 0.006452 s, LTS sync intervals; 6400 fault steps of 0.000807 s); the run stops
+--- gts
+      step       tau [s]         max V    max VdT/Dc           sigma_n_eff [MPa]            sigma_PC [MPa]        s/step       max V at x, y, z [km]
+  end: max_dyn_steps at t = 5.000627 s (phase length 5.000627 s, 6200 steps of 0.000807 s); the run stops
+p2 check: 0 failed (runs in /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2check_1094926)
