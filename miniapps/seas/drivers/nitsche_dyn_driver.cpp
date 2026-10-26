@@ -853,6 +853,9 @@ int main(int argc, char *argv[])
    // ------------------------------------------------------------ mesh
    std::unique_ptr<Mesh> smesh = std::make_unique<Mesh>(mesh_path.c_str(), 1, 1);
    MFEM_VERIFY(smesh->Dimension() == 3, "mesh must be 3-D");
+   // 2D in-plane design rev 3, section 5.5: the loader reads 2-entry
+   // [fault_geometry] vectors for 2-D decks; a 3-D mesh refuses them.
+   spatial::CheckFaultGeometryDimension(cfg.fault_geometry, smesh->Dimension());
    for (int e = 0; e < smesh->GetNE(); e++)
    {
       MFEM_VERIFY(smesh->GetElementBaseGeometry(e) == Geometry::TETRAHEDRON,

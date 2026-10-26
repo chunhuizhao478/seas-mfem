@@ -352,6 +352,15 @@ struct DynamicConfig
    real_t sigma_min = 0.0;         ///< [Pa]
 };
 
+/// A vector key the deck gave and its number of entries (2 or 3).
+/// CycleConfig::CheckDimension matches it to the mesh (2D in-plane design
+/// rev 3, section 5.5).
+struct DeckVector
+{
+   std::string key;   ///< "[section].key"
+   int entries = 3;
+};
+
 struct CycleConfig
 {
    std::string deck_path;
@@ -376,6 +385,7 @@ struct CycleConfig
    LtsConfig lts;
    LoadingConfig loading;         ///< [cycle.loading] (default: the BP5 function)
    int checkpoint_every = 0;
+   std::vector<DeckVector> deck_vectors;   ///< every vector key Load read
 
    // Shortcuts into `shared`, checked by Load.
    real_t t_final = 0.0;
@@ -393,6 +403,24 @@ struct CycleConfig
    }
 
    static CycleConfig Load(const std::string &deck);
+
+   /// 2D in-plane design rev 3, section 5.5: the deck's vectors against the
+   /// mesh dimension, which Load cannot know (the mesh is read after it).  A
+   /// 3-D mesh takes 3-entry vectors only, a 2-D mesh 2-entry ones only (z =
+   /// 0); [fault_geometry] by spatial::CheckFaultGeometryDimension (its up
+   /// may be [0, 0, +-1] in 2-D).  A vector of the other dimension is refused,
+   /// never truncated or padded silently.
+   void CheckDimension(int dim) const
+   {
+      MFEM_VERIFY(dim == 2 || dim == 3, "CycleConfig::CheckDimension: dim = " << dim);
+      for (const DeckVector &v : deck_vectors)
+      {
+         MFEM_VERIFY(v.entries == dim, v.key << " has " << v.entries << " entries, but "
+                     "the mesh is " << dim << "-D: give "
+                     << ((dim == 2) ? "[x, y]" : "[x, y, z]"));
+      }
+      spatial::CheckFaultGeometryDimension(shared.fault_geometry, dim);
+   }
 };
 
 #ifdef SEAS_USE_TOML
@@ -443,8 +471,11 @@ inline int Int(const toml::value &t, const std::string &sec,
    return static_cast<int>(t.at(key).as_integer());
 }
 
-inline std::array<real_t, 3> Vec3(const toml::value &t, const std::string &sec,
-                                  const std::string &key,
+/// A vector key: 3 numbers, or 2 (an in-plane vector of a 2-D deck, z = 0;
+/// 2D in-plane design rev 3, section 5.5).  The key and its entries go to
+/// `rec` for CycleConfig::CheckDimension.
+inline std::array<real_t, 3> Vec3(std::vector<DeckVector> &rec, const toml::value &t,
+                                  const std::string &sec, const std::string &key,
                                   const std::array<real_t, 3> &def, bool required = false)
 {
    if (!t.contains(key))
@@ -453,10 +484,12 @@ inline std::array<real_t, 3> Vec3(const toml::value &t, const std::string &sec,
       return def;
    }
    const toml::value &v = t.at(key);
-   MFEM_VERIFY(v.is_array() && v.as_array().size() == 3,
-               "[" << sec << "]." << key << " must be an array of 3 numbers");
-   std::array<real_t, 3> out;
-   for (int d = 0; d < 3; d++)
+   MFEM_VERIFY(v.is_array() && (v.as_array().size() == 2 || v.as_array().size() == 3),
+               "[" << sec << "]." << key << " must be an array of 3 numbers (2 on a "
+               "2-D mesh)");
+   const int n = static_cast<int>(v.as_array().size());
+   std::array<real_t, 3> out = {{0.0, 0.0, 0.0}};
+   for (int d = 0; d < n; d++)
    {
       const toml::value &c = v.as_array()[d];
       MFEM_VERIFY(c.is_floating() || c.is_integer(),
@@ -464,6 +497,7 @@ inline std::array<real_t, 3> Vec3(const toml::value &t, const std::string &sec,
       out[d] = c.is_floating() ? static_cast<real_t>(c.as_floating())
                                : static_cast<real_t>(c.as_integer());
    }
+   rec.push_back({"[" + sec + "]." + key, n});
    return out;
 }
 
@@ -534,7 +568,8 @@ inline SnapshotKindConfig SnapshotKind(const toml::value &t, const std::string &
    return k;
 }
 
-inline RectTaperSpec Field(const toml::value &fields, const std::string &name)
+inline RectTaperSpec Field(std::vector<DeckVector> &rec, const toml::value &fields,
+                           const std::string &name)
 {
    const std::string sec = "cycle.fields." + name;
    RectTaperSpec f;
@@ -542,9 +577,9 @@ inline RectTaperSpec Field(const toml::value &fields, const std::string &name)
    const toml::value &t = fields.at(name);
    OnlyKeys(t, sec, {"center", "axis1", "axis2", "half1", "half2", "taper", "eps",
                      "inside", "outside"});
-   f.center = Vec3(t, sec, "center", f.center, true);
-   f.axis1 = Vec3(t, sec, "axis1", f.axis1, true);
-   f.axis2 = Vec3(t, sec, "axis2", f.axis2, true);
+   f.center = Vec3(rec, t, sec, "center", f.center, true);
+   f.axis1 = Vec3(rec, t, sec, "axis1", f.axis1, true);
+   f.axis2 = Vec3(rec, t, sec, "axis2", f.axis2, true);
    f.half1 = Real(t, sec, "half1", 0.0, true);
    f.half2 = Real(t, sec, "half2", 0.0, true);
    f.taper = Real(t, sec, "taper", 0.0);
@@ -744,9 +779,9 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       OnlyKeys(f, "cycle.fields", {"V_init_dip", "a", "Dc", "V_init"});
       c.fields.V_init_dip = Real(f, "cycle.fields", "V_init_dip", 0.0, true);
       MFEM_VERIFY(c.fields.V_init_dip >= 0.0, "[cycle.fields].V_init_dip must be >= 0");
-      c.fields.a = Field(f, "a");
-      c.fields.Dc = Field(f, "Dc");
-      c.fields.V_init = Field(f, "V_init");
+      c.fields.a = Field(c.deck_vectors, f, "a");
+      c.fields.Dc = Field(c.deck_vectors, f, "Dc");
+      c.fields.V_init = Field(c.deck_vectors, f, "V_init");
       MFEM_VERIFY(c.fields.a.set && c.fields.Dc.set && c.fields.V_init.set,
                   "[cycle.fields.a], [cycle.fields.Dc] and [cycle.fields.V_init] are required");
    }
@@ -764,9 +799,9 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       oc.dt_slow = Real(o, sec, "dt_slow", oc.dt_slow);
       oc.event_V = Real(o, sec, "event_V", oc.event_V);
       oc.event_dwell = Real(o, sec, "event_dwell", oc.event_dwell);
-      oc.plane_origin = Vec3(o, sec, "plane_origin", oc.plane_origin);
-      oc.plane_axis1 = Vec3(o, sec, "plane_axis1", oc.plane_axis1);
-      oc.plane_axis2 = Vec3(o, sec, "plane_axis2", oc.plane_axis2);
+      oc.plane_origin = Vec3(c.deck_vectors, o, sec, "plane_origin", oc.plane_origin);
+      oc.plane_axis1 = Vec3(c.deck_vectors, o, sec, "plane_axis1", oc.plane_axis1);
+      oc.plane_axis2 = Vec3(c.deck_vectors, o, sec, "plane_axis2", oc.plane_axis2);
       MFEM_VERIFY(oc.dt_fast > 0.0 && oc.dt_slow > 0.0 && oc.fast_V > 0.0 &&
                   oc.event_V > 0.0 && oc.event_dwell >= 0.0,
                   "[cycle.output] fast_V, dt_fast, dt_slow, event_V must be > 0, "
@@ -786,7 +821,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
             OnlyKeys(st, "cycle.output.station", {"name", "x"});
             StationSpec sp;
             sp.name = Str(st, "cycle.output.station", "name", "", true);
-            sp.x = Vec3(st, "cycle.output.station", "x", sp.x, true);
+            sp.x = Vec3(c.deck_vectors, st, "cycle.output.station", "x", sp.x, true);
             oc.stations.push_back(sp);
          }
       }
@@ -816,7 +851,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
          sc.surface = SnapshotKind(s2, sec, {"attrs", "plane_normal", "plane_offset",
                                              "plane_tol"});
          sc.surface_attrs = Ints(s2, sec, "attrs", sc.surface_attrs);
-         sc.surface_normal = Vec3(s2, sec, "plane_normal", sc.surface_normal);
+         sc.surface_normal = Vec3(c.deck_vectors, s2, sec, "plane_normal", sc.surface_normal);
          sc.surface_offset = Real(s2, sec, "plane_offset", sc.surface_offset);
          sc.surface_tol = Real(s2, sec, "plane_tol", sc.surface_tol);
          const std::array<real_t, 3> &n = sc.surface_normal;
@@ -877,7 +912,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
             OnlyKeys(st, ssec, {"name", "x"});
             StationSpec sp;
             sp.name = Str(st, ssec, "name", "", true);
-            sp.x = Vec3(st, ssec, "x", sp.x, true);
+            sp.x = Vec3(c.deck_vectors, st, ssec, "x", sp.x, true);
             bc.volume_stations.push_back(sp);
          }
       }
@@ -901,6 +936,8 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
                                                       : static_cast<real_t>(e.as_integer());
             }
          }
+         // three 3-vectors: the BP5 volume stations are 3-D only
+         c.deck_vectors.push_back({"[" + sec + "].volume_axes", 3});
          for (int i = 0; i < 3; i++)
          {
             for (int j = 0; j < 3; j++)
@@ -1065,9 +1102,9 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       {
          auto dot = [](const std::array<real_t, 3> &u, const std::array<real_t, 3> &v)
          { return u[0] * v[0] + u[1] * v[1] + u[2] * v[2]; };
-         L.plane_point = Vec3(l, sec, "plane_point", L.plane_point, true);
-         L.plane_normal = Vec3(l, sec, "plane_normal", c.dyn.ref_normal);
-         L.slip_dir = Vec3(l, sec, "slip_dir", L.slip_dir, true);
+         L.plane_point = Vec3(c.deck_vectors, l, sec, "plane_point", L.plane_point, true);
+         L.plane_normal = Vec3(c.deck_vectors, l, sec, "plane_normal", c.dyn.ref_normal);
+         L.slip_dir = Vec3(c.deck_vectors, l, sec, "slip_dir", L.slip_dir, true);
          L.band = Real(l, sec, "band", 0.0, true);
          MFEM_VERIFY(std::abs(dot(L.plane_normal, L.plane_normal) - 1.0) < 1e-12 &&
                      std::abs(dot(L.slip_dir, L.slip_dir) - 1.0) < 1e-12,

@@ -9,6 +9,7 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-plate-loading       # phase A: A4 ([cycle.loading])
 #   make -f tests/2d_inplane/2d_inplane.mk test-okada-dislocation   # phase A: the Okada check
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d-fault-layout     # phase B: the 2D switch
+#   make -f tests/2d_inplane/2d_inplane.mk test-2d-deck             # phase B: 2D deck vectors
 #   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
 # The 3D parity set (every phase must leave it bit for bit unchanged) is the
 # script tests/2d_inplane/parity_3d.sh (see its header).
@@ -122,7 +123,58 @@ test-2d-fault-layout: seas_test_2d_fault_layout
 	   else printf '%s\n' "$$out" | tail -15; echo "  FAILED: refusal $$n: exit $$rc, \"$$msg\" not found"; exit 1; fi; \
 	done; rm -f test_2d_fault_layout_quad.mesh
 
-2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout
+# Phase B (part 2): the deck's vectors in 2D (needs the deck loader: the
+# cycle's flags and objects, as test-plate-loading).
+TEST_2D_DECK_SRC = tests/2d_inplane/test_2d_deck.cpp
+TEST_2D_DECK_OBJ = $(TEST_2D_DECK_SRC:.cpp=.o)
+$(TEST_2D_DECK_OBJ): %.o: $(SRC)%.cpp $(CYCLE_HEADERS) $(CYCLE_STAMP) \
+                          $(CYCLE_SHARED_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
+
+seas_test_2d_deck: $(TEST_2D_DECK_OBJ) $(CYCLE_LINK_OBJS)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_2D_DECK_OBJ) $(CYCLE_LINK_OBJS) \
+	    $(CYCLE_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# K1-K4 on 1 rank; each refusal must exit non-zero with its message; then
+# both drivers, given a 3-D mesh and a 2-entry [fault_geometry].ref_normal,
+# must refuse right after reading the mesh (the Nitsche deck's fault
+# ParaView output off, so that an MFEM without HDF5 gets that far).
+DECK_2D_REFUSALS = 1:ref_normal has 2 entries, but the mesh is 3-D|2:up has 2 entries, but the mesh is 3-D|3:x has 2 entries, but the mesh is 3-D|4:plane_origin has 3 entries, but the mesh is 2-D|5:up is required on a 2-D mesh|6:must be [0, 0, +-1]|7:ref_normal has 3 entries, but the mesh is 2-D|8:ref_normal is required on a 2-D mesh|9:must be a 2- or 3-element array|10:must be an array of 3 numbers (2 on a 2-D mesh)
+DECK_2D_TMP = $(or $(TMPDIR),/tmp)/seas_test_2d_deck_drivers
+DECK_2D_DRIVER_MSG = ref_normal has 2 entries, but the mesh is 3-D
+test-2d-deck: seas_test_2d_deck seas_fd_cycle_driver seas_nitsche_dyn_driver
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_2d_deck
+	@list='$(DECK_2D_REFUSALS)'; set -f; IFS='|'; for r in $$list; do n=$${r%%:*}; msg=$${r#*:}; \
+	   out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_2d_deck --refuse $$n 2>&1); rc=$$?; \
+	   if [ $$rc -ne 0 ] && printf '%s' "$$out" | grep -qF "$$msg"; then \
+	      echo "  PASSED: refusal $$n: exit $$rc, \"$$msg\""; \
+	   else printf '%s\n' "$$out" | tail -15; echo "  FAILED: refusal $$n: exit $$rc, \"$$msg\" not found"; exit 1; fi; \
+	done
+	@rm -rf $(DECK_2D_TMP); mkdir -p $(DECK_2D_TMP); \
+	 sed 's/^ref_normal      = \[0.0, -1.0, 0.0\]$$/ref_normal      = [0.0, -1.0]/' \
+	    config/fd_cycle/bp5_fd_first_event.toml > $(DECK_2D_TMP)/fd.toml; \
+	 sed -e 's/^ref_normal        = \[0.0, -1.0, 0.0\]$$/ref_normal        = [0.0, -1.0]/' \
+	     -e 's/^paraview_fault         = "hdf5"$$/paraview_fault         = "off"/' \
+	    tpv205/configs/tpv205_nitsche.toml > $(DECK_2D_TMP)/nitsche.toml; \
+	 for f in fd nitsche; do grep -q '^ref_normal *= \[0.0, -1.0\]$$' $(DECK_2D_TMP)/$$f.toml \
+	    || { echo "  FAILED: the $$f deck's ref_normal line moved"; exit 1; }; done; \
+	 out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_fd_cycle_driver -d $(DECK_2D_TMP)/fd.toml \
+	    -o $(DECK_2D_TMP)/fd_out 2>&1); rc=$$?; \
+	 if [ $$rc -ne 0 ] && printf '%s' "$$out" | grep -qF "$(DECK_2D_DRIVER_MSG)" \
+	    && printf '%s' "$$out" | grep -q "^  mesh: "; then \
+	    echo "  PASSED: seas_fd_cycle_driver: exit $$rc, \"$(DECK_2D_DRIVER_MSG)\""; \
+	 else printf '%s\n' "$$out" | tail -15; echo "  FAILED: seas_fd_cycle_driver: exit $$rc"; exit 1; fi; \
+	 out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_nitsche_dyn_driver --config $(DECK_2D_TMP)/nitsche.toml \
+	    --mesh bp5/mesh/reference/bp5_tandem_exact.msh --output-dir $(DECK_2D_TMP)/nitsche_out 2>&1); rc=$$?; \
+	 if [ $$rc -ne 0 ] && printf '%s' "$$out" | grep -qF "$(DECK_2D_DRIVER_MSG)"; then \
+	    echo "  PASSED: seas_nitsche_dyn_driver: exit $$rc, \"$(DECK_2D_DRIVER_MSG)\""; \
+	 else printf '%s\n' "$$out" | tail -15; echo "  FAILED: seas_nitsche_dyn_driver: exit $$rc"; exit 1; fi; \
+	 rm -rf $(DECK_2D_TMP)
+
+2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
+                test-2d-deck
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
-        2d-inplane-all
+        test-2d-deck 2d-inplane-all

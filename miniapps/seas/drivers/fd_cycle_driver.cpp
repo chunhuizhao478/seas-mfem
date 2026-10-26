@@ -785,6 +785,7 @@ int main(int argc, char *argv[])
    {
       // ---- mesh ----
       std::unique_ptr<Mesh> smesh = cycle::LoadScaledMesh(cfg.shared.mesh.path, cfg.mesh_scale);
+      cfg.CheckDimension(smesh->Dimension());   // 2D in-plane rev 3, section 5.5
       if (root)
       {
          std::cout << "  elements: " << smesh->GetNE() << ", vertices: " << smesh->GetNV()

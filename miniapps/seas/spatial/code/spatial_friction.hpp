@@ -634,7 +634,49 @@ struct FaultGeometrySpec
    std::array<real_t, 3> ref_normal = {{0.0, -1.0, 0.0}};
    std::array<real_t, 3> up         = {{0.0,  0.0, 1.0}};
    std::string           kind;   ///< informational (no code branches on it)
+   /// Entries the deck gave: 0 (the key is absent, the default above holds),
+   /// 2 (an in-plane [x, y], padded with z = 0) or 3.  2D in-plane design
+   /// rev 3, section 5.5: CheckFaultGeometryDimension matches them to the
+   /// mesh.
+   int ref_normal_entries = 0;
+   int up_entries = 0;
 };
+
+/// The [fault_geometry] vectors against the mesh dimension (2D in-plane
+/// design rev 3, section 5.5): a 3-D mesh takes 3-entry vectors only; a 2-D
+/// mesh needs ref_normal = [nx, ny] and an up, either in the plane ([ux, uy],
+/// a vertical section: the slip in the dip slot) or out of it ([0, 0, +-1],
+/// a horizontal slice: the slip in the strike slot), because up decides the
+/// slot.  A vector of the other dimension is refused, never truncated or
+/// padded silently.
+inline void CheckFaultGeometryDimension(const FaultGeometrySpec& g, int dim)
+{
+   MFEM_VERIFY(dim == 2 || dim == 3, "CheckFaultGeometryDimension: dim = " << dim);
+   if (dim == 3)
+   {
+      MFEM_VERIFY(g.ref_normal_entries != 2,
+                  "[fault_geometry].ref_normal has 2 entries, but the mesh is 3-D: "
+                  "give [nx, ny, nz]");
+      MFEM_VERIFY(g.up_entries != 2,
+                  "[fault_geometry].up has 2 entries, but the mesh is 3-D: give "
+                  "[ux, uy, uz]");
+      return;
+   }
+   MFEM_VERIFY(g.ref_normal_entries == 2,
+               "[fault_geometry].ref_normal "
+               << (g.ref_normal_entries == 3 ? "has 3 entries, but the mesh is 2-D"
+                                             : "is required on a 2-D mesh")
+               << ": give [nx, ny]");
+   MFEM_VERIFY(g.up_entries != 0,
+               "[fault_geometry].up is required on a 2-D mesh: [0, 0, 1] (out of "
+               "the plane, a horizontal slice: the slip in the strike slot) or "
+               "[ux, uy] (in the plane, a vertical section: the slip in the dip "
+               "slot)");
+   MFEM_VERIFY(g.up_entries == 2 || (g.up[0] == 0.0 && g.up[1] == 0.0),
+               "[fault_geometry].up has 3 entries on a 2-D mesh, so it must be "
+               "[0, 0, +-1] (out of the plane); got (" << g.up[0] << ", "
+               << g.up[1] << ", " << g.up[2] << "); an in-plane up is [ux, uy]");
+}
 
 /// Hypocenter / nucleation centre.  R-008 guard: if up[2] > 0 (z increases
 /// upward) the hypocenter z must be <= 0 (at/below the free surface).

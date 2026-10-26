@@ -210,3 +210,101 @@ rerun alone, it passes with both binary sets, and both reach the limit
 Known behaviour changes in 3D: (1) J3 refuses an element next to the fault
 that is not a tetrahedron (before, it read the element's first 4 vertices);
 (2) `BdrAttrCount::triangles` is renamed `simplex_faces`.
+
+## Phase B, part 2: 2D deck vectors and the three 2D meshes
+
+A 2D deck is a 3D deck whose vectors have two entries (design rev 3,
+section 5.5).  The readers take [x, y] and pad z = 0, record how many
+entries each key had, and a check against the mesh dimension, called by
+both drivers right after the mesh is read, refuses a vector of the other
+dimension (never truncated or padded silently).  The one 3-entry vector a
+2D deck takes is `[fault_geometry].up = [0, 0, +-1]` (out of the plane, a
+horizontal slice: the slip in the strike slot); an in-plane up is [ux, uy]
+(a vertical section: the slip in the dip slot).  In 2D, ref_normal and up
+are required.
+
+New files (branch-owned): `tests/2d_inplane/test_2d_deck.cpp` and its make
+target `test-2d-deck`; the meshes below (each `.geo` and the `.msh` it makes,
+added with `git add -f` past the folder's `*.msh` ignore rule, as the other
+committed meshes); in `tests/2d_inplane/test_2d_fault_layout.cpp` the tests
+M1 (the committed meshes) and D2 (the layout on the BP3 mesh).
+
+| Shared file | Change | 3D |
+|---|---|---|
+| `spatial/code/spatial_friction.hpp` | `FaultGeometrySpec` records `ref_normal_entries`, `up_entries` (0 absent, 2, 3); new inline `CheckFaultGeometryDimension(g, dim)` | the vectors and their defaults unchanged; the entries are read by the check only |
+| `spatial/code/spatial_friction.cpp` | `toml_vec3` (used for `[fault_geometry]` ref_normal and up only) takes 2 or 3 entries, pads z = 0, returns the count | 3-entry vectors read, normalized and guarded as before; a 2-entry vector, which used to stop the load ("must be a 3-element array"), now loads and is refused by the check in the driver |
+| `cycle/cycle_config.hpp` | `detail::Vec3` takes 2 or 3 entries (z = 0) and records "[section].key" and the count in `CycleConfig::deck_vectors` (`detail::Field` passes the record on); the BP5 `volume_axes` recorded as 3-entry; new `CycleConfig::CheckDimension(dim)` (every recorded vector, then `CheckFaultGeometryDimension`) | every value read as before; a 2-entry vector moves from a load-time refusal to the driver's check |
+| `drivers/fd_cycle_driver.cpp` | `cfg.CheckDimension(mesh dim)` after `LoadScaledMesh` | passes for every 3-entry deck |
+| `drivers/nitsche_dyn_driver.cpp` | `CheckFaultGeometryDimension(cfg.fault_geometry, mesh dim)` after the mesh read (the driver stays 3-D only until phase C) | passes for every 3-entry deck |
+
+Not changed: `spatial_dyn_driver.cpp` reads the shared deck but not
+`[fault_geometry]`; the tests that load committed 3D cycle decks
+(`tests/cycle/*`) do not call `CheckDimension`.
+
+### The meshes (Gmsh 4.15.2, `-format msh22`, deterministic: two runs give the same file)
+
+| File | Made by | Tags | Triangles | Fault | sha256 (first 16) | Size |
+|---|---|---|---|---|---|---|
+| `bp3/mesh/bp3_d30_25m.msh` | `gmsh -2 bp3.geo -format msh22 -setnumber dip 30 -o bp3_d30_25m.msh` | 1 natural 242, 3 fault 1600, 5 Dirichlet 279 (238 creep) | 127843 | 40 km, 25 m | da99995f14a786c9 | 7.0 MB |
+| `bp3/mesh/bp3_d60_25m.msh` | the same, dip 60 | 210, 1600, 255 (230 creep) | 212659 | 40 km, 25 m | fd08af92b3b48b78 | 11.7 MB |
+| `bp3/mesh/bp3_d90_25m.msh` | the same, dip 90 | 210, 1600, 248 (228 creep) | 244958 | 40 km, 25 m | 41e033c40e1f74ce | 13.8 MB |
+| `tpv205/mesh/tpv205_2d_100m.msh` | `gmsh -2 tpv205_2d.geo -format msh22 -o tpv205_2d_100m.msh` | 103 fault 300, 105 absorbing 136 | 40526 | 30 km, 100 m | b1b9467a67d7c53e | 2.1 MB |
+| `tpv105/mesh/tpv105_2d_100m.msh` | `gmsh -2 tpv105_2d.geo -format msh22 -o tpv105_2d_100m.msh` | 3 fault 604, 5 absorbing 152 | 56652 | 140 km, 100 m for \|x\| <= 24 km | 184a4d1b0f3ff570 | 3.0 MB |
+
+- `bp3/mesh/bp3.geo` is Tandem's `examples/tandem/2d/bp3.geo` (Tandem
+  a26753d6, the file's last commit c0ad90f9) with one change: the default
+  resolution Lf = Ls = 0.025 km, the 25 m the BP3 description suggests
+  (Tandem's default 0.020).  Geometry, tags and size fields are Tandem's: km,
+  y up, the fault from the trace (0, 0) to 40 km down-dip, the creep segment
+  below it to the 400 km bottom (tag 5, as the sides), the free surface and
+  the bottom natural (tag 1), Tandem's "bottom: free surface" variant.
+- `tpv205/mesh/tpv205_2d.geo` is the 2D slice of the folder's 3D meshes
+  (SeisSol's TPV5 geometry): the fault y = 0, |x| <= 15 km, embedded (its
+  ends are the TPV5 barrier), split at the nucleation and stress patch edges
+  (+-1.5, +-6, +-9 km); the box +-60 km as in 3D (45 km beyond the fault
+  ends, 60 km from the fault); the 3D size field 0.05 d + (d / 2.5 km)^2 +
+  lc_fault capped at 5 km; SeisSol's tags 103 / 105 as the 3D meshes.
+- `tpv105/mesh/tpv105_2d.geo`: TPV105 is TPV103 (whole space) with thermal
+  pressurization, and its 2D version is the 7.5 km depth line of the 3D
+  fault (the seven 2D stations x = 0, +-9, +-15, +-18 km of
+  uploadTPV105_2D.pdf).  The description makes the fault velocity
+  strengthening outside |x| = 18 km and gives it no end, so the fault
+  crosses the whole box (no fault tip inside; its ends lie on the absorbing
+  sides).  Split at +-15, +-18 (the box function's transition) and +-24 km
+  (the end of the 100 m part, 6 km past the last station); the box x in
+  [-70, 70] km, y in [-50, 50] km, more than a P wave travels to a side and
+  back from the outermost stations in the 15 s run; tags 3 / 5 as the 3D
+  TPV104 meshes.  (The 3D TPV104 meshes end the fault at +-18 km, where the
+  2D stations at +-18 km would sit on the tips.)
+
+How it was checked (cloud container, 10-25).  test_2d_deck: 15 of 15 (the
+3D first-event deck reads 22 vector keys with 3 entries and passes the 3D
+check; its 2D form the same keys with 2, z = 0 everywhere, and passes the 2D
+check; up [0, 1] with ref_normal [1, 0], and up [0, 0, -1], pass; the spatial
+loader alone normalizes [3, 4] to (0.6, 0.8, 0) and keeps the defaults with
+0 entries for absent keys), ten refusals (2-entry ref_normal, up and a
+station in 3D; a 3-entry plane_origin, ref_normal, an off-axis 3-entry up,
+no up and no ref_normal in 2D; 4-entry vectors in both readers), and both
+drivers refuse a 2-entry ref_normal on a 3D mesh right after reading it.
+test_2d_fault_layout: 127 of 127 on 1, 2 and 4 ranks, now with M1 on the
+five committed meshes (Dimension 2, the triangle count and the tag census of
+each file, counted independently by a Python read of the .msh; the fault's
+length and bounding box; the census: one patch, 0 junction vertices, 2 tips,
+the BP3 creep segment one patch with 1 seam vertex; every oriented normal
+the expected one, to 6.4e-13 at dip 60 from the file's 16 digits; the plus
+side; the slot of the deck's up: BP3 [0, 1] the dip slot, TPV [0, 0, 1] the
+strike slot, the out-of-plane slot exact; the report equal to the 1-rank
+one) and D2 (the fault DOF layout on the BP3 dip 60 mesh at p = 1, 2, 3, with
+METIS's partition and with one that cuts along the fault so that all 1600
+segments are rank-boundary faces: the table equals the 1-rank one bit for
+bit).
+
+3D results are unchanged.  A 3D deck goes through the new readers with 3
+entries in every vector.  The parity set, rebuilt from clean with review 3's
+tree and with this change: TPV205 and TPV104 on 2 ranks, the cycle QD and
+dynamic regimes on 1 rank and the dynamic regime on 2 ranks byte for byte;
+the cycle QD regime on 2 ranks (1.8e-9) and the BP5 quick check on 8 ranks
+(4.4e-8) within MUMPS's run-to-run noise, as at every earlier review; the 15
+unit tests, the field, plate loading and Okada tests and the
+fully-dynamic-cycle tests (P3 on 2 ranks included) pass, with 1-rank outputs
+byte for byte.

@@ -343,16 +343,21 @@ real_t toml_time_seconds(const toml::value& tbl, const std::string& key,
 
 /// Phase 6 req 1: read a 3-element numeric TOML array (int or float
 /// elements) into a std::array<real_t,3>.  Leaves `out` untouched (keeps
-/// its struct default) when the key is absent.
-void toml_vec3(const toml::value& tbl, const std::string& key,
-               std::array<real_t, 3>& out)
+/// its struct default) when the key is absent.  2D in-plane design rev 3,
+/// section 5.5: a 2-element array is an in-plane vector [x, y], read with
+/// z = 0.  Returns the number of entries (0 when the key is absent), which
+/// CheckFaultGeometryDimension matches to the mesh.
+int toml_vec3(const toml::value& tbl, const std::string& key,
+              std::array<real_t, 3>& out)
 {
-   if (!tbl.contains(key)) { return; }
+   if (!tbl.contains(key)) { return 0; }
    const auto& arr = tbl.at(key).as_array();
-   MFEM_VERIFY(arr.size() == 3,
-               "TOML key '" << key << "' must be a 3-element array; got "
+   const int n = static_cast<int>(arr.size());
+   MFEM_VERIFY(n == 2 || n == 3,
+               "TOML key '" << key << "' must be a 2- or 3-element array; got "
                << arr.size() << " elements");
-   for (int i = 0; i < 3; ++i)
+   out[2] = 0.0;
+   for (int i = 0; i < n; ++i)
    {
       const auto& e = arr[i];
       if      (e.is_floating()) { out[i] = static_cast<real_t>(e.as_floating()); }
@@ -360,6 +365,7 @@ void toml_vec3(const toml::value& tbl, const std::string& key,
       else { MFEM_ABORT("TOML key '" << key << "'[" << i
                         << "] must be a number (float or int)"); }
    }
+   return n;
 }
 
 /// Phase 6 req 1: read an integer TOML array into a std::vector<int>
@@ -1702,8 +1708,9 @@ SpatialFrictionConfig parse_root(const toml::value& root)
    if (root.contains("fault_geometry"))
    {
       const auto& f = root.at("fault_geometry");
-      toml_vec3(f, "ref_normal", cfg.fault_geometry.ref_normal);
-      toml_vec3(f, "up",         cfg.fault_geometry.up);
+      cfg.fault_geometry.ref_normal_entries =
+         toml_vec3(f, "ref_normal", cfg.fault_geometry.ref_normal);
+      cfg.fault_geometry.up_entries = toml_vec3(f, "up", cfg.fault_geometry.up);
       cfg.fault_geometry.kind = toml_str(f, "kind", std::string());
 
       // req-7 guards: ref_normal and up define the fault-local frame; the

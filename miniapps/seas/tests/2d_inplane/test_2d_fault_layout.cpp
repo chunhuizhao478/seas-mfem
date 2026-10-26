@@ -1,7 +1,8 @@
 // Copyright (c) 2010-2026, Lawrence Livermore National Security, LLC.
 //
 // tests/2d_inplane/test_2d_fault_layout.cpp — 2D in-plane design rev 3,
-// phase B (part 1): the dimension switch on 2D triangle meshes built here.
+// phase B: the dimension switch on 2D triangle meshes built here (part 1)
+// and on the committed 2D meshes (part 2).
 //
 //   L1  LoadScaledMesh reads a 2D triangle mesh: Dimension 2, the element and
 //       boundary counts and tags of the file, every vertex times the scale.
@@ -25,6 +26,17 @@
 //       face owned once, the owned -> local scatter puts f(x) on every local
 //       DOF (the ghost copies of shared faces included), and the table of
 //       (position, n, d, s) equals the one of a 1-rank run.
+//   M1  (part 2) the committed meshes bp3/mesh/bp3_d{30,60,90}_25m.msh,
+//       tpv205/mesh/tpv205_2d_100m.msh, tpv105/mesh/tpv105_2d_100m.msh:
+//       Dimension 2, the triangle count and the tag census of the file
+//       (segments, exterior, interior per tag), the fault's length and
+//       bounding box; the census: one patch, 0 junction vertices, 2 tips
+//       (BP3: the creep segment one patch, 1 seam vertex), the oriented
+//       normal, the plus side and the slot of the deck's up (BP3 [0, 1]: dip;
+//       TPV [0, 0, 1]: strike), the report the same as on 1 rank.
+//   D2  (part 2) D1 on the BP3 mesh (dip 60, 25 m), p = 1, 2, 3, with
+//       METIS's partition and with one that cuts along the fault (every
+//       fault segment a rank-boundary face).
 //
 //   seas_test_2d_fault_layout             (1, 2 or 4 ranks)
 //   seas_test_2d_fault_layout --refuse N  one refusal, must exit non-zero:
@@ -48,6 +60,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -184,7 +197,8 @@ static Mesh *BoxSlice()
 }
 
 // ---------------------------------------------------------------- operator
-static std::shared_ptr<const FaultFrameConfig> FrameConfig(const real_t ref[3], const real_t up[3])
+static std::shared_ptr<const FaultFrameConfig> FrameConfig(const real_t ref[3], const real_t up[3],
+                                                           int fault_attr = 3)
 {
    auto c = std::make_shared<FaultFrameConfig>();
    for (int d = 0; d < 3; d++)
@@ -193,15 +207,17 @@ static std::shared_ptr<const FaultFrameConfig> FrameConfig(const real_t ref[3], 
       c->orientation.up[d] = up[d];
       c->up[d] = up[d];
    }
-   c->orientation.fault_attrs = {3};
+   c->orientation.fault_attrs = {fault_attr};
    return c;
 }
 
-static BoundaryConfig MakeBC(int dim, std::set<int> dirichlet)
+static BoundaryConfig MakeBC(int dim, std::set<int> dirichlet, int fault_attr = 3,
+                             std::set<int> natural = {1}, std::set<int> absorbing = {})
 {
    BoundaryConfig bc;
-   bc.fault_attr = 3;
-   bc.natural_attrs = {1};
+   bc.fault_attr = fault_attr;
+   bc.natural_attrs = natural;
+   bc.absorbing_attrs = absorbing;
    bc.dirichlet_attrs = dirichlet;
    bc.default_dirichlet_func = [dim](const Vector &, real_t, Vector &u) { u.SetSize(dim); u = 0.0; };
    return bc;
@@ -211,20 +227,21 @@ using Op = ElasticityDomainOperator<ParMesh>;
 
 static std::unique_ptr<Op> MakeOp(ParMesh &pm, int order, FaultFrameSource src,
                                   std::set<int> dirichlet = {5},
-                                  DGMethod method = DGMethod::IP)
+                                  DGMethod method = DGMethod::IP, int fault_attr = 3,
+                                  std::set<int> natural = {1}, std::set<int> absorbing = {})
 {
    LinearElastic *model = new LinearElastic(kLambda, kMu);   // leaked: test lifetime
    DomainConfig dc;
    dc.fault_frames = src;
    return std::make_unique<Op>(pm, order, *model, 0.0, kWf, 2.0 * kLs,
-                               MakeBC(pm.Dimension(), dirichlet), method, SolverType::MUMPS,
-                               dc);
+                               MakeBC(pm.Dimension(), dirichlet, fault_attr, natural, absorbing), method,
+                               SolverType::MUMPS, dc);
 }
 
-static FaultFrameSource Source(const real_t ref[3], const real_t up[3])
+static FaultFrameSource Source(const real_t ref[3], const real_t up[3], int fault_attr = 3)
 {
    FaultFrameSource s;
-   s.config = FrameConfig(ref, up);
+   s.config = FrameConfig(ref, up, fault_attr);
    return s;
 }
 
@@ -635,21 +652,25 @@ static std::vector<Row> Gather(const std::vector<Row> &loc, MPI_Comm comm)
    return out;
 }
 
-static void TestLayout(Mesh &serial, MPI_Comm comm, int np)
+// `part` (optional): the element partition; `tag` names the test (D1, D2)
+static void TestLayout(Mesh &serial, MPI_Comm comm, int np, const char *tag = "D1",
+                       const std::vector<int> *part = nullptr)
 {
-   if (g_rank == 0) { std::cout << "\n=== D1 the 2D fault DOF layout ===\n"; }
+   if (g_rank == 0) { std::cout << "\n=== " << tag << " the 2D fault DOF layout ===\n"; }
    const real_t ref[3] = {1, 0, 0}, upB[3] = {0, 1, 0};
    for (int p = 1; p <= 3; p++)
    {
-      ParMesh pm(comm, serial);
+      ParMesh pm(comm, serial, part ? part->data() : nullptr);
       auto op = MakeOp(pm, p, Source(ref, upB));
       const int nf = op->FrameField()->Report().fault.faces;
-      TEST_ASSERT(op->GetNbfPerFace() == p + 1, "D1 p = " << p << ": " << op->GetNbfPerFace()
+      TEST_ASSERT(op->GetNbfPerFace() == p + 1, tag << " p = " << p << ": " << op->GetNbfPerFace()
                   << " nodes per fault segment");
       const int nof = ISum(op->GetNumOwnedFaultFaces(), comm);
+      const int nsh = ISum(op->GetFaultSharedFaces().Size(), comm);
       const int nod = ISum(op->GetNumOwnedFaultDOFs(), comm);
-      TEST_ASSERT(nof == nf && nod == nf * (p + 1), "D1 p = " << p << ": each of the " << nf
-                  << " fault segments owned once (" << nod << " owned DOFs)");
+      TEST_ASSERT(nof == nf && nod == nf * (p + 1), tag << " p = " << p << ": each of the " << nf
+                  << " fault segments owned once (" << nod << " owned DOFs; " << nsh
+                  << " rank-boundary copies)");
       // owned -> local scatter of f(x)
       Vector X, Xo;
       op->GetFaultDOFCoords3D(X);
@@ -664,7 +685,7 @@ static void TestLayout(Mesh &serial, MPI_Comm comm, int np)
          es = std::max(es, std::abs(fl(k) - f(X(3 * k), X(3 * k + 1))));
       }
       es = RMax(es, comm);
-      TEST_ASSERT(es <= 1e-12, "D1 p = " << p << ": the owned -> local scatter puts f(x) on every "
+      TEST_ASSERT(es <= 1e-12, tag << " p = " << p << ": the owned -> local scatter puts f(x) on every "
                   "local DOF, shared segments included (" << es << ")");
       // the table against a 1-rank run
       std::vector<Row> all = Gather(DofTable(*op), comm);
@@ -683,10 +704,160 @@ static void TestLayout(Mesh &serial, MPI_Comm comm, int np)
          }
       }
       MPI_Bcast(&ex, 1, MPI_DOUBLE, 0, comm);
-      TEST_ASSERT(AllTrue(same, comm) && ex <= 1e-6, "D1 p = " << p << ": the table (position, n, d, s) "
+      TEST_ASSERT(AllTrue(same, comm) && ex <= 1e-6, tag << " p = " << p << ": the table (position, n, d, s) "
                   "at " << np << " rank(s) equals the 1-rank one (frames bit for bit, positions "
                   << ex << " m)");
    }
+}
+
+// ------------------------------------------------------------- M1 (files)
+// The committed 2D meshes (Gmsh 4.15.2, msh 2.2, from the .geo files next to
+// them).  The expected counts are those of the files, counted outside MFEM
+// (the .msh read in Python, each segment's adjacent triangles counted).
+struct TagCount { int attr, faces, exterior, interior; };
+struct MeshFile
+{
+   const char *path;
+   real_t scale;
+   int ne;
+   std::vector<TagCount> tags;
+   int fault_attr;
+   std::set<int> natural, dirichlet, absorbing;
+   real_t length;                      // the fault's length [m]
+   real_t lo[2], hi[2];                // the fault's bounding box [m]
+   real_t ref[3], up[3], n[3];         // the deck's ref_normal and up, the oriented normal
+   int creep_faces;                    // BP3: the creep segment (interior tag-5 segments)
+};
+
+static std::vector<MeshFile> MeshFiles()
+{
+   const real_t c30 = std::cos(M_PI / 6.0), c60 = 0.5;
+   // BP3: fault from the trace (0, 0) to 40 km down-dip, (40 cos, -40 sin)
+   // km; ref_normal (1, 0), up (0, 1): n = (sin, cos), into the hanging wall
+   return {
+      {"bp3/mesh/bp3_d30_25m.msh", 1000.0, 127843,
+       {{1, 242, 242, 0}, {3, 1600, 0, 1600}, {5, 279, 41, 238}}, 3, {1}, {5}, {}, 40e3,
+       {0.0, -20e3}, {40e3 * c30, 0.0}, {1, 0, 0}, {0, 1, 0}, {0.5, c30, 0}, 238},
+      {"bp3/mesh/bp3_d60_25m.msh", 1000.0, 212659,
+       {{1, 210, 210, 0}, {3, 1600, 0, 1600}, {5, 255, 25, 230}}, 3, {1}, {5}, {}, 40e3,
+       {0.0, -40e3 * c30}, {40e3 * c60, 0.0}, {1, 0, 0}, {0, 1, 0}, {c30, c60, 0}, 230},
+      {"bp3/mesh/bp3_d90_25m.msh", 1000.0, 244958,
+       {{1, 210, 210, 0}, {3, 1600, 0, 1600}, {5, 248, 20, 228}}, 3, {1}, {5}, {}, 40e3,
+       {0.0, -40e3}, {0.0, 0.0}, {1, 0, 0}, {0, 1, 0}, {1, 0, 0}, 228},
+      // TPV205-2D and TPV105-2D: ref_normal (0, 1), up (0, 0, 1) (design rev 3,
+      // section 6.1): n = (0, 1)
+      {"tpv205/mesh/tpv205_2d_100m.msh", 1.0, 40526,
+       {{103, 300, 0, 300}, {105, 136, 136, 0}}, 103, {}, {}, {105}, 30e3,
+       {-15e3, 0.0}, {15e3, 0.0}, {0, 1, 0}, {0, 0, 1}, {0, 1, 0}, 0},
+      {"tpv105/mesh/tpv105_2d_100m.msh", 1.0, 56652,
+       {{3, 604, 0, 604}, {5, 152, 152, 0}}, 3, {}, {}, {5}, 140e3,
+       {-70e3, 0.0}, {70e3, 0.0}, {0, 1, 0}, {0, 0, 1}, {0, 1, 0}, 0}};
+}
+
+static void TestMeshFile(const MeshFile &m, MPI_Comm comm)
+{
+   if (g_rank == 0) { std::cout << "\n=== M1 " << m.path << " ===\n"; }
+   std::unique_ptr<Mesh> mesh = cycle::LoadScaledMesh(m.path, m.scale);
+   TEST_ASSERT(mesh->Dimension() == 2 && mesh->SpaceDimension() == 2 && mesh->GetNE() == m.ne,
+               "M1 Dimension 2, " << mesh->GetNE() << " triangles (" << m.ne << ")");
+   const auto census = cycle::CountBoundary(*mesh);
+   bool tags = census.size() == m.tags.size();
+   for (const TagCount &t : m.tags)
+   {
+      const auto it = census.find(t.attr);
+      const bool ok = it != census.end() && it->second.faces == t.faces
+                      && it->second.exterior == t.exterior && it->second.interior == t.interior
+                      && it->second.simplex_faces == t.faces;
+      tags = tags && ok;
+      if (g_rank == 0 && it != census.end())
+      {
+         std::cout << "    tag " << t.attr << ": " << it->second.faces << " segments ("
+                   << it->second.exterior << " exterior, " << it->second.interior << " interior)\n";
+      }
+   }
+   TEST_ASSERT(tags, "M1 tag census as the file (every tag, segments, exterior, interior)");
+   // the fault: its length and bounding box
+   real_t len = 0.0;
+   Array<int> v;
+   for (int be = 0; be < mesh->GetNBE(); be++)
+   {
+      if (mesh->GetBdrAttribute(be) != m.fault_attr) { continue; }
+      mesh->GetBdrElementVertices(be, v);
+      const real_t *a = mesh->GetVertex(v[0]), *b = mesh->GetVertex(v[1]);
+      len += std::hypot(a[0] - b[0], a[1] - b[1]);
+   }
+   const cycle::BdrAttrCount &fc = census.at(m.fault_attr);
+   const real_t box = std::max({std::abs(fc.lo[0] - m.lo[0]), std::abs(fc.lo[1] - m.lo[1]),
+                                std::abs(fc.hi[0] - m.hi[0]), std::abs(fc.hi[1] - m.hi[1])});
+   TEST_ASSERT(std::abs(len - m.length) <= 1e-9 * m.length && box <= 1e-9,
+               "M1 fault (tag " << m.fault_attr << "): length " << len << " m, bounding box ("
+               << fc.lo[0] << ", " << fc.lo[1] << ") - (" << fc.hi[0] << ", " << fc.hi[1]
+               << ") m (off by " << box << " m)");
+
+   // the census at this rank count and on 1 rank (P1)
+   ParMesh pm(comm, *mesh);
+   auto op = MakeOp(pm, 1, Source(m.ref, m.up, m.fault_attr), m.dirichlet, DGMethod::IP,
+                    m.fault_attr, m.natural, m.absorbing);
+   auto F = op->FrameField();
+   const FaultFrameReport &R = F->Report();
+   const int nf = census.at(m.fault_attr).faces;
+   TEST_ASSERT(R.fault.faces == nf && R.fault.components == 1 && R.fault.junction_edges == 0
+               && R.fault.tip_edges == 2 && R.fault.parity_global_ok && R.fault.parity_per_patch_ok,
+               "M1 census: " << R.fault.faces << " fault segments, " << R.fault.components
+               << " patch, " << R.fault.junction_edges << " junction vertices, " << R.fault.tip_edges
+               << " tips, J3 parity");
+   TEST_ASSERT(R.creep.faces == m.creep_faces && (m.creep_faces == 0 ||
+               (R.creep.components == 1 && R.seam_edges == 1)),
+               "M1 creep: " << R.creep.faces << " segments, " << R.creep.components << " patch, "
+               << R.seam_edges << " seam vertex");
+   real_t en = 0.0;
+   bool side_ok = true, slots = true;
+   const bool in_plane_up = (m.up[2] == 0.0);
+   for (int fi = 0; fi < F->NumFaultFaces(); fi++)
+   {
+      en = std::max(en, Dist3(F->Normal(fi), m.n));
+      const ff::Frame &fr = F->Frame(fi);
+      // up in the plane: s = -+e_z (slip in the dip slot); up = e_z: d = -+e_z
+      // (slip in the strike slot); the other tangent exactly in the plane
+      const real_t *oz = in_plane_up ? fr.s : fr.d, *ip = in_plane_up ? fr.d : fr.s;
+      if (!(oz[0] == 0.0 && oz[1] == 0.0 && std::abs(oz[2]) == 1.0 && ip[2] == 0.0
+            && fr.n[2] == 0.0 && !fr.fallback)) { slots = false; }
+      const int pe = F->FaultCensus().PlusElement(fi);
+      if (pe >= 0)
+      {
+         real_t ce[3], cf[3];
+         Centroid(pm, pe, ce);
+         FaceCentre(pm, *op, fi, cf);
+         real_t mg = 0.0;
+         for (int d = 0; d < 3; d++) { mg += (ce[d] - cf[d]) * F->Normal(fi)[d]; }
+         if (!(mg < 0.0)) { side_ok = false; }
+      }
+   }
+   en = RMax(en, comm);
+   // the file's vertices carry 16 digits and Gmsh's rounding along the
+   // line: a few 1e-12 m 40 km out, so a few 1e-13 on a 25 m segment's
+   // normal (6.4e-13 seen at dip 60)
+   TEST_ASSERT(en <= 4e-12, "M1 every oriented normal = (" << m.n[0] << ", " << m.n[1]
+               << ", 0) (" << en << ")");
+   TEST_ASSERT(AllTrue(side_ok, comm), "M1 the plus element is on the side n points away from");
+   TEST_ASSERT(AllTrue(slots, comm), "M1 up = (" << m.up[0] << ", " << m.up[1] << ", " << m.up[2]
+               << "): the slip in the " << (in_plane_up ? "dip" : "strike")
+               << " slot, the out-of-plane slot exact");
+   ReportKey k1{};
+   if (g_rank == 0)
+   {
+      ParMesh pm1(MPI_COMM_SELF, *mesh);
+      auto op1 = MakeOp(pm1, 1, Source(m.ref, m.up, m.fault_attr), m.dirichlet, DGMethod::IP,
+                        m.fault_attr, m.natural, m.absorbing);
+      k1 = KeyOf(op1->FrameField()->Report());
+   }
+   MPI_Bcast(&k1, sizeof(ReportKey), MPI_BYTE, 0, comm);
+   const ReportKey k = KeyOf(R);
+   TEST_ASSERT(k.faces == k1.faces && k.comps == k1.comps && k.junc == k1.junc && k.tips == k1.tips
+               && k.cfaces == k1.cfaces && k.ccomps == k1.ccomps && k.seams == k1.seams
+               && k.pin == k1.pin && std::abs(k.side - k1.side) <= 1e-12 * k1.side,
+               "M1 the report equals the 1-rank report (P1; pin margin " << k.pin
+               << ", side margin " << k.side << ")");
 }
 
 // --------------------------------------------------------------- refusals
@@ -790,6 +961,31 @@ int main(int argc, char *argv[])
    {
       std::unique_ptr<Mesh> s(ShearBox(60.0));
       TestLayout(*s, comm, np);
+   }
+   for (const MeshFile &m : MeshFiles()) { TestMeshFile(m, comm); }
+   {
+      // D2: the layout on the BP3 mesh (dip 60, 25 m), with METIS's
+      // partition (which keeps the fault inside the parts) and with one that
+      // cuts along the fault: the hanging wall and the footwall on different
+      // ranks, each side split at 20 km down-dip on 4 ranks, so that every
+      // fault segment is a rank-boundary face
+      std::unique_ptr<Mesh> s = cycle::LoadScaledMesh("bp3/mesh/bp3_d60_25m.msh", 1000.0);
+      if (g_rank == 0) { std::cout << "\n(D2: bp3/mesh/bp3_d60_25m.msh)"; }
+      TestLayout(*s, comm, np, "D2 (METIS)");
+      const real_t n60[2] = {std::sqrt(3.0) / 2.0, 0.5};
+      std::vector<int> cut(s->GetNE());
+      for (int e = 0; e < s->GetNE(); e++)
+      {
+         Array<int> ev;
+         s->GetElementVertices(e, ev);
+         real_t c[2] = {0.0, 0.0};
+         for (int a = 0; a < ev.Size(); a++)
+            for (int d = 0; d < 2; d++) { c[d] += s->GetVertex(ev[a])[d] / ev.Size(); }
+         const int side = (c[0] * n60[0] + c[1] * n60[1] > 0.0) ? 0 : 1;
+         const int deep = (c[1] < -20e3 * 0.5 * std::sqrt(3.0)) ? 1 : 0;
+         cut[e] = (np == 1) ? 0 : (np == 2) ? side : std::min(np - 1, 2 * side + deep);
+      }
+      TestLayout(*s, comm, np, "D2 (fault cut)", &cut);
    }
    if (g_rank == 0)
    {
