@@ -13,7 +13,8 @@
 # all of them (qd_speed_submit.sh STEPS=integrator submits this with
 # afterany, so a failed run is reported, not hidden).
 #
-#   RUNS  "tag:jobid ..." of every run; the first is the reference
+#   RUNS  "tag:jobid ..." of every run; the first is the reference.  A run
+#         of another clone is given as "tag:/absolute/run/dir" (read only).
 #   LINE  "tag tag": today's setting at two tolerances (default "a0 a3")
 #
 # Writes bp5/results_qd_speed/integrator/compare_job<id>.txt.
@@ -31,8 +32,12 @@ ARGS=()
 first=1
 for spec in ${RUNS}; do
    tag="${spec%%:*}"
-   jid="${spec##*:}"
-   d="bp5/results_qd_speed/integrator/${tag}_job${jid}"
+   jid="${spec#*:}"
+   if [[ "${jid}" == /* ]]; then
+      d="${jid}"
+   else
+      d="bp5/results_qd_speed/integrator/${tag}_job${jid}"
+   fi
    echo "${tag}: ${d}, exit code $(cat "${d}/exit_code" 2>/dev/null || echo none)"
    if [ ! -d "${d}" ]; then
       echo "ERROR: no run directory ${d}." >&2

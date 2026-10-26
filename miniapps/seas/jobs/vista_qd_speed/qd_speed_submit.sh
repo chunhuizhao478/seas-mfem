@@ -96,6 +96,26 @@
 #             b_n4_r576     p = 1, 1,000 steps, 4 nodes
 #             b_p2_n4_r576  p = 2, 200 steps, 4 nodes
 #           EXCLUDE applies as for layout.
+#   rock4   QD speed S3 (ROCK4 as a TS option): jobs/vista_qd_speed/
+#           qd_rock4_test.sbatch (builds test_ts_rock4, runs it at 1, 2, 4
+#           and 8 ranks), then qd_integrator.sbatch once per run below,
+#           then qd_integrator_compare.sbatch per order after its runs
+#           (afterany).  The H files are only read, and the step stops
+#           unless they exist.  Not in the default STEPS; R4_RUNS limits it:
+#             r4     p = 1, ROCK4 atol 1e-8, t = 0 to 7.2e9 s, 1 node
+#             r4t    p = 1, ROCK4 atol 1e-9, the same
+#             r4u    p = 1, ROCK4 atol 1e-10, the same
+#             p2ref  p = 2, 5dp atol 1e-10, t = 0 to 3.15576e8 s (10 yr),
+#                    4 nodes
+#             p2a0   p = 2, 5dp atol 1e-7 (the golds' setting), the same
+#             p2a3   p = 2, 5dp atol 1e-8 (the fully dynamic cycle's), the
+#                    same
+#             p2r4   p = 2, ROCK4 atol 1e-8, the same
+#           The p = 1 runs are compared with item A's runs ref, a0 and a3
+#           (jobs 1084896, 1084897 and 1084900; read from R4_ITEM_A, default
+#           $WORK/seas-mfem-qd-v2/miniapps/seas/bp5/results_qd_speed/
+#           integrator) with --line a0 a3; the p = 2 runs with p2ref and
+#           --line p2a0 p2a3.  EXCLUDE applies as for layout.
 # Layouts (nodes x ranks, CPUs per rank):
 #   n1_r144  1 x 144, 1   loops and the new default, twice each
 #   n1_r72   1 x 72,  2   default
@@ -123,6 +143,8 @@ HEVENT_LAYOUTS="${HEVENT_LAYOUTS:-e_n1_r144_hgreen e_n4_r576_hgreen}"
 INTEGRATOR_RUNS="${INTEGRATOR_RUNS:-a0 a1 a2 a3 a4}"
 C_LAYOUTS="${C_LAYOUTS:-c_n1_r144 c_n2_r288 c_n4_r576 c_p2_n4_r576}"
 B_LAYOUTS="${B_LAYOUTS:-b_n1_r144 b_n2_r288 b_n4_r576 b_p2_n4_r576}"
+R4_RUNS="${R4_RUNS:-r4 r4t r4u p2ref p2a0 p2a3 p2r4}"
+R4_ITEM_A="${R4_ITEM_A:-${WORK:-}/seas-mfem-qd-v2/miniapps/seas/bp5/results_qd_speed/integrator}"
 EXCLUDE="${EXCLUDE:-i617-131}"
 
 if [ ! -f jobs/vista_qd_speed/qd_speed_timing.sbatch ]; then
@@ -387,4 +409,79 @@ if has gather; then
           -N "${nodes}" -n "${ranks}" --ntasks-per-node="$((ranks / nodes))" -c 1 \
           -t "${hh}:${mm}:${ss}" jobs/vista_qd_speed/qd_speed_timing.sbatch
    done
+fi
+
+if has rock4; then
+   HCACHE_P2="$(dirname "${GREEN_CACHE_P1}")/bp5_prod_p2_h${HEPS}.bin"
+   # tag:order:options file:t_final:nodes:walltime.  p = 1: item A's a3 (5dp
+   # atol 1e-8) took 398,293 stage evaluations, about 2 h on 1 node; ROCK4
+   # took 2.3-2.6x fewer right-hand sides in the cloud (inferred about 1 h).
+   # p = 2: about 0.14 s/step on 4 nodes (item C/B); the step count to
+   # 10 yr is not measured at p = 2 (inferred 1-2 h).
+   R4_SPECS="r4:1:tests/verification/petsc_ts_rock4_atol1e-8.cfg:7.2e9:1:04:00:00
+             r4t:1:tests/verification/petsc_ts_rock4_atol1e-9.cfg:7.2e9:1:04:00:00
+             r4u:1:tests/verification/petsc_ts_rock4_atol1e-10.cfg:7.2e9:1:04:00:00
+             p2ref:2:tests/verification/petsc_ts_rk5dp_atol1e-10.cfg:3.15576e8:4:06:00:00
+             p2a0:2:tests/verification/petsc_ts_rk45_tandem.cfg:3.15576e8:4:06:00:00
+             p2a3:2:tests/verification/petsc_ts_rk5dp_atol1e-8.cfg:3.15576e8:4:06:00:00
+             p2r4:2:tests/verification/petsc_ts_rock4_atol1e-8.cfg:3.15576e8:4:06:00:00"
+   # Every input first, so a missing one submits none of the runs
+   want_p1=0
+   for spec in ${R4_SPECS}; do
+      IFS=: read -r tag order cfg _ <<< "${spec}"
+      [[ " ${R4_RUNS} " == *" ${tag} "* ]] || continue
+      hfile="${HCACHE_P1}"
+      [ "${order}" = 1 ] || hfile="${HCACHE_P2}"
+      if [ ! -f "${hfile}" ]; then
+         echo "ERROR: rock4 ${tag}: no H file ${hfile}; the runs only read it." >&2
+         exit 1
+      fi
+      [ -f "${cfg}" ] || { echo "ERROR: rock4 ${tag}: no options file ${cfg}." >&2; exit 1; }
+      [ "${order}" = 1 ] && want_p1=1
+   done
+   if [ "${want_p1}" = 1 ]; then
+      for d in ref_job1084896 a0_job1084897 a3_job1084900; do
+         if [ ! -f "${R4_ITEM_A}/${d}/exit_code" ]; then
+            echo "ERROR: rock4: no item A run ${R4_ITEM_A}/${d} (R4_ITEM_A)." >&2
+            exit 1
+         fi
+      done
+   fi
+   sub "rock4 test" "${DEP[@]}" -J qd_rock4_test --exclude="${EXCLUDE}" \
+       -N 1 -n 8 -t 00:30:00 jobs/vista_qd_speed/qd_rock4_test.sbatch
+   P1_RUNS="ref:${R4_ITEM_A}/ref_job1084896 a0:${R4_ITEM_A}/a0_job1084897 a3:${R4_ITEM_A}/a3_job1084900"
+   P1_IDS=""
+   P2_RUNS=""
+   P2_IDS=""
+   for spec in ${R4_SPECS}; do
+      IFS=: read -r tag order cfg tf nodes hh mm ss <<< "${spec}"
+      [[ " ${R4_RUNS} " == *" ${tag} "* ]] || continue
+      hfile="${HCACHE_P1}"
+      [ "${order}" = 1 ] || hfile="${HCACHE_P2}"
+      sub "rock4 ${tag}" "${DEP[@]}" -J "qd_int_${tag}" --exclude="${EXCLUDE}" \
+          --export="ALL,TSCFG=${cfg},TAG=${tag},TFINAL=${tf},ORDER=${order},HEPS=${HEPS},HCACHE=${hfile}" \
+          -N "${nodes}" -n "$((144 * nodes))" --ntasks-per-node=144 -c 1 \
+          -t "${hh}:${mm}:${ss}" jobs/vista_qd_speed/qd_integrator.sbatch
+      if [ "${order}" = 1 ]; then
+         P1_RUNS="${P1_RUNS} ${tag}:${JOB}"
+         P1_IDS="${P1_IDS}:${JOB}"
+      else
+         P2_RUNS="${P2_RUNS} ${tag}:${JOB}"
+         P2_IDS="${P2_IDS}:${JOB}"
+      fi
+   done
+   if [ -n "${P1_IDS}" ]; then
+      sub "rock4 compare p1" --dependency="afterany${P1_IDS}" \
+          --export="ALL,RUNS=${P1_RUNS},LINE=a0 a3" \
+          jobs/vista_qd_speed/qd_integrator_compare.sbatch
+   fi
+   # p = 2: the reference must come first and both line runs must be there
+   if [[ "${P2_RUNS}" == " p2ref:"* ]] && [[ "${P2_RUNS}" == *" p2a0:"* ]] \
+      && [[ "${P2_RUNS}" == *" p2a3:"* ]]; then
+      sub "rock4 compare p2" --dependency="afterany${P2_IDS}" \
+          --export="ALL,RUNS=${P2_RUNS# },LINE=p2a0 p2a3" \
+          jobs/vista_qd_speed/qd_integrator_compare.sbatch
+   elif [ -n "${P2_IDS}" ]; then
+      echo "NOTE: rock4: p = 2 compare not submitted (needs p2ref, p2a0 and p2a3 in R4_RUNS)."
+   fi
 fi

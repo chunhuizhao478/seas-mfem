@@ -9,33 +9,38 @@
 #SBATCH -A EAR20006
 
 # QD speed-up plan v2, item A (integrator study): one run of the production
-# BP5 QD deck (v63 flags, p=1, compressed G read from the H file) from t = 0
-# to TFINAL (default 7.2e9 s, about 2.9 yr after gold 1074099's second
+# BP5 QD deck (v63 flags, p=ORDER, compressed G read from the H file) from
+# t = 0 to TFINAL (default 7.2e9 s, about 2.9 yr after gold 1074099's second
 # event starts) with the PETSc TS options file TSCFG.  One run per job, so
 # the runs go side by side; jobs/vista_qd_speed/qd_speed_submit.sh
-# STEPS=integrator submits them all, then qd_integrator_compare.sbatch.
+# STEPS=integrator (and STEPS=rock4, QD speed S3) submits them all, then
+# qd_integrator_compare.sbatch.
 #
 #   TSCFG   options file, relative to miniapps/seas (required)
 #   TAG     run name (required): output in
 #           bp5/results_qd_speed/integrator/<TAG>_job<id>
 #   TFINAL  end time in s (default 7.2e9)
-#   HCACHE  the H file (default the one job 1084131 wrote, eps 1e-10).  It
-#           is only read: the job stops if it does not exist, so it never
-#           compresses or writes there.
+#   ORDER   polynomial order (default 1)
+#   HCACHE  the H file (default bp5_prod_p<ORDER>_h<HEPS>.bin in
+#           $SCRATCH/seas-qd-green: job 1084131 wrote p=1's, 1086777
+#           p=2's, eps 1e-10).  It is only read: the job stops if it does
+#           not exist, so it never compresses or writes there.
 #
-# GitHub is the version control: the checkout must be clean and at the
-# commit its upstream branch points to, or the job stops.
+# GitHub is the version control: the checkout must be clean, its HEAD on
+# GitHub (CLAUDE.md guard) and at the commit its upstream branch points to,
+# or the job stops.
 
 set -uo pipefail
 source "${SLURM_SUBMIT_DIR}/jobs/vista/g0_env.sh"
 g0_check_binary
 
 cd "${SEAS_MFEM_ROOT}"
-if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-   echo "ERROR: checkout has uncommitted changes; run only pushed commits." >&2
-   git status --short --untracked-files=no >&2
-   exit 1
-fi
+git fetch -q origin || { echo "ERROR: git fetch failed"; exit 2; }
+[ -z "$(git status --porcelain --untracked-files=no)" ] \
+   || { echo "ERROR: uncommitted changes in ${SEAS_MFEM_ROOT}"; git status --short; exit 2; }
+[ -n "$(git branch -r --contains HEAD)" ] \
+   || { echo "ERROR: HEAD $(git rev-parse --short HEAD) is not on GitHub"; exit 2; }
+echo "commit $(git rev-parse HEAD)"
 if [ "$(git rev-parse HEAD)" != "$(git rev-parse '@{u}' 2>/dev/null)" ]; then
    echo "ERROR: HEAD $(git rev-parse --short HEAD) is not its upstream" \
         "($(git rev-parse --short '@{u}' 2>/dev/null || echo none)); pull first." >&2
@@ -47,8 +52,13 @@ cd "${SEAS_DIR}"
 TSCFG="${TSCFG:-}"
 TAG="${TAG:-}"
 TFINAL="${TFINAL:-7.2e9}"
+ORDER="${ORDER:-1}"
+if ! [[ "${ORDER}" =~ ^[1-3]$ ]]; then
+   echo "ERROR: ORDER='${ORDER}' must be 1, 2 or 3." >&2
+   exit 1
+fi
 HEPS="${HEPS:-1e-10}"
-HCACHE="${HCACHE:-${SCRATCH:-${WORK}}/seas-qd-green/bp5_prod_p1_h${HEPS}.bin}"
+HCACHE="${HCACHE:-${SCRATCH:-${WORK}}/seas-qd-green/bp5_prod_p${ORDER}_h${HEPS}.bin}"
 if [ -z "${TSCFG}" ] || [ ! -f "${TSCFG}" ]; then
    echo "ERROR: TSCFG='${TSCFG}' is not an options file under ${SEAS_DIR}." >&2
    exit 1
@@ -61,7 +71,7 @@ if [ ! -f "${HCACHE}" ]; then
    echo "ERROR: no H file ${HCACHE}; this job only reads it." >&2
    exit 1
 fi
-GOLD_README_KNOBS+=(TSCFG TAG TFINAL HEPS HCACHE)
+GOLD_README_KNOBS+=(TSCFG TAG TFINAL ORDER HEPS HCACHE)
 
 # The v63 flags with this run's options file in place of
 # petsc_ts_rk45_tandem.cfg.
@@ -81,7 +91,7 @@ PFX="qd_int_${TAG}"
 mkdir -p "${OUT}"
 g0_provenance "${OUT}"
 {
-   echo "integrator run ${TAG}: options ${TSCFG}, t_final ${TFINAL} s"
+   echo "integrator run ${TAG}: options ${TSCFG}, t_final ${TFINAL} s, order ${ORDER}"
    echo "layout: ${SLURM_JOB_NUM_NODES:-1} node(s), ${SLURM_NTASKS:-144} ranks"
    echo "H file (read only): ${HCACHE}"
    echo "options file:"
@@ -89,7 +99,7 @@ g0_provenance "${OUT}"
 } >> "${OUT}/provenance.txt"
 
 echo "=== ${TAG}: start $(date -u +%T) ==="
-ibrun ./seas_bp5_full --mesh "${G0_MESH_PROD}" "${FLAGS[@]}" --order 1 \
+ibrun ./seas_bp5_full --mesh "${G0_MESH_PROD}" "${FLAGS[@]}" --order "${ORDER}" \
       --qd-green --qd-green-compress "${HEPS}" --qd-green-hcache "${HCACHE}" \
       --tfinal "${TFINAL}" --stage-timers 5000 --checkpoint-interval 0 \
       --output-dir "${OUT}" --output-prefix "${PFX}" > "${OUT}/run.log" 2>&1
