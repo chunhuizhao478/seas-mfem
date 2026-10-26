@@ -308,3 +308,107 @@ the cycle QD regime on 2 ranks (1.8e-9) and the BP5 quick check on 8 ranks
 unit tests, the field, plate loading and Okada tests and the
 fully-dynamic-cycle tests (P3 on 2 ranks included) pass, with 1-rank outputs
 byte for byte.
+
+## Phase C, part 1: the Nitsche dynamic operator on triangles (C1)
+
+The Nitsche dynamic path now runs on a 2D triangle mesh in the (x, y) plane
+(design rev 3, section 5.5).  The volume vectors hold D = 2 components per
+node (byNODES, strides D nd); the fault state stays padded: d, V, positions
+and tractions are global three-vectors with z = 0 and the frame is 9 entries
+per DOF.  The out-of-plane frame slot is an exact zero (Proposition 1), so
+`CloseDOF`, the closures, Kelvin-Voigt and Prakash-Clifton are the 3D code.
+The stiffness, the slip and Dirichlet loads, the traction, the fault-face
+penalties and the fast fault-face operators now accept 2D; the quasi-dynamic
+solve (`Solve`, `BuildQDStageOperators`, `BuildQDGreen`) stays phase E and
+refuses 2D.  The drivers stay 3D only until C2, which switches their own
+stable-constant tables (`drivers/nitsche_dyn_driver.cpp`, `cycle/dyn_phase.hpp`)
+to `NitscheStableConstant` and runs LTS in 2D; the LTS edit below is not yet
+exercised on a 2D mesh.
+
+New file (branch-owned): `tests/2d_inplane/test_2d_nitsche.cpp` (make target
+`test-2d-nitsche`, part of `2d-inplane-all`).
+
+| Shared file | Change | 3D |
+|---|---|---|
+| `domain/elasticity_operator.hpp` | `Require3D_`'s message names the QD solve only; `SetFirstStepDebugConfig` refuses the first-step dumps in 2D | message text only |
+| `domain/elasticity_operator_assembly.inl` | `AssembleStiffness` no longer refuses 2D; the IP integrators (interior and Dirichlet faces), the BlockILU block size and the slip and Dirichlet loads take `dim_` in place of 3 | `dim_ = 3`: the same calls |
+| `domain/elasticity_operator_traction.inl` | `ComputeTraction`, `AssembleSlipOnlyRHS`, `AssembleDirichletOnlyRHS` accept 2D (`dim_`); `Solve` gets its own `Require3D_` (it was refused through `AssembleStiffness` before) | no-op checks |
+| `domain/elasticity_operator_{fault_ops,penalty,qd,debug}.inl` | `BuildFaultFaceOps` and `GetFaultFacePenalties` accept 2D; the face-traction kernels, the neighbour-exchange row size and the shared-face vdofs use `dim_` | 3 as before |
+| `integrator/dg_elasticity_ip_combined_integrator.hpp` | **bug fix**: the trace of grad u in `ComputeTractionAtQuadPoints` and `ComputeTractionAtQuadPointsDecomposed` added `grad(2,2)` also when `dim_ = 2`, reading past the 2 x 2 matrix; now `dim_` terms.  Before the fix the 2D normal traction from pure tangential slip was garbage (N5 aborted with sigma_n_eff = -2.2e9 Pa) | the same three terms |
+| `integrator/dg_absorbing_bc_integrator.hpp` | the block dimension is `fe.GetDim()` | 3 |
+| `domain/nitsche_mass.hpp` | `dim_` from the mesh, triangles accepted in 2D; component loops and damping blocks D nd x D nd; `Dimension()` | `dim_ = 3` |
+| `domain/nitsche_material_sample.hpp` | triangles accepted in 2D | tetrahedra as before |
+| `domain/nitsche_wave_operator.hpp` | `dim_`, `Dimension()`; damping-block loops over `dim_`; Kelvin-Voigt face centroids over the face's vertices (2 in 2D) and element centres padded with z = 0; the prestress projection evaluates the deck's stress at (x, y, 0), uses the `dim_`-entry normal and refuses a 2D fault point with sigma_xz or sigma_yz nonzero (no anti-plane unknown); the penalty-spread abort message prints the centroid of 2 or 3 vertices | the same sums in the same order |
+| `solver/nitsche_cfl.hpp` | `NitscheElementLength` accepts triangles (h = 4 A / P, twice the inradius, as 6 V / A for tets); new `NitscheStableConstant(dim, p)`: the 3D column (the drivers' `kCeig`) and the measured 2D column | `ComputeMaxDt` unchanged for tets |
+| `solver/nitsche_lts_run.hpp` | the LTS block builder and the cluster mass loop use the mesh dimension | 3 |
+| `tests/2d_inplane/2d_inplane.mk` | `test-2d-nitsche` | - |
+
+The 2D stable constant.  The 3D column does not carry over to triangles.
+N2 measures C = 2 / (omega_max dt_unit) with dt_unit = h_min / (p^2 c_p) on
+the 4 x 4 grid of 4-triangle squares, by power iteration and by bisection on
+blow-up over 1000 steps; the 8 x 8 grid gives the same C_eig to 0.03%:
+
+| p | C_eig | bisection | 2D column | 3D column | 2D / 3D |
+|---|---|---|---|---|---|
+| 1 | 0.215484 | 0.215484 | 0.215 | 0.113 | 1.91 |
+| 2 | 0.365158 | 0.365158 | 0.365 | 0.212 | 1.72 |
+| 3 | 0.464475 | 0.461572 | 0.461 | 0.282 | 1.64 |
+| 4 | 0.526223 | 0.526223 | 0.526 | 0.332 | 1.59 |
+
+On the committed unstructured meshes C_eig is higher (N2M): TPV205-2D 100 m
+0.244, 0.414, 0.522 and TPV105-2D 100 m 0.256, 0.440, 0.562 at p = 1, 2, 3,
+1.13 to 1.22 times the column, so the column is safe for them.
+
+Where the 2D tests differ from the 3D ones they follow.  (1) N3 drift: the
+3D slope bound (1e-10 E_0 per step) failed at p = 1 (1.18e-10) although
+E_h was conserved to 8e-15: the 2D step is 1.9 times P3's and the dt^2
+oscillation of E is larger, so a drift-free E fits that slope.  The test
+now asks the drift over the run to stay below 1% of the oscillation bound
+(measured 0.10%, 0.11%, 0.66%); E_h is still checked to 1e-10.  (2) N3
+temporal order: at the production step the first error ratio was not yet
+asymptotic (U 3.08, Udot 5.14 at p = 1); the refinement starts at half the
+step (ratios 3.96 to 4.22).  (3) N4 at 45 degrees: the 3D test could only
+print the oblique reflection; the 2D box is wide enough that the side
+walls' incident-only data cannot reach the fit region, so R_PP and R_PS are
+asserted within 0.002 of the analytic values at both resolutions.
+
+How it was checked (cloud container, 10-25 and 10-26).  test_2d_nitsche on
+1 rank, 74 of 74 (N1 to N5): N1 plane P and S waves, finest-pair L2 orders 2.10 / 2.05
+(p = 1), 2.61 / 2.99 (p = 2; the P value close to its 2.5 floor), 3.98 /
+3.89 (p = 3); N3 as above, Newmark loop = `CentralDifferenceSolver` bit for
+bit, `ComputeMaxDt` = the serial 4 A / P reference bit for bit; N4 the
+damped mass inverse to 8e-16, normal P |D| 7.8e-4 -> 5.2e-5 and S 7.1e-4 ->
+7.2e-5 with resolution, at 45 degrees R_PP -0.01381 / -0.01380 against
+-0.01385 and R_PS -0.07070 / -0.07070 against -0.07090; N5 at p = 1 (max
+slip 7.29 m) and p = 2: the out-of-plane slots exactly 0, |sigma_eff -
+120 MPa| <= 8e-7 Pa, the half turn 2.7e-13, the 90-degree rotated run (slip
+in the dip slot) 3.7e-13 / 4.7e-12, the fast fault operators against the
+CSR path 7.7e-13 / 5.4e-12, Kelvin-Voigt and Prakash-Clifton finite,
+Prakash-Clifton with L = 1e-200 bit for bit the run without it.  On 2 and 4
+ranks (`--np`, 42 of 42) with a partition that puts the two sides of the
+fault on different ranks (every fault face a rank-boundary face): N3 bit
+for bit, N5 against the 1-rank run 4.4e-13 / 6.0e-12 (2 ranks) and 5.8e-13
+/ 4.0e-12 (4 ranks).
+
+3D parity against review 4's tree (same container, both binary sets rebuilt
+from clean; review 4's from a `git archive` export, whose files carry the
+commit stamp "unknown"): TPV205 and TPV104 on 2 ranks, the cycle QD and
+dynamic regimes on 1 rank byte for byte apart from the commit stamp; the
+cycle QD regime on 2 ranks 1.3e-9 (review 4's binaries run twice: 2.7e-9),
+the BP5 quick check on 8 ranks 6.0e-8 (twice: 1.1e-7); the cycle dynamic
+regime on 2 ranks differs only in the t = 0 quasi-static velocity of the
+off-fault stations, 3.7e-9 (twice: 2.2e-9; it needs the container to itself,
+2 x 7 GB, and was killed by the memory limit once when run next to other
+tests); the 15 unit tests pass with identical outputs.  This phase also
+compares the Nitsche verification tests (19 runs of the Makefile's
+`test-nitsche-*` targets): identical apart from timings, MPI process names
+and, in P5 on 2 ranks, QD-solve diagnostics at MUMPS's run-to-run level.  Two
+of their checks fail with both binary sets, identically, and also at the
+branch point 3926e9c8: KV (e) at p = 2 (node-scaled L2 order 2.332, floor
+2.5) and TPV102 inline T-21(a) (`Mult` against M^{-1}(F - Kx + Gd - Cv) bit
+for bit: 6088 and 18422 entries differ); they are not touched here.  The
+fully-dynamic-cycle tests pass; their 1-rank logs are identical apart from
+the header and timings, their 2-rank logs differ at MUMPS's run-to-run level
+(the P3 switch checkpoint 3.4e-11).  `2d-inplane-all` passes.
+
+Known behaviour changes in 3D: none.

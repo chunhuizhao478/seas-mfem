@@ -11,13 +11,15 @@
 //    C_e(c n_e + i, d n_e + j) = int_F  rho_e c_p,e (phi_i n_c)(phi_j n_d)
 //                                     + rho_e c_s,e phi_i phi_j (delta_cd - n_c n_d)
 //
-// (size 3 n_e x 3 n_e, element-local byNODES layout: component c of local
-// dof i at c n_e + i, matching NitscheMass).  rho, c_p, c_s are the element's
+// (size D n_e x D n_e, D = the element dimension 3 or 2, element-local
+// byNODES layout: component c of local dof i at c n_e + i, matching
+// NitscheMass).  In 2D the tangential part v - (v.n) n is one component
+// along rot90(n); the expression is the same.  rho, c_p, c_s are the element's
 // values from NitscheMaterialSample (not the operator's fallback scalars).
 // C is not part of K.
 //
-// Scope (Chunhui Zhao, 2026-10-14): tetrahedral meshes only; PML is future
-// work.
+// Scope (Chunhui Zhao, 2026-10-14): tetrahedral meshes only, triangles in 2D
+// (2D in-plane design rev 3, phase C); PML is future work.
 
 #ifndef MFEM_SEAS_DG_ABSORBING_BC_INTEGRATOR_HPP
 #define MFEM_SEAS_DG_ABSORBING_BC_INTEGRATOR_HPP
@@ -34,7 +36,7 @@ namespace seas
 class DGAbsorbingBCIntegrator
 {
 public:
-   /// Add the dashpot block of one boundary face to C (3 nd x 3 nd).
+   /// Add the dashpot block of one boundary face to C (D nd x D nd).
    /// `fe` is the scalar finite element of Tr.Elem1; Tr is the boundary
    /// face transformation (Elem2 absent).  Quadrature: face rule of order
    /// 2 p (exact for affine faces).
@@ -44,9 +46,10 @@ public:
                             DenseMatrix &C)
    {
       const int nd = fe.GetDof();
-      const int dim = 3;
+      const int dim = fe.GetDim();
       MFEM_VERIFY(C.Height() == dim * nd && C.Width() == dim * nd,
-                  "DGAbsorbingBCIntegrator: block must be 3 nd x 3 nd");
+                  "DGAbsorbingBCIntegrator: block must be " << dim << " nd x "
+                  << dim << " nd");
       const IntegrationRule &ir =
          IntRules.Get(Tr.GetGeometryType(), 2 * fe.GetOrder());
       Vector shape(nd), nor(dim);

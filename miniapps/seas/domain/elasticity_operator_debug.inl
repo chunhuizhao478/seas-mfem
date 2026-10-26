@@ -819,7 +819,7 @@
                                   const real_t *face_slip,
                                   Vector &delta_u_quad) const
    {
-      const int dim = 3;
+      const int dim = dim_;
       const int nbf = nbf_per_face_;
       const auto &basis = fault_basis_.GetBasis(logical_fault_idx);
       // Tandem convention: sign is baked into the basis vectors.

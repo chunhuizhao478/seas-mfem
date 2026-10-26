@@ -95,6 +95,15 @@
 // P3 to break an include cycle with nitsche_mass.hpp); it is re-exported here.
 //
 // Scope (Chunhui Zhao, 2026-10-13): the Nitsche path uses tetrahedral meshes only.
+//
+// 2D in-plane (design rev 3, phase C, section 5.5): on a triangle mesh the
+// volume vectors hold D = 2 components per node (strides D nd) and the fault
+// state stays padded: d, V, positions and tractions are global three-vectors
+// with z = 0, the frame 9 per DOF.  The out-of-plane frame slot is an exact
+// zero (Proposition 1 of the design), so CloseDOF and the closures are the 3D
+// ones.  The deck's stress functions are evaluated at (x, y, 0) and must
+// give sigma_xz = sigma_yz = 0 on the fault (refused otherwise: the in-plane
+// model has no anti-plane traction).
 
 #ifndef MFEM_SEAS_NITSCHE_WAVE_OPERATOR_HPP
 #define MFEM_SEAS_NITSCHE_WAVE_OPERATOR_HPP
@@ -180,8 +189,10 @@ public:
                        const DomainConfig &config = {},
                        const NitscheFaultSetup *fault = nullptr)
       : SecondOrderTimeDependentOperator(0, 0.0),
-        mesh_(mesh), order_(order), bc_(bc), config_(config)
+        mesh_(mesh), dim_(mesh.Dimension()), order_(order), bc_(bc), config_(config)
    {
+      MFEM_VERIFY(dim_ == 2 || dim_ == 3, "NitscheWaveOperator: mesh dimension "
+                  << dim_ << "; 2 or 3 only");
       sample_ = std::make_unique<NitscheMaterialSample>(mesh, material);
 
       // Scalar fallbacks for the operator's scalar-only accessors: global
@@ -334,12 +345,14 @@ public:
 
    const NitscheMaterialSample &Sample() const { return *sample_; }
    ParMesh &GetMesh() const { return mesh_; }
+   /// Mesh dimension D: components per volume node (fault state stays 3).
+   int Dimension() const { return dim_; }
    int GetOrder() const { return order_; }
    ElasticityDomainOperator<ParMesh> &Elasticity() { return *elast_; }
    const NitscheMass &Mass() const { return *mass_; }
    /// (M + dt/2 C)^{-1}; null without absorbing faces or before SetTimeStep.
    const NitscheMass *DampedMass() const { return mass_damped_.get(); }
-   /// Per-element dashpot blocks C_e (element-local byNODES, 3 nd x 3 nd).
+   /// Per-element dashpot blocks C_e (element-local byNODES, D nd x D nd).
    const std::map<int, DenseMatrix> &DampingBlocks() const { return damping_blocks_; }
    bool HasDamping() const { return !damping_blocks_.empty(); }
 
@@ -355,12 +368,12 @@ public:
       {
          const Array<int> &dofs = mass_->ElementScalarDofs(kv.first);
          const int nd = dofs.Size();
-         x.SetSize(3 * nd);
-         y.SetSize(3 * nd);
-         for (int c = 0; c < 3; ++c)
+         x.SetSize(dim_ * nd);
+         y.SetSize(dim_ * nd);
+         for (int c = 0; c < dim_; ++c)
             for (int k = 0; k < nd; ++k) { x(c * nd + k) = v(c * n + dofs[k]); }
          kv.second.Mult(x, y);
-         for (int c = 0; c < 3; ++c)
+         for (int c = 0; c < dim_; ++c)
             for (int k = 0; k < nd; ++k) { Cv(c * n + dofs[k]) += y(c * nd + k); }
       }
    }
@@ -597,16 +610,23 @@ public:
       kv_eta_bar_ = eta_bar;
       kv_scale_ = scale;
       kv_width_ = width;
-      // fault-face centroids of all ranks
+      // fault-face centroids of all ranks (padded three-vectors; a 2D face
+      // is an edge of 2 vertices with z = 0)
       std::vector<real_t> cl;
       if (has_fault_ && width >= 0.0)
       {
+         const int nv = frames_->FaultCensus().FaceVertices();
          for (int fi = 0; fi < nloc_faces_; fi++)
          {
             long long key[3];
             real_t xv[3][3];
             frames_->FaultCensus().FaceVertexData(fi, key, xv);
-            for (int c = 0; c < 3; c++) { cl.push_back((xv[0][c] + xv[1][c] + xv[2][c]) / 3.0); }
+            for (int c = 0; c < 3; c++)
+            {
+               real_t s = 0.0;
+               for (int a = 0; a < nv; a++) { s += xv[a][c]; }
+               cl.push_back(s / nv);
+            }
          }
       }
       MPI_Comm comm = mesh_.GetComm();
@@ -635,7 +655,8 @@ public:
       kv_mu_gf_ = std::make_unique<ParGridFunction>(const_cast<ParFiniteElementSpace *>(mfes));
       kv_in_gf_ = std::make_unique<ParGridFunction>(const_cast<ParFiniteElementSpace *>(mfes));
       Array<int> mdofs, ev;
-      Vector xc(3);
+      Vector xcs;           // element centre, SpaceDimension() entries
+      real_t xc[3];         // padded (2D: z = 0)
       long long nin = 0;
       real_t bmm[2] = {std::numeric_limits<real_t>::infinity(),
                        std::numeric_limits<real_t>::infinity()};   // {min, -max}
@@ -646,19 +667,20 @@ public:
          if (!in)
          {
             ElementTransformation *T = mesh_.GetElementTransformation(e);
-            T->Transform(Geometries.GetCenter(mesh_.GetElementBaseGeometry(e)), xc);
+            T->Transform(Geometries.GetCenter(mesh_.GetElementBaseGeometry(e)), xcs);
+            for (int c = 0; c < 3; c++) { xc[c] = (c < xcs.Size()) ? xcs(c) : 0.0; }
             bool near_box = true;
             for (int c = 0; c < 3; c++)
             {
-               if (xc(c) < lo[c] - width || xc(c) > hi[c] + width) { near_box = false; }
+               if (xc[c] < lo[c] - width || xc[c] > hi[c] + width) { near_box = false; }
             }
             if (near_box)
             {
                const real_t w2 = width * width;
                for (int f = 0; f < nf && !in; f++)
                {
-                  const real_t dx = xc(0) - cg[3 * f], dy = xc(1) - cg[3 * f + 1],
-                               dz = xc(2) - cg[3 * f + 2];
+                  const real_t dx = xc[0] - cg[3 * f], dy = xc[1] - cg[3 * f + 1],
+                               dz = xc[2] - cg[3 * f + 2];
                   in = (dx * dx + dy * dy + dz * dz <= w2);
                }
             }
@@ -1280,7 +1302,8 @@ private:
       const FaultBasis *fb = elast_->GetFaultBasis();
       Vector S_loc(3 * nd_);
       S_loc = 0.0;
-      Vector nor(3), xq(3), Tq, nlq, out;
+      Vector nor(dim_), xq, Tq, nlq, out;
+      real_t x3[3];   // padded quadrature point (2D: z = 0)
       for (int fi = 0; fi < nloc_faces_; fi++)
       {
          FaceElementTransformations *Tr = FaultFaceTr_(fi);
@@ -1291,7 +1314,7 @@ private:
                      "NitscheWaveOperator: face basis at quadrature points is "
                      << e_q.Height() << " x " << e_q.Width() << ", expected "
                      << nbf_ << " x " << nq);
-         Tq.SetSize(3 * nq);
+         Tq.SetSize(dim_ * nq);
          nlq.SetSize(nq);
          for (int q = 0; q < nq; q++)
          {
@@ -1300,11 +1323,24 @@ private:
             CalcOrtho(Tr->Jacobian(), nor);
             const real_t nl = nor.Norml2();
             nlq(q) = nl;
-            const real_t nq3[3] = {nor(0) / nl, nor(1) / nl, nor(2) / nl};
+            const real_t nq3[3] = {nor(0) / nl, nor(1) / nl,
+                                   dim_ == 3 ? nor(2) / nl : 0.0};
             Tr->Transform(ip, xq);
+            for (int c = 0; c < 3; c++) { x3[c] = (c < xq.Size()) ? xq(c) : 0.0; }
             real_t s[9];
-            sig(xq.GetData(), s);
-            for (int a = 0; a < 3; a++)
+            sig(x3, s);
+            if (dim_ == 2)
+            {
+               // in-plane: the anti-plane traction sigma_{zx} n_x + sigma_{zy} n_y
+               // has no unknown to act on (header)
+               MFEM_VERIFY(s[2] == 0.0 && s[5] == 0.0 && s[6] == 0.0 && s[7] == 0.0,
+                           "NitscheWaveOperator: 2D mesh but the stress at fault point ("
+                           << x3[0] << ", " << x3[1] << ") has sigma_xz = " << s[2]
+                           << ", sigma_yz = " << s[5] << " (sigma_zx = " << s[6]
+                           << ", sigma_zy = " << s[7] << "); the in-plane model "
+                           "carries no anti-plane stress");
+            }
+            for (int a = 0; a < dim_; a++)
             {
                Tq(a * nq + q) = s[3 * a] * nq3[0] + s[3 * a + 1] * nq3[1]
                                 + s[3 * a + 2] * nq3[2];
@@ -1319,7 +1355,7 @@ private:
             bv[2][c] = b.tangent2[c];
          }
          DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
-            3, 3, Tq, nlq, ir, nbf_, e_q, bv, out,
+            dim_, 3, Tq, nlq, ir, nbf_, e_q, bv, out,
             b.qp_data.empty() ? nullptr : &b.qp_data);
          for (int kk = 0; kk < nbf_; kk++)
          {
@@ -1412,12 +1448,14 @@ private:
             long long key[3];
             real_t xv[3][3];
             orient.FaceVertexData(fi, key, xv);
+            const int nv = orient.FaceVertices();
+            real_t xm[3] = {0.0, 0.0, 0.0};
+            for (int a = 0; a < nv; a++)
+               for (int c = 0; c < 3; c++) { xm[c] += xv[a][c] / nv; }
             MFEM_ABORT("NitscheWaveOperator: the penalty sigma_F is not "
                        "constant on fault face " << fi << " of rank "
-                       << Mpi::WorldRank() << " (centroid ("
-                       << (xv[0][0] + xv[1][0] + xv[2][0]) / 3 << ", "
-                       << (xv[0][1] + xv[1][1] + xv[2][1]) / 3 << ", "
-                       << (xv[0][2] + xv[1][2] + xv[2][2]) / 3
+                       << Mpi::WorldRank() << " (centroid (" << xm[0] << ", "
+                       << xm[1] << ", " << xm[2]
                        << ")): relative spread " << spread_face_(fi) << " > "
                        << kPenaltySpreadTol << "; the scalar gamma_F would not "
                        "be the kernel's derivative (plan, \"The scalar gamma\").");
@@ -1488,7 +1526,7 @@ private:
          auto it = damping_blocks_.find(e);
          if (it == damping_blocks_.end())
          {
-            it = damping_blocks_.emplace(e, DenseMatrix(3 * nd)).first;
+            it = damping_blocks_.emplace(e, DenseMatrix(dim_ * nd)).first;
             it->second = 0.0;
          }
          DGAbsorbingBCIntegrator::AddFaceBlock(fe, *Tr, rho, cp, cs, it->second);
@@ -1496,6 +1534,7 @@ private:
    }
 
    ParMesh &mesh_;
+   int dim_ = 3;   ///< mesh dimension (2D in-plane: 2)
    int order_;
    BoundaryConfig bc_;
    DomainConfig config_;

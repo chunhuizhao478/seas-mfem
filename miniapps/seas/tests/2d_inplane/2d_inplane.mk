@@ -10,6 +10,7 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-okada-dislocation   # phase A: the Okada check
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d-fault-layout     # phase B: the 2D switch
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d-deck             # phase B: 2D deck vectors
+#   make -f tests/2d_inplane/2d_inplane.mk test-2d-nitsche          # phase C: 2D Nitsche operator
 #   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
 # The 3D parity set (every phase must leave it bit for bit unchanged) is the
 # script tests/2d_inplane/parity_3d.sh (see its header).
@@ -173,8 +174,33 @@ test-2d-deck: seas_test_2d_deck seas_fd_cycle_driver seas_nitsche_dyn_driver
 	 else printf '%s\n' "$$out" | tail -15; echo "  FAILED: seas_nitsche_dyn_driver: exit $$rc"; exit 1; fi; \
 	 rm -rf $(DECK_2D_TMP)
 
+# Phase C (part 1): the Nitsche dynamic operator on 2D triangle meshes built
+# in the test (plane waves, the CFL constant on triangles, the step, the
+# dashpot, an in-plane rupture).  N1-N5 on 1 rank, then the parts that must
+# not depend on the partition (N3, N5) on 2 and 4 ranks.
+NITSCHE_2D_HEADERS = domain/nitsche_wave_operator.hpp domain/nitsche_mass.hpp \
+                     domain/nitsche_material_sample.hpp solver/nitsche_cfl.hpp \
+                     integrator/dg_absorbing_bc_integrator.hpp friction/slip_weakening_closure.hpp
+TEST_2D_NITSCHE_SRC = tests/2d_inplane/test_2d_nitsche.cpp
+TEST_2D_NITSCHE_OBJ = $(TEST_2D_NITSCHE_SRC:.cpp=.o)
+$(TEST_2D_NITSCHE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(INPLANE_HEADERS) $(NITSCHE_2D_HEADERS) \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_2d_nitsche: $(TEST_2D_NITSCHE_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_2D_NITSCHE_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-2d-nitsche: seas_test_2d_nitsche
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_2d_nitsche
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_2d_nitsche --np
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_2d_nitsche --np
+
 2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
-                test-2d-deck
+                test-2d-deck test-2d-nitsche
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
-        test-2d-deck 2d-inplane-all
+        test-2d-deck test-2d-nitsche 2d-inplane-all

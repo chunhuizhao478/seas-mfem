@@ -40,7 +40,7 @@ void ElasticityDomainOperator<MeshType>::ComputeIPFaceTraction(
    const Vector &u1_all, const Vector &u2_all,
    const real_t *face_slip, bool with_normal, Vector &trac_local) const
 {
-   const int dim = 3;
+   const int dim = dim_;
    const int nbf = nbf_per_face_;
    const auto &basis = fault_basis_.GetBasis(fi);
 

@@ -372,14 +372,16 @@ public:
       }
 
       // the blocks: the integrators of AssembleStiffness, split by owner
+      // (dimension of the mesh: 2D in-plane design rev 3, phase C)
+      const int dim = pm.Dimension();
       ElasticityIntegrator vol(lam, mu);
-      DGElasticityIPCombinedIntegrator face(lam, mu, 3, -1.0, penalty);   // SIPG: epsilon -1
+      DGElasticityIPCombinedIntegrator face(lam, mu, dim, -1.0, penalty);   // SIPG: epsilon -1
       std::unique_ptr<ElasticityIntegrator> kvol;
       std::unique_ptr<DGElasticityIPCombinedIntegrator> kface;
       if (nm_ == 2)
       {
          kvol = std::make_unique<ElasticityIntegrator>(*klam, *kmu);
-         kface = std::make_unique<DGElasticityIPCombinedIntegrator>(*klam, *kmu, 3, -1.0, penalty);
+         kface = std::make_unique<DGElasticityIPCombinedIntegrator>(*klam, *kmu, dim, -1.0, penalty);
       }
       DenseMatrix elmat;
       for (int e = 0; e < ne_; e++)
@@ -956,7 +958,8 @@ public:
       const NitscheMass &M = op.Mass();
       Vector rho;
       RhoPerElement(sample, rho);
-      nd_ = nb_ / 3;
+      dim_ = op.Dimension();   // 2D in-plane: 2 components per node
+      nd_ = nb_ / dim_;
       minv_.resize(static_cast<std::size_t>(ne) * nd_ * nd_);
       inv_rho_.resize(ne);
       for (int e = 0; e < ne; e++)
@@ -1124,7 +1127,7 @@ private:
             continue;
          }
          const real_t *Mi = minv_.data() + static_cast<std::size_t>(e) * nd_ * nd_;
-         for (int comp = 0; comp < 3; comp++)
+         for (int comp = 0; comp < dim_; comp++)
          {
             const real_t *xc = x + comp * nd_;
             for (int i = 0; i < nd_; i++)
@@ -1154,7 +1157,7 @@ private:
 
    NitscheWaveOperator &op_;
    std::vector<int> cl_;
-   int nc_ = 1, L_ = 0, cf_ = 0, nb_ = 0, nd_ = 0;
+   int nc_ = 1, L_ = 0, cf_ = 0, nb_ = 0, nd_ = 0, dim_ = 3;
    real_t dt0_ = 0.0;
    bool same_ = false, kv_ = false, has_dirichlet_ = false;
    MPI_Comm comm_ = MPI_COMM_NULL;

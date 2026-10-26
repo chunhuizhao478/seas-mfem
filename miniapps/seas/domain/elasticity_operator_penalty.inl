@@ -17,11 +17,10 @@ template <typename MeshType>
 void ElasticityDomainOperator<MeshType>::GetFaultFacePenalties(
    Vector &sigma_F_face, Vector &spread) const
 {
-   Require3D_("GetFaultFacePenalties");
    MFEM_VERIFY(method_ == DGMethod::IP,
                "GetFaultFacePenalties: IP method only (sigma_F is the "
                "interior-penalty coefficient)");
-   const int dim = 3;
+   const int dim = dim_;
    const int nfaces = fault_interior_faces_.Size() + fault_shared_faces_.Size();
    sigma_F_face.SetSize(nfaces);
    spread.SetSize(nfaces);

@@ -536,8 +536,11 @@ public:
 
          // Stress average: {σ} = 0.5*(σ_0 + σ_1), then T = {σ}·n̂
          // Per-side material: σ_x uses lam_x, mu_x (Tandem convention)
-         real_t tr1 = grad1(0,0) + grad1(1,1) + grad1(2,2);
-         real_t tr2 = grad2(0,0) + grad2(1,1) + grad2(2,2);
+         // (2D in-plane design rev 3, phase C: the trace has dim_ terms)
+         real_t tr1 = (dim_ == 3) ? grad1(0,0) + grad1(1,1) + grad1(2,2)
+                                  : grad1(0,0) + grad1(1,1);
+         real_t tr2 = (dim_ == 3) ? grad2(0,0) + grad2(1,1) + grad2(2,2)
+                                  : grad2(0,0) + grad2(1,1);
          for (int p = 0; p < dim_; p++)
          {
             real_t T_p = 0.0;
@@ -662,8 +665,11 @@ public:
                   grad2(c, d) += dshape2_phys(k, d) * u2_dofs(c * ndof2 + k);
             }
 
-         real_t tr1 = grad1(0,0) + grad1(1,1) + grad1(2,2);
-         real_t tr2 = grad2(0,0) + grad2(1,1) + grad2(2,2);
+         // (2D in-plane design rev 3, phase C: the trace has dim_ terms)
+         real_t tr1 = (dim_ == 3) ? grad1(0,0) + grad1(1,1) + grad1(2,2)
+                                  : grad1(0,0) + grad1(1,1);
+         real_t tr2 = (dim_ == 3) ? grad2(0,0) + grad2(1,1) + grad2(2,2)
+                                  : grad2(0,0) + grad2(1,1);
          for (int p = 0; p < dim_; p++)
          {
             real_t T_p = 0.0;

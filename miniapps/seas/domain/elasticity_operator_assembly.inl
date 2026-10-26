@@ -8,7 +8,6 @@
 
    void AssembleStiffness() const
    {
-      Require3D_("AssembleStiffness");
       // In parallel, exchange face neighbor data before assembly.
       // ParBilinearForm::AssembleSharedFaces needs this to access
       // face neighbor elements and DOFs.
@@ -67,13 +66,13 @@
          // recovery all use this same integrator.
          cached_a_->AddInteriorFaceIntegrator(
             new DGElasticityIPCombinedIntegrator(
-               *lambda_ptr_, *mu_ptr_, 3, epsilon_, penalty_factor_));
+               *lambda_ptr_, *mu_ptr_, dim_, epsilon_, penalty_factor_));
 
          if (dirichlet_bdr_marker_.Size() > 0)
          {
             cached_a_->AddBdrFaceIntegrator(
                new DGElasticityIPCombinedIntegrator(
-                  *lambda_ptr_, *mu_ptr_, 3, epsilon_, penalty_factor_),
+                  *lambda_ptr_, *mu_ptr_, dim_, epsilon_, penalty_factor_),
                dirichlet_bdr_marker_);
          }
       }
@@ -396,7 +395,7 @@
             gmres->SetPrintLevel(0);
 
             // BlockILU with element-sized blocks — natural for DG
-            int block_size = fes_->GetTypicalFE()->GetDof() * 3;  // vdim=3
+            int block_size = fes_->GetTypicalFE()->GetDof() * dim_;  // vdim = dim
             cached_prec_.reset(new BlockILU(block_size,
                BlockILU::Reordering::MINIMUM_DISCARDED_FILL));
 
@@ -468,7 +467,7 @@
 
    void AssembleSlipContributionIP(Vector &rhs, const Vector &slip_bc) const
    {
-      int dim = 3;
+      const int dim = dim_;
       int nbf = nbf_per_face_;
 
       // v55: Use the combined integrator's AssembleSlipFaceRHS to guarantee
@@ -810,7 +809,7 @@
       if constexpr (IsParallelMesh<MeshType>::value)
       {
 #ifdef MFEM_USE_MPI
-         int dim = 3;
+         const int dim = dim_;
          int nbf = nbf_per_face_;
 
          // v55: Use combined integrator for K-b consistency (shared faces)
@@ -1139,7 +1138,7 @@
       //   b[k,i] += c0 * [σ(φ_k e_i)·n]_u * u_D_u * (1/detJ)
       //           + penalty * φ_k * u_D_i
 
-      int dim = 3;
+      const int dim = dim_;
 
       Array<int> dir_bdr_faces, dir_bdr_attrs;
       CollectDirichletBoundaryFaces(dir_bdr_faces, dir_bdr_attrs);

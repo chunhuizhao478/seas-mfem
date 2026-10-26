@@ -10,7 +10,9 @@
 //     with (lam_e, mu_e, rho_e) from the per-element NitscheMaterialSample and
 //     h_e the per-element length of BimaterialWaveOperator
 //     (dynamic/bimaterial_wave_operator.inl:250-276: inscribed diameter
-//     6 V / A_total for tets).  Same structure as
+//     6 V / A_total for tets; 4 A / P for triangles, 2D in-plane design
+//     rev 3, derivation 10.3: twice the inradius in both dimensions, so the
+//     deck's cfl means the same in a 2D and a 3D run).  Same structure as
 //     BimaterialWaveOperator::ComputeMaxDt with p^2 in place of its factor;
 //     global MIN over ranks.  The measured stable constant is cfl = C_CFL.
 //
@@ -18,7 +20,8 @@
 //     (linalg/ode.hpp: NewmarkSolver(0.0, 0.5)).  No stepping arithmetic of
 //     our own.
 //
-// Scope (Chunhui Zhao, 2026-10-13): tetrahedral meshes only.
+// Scope (Chunhui Zhao, 2026-10-13): tetrahedral meshes only; triangles in 2D
+// (2D in-plane design rev 3, phase C).
 
 #ifndef MFEM_SEAS_NITSCHE_CFL_HPP
 #define MFEM_SEAS_NITSCHE_CFL_HPP
@@ -37,16 +40,30 @@ namespace seas
 #ifdef MFEM_USE_MPI
 
 /// Per-element CFL length: inscribed diameter 6 V / A_total for a tet
-/// (vol^{1/3} if the face area vanishes), as BimaterialWaveOperator.
+/// (vol^{1/3} if the face area vanishes), as BimaterialWaveOperator; for a
+/// triangle 4 A / P (twice the inradius; sqrt(A) if the perimeter vanishes).
 inline real_t NitscheElementLength(Mesh &mesh, int e)
 {
-   MFEM_VERIFY(mesh.GetElementBaseGeometry(e) == Geometry::TETRAHEDRON,
+   const Geometry::Type g = mesh.GetElementBaseGeometry(e);
+   MFEM_VERIFY(g == Geometry::TETRAHEDRON || g == Geometry::TRIANGLE,
                "NitscheElementLength: element " << e << " is a "
-               << Geometry::Name[mesh.GetElementBaseGeometry(e)]
-               << "; the Nitsche path supports tetrahedra only.");
+               << Geometry::Name[g] << "; the Nitsche path supports "
+               "tetrahedra (3D) and triangles (2D) only.");
    const real_t vol = mesh.GetElementVolume(e);
    Array<int> vert;
    mesh.GetElementVertices(e, vert);
+   if (g == Geometry::TRIANGLE)
+   {
+      const int sd = mesh.SpaceDimension();
+      auto dist = [&](int i, int j) {
+         const real_t *xi = mesh.GetVertex(vert[i]), *xj = mesh.GetVertex(vert[j]);
+         real_t d2 = 0.0;
+         for (int c = 0; c < sd; c++) { d2 += (xi[c] - xj[c]) * (xi[c] - xj[c]); }
+         return std::sqrt(d2);
+      };
+      const real_t P = dist(0, 1) + dist(1, 2) + dist(2, 0);
+      return (P > 0) ? 4.0 * vol / P : std::sqrt(vol);
+   }
    Vector v0(mesh.GetVertex(vert[0]), 3);
    Vector v1(mesh.GetVertex(vert[1]), 3);
    Vector v2(mesh.GetVertex(vert[2]), 3);
@@ -63,6 +80,23 @@ inline real_t NitscheElementLength(Mesh &mesh, int e)
    const real_t A_total = tri_area(v0, v1, v2) + tri_area(v0, v2, v3)
                         + tri_area(v0, v3, v1) + tri_area(v1, v2, v3);
    return (A_total > 0) ? 6.0 * vol / A_total : std::pow(vol, 1.0 / 3.0);
+}
+
+/// The stable constant C(p) of dt = cfl C(p) h_min / (p^2 c_p), p = 1..4:
+/// 2 / (omega_max dt_unit) on a structured simplex mesh, measured by power
+/// iteration and by bisection on blow-up and rounded down.  3D: P3 on 24
+/// tets per hex (the drivers' kCeig).  2D: 4 triangles per square
+/// (tests/2d_inplane/test_2d_nitsche.cpp N2; 2D in-plane design rev 3
+/// section 5.5: the 3D column does not carry over, triangles allow
+/// 1.6 to 1.9 times more with h = 4 A / P).
+inline real_t NitscheStableConstant(int dim, int p)
+{
+   static const real_t c3[5] = {0.0, 0.113, 0.212, 0.282, 0.332};
+   static const real_t c2[5] = {0.0, 0.215, 0.365, 0.461, 0.526};
+   MFEM_VERIFY((dim == 2 || dim == 3) && p >= 1 && p <= 4,
+               "NitscheStableConstant: dim " << dim << ", p " << p
+               << "; measured for dim 2 or 3 and p = 1..4 only");
+   return (dim == 3) ? c3[p] : c2[p];
 }
 
 /// dt = cfl * min_e h_e / (p^2 c_p,e), global MIN over ranks.

@@ -17,6 +17,10 @@
 //   G_f  ((n1 + n2) x 2 nbf), shared faces n1 rows:  the slip-load vectors
 //        elvec1 (and elvec2) of AssembleSlipFaceRHS.
 //
+// In 2D (design rev 3, phase C) u_1, u_2 hold 2 components per node and the
+// frame rows stay padded 3-vectors, so A_f keeps its 3 nbf rows; the row of
+// the out-of-plane tangent (+-e_z) is zero there.
+//
 // Per step, ComputeTractionFast is then one small dense product per face and
 // AddSlipLoadFast one per face, with no allocation and no whole-vector copy.
 // Shared fault faces need u on the neighbour's element: instead of the full
@@ -36,7 +40,7 @@ void ElasticityDomainOperator<MeshType>::FaultFaceTractionKernel_(
 {
    // Same steps as the IP branch of ComputeTractionImpl with a normal
    // traction requested and no decomposition.
-   const int dim = 3, nbf = nbf_per_face_;
+   const int dim = dim_, nbf = nbf_per_face_;
    const auto &basis = fault_basis_.GetBasis(idx);
    FTr.SetAllIntPoints(&Geometries.GetCenter(FTr.GetGeometryType()));
    Vector du_q;
@@ -70,7 +74,6 @@ void ElasticityDomainOperator<MeshType>::FaultFaceTractionKernel_(
 template <typename MeshType>
 void ElasticityDomainOperator<MeshType>::BuildFaultFaceOps()
 {
-   Require3D_("BuildFaultFaceOps");
    MFEM_VERIFY(method_ == DGMethod::IP, "BuildFaultFaceOps: IP method only");
    const int nfi = fault_interior_faces_.Size(), nfs = fault_shared_faces_.Size();
    const int nbf = nbf_per_face_, nf = nfi + nfs;
@@ -101,7 +104,7 @@ void ElasticityDomainOperator<MeshType>::BuildFaultFaceOps()
 
    Vector probe(2 * num_fault_dofs_);
    probe = 0.0;
-   DGElasticityIPCombinedIntegrator slip_integ(*lambda_ptr_, *mu_ptr_, 3, epsilon_,
+   DGElasticityIPCombinedIntegrator slip_integ(*lambda_ptr_, *mu_ptr_, dim_, epsilon_,
                                                penalty_factor_);
    Vector out, ev1, ev2, du_q;
    for (int f = 0; f < nf; f++)
@@ -132,7 +135,7 @@ void ElasticityDomainOperator<MeshType>::BuildFaultFaceOps()
             fe2 = pfes->GetFaceNbrFE(nbr);
             fes_->GetElementVDofs(FTr->Elem1No, vd1);
             ffo_.nbr_face_elem[f - nfi] = nbr;
-            vd2.SetSize(3 * fe2->GetDof());   // values come from the exchange
+            vd2.SetSize(dim_ * fe2->GetDof());   // values come from the exchange
          }
 #endif
       }
@@ -211,7 +214,7 @@ void ElasticityDomainOperator<MeshType>::BuildFaultNbrExchange_()
       int nranks = 1;
       MPI_Comm_size(comm, &nranks);
       const int nfs = fault_shared_faces_.Size();
-      const int vdim = 3 * scalar_fes_->GetFE(0)->GetDof();
+      const int vdim = dim_ * scalar_fes_->GetFE(0)->GetDof();
       // positions (in the owner's send_face_nbr_elements row) requested
       // from each neighbour rank, in the order of the shared fault faces
       std::map<int, std::vector<int>> want;       // rank -> positions

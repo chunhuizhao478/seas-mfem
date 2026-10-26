@@ -504,6 +504,8 @@ public:
 
    void SetFirstStepDebugConfig(const FirstStepDebugConfig &cfg)
    {
+      MFEM_VERIFY(!cfg.enabled || dim_ == 3, "SetFirstStepDebugConfig: the first-step "
+                  "debug dumps are 3D only");
       first_step_debug_ = cfg;
       debug_target_elems_cached_ = false;
    }
@@ -864,14 +866,15 @@ private:
    }
 
    /// 2D in-plane design rev 3: phase B builds the 2D spaces, the fault
-   /// layout and the frames; the stiffness, the slip and Dirichlet loads and
-   /// the traction in 2D are phase E.  Every solve entry point refuses 2D.
+   /// layout and the frames; phase C takes the dynamic path to 2D (the
+   /// stiffness, the slip and Dirichlet loads, the traction, the fault-face
+   /// penalties and operators).  The quasi-dynamic solve, its stage
+   /// operators and its Green's function are phase E and refuse 2D.
    void Require3D_(const char *what) const
    {
       MFEM_VERIFY(dim_ == 3, "ElasticityDomainOperator::" << what << ": not available "
                   "on a 2D mesh yet (the 2D quasi-dynamic solve is phase E of the 2D "
-                  "in-plane design; phase B sets up the 2D spaces, fault layout and "
-                  "frames only)");
+                  "in-plane design)");
    }
 
    /// Reference normal handed to FaultBasis::ComputeOrientedFrame for

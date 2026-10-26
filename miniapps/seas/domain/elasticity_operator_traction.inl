@@ -517,6 +517,7 @@ template <typename MeshType>
 void ElasticityDomainOperator<MeshType>::Solve(
    real_t time, const Vector &slip_bc, GridFuncType &displacement)
 {
+   Require3D_("Solve");
    MFEM_VERIFY(!assemble_matrix_only_,
                "Solve() after AssembleMatrixOnly(): no solver was set up");
    if (!stiffness_assembled_)
@@ -660,7 +661,6 @@ template <typename MeshType>
 void ElasticityDomainOperator<MeshType>::AssembleSlipOnlyRHS(
    Vector &rhs, const Vector &slip_bc) const
 {
-   Require3D_("AssembleSlipOnlyRHS");
    rhs.SetSize(fes_->GetVSize());
    rhs = 0.0;
 
@@ -682,7 +682,6 @@ template <typename MeshType>
 void ElasticityDomainOperator<MeshType>::AssembleDirichletOnlyRHS(
    Vector &rhs, real_t time) const
 {
-   Require3D_("AssembleDirichletOnlyRHS");
    rhs.SetSize(fes_->GetVSize());
    rhs = 0.0;
    AssembleDirichletLoading(rhs, time);
@@ -730,8 +729,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
    Vector *normal_stress_out,
    Vector *normal_correction_out)
 {
-   Require3D_("ComputeTraction");
-   int dim = 3;
+   const int dim = dim_;
    traction.SetSize(2 * num_fault_dofs_);
    traction = 0.0;
 

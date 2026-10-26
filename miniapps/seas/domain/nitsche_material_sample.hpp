@@ -14,7 +14,8 @@
 // (Moved unchanged from nitsche_wave_operator.hpp in P3 to break the
 // nitsche_mass.hpp <-> nitsche_wave_operator.hpp include cycle.)
 //
-// Scope (Chunhui Zhao, 2026-10-13): the Nitsche path uses tetrahedral meshes only.
+// Scope (Chunhui Zhao, 2026-10-13): the Nitsche path uses tetrahedral meshes
+// only; triangles in 2D (2D in-plane design rev 3, phase C).
 
 #ifndef MFEM_SEAS_NITSCHE_MATERIAL_SAMPLE_HPP
 #define MFEM_SEAS_NITSCHE_MATERIAL_SAMPLE_HPP
@@ -48,12 +49,18 @@ public:
                   << static_cast<int>(material.mode) << ").");
 
       const int ne = pmesh.GetNE();
+      const int dim = pmesh.Dimension();
+      MFEM_VERIFY(dim == 2 || dim == 3, "NitscheMaterialSample: mesh dimension "
+                  << dim << "; 2 or 3 only");
+      const Geometry::Type simplex = (dim == 3) ? Geometry::TETRAHEDRON
+                                                : Geometry::TRIANGLE;
       for (int e = 0; e < ne; ++e)
       {
-         MFEM_VERIFY(pmesh.GetElementBaseGeometry(e) == Geometry::TETRAHEDRON,
+         MFEM_VERIFY(pmesh.GetElementBaseGeometry(e) == simplex,
                      "NitscheMaterialSample: element " << e << " is a "
                      << Geometry::Name[pmesh.GetElementBaseGeometry(e)]
-                     << "; the Nitsche path supports tetrahedra only.");
+                     << "; the Nitsche path supports tetrahedra (3D) and "
+                     "triangles (2D) only.");
       }
 
       Array<int> dofs;
