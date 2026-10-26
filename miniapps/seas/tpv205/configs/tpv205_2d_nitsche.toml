@@ -1,0 +1,173 @@
+# =====================================================================
+#  SCEC TPV205-2D — linear slip weakening on a 2-D triangle mesh, run
+#  through the Nitsche dynamic-rupture driver (seas_nitsche_dyn_driver;
+#  2D in-plane design rev 3, phase C part 2, gate G1).
+#
+#  TPV205-2D (TPV205_210_Description_v4.pdf) is the horizontal slice of
+#  TPV205 (= TPV5) at 7.5 km depth, through the hypocentre: plane strain,
+#  mode II, a straight fault from -15 to +15 km along strike, and "all the
+#  model parameters, material properties, initial stresses, nucleation
+#  technique ... the same as the 3D benchmark".  So this deck is
+#  tpv205_nitsche.toml (the 3-D deck) with:
+#
+#   - the 2-D mesh tpv205/mesh/tpv205_2d_100m.msh (x along strike, y fault
+#     normal; the fault on y = 0 ends at +-15 km inside the box; all four
+#     sides absorbing, tag 105; no free surface, so no natural_attrs);
+#   - 2-entry [fault_geometry] vectors: ref_normal = [0, -1] as in 3-D, and
+#     up = [0, 0, 1] out of the plane, which puts the in-plane slip in the
+#     strike slot (station column slip2 = SCEC h-slip), as in 3-D;
+#   - the three patches as [[stress_region]] boxes in x only (a 2-D box
+#     takes no z bounds): X = 0 81.6 MPa (nucleates at t = 0, above the
+#     static yield 0.677 x 120 = 81.24 MPa), X = -7.5 km 78.0 MPa, X = +7.5
+#     km 62.0 MPa; the patch edges are mesh vertices (tpv205_2d.geo);
+#   - the 2-D stations tpv205/stations/tpv205_2d_fault_stations.csv (the
+#     seven on-fault stations of the description, at z = 0);
+#   - no fault ParaView output (the 2-D fault is a polyline; phase F).
+#
+#  sigma_zz plays no part in the in-plane traction (the fault normal lies in
+#  the plane) and is left 0, as in the 3-D deck; sigma_xz and sigma_yz must
+#  be 0 in 2-D (the operator refuses them).
+#
+#  Regularization as in the 3-D deck: Kelvin-Voigt (eta_bar 0.1, h_e = the
+#  2-D CFL length 4 A / P) and Prakash-Clifton (v* = 1 m/s, L = 0.01 m).
+#
+#  The 100 m mesh is committed (tpv205/mesh/tpv205_2d_100m.msh); others from
+#  tpv205/mesh/tpv205_2d.geo (from miniapps/seas, pythonenv):
+#    gmsh -2 tpv205/mesh/tpv205_2d.geo -format msh22 -setnumber lc_fault 200 \
+#         -o tpv205/mesh/tpv205_2d_200m.msh
+#
+#  Scope: Chunhui Zhao, 2026-10-26.
+# =====================================================================
+
+[meta]
+schema_version = 1
+law            = "slip_weakening"
+description    = "SCEC TPV205-2D (linear slip weakening, plane strain) via the Nitsche dynamic-rupture driver on a 2-D triangle mesh."
+
+[problem]
+tag = "tpv205_2d"   # output file prefix
+
+# Material: homogeneous, rho = 2670, cs = 3464, cp = 6000 (as TPV205).
+[material_constant_fallback]
+lambda = 32043759360.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+[mesh]
+path  = "tpv205/mesh/tpv205_2d_100m.msh"
+order = 1
+
+[velocity]
+use_sidecar = false
+
+# Background prestress, global Cauchy tensor (x along strike, y fault
+# normal), TENSION POSITIVE: with nhat = (0, -1) the SCEC along-strike shear
+# is +70 MPa and sigma_n = 120 MPa, as in 3-D.
+[stress]
+kind        = "constant_tensor"
+sigma_xx_pa = 0.0
+sigma_yy_pa = -120.0e6
+sigma_zz_pa = 0.0
+sigma_xy_pa = 70.0e6
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+# The three patches, 3 km long (x only; y open).  Each box replaces the
+# background tensor inside it; the last match wins (the boxes are disjoint).
+[[stress_region]]           # nucleation patch, X = 0
+x_min_m     = -1500.0
+x_max_m     =  1500.0
+sigma_xx_pa = 0.0
+sigma_yy_pa = -120.0e6
+sigma_zz_pa = 0.0
+sigma_xy_pa = 81.6e6
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+[[stress_region]]           # X = -7.5 km
+x_min_m     = -9000.0
+x_max_m     = -6000.0
+sigma_xx_pa = 0.0
+sigma_yy_pa = -120.0e6
+sigma_zz_pa = 0.0
+sigma_xy_pa = 78.0e6
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+[[stress_region]]           # X = +7.5 km
+x_min_m     = 6000.0
+x_max_m     = 9000.0
+sigma_xx_pa = 0.0
+sigma_yy_pa = -120.0e6
+sigma_zz_pa = 0.0
+sigma_xy_pa = 62.0e6
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+[numerics]
+cfl            = 0.5        # fraction of C(p), the 2-D column on triangles
+penalty_factor = 1.0
+# Kelvin-Voigt damping (Day et al. 2005 A8): beta_e = kv_eta (1/3) (h_e/p) / c_s,e, h_e = 4A/P in 2-D
+kv_eta    = 0.1
+kv_scale  = "node"
+kv_length = "inscribed"
+
+[time]
+tfinal     = "12s"
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.05s"
+
+[output]
+output_dir             = "output_tpv205_2d_nitsche"
+restart_prefix         = "cp"
+paraview_enabled       = false
+paraview_fault         = "off"   # 2-D fault snapshots are phase F
+paraview_free_surface  = "off"
+
+# On-fault stations, snapped to the nearest fault node.  On the 100 m mesh
+# every station is a fault vertex (0 m); 100 m covers the 200 m mesh at
+# p = 1, where x = +-7.5 km lies half-way between two vertices.
+[output.stations]
+file             = "tpv205/stations/tpv205_2d_fault_stations.csv"
+snap_tolerance_m = 100.0
+
+# Linear slip weakening: mu = mu_s - (mu_s - mu_d) min(|slip|/d_c, 1).
+[friction.slip_weakening]
+mu_s_default     = 0.677
+mu_d_default     = 0.525
+d_c_default      = 0.40
+cohesion_default = 0.0
+
+[boundary]
+fault_attr      = 103
+natural_attrs   = []
+absorbing_attrs = [105]
+
+[fault_geometry]
+ref_normal        = [0.0, -1.0]
+up                = [0.0,  0.0, 1.0]
+kind              = "vertical_strike_slip"
+orientation       = "propagated"
+pin_by            = "reference"
+tangent           = "pointwise"
+junction_policy   = "refuse"
+pin_min_margin    = 0.1
+
+[hypocenter]
+x_m                 = 0.0
+y_m                 = 0.0
+z_m                 = 0.0
+nucleation_radius_m = 1500.0
+
+[diagnostics]
+energy_balance = false
+
+[friction.prakash_clifton]
+v_star = 1.0      # m/s
+length = 0.01     # m

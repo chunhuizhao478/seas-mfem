@@ -11,6 +11,7 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d-fault-layout     # phase B: the 2D switch
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d-deck             # phase B: 2D deck vectors
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d-nitsche          # phase C: 2D Nitsche operator
+#   make -f tests/2d_inplane/2d_inplane.mk test-2d-driver           # phase C: the driver, TPV205-2D
 #   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
 # The 3D parity set (every phase must leave it bit for bit unchanged) is the
 # script tests/2d_inplane/parity_3d.sh (see its header).
@@ -199,8 +200,54 @@ test-2d-nitsche: seas_test_2d_nitsche
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_2d_nitsche --np
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_2d_nitsche --np
 
+# Phase C (part 2): the Nitsche driver on the TPV205-2D deck and its
+# committed 100 m mesh, 0.1 s: 1 rank and 4 ranks must run (the triangle
+# count and the 2-D stable constant in the log) and give the same station
+# files to DRIVER_2D_RTOL; 4 ranks with local time stepping must run; then
+# each 2-D refusal (a station off the plane, a z bound in [[stress_region]],
+# the fault ParaView output, a nucleation centre off the plane) must exit
+# non-zero with its message.
+DRIVER_2D_DECK = tpv205/configs/tpv205_2d_nitsche.toml
+DRIVER_2D_TMP = $(or $(TMPDIR),/tmp)/seas_test_2d_driver
+DRIVER_2D_RTOL = 1e-9
+DRIVER_2D_RUN = ./seas_nitsche_dyn_driver --config $(DRIVER_2D_DECK) --tfinal 0.1 --log-every 1000
+DRIVER_2D_REFUSALS = station:2-D stations lie in the (x, y) plane|region:z_min_m / z_max_m on a 2-D mesh|pvfault:on a 2-D mesh: fault.vtkhdf holds triangles|nucleation:both must be 0 (the (x, y) plane)
+test-2d-driver: seas_nitsche_dyn_driver
+	@rm -rf $(DRIVER_2D_TMP); mkdir -p $(DRIVER_2D_TMP)
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 $(DRIVER_2D_RUN) --output-dir $(DRIVER_2D_TMP)/np1 > $(DRIVER_2D_TMP)/np1.log 2>&1 \
+	   || { tail -20 $(DRIVER_2D_TMP)/np1.log; echo "  FAILED: TPV205-2D on 1 rank"; exit 1; }
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 $(DRIVER_2D_RUN) --output-dir $(DRIVER_2D_TMP)/np4 > $(DRIVER_2D_TMP)/np4.log 2>&1 \
+	   || { tail -20 $(DRIVER_2D_TMP)/np4.log; echo "  FAILED: TPV205-2D on 4 ranks"; exit 1; }
+	@for f in np1 np4; do grep -q ": 40526 triangles; p = 1;" $(DRIVER_2D_TMP)/$$f.log \
+	    && grep -q "x C(p) 0.215 ->" $(DRIVER_2D_TMP)/$$f.log \
+	    || { echo "  FAILED: $$f log lacks the triangle count or the 2-D constant"; exit 1; }; done; \
+	 echo "  PASSED: TPV205-2D on 1 and 4 ranks (40526 triangles, C(1) = 0.215)"
+	python3 tests/2d_inplane/compare_station_runs.py $(DRIVER_2D_TMP)/np1 $(DRIVER_2D_TMP)/np4 --rtol $(DRIVER_2D_RTOL)
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 $(DRIVER_2D_RUN) --lts rate2 --output-dir $(DRIVER_2D_TMP)/lts > $(DRIVER_2D_TMP)/lts.log 2>&1 \
+	   || { tail -20 $(DRIVER_2D_TMP)/lts.log; echo "  FAILED: TPV205-2D with --lts rate2"; exit 1; }
+	@grep -q "^  LTS: .* ticks; patch element kicks" $(DRIVER_2D_TMP)/lts.log \
+	    || { echo "  FAILED: the LTS run has no tick report"; exit 1; }; \
+	 echo "  PASSED: TPV205-2D with --lts rate2 on 4 ranks"
+	@d=$(DRIVER_2D_TMP); printf 'name,x,y,z\nup_dip,0,0,-7500\n' > $$d/st.csv; \
+	 sed -e "s|^file             = .*|file             = \"$$d/st.csv\"|" $(DRIVER_2D_DECK) > $$d/station.toml; \
+	 awk '{print} /^x_max_m     =  1500.0$$/ && !n {print "z_min_m     = -9000.0"; n = 1}' $(DRIVER_2D_DECK) > $$d/region.toml; \
+	 sed -e 's/^paraview_enabled       = false$$/paraview_enabled       = true/' \
+	     -e 's/^paraview_fault         = "off".*/paraview_fault         = "hdf5"/' $(DRIVER_2D_DECK) > $$d/pvfault.toml; \
+	 { cat $(DRIVER_2D_DECK); printf '\n[nucleation]\nkind = "gradual_overstress_compact_circular"\n'; \
+	   printf '[nucleation.gradual_overstress_compact_circular]\ncenter_x_m = 0.0\ncenter_y_m = 0.0\n'; \
+	   printf 'center_z_m = -7500.0\nradius_m = 1500.0\ndelta_tau_pa = 1.0e6\nT_nuc_s = "1.0s"\n'; } > $$d/nucleation.toml; \
+	 for f in station region pvfault nucleation; do cmp -s $(DRIVER_2D_DECK) $$d/$$f.toml \
+	    && { echo "  FAILED: the $$f edit did not change the deck"; exit 1; }; done; \
+	 list='$(DRIVER_2D_REFUSALS)'; set -f; IFS='|'; for r in $$list; do n=$${r%%:*}; msg=$${r#*:}; \
+	   out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_nitsche_dyn_driver --config $$d/$$n.toml \
+	      --tfinal 0.01 --output-dir $$d/out_$$n 2>&1); rc=$$?; \
+	   if [ $$rc -ne 0 ] && printf '%s' "$$out" | grep -qF "$$msg"; then \
+	      echo "  PASSED: refusal $$n: exit $$rc, \"$$msg\""; \
+	   else printf '%s\n' "$$out" | tail -15; echo "  FAILED: refusal $$n: exit $$rc, \"$$msg\" not found"; exit 1; fi; \
+	 done; rm -rf $$d
+
 2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
-                test-2d-deck test-2d-nitsche
+                test-2d-deck test-2d-nitsche test-2d-driver
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
-        test-2d-deck test-2d-nitsche 2d-inplane-all
+        test-2d-deck test-2d-nitsche test-2d-driver 2d-inplane-all

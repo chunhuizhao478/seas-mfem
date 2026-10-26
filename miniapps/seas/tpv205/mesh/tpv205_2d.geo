@@ -25,7 +25,7 @@
 // (0.05 d + (d / 2.5 km)^2 + lc_fault, d the distance to the fault), capped
 // at lc.
 //
-// Units: meters (Nitsche driver --mesh-scale 1.0).
+// Units: meters (the Nitsche driver reads the mesh as it is).
 //
 // Usage:
 //   gmsh -2 tpv205_2d.geo -format msh22 -o tpv205_2d_100m.msh

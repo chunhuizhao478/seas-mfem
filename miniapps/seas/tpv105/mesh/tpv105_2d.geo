@@ -27,7 +27,7 @@
 // (0.05 d + (d / 2.5 km)^2 + lc_fault), capped at lc; the fault beyond
 // 24 km is meshed by the same growth.
 //
-// Units: meters (Nitsche driver --mesh-scale 1.0).
+// Units: meters (the Nitsche driver reads the mesh as it is).
 //
 // Usage:
 //   gmsh -2 tpv105_2d.geo -format msh22 -o tpv105_2d_100m.msh

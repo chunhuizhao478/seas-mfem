@@ -117,9 +117,9 @@ struct LtsLayout
 class DynPhase
 {
 public:
-   /// The measured stable constant C(p) of the explicit step, p = 1..4
-   /// (Nitsche P3; the same values as drivers/nitsche_dyn_driver.cpp:91).
-   static constexpr real_t kCeig[5] = {0.0, 0.113, 0.212, 0.282, 0.332};
+   // The measured stable constant C(p) of the explicit step, p = 1..4, is
+   // NitscheStableConstant(dim, p) (solver/nitsche_cfl.hpp: Nitsche P3 on
+   // tets, the 2-D column on triangles), the table the Nitsche driver uses.
 
    /// `table`, `par` and `pre` are the QD regime's, on the same owned fault
    /// DOFs.  `dt_scale` multiplies the CFL step (tests only).  `lts`: the
@@ -211,7 +211,8 @@ public:
       frames_.TractionToGlobal(pre.tau0, pre.sigma0, S0);
       W_->SetBackgroundTraction(S0);   // hook H2
 
-      dt_cfl_ = ComputeMaxDt(W_->Sample(), pmesh, p, dc.cfl * kCeig[p]);
+      ceig_ = NitscheStableConstant(pmesh.Dimension(), p);
+      dt_cfl_ = ComputeMaxDt(W_->Sample(), pmesh, p, dc.cfl * ceig_);
       const bool lts_on = (lts != nullptr && lts->on);
       MFEM_VERIFY(lts_on == cfg.lts.On(), "DynPhase: [cycle.lts] is " << cfg.lts.mode
                   << " but the layout says " << (lts_on ? "rate2" : "off"));
@@ -336,7 +337,8 @@ public:
       {
          const auto &mf = cfg.shared.material_fallback;
          const real_t cp = std::sqrt((mf.lambda + 2.0 * mf.mu) / mf.rho);
-         asg = BuildNitscheLtsAssignment(smesh, p, cfg.dyn.cfl * kCeig[p], cp, cfg.fault_attr,
+         const real_t ceig = NitscheStableConstant(smesh.Dimension(), p);
+         asg = BuildNitscheLtsAssignment(smesh, p, cfg.dyn.cfl * ceig, cp, cfg.fault_attr,
                                          std::numeric_limits<real_t>::infinity(),
                                          cfg.lts.cluster_cap, cfg.lts.fault_buffer);
          hdr[0] = asg.num_clusters;
@@ -469,6 +471,8 @@ public:
    real_t Time() const { return *t0_ + tau_; }
    real_t Dt() const { return dt_; }
    real_t DtCFL() const { return dt_cfl_; }
+   /// C(p) of the CFL step (NitscheStableConstant of the mesh dimension).
+   real_t StableConstant() const { return ceig_; }
    long Steps() const { return steps_; }
    /// Global max |V| of the last step (0 before the first).
    real_t MaxV() const { return W_->LastStep().max_V; }
@@ -663,7 +667,7 @@ private:
    FrameMap frames_;
    Vector U_, Ud_;
    real_t tau_ = 0.0;
-   real_t dt_ = 0.0, dt_cfl_ = 0.0;
+   real_t dt_ = 0.0, dt_cfl_ = 0.0, ceig_ = 0.0;
    long steps_ = 0;
    real_t ghost_mismatch_ = 0.0, normal_mismatch_ = 0.0;
 };

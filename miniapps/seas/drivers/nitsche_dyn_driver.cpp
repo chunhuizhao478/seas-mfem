@@ -104,6 +104,20 @@
 // (checked at the end).  LTS needs cfl <= 0.6 (the accepted multirate
 // limit, Chunhui Zhao 2026-10-19) and kv_scale = "node".  --lts-same-step 1
 // (test only): the same clusters, every one at dt0.
+//
+// 2-D in-plane (2D in-plane design rev 3, phase C part 2; Chunhui Zhao,
+// 2026-10-26): a triangle mesh in the (x, y) plane (plane strain, mode II)
+// runs the same code with 2 components per volume node; the fault state stays
+// padded (three-vectors with z = 0, Proposition 1), so the closures, the
+// station columns and the fault CSVs are the 3-D ones.  The deck is a 3-D deck
+// with 2-entry [fault_geometry] vectors (ref_normal [nx, ny]; up [0, 0, 1]
+// puts the in-plane slip in the strike slot, slip2, as in the 3-D strike-slip
+// benchmarks; spatial::CheckFaultGeometryDimension).  The step uses the 2-D
+// column of NitscheStableConstant (solver/nitsche_cfl.hpp) with h_e = 4 A / P.
+// Refused in 2-D, with a message, instead of being misread: station or
+// nucleation points with z != 0, [[stress_region]] z bounds, and the fault
+// ParaView output (fault.vtkhdf writes triangles; the 2-D fault is a
+// polyline, phase F).
 
 #include "mfem.hpp"
 #include "../domain/nitsche_wave_operator.hpp"
@@ -146,9 +160,6 @@ namespace ff = mfem::seas::fault_frame;
 
 namespace
 {
-
-/// P3's measured stable constants C(p), p = 1..4 (dt = cfl C(p) h/(p^2 c_p)).
-const real_t kCeig[5] = {0.0, 0.113, 0.212, 0.282, 0.332};
 
 int g_rank = 0;
 
@@ -202,6 +213,8 @@ bool TomlBool(const toml::value *t, const char *key, bool def)
 /// (P = the lexicographically smallest such position, copies within kTie of
 /// P); rank 0 sums in face-centroid order, so the sum does not depend on the
 /// partition, and writes the envelope (min/max over copies).  Collective.
+/// On a 2-D mesh a fault face is an edge: its midpoint and length take the
+/// place of the centroid and area.
 class StationCopyAverage
 {
 public:
@@ -213,6 +226,7 @@ public:
       ElasticityDomainOperator<ParMesh> &E = op.Elasticity();
       const int nd = E.GetNumFaultDOFs(), nbf = E.GetNbfPerFace();
       const int no = op.NumOwnedFaultDOFs();
+      const int nv = op.Orientation().FaceVertices();   // 3, or 2 on a 2-D mesh
       // face centroid and area per local DOF, vertices in a canonical order
       Vector cl(4 * nd);
       for (int k = 0; k < nd; k++)
@@ -222,6 +236,14 @@ public:
          op.Orientation().FaceVertexData(k / nbf, key, xv);
          std::array<std::array<real_t, 3>, 3> v;
          for (int i = 0; i < 3; i++) { for (int c = 0; c < 3; c++) { v[i][c] = xv[i][c]; } }
+         if (nv == 2)
+         {
+            // 2-D: the edge's midpoint and length
+            std::sort(v.begin(), v.begin() + 2);
+            for (int c = 0; c < 3; c++) { cl(4 * k + c) = 0.5 * (v[0][c] + v[1][c]); }
+            cl(4 * k + 3) = std::hypot(v[1][0] - v[0][0], v[1][1] - v[0][1], v[1][2] - v[0][2]);
+            continue;
+         }
          std::sort(v.begin(), v.end());
          real_t e1[3], e2[3];
          for (int c = 0; c < 3; c++)
@@ -823,10 +845,6 @@ int main(int argc, char *argv[])
                   "driver writes at the fixed cadence paraview_fault_dt (or "
                   "paraview_every_steps); remove the regime-adaptive keys");
    }
-#ifndef MFEM_USE_HDF5
-   MFEM_VERIFY(!pv_fault, "[output] paraview_fault = \"hdf5\" needs MFEM built with "
-               "MFEM_USE_HDF5=YES");
-#endif
 
    if (g_rank == 0)
    {
@@ -852,16 +870,32 @@ int main(int argc, char *argv[])
 
    // ------------------------------------------------------------ mesh
    std::unique_ptr<Mesh> smesh = std::make_unique<Mesh>(mesh_path.c_str(), 1, 1);
-   MFEM_VERIFY(smesh->Dimension() == 3, "mesh must be 3-D");
+   // 2-D in-plane (header): a triangle mesh in the (x, y) plane
+   const int dim = smesh->Dimension();
+   MFEM_VERIFY(dim == 3 || (dim == 2 && smesh->SpaceDimension() == 2),
+               "mesh must be 3-D, or 2-D in the (x, y) plane; " << mesh_path << " is a "
+               << dim << "-D mesh in " << smesh->SpaceDimension() << "-D space");
    // 2D in-plane design rev 3, section 5.5: the loader reads 2-entry
    // [fault_geometry] vectors for 2-D decks; a 3-D mesh refuses them.
    spatial::CheckFaultGeometryDimension(cfg.fault_geometry, smesh->Dimension());
+   const Geometry::Type egeom = (dim == 3) ? Geometry::TETRAHEDRON : Geometry::TRIANGLE;
+   const char *elems = (dim == 3) ? "tets" : "triangles";
    for (int e = 0; e < smesh->GetNE(); e++)
    {
-      MFEM_VERIFY(smesh->GetElementBaseGeometry(e) == Geometry::TETRAHEDRON,
-                  "Nitsche driver: tetrahedral meshes only; element " << e << " is "
-                  << Geometry::Name[smesh->GetElementBaseGeometry(e)]);
+      MFEM_VERIFY(smesh->GetElementBaseGeometry(e) == egeom,
+                  "Nitsche driver: tetrahedral meshes only (triangle meshes in 2-D); element "
+                  << e << " is " << Geometry::Name[smesh->GetElementBaseGeometry(e)]);
    }
+   // P3's measured stable constant C(p) on tets, the 2-D column on triangles
+   const real_t Ceig = NitscheStableConstant(dim, p);
+   MFEM_VERIFY(!(pv_fault && dim == 2), "[output] paraview_fault = \"" << ocfg.paraview_fault
+               << "\" on a 2-D mesh: fault.vtkhdf holds triangles and the 2-D fault is a "
+               "polyline (2-D fault snapshots are phase F of the 2D in-plane design); set "
+               "paraview_fault = \"off\"");
+#ifndef MFEM_USE_HDF5
+   MFEM_VERIFY(!pv_fault, "[output] paraview_fault = \"hdf5\" needs MFEM built with "
+               "MFEM_USE_HDF5=YES");
+#endif
    const long long ne_global = smesh->GetNE();
    if (lts_report)
    {
@@ -870,9 +904,9 @@ int main(int argc, char *argv[])
       {
          const auto &mf = cfg.material_fallback;
          const real_t cp = std::sqrt((mf.lambda + 2.0 * mf.mu) / mf.rho);
-         const NitscheLtsMesh lm = BuildNitscheLtsMesh(*smesh, p, cfl * kCeig[p], cp,
+         const NitscheLtsMesh lm = BuildNitscheLtsMesh(*smesh, p, cfl * Ceig, cp,
                                                        cfg.boundary.fault_attr);
-         std::cout << "  LTS report: p = " << p << ", cfl " << cfl << " x C(p) " << kCeig[p]
+         std::cout << "  LTS report: p = " << p << ", cfl " << cfl << " x C(p) " << Ceig
                    << ", c_p " << cp << " m/s\n";
          PrintNitscheLtsReport(std::cout, *smesh, lm, lts_report_cap, lts_report_ranks);
          std::cout << std::flush;
@@ -892,7 +926,7 @@ int main(int argc, char *argv[])
       {
          const auto &mf = cfg.material_fallback;
          const real_t cp = std::sqrt((mf.lambda + 2.0 * mf.mu) / mf.rho);
-         lts_asg = BuildNitscheLtsAssignment(*smesh, p, cfl * kCeig[p], cp, cfg.boundary.fault_attr,
+         lts_asg = BuildNitscheLtsAssignment(*smesh, p, cfl * Ceig, cp, cfg.boundary.fault_attr,
                                              cfg.time.dt_max, lts_cap, lts_buffer);
          hdr[0] = lts_asg.num_clusters;
          hdr[1] = lts_asg.fault_cluster;
@@ -901,10 +935,10 @@ int main(int argc, char *argv[])
          dt0 = lts_asg.dt0;
          std::cout << std::setprecision(6) << "  LTS (plan item 7): rate2" << (lts_same ? " with "
                    "--lts-same-step (every cluster at dt0; test)" : "") << ", " << lts_asg.num_clusters
-                   << " clusters (hard cap " << lts_cap << "), dt0 = " << dt0 << " s; tets per cluster";
+                   << " clusters (hard cap " << lts_cap << "), dt0 = " << dt0 << " s; " << elems << " per cluster";
          for (long long c : lts_asg.cells) { std::cout << " " << c; }
          std::cout << "; ideal " << lts_asg.ideal << "x; fault (" << lts_asg.fault_tets
-                   << " tets, " << lts_asg.buffer_tets << " buffer tets in " << lts_buffer
+                   << " " << elems << ", " << lts_asg.buffer_tets << " buffer " << elems << " in " << lts_buffer
                    << " layer(s)) in cluster " << lts_asg.fault_cluster << " after "
                    << lts_asg.passes << " clustering(s)\n";
       }
@@ -962,7 +996,7 @@ int main(int argc, char *argv[])
                    << "fault weight w = " << fault_weight << "); max/mean overall " << imb.overall
                    << ", per cluster";
          for (double x : imb.per_cluster) { std::cout << " " << x; }
-         std::cout << ", fault tets " << imb.fault << "\n";
+         std::cout << ", fault " << elems << " " << imb.fault << "\n";
       }
       MPI_Bcast(part.data(), ne, MPI_INT, 0, MPI_COMM_WORLD);
    }
@@ -1011,7 +1045,7 @@ int main(int argc, char *argv[])
          m.GetElementVertices(e, v);
          c[0] = c[1] = c[2] = 0.0;
          for (int k = 0; k < v.Size(); k++)
-            for (int d = 0; d < 3; d++) { c[d] += m.GetVertex(v[k])[d] / v.Size(); }
+            for (int d = 0; d < m.SpaceDimension(); d++) { c[d] += m.GetVertex(v[k])[d] / v.Size(); }
       };
       for (int i = 0; i < smesh->GetNE(); i++)
       {
@@ -1034,7 +1068,7 @@ int main(int argc, char *argv[])
                   << " has " << pmesh.GetNE() << " local elements but " << lts_cl.size()
                   << " serial elements");
       pmesh.ExchangeFaceNbrData();
-      DG_FECollection fec0(0, 3);
+      DG_FECollection fec0(0, dim);
       ParFiniteElementSpace fes0(&pmesh, &fec0);
       ParGridFunction g0(&fes0);
       Array<int> d0;
@@ -1132,6 +1166,11 @@ int main(int argc, char *argv[])
             MFEM_VERIFY(known, "[[stress_region]] entry " << r + 1 << ": unknown key '" << kv.first
                         << "' (bounds x/y/z_min_m, x/y/z_max_m; tensor sigma_xx_pa ... sigma_xz_pa)");
          }
+         // 2-D (header): every fault point has z = 0, so a z bound would
+         // select all or nothing; refused instead of read
+         MFEM_VERIFY(dim == 3 || (!e.contains("z_min_m") && !e.contains("z_max_m")),
+                     "[[stress_region]] entry " << r + 1 << ": z_min_m / z_max_m on a 2-D mesh "
+                     "(the (x, y) plane, z = 0); bound the box in x and y only");
          StressRegion R;
          int nb = 0;
          for (int c = 0; c < 3; c++)
@@ -1196,6 +1235,11 @@ int main(int argc, char *argv[])
       const auto spec = cfg.nucleation.compact_circular;
       MFEM_VERIFY(spec.radius_m > 0.0 && spec.T_nuc_s > 0.0, "compact-circular nucleation: "
                   "radius_m and T_nuc_s must be > 0");
+      // 2-D: the centre on the plane, so r is the distance along the fault
+      MFEM_VERIFY(dim == 3 || (spec.center_z_m == 0.0 && cfg.hypocenter.z_m == 0.0),
+                  "compact-circular nucleation on a 2-D mesh: center_z_m = " << spec.center_z_m
+                  << " and [hypocenter] z_m = " << cfg.hypocenter.z_m << "; both must be 0 "
+                  "(the (x, y) plane)");
       // strike overstress delta_tau F(r) G(t) as the global tensor
       //   dsigma = -delta_tau F G (shat (x) nhat + nhat (x) shat),
       // so that -(dsigma nhat).shat = +delta_tau F G.  r is the in-plane
@@ -1276,7 +1320,7 @@ int main(int argc, char *argv[])
    MFEM_VERIFY(op.Orientation().GetReport().junction_edges == 0,
                "[fault_geometry] junction_policy = \"refuse\": the fault has "
                << op.Orientation().GetReport().junction_edges << " junction edges");
-   const real_t dt_cfl = ComputeMaxDt(op.Sample(), pmesh, p, cfl * kCeig[p]);
+   const real_t dt_cfl = ComputeMaxDt(op.Sample(), pmesh, p, cfl * Ceig);
    const real_t dt_gts = std::min(dt_cfl, cfg.time.dt_max);
    // the step of the fault (and of the outputs): the global step, or with LTS
    // the fault cluster's step dt0 2^c_F
@@ -1500,6 +1544,12 @@ int main(int argc, char *argv[])
       MFEM_VERIFY(snap_tol > 0.0, "[output.stations] snap_tolerance_m = " << snap_tol
                   << "; it must be > 0");
       const std::vector<FaultStation> st_list = ReadFaultStationFile(st_path);
+      for (const FaultStation &q : st_list)
+      {
+         MFEM_VERIFY(dim == 3 || q.x[2] == 0.0, "station " << q.name << " in " << st_path
+                     << ": z = " << q.x[2] << " on a 2-D mesh; 2-D stations lie in the (x, y) "
+                     "plane, z = 0");
+      }
       const std::vector<FaultStationSnap> snap =
          SnapFaultStations(st_list, op.FaultPositions(), MPI_COMM_WORLD);
       if (g_rank == 0)
@@ -1624,12 +1674,17 @@ int main(int argc, char *argv[])
       ElasticityDomainOperator<ParMesh> &E = op.Elasticity();
       const int nd = E.GetNumFaultDOFs(), nbf = E.GetNbfPerFace();
       Vector cl(3 * nd);
+      const bool edge = op.Orientation().FaceVertices() == 2;   // 2-D: the edge midpoint
       for (int k = 0; k < nd; k++)
       {
          long long key[3];
          real_t xv[3][3];
          op.Orientation().FaceVertexData(k / nbf, key, xv);
-         for (int c = 0; c < 3; c++) { cl(3 * k + c) = (xv[0][c] + xv[1][c] + xv[2][c]) / 3.0; }
+         for (int c = 0; c < 3; c++)
+         {
+            cl(3 * k + c) = edge ? 0.5 * (xv[0][c] + xv[1][c])
+                                 : (xv[0][c] + xv[1][c] + xv[2][c]) / 3.0;
+         }
       }
       E.RestrictToOwnedFault(cl, cf, 3);
    }
@@ -1688,10 +1743,10 @@ int main(int argc, char *argv[])
    if (g_rank == 0)
    {
       long long nloc = op.Height();
-      std::cout << "  mesh " << mesh_path << ": " << ne_global << " tets; p = " << p
+      std::cout << "  mesh " << mesh_path << ": " << ne_global << " " << elems << "; p = " << p
                 << "; law " << law.name << "; fault faces " << op.Orientation().GetReport().faces
                 << ", shared fault faces " << op.NumSharedFaultFacesGlobal() << "\n"
-                << "  dt = " << dt << " s (CFL walk: cfl " << cfl << " x C(p) " << kCeig[p]
+                << "  dt = " << dt << " s (CFL walk: cfl " << cfl << " x C(p) " << Ceig
                 << " -> " << dt_cfl << "; dt_max " << cfg.time.dt_max << "), " << nsteps
                 << " steps to t = " << tfinal << " s; penalty_factor " << penalty_factor
                 << "; energy balance " << (energy_on ? "on" : "off") << "\n";
@@ -2020,8 +2075,9 @@ int main(int argc, char *argv[])
          const double c_tet = glob[0] / ns / ne_global;
          const double c_side = glob[2] > 0 ? glob[1] / ns / glob[2] : 0.0;
          std::cout << std::setprecision(4) << "  fault work: " << 1e3 * fmx / ns
-                   << " ms/step on the busiest rank; cost per step " << 1e6 * c_tet << " us per tet, "
-                   << 1e6 * c_side << " us per fault-face side (w = " << c_side / c_tet << " tets)\n";
+                   << " ms/step on the busiest rank; cost per step " << 1e6 * c_tet << " us per "
+                   << (dim == 3 ? "tet" : "triangle") << ", "
+                   << 1e6 * c_side << " us per fault-face side (w = " << c_side / c_tet << " " << elems << ")\n";
       }
    }
    const real_t wall = std::chrono::duration<real_t>(std::chrono::steady_clock::now() - wall0).count();

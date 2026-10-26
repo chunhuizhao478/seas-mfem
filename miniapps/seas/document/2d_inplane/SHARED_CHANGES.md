@@ -412,3 +412,71 @@ the header and timings, their 2-rank logs differ at MUMPS's run-to-run level
 (the P3 switch checkpoint 3.4e-11).  `2d-inplane-all` passes.
 
 Known behaviour changes in 3D: none.
+
+## Phase C, part 2: the Nitsche driver on 2D meshes, TPV205-2D (C2)
+
+`seas_nitsche_dyn_driver` now runs a 2D triangle mesh in the (x, y) plane
+(plane strain, mode II) with the operator of C1.  A 2D deck is the 3D deck
+with 2-entry `[fault_geometry]` vectors (B2); `up = [0, 0, 1]` puts the
+in-plane slip in the strike slot, so the station columns, the fault CSVs and
+the conventions file are the 3D ones (slip2 = SCEC h-slip).  The step uses
+the 2D column of `NitscheStableConstant` (C1) in the global step, the LTS
+clusters and the logs; the cycle's dynamic phase reads the same function, so
+the drivers no longer keep their own copies of the 3D column.  In 2D the
+driver refuses, with a message, what it would otherwise misread: a station
+or a nucleation centre off the plane (z != 0), `[[stress_region]]` z bounds
+(every fault point has z = 0), and the fault ParaView output (`fault.vtkhdf`
+holds triangles; the 2D fault is a polyline, phase F).
+
+New files (branch-owned): `tpv205/configs/tpv205_2d_nitsche.toml` (gate G1),
+`tpv205/stations/tpv205_2d_fault_stations.csv` (written by
+`scripts/make_fault_stations.py tpv205_2d`), and
+`tests/2d_inplane/compare_station_runs.py` (make target `test-2d-driver`,
+part of `2d-inplane-all`).
+
+| Shared file | Change | 3D |
+|---|---|---|
+| `drivers/nitsche_dyn_driver.cpp` | the mesh check takes a 2D mesh in the plane (triangles) or a 3D mesh (tets); `kCeig` removed, `NitscheStableConstant(dim, p)` in its five places; the LTS centroid check sums `SpaceDimension()` coordinates and the DG0 cluster field has the mesh dimension; the station copy average and the fault CSV dump use the edge midpoint and length of a 2D fault face; the four 2D refusals above; "tets" in the log becomes "triangles" in 2D; the no-HDF5 refusal of the fault ParaView output moved after the mesh read, so that a 2D deck gets the 2D message | the same constants (0.113, 0.212, 0.282, 0.332), sums and text; a deck asking for `fault.vtkhdf` from an MFEM without HDF5 is refused after the mesh read instead of before it |
+| `cycle/dyn_phase.hpp` | `DynPhase::kCeig` removed; the CFL step and the LTS assignment use `NitscheStableConstant` of the mesh dimension; `StableConstant()` for the log | the same values |
+| `drivers/fd_cycle_driver.cpp` | the dynamic-setup log prints `dyn.StableConstant()` | the same text |
+| `scripts/make_fault_stations.py` | problem `tpv205_2d`: the seven on-fault stations of the TPV205-2D description, named as the 3D stations at 7.5 km depth, written into `tpv205/stations/` with z = 0 | the other station files unchanged (`--check`) |
+| `tpv205/mesh/tpv205_2d.geo`, `tpv105/mesh/tpv105_2d.geo` | comment only: the Nitsche driver has no `--mesh-scale` | the 100 m mesh regenerates byte for byte |
+| `tests/2d_inplane/2d_inplane.mk` | `test-2d-driver` | - |
+
+`dynamic/precomputed_face_fluxes.hpp`, which the design's phase C row lists,
+belongs to the velocity-stress path; the Nitsche driver does not use it, so
+it is not touched.
+
+How it was checked (cloud container, 10-26).  TPV205-2D, the committed deck,
+12 s on 4 ranks: p = 1 on 200, 100 and 50 m fault meshes (2.01, 4.11 and
+7.68 ms/step) and p = 2 on 200 and 100 m (4.63 and 10.32 ms/step); the
+200 m and 50 m meshes from `tpv205_2d.geo` with `-setnumber lc_fault`,
+not committed.  At every station the final slip of the three finest runs
+(p = 1 50 m, p = 2 200 m and 100 m) agrees within 0.3%, the rupture arrival
+(first |V| > 1 mm/s) within 0.04 s except at +12 km (0.13 s, a slow
+precursor; at 1 m/s 0.023 s); peak slip rates still change by about 10%
+between those runs.  The dip columns (slip1, V1, tau1) are exactly 0 at
+every station and step of every run.  `--lts rate2` on the 100 m mesh
+(4 clusters, ideal 2.21x): 1.93x faster at p = 1 and 1.94x at p = 2, the
+stations within 3.0e-3 (V), 1.5e-3 (tau) and 2.7e-4 (slip) of the global
+step, relative to each column's largest value.  1 rank against 4 ranks
+(2 s): the same time columns, 8.2e-11 at most, the last printed digit;
+`test-2d-driver` asserts it at 0.1 s with 1e-9 (bit for bit in its run),
+runs the LTS deck and checks the four refusals.  The PyLith comparison
+(gate G1) needs the PyLith file on the Mac and follows the push.
+
+3D parity against review 5's tree (same container, the parity set of C1
+rerun with this change): TPV205 and TPV104 on 2 ranks and the cycle QD and
+dynamic regimes on 1 rank byte for byte; the cycle dynamic regime on 2 ranks
+byte for byte (against C1's rerun of it alone; C1's run in the set had been
+killed by the memory limit); the cycle QD regime on 2 ranks 1.9e-9 and the
+BP5 quick check on 8 ranks 7.0e-8 (MUMPS run to run; C1: 2.7e-9 and
+1.1e-7 between two runs of one binary); the 15 unit tests pass with
+identical outputs.  TPV205 1000 m with `--lts rate2` on 2 ranks (1 s):
+byte for byte.  The fully-dynamic-cycle tests pass; their 1-rank logs are
+identical apart from paths and timings, their 2-rank logs differ at MUMPS's
+run-to-run level (the P3 switch checkpoint 8.8e-12).  `2d-inplane-all`
+passes, `test-2d-driver` included.
+
+Known behaviour changes in 3D: none in a run; the no-HDF5 refusal comes
+after the mesh read.

@@ -24,8 +24,13 @@ The positions are the on-fault station lists of the benchmark descriptions:
   tpv205  TPV5_forwebsite.pdf, "Diagram showing locations of on-fault
           stations" (sixteen points; the same positions as the DRDG3D files
           in tpv205/benchmark_data/)
+  tpv205_2d  TPV205_210_Description_v4.pdf, the 2D benchmark: the seven
+          on-fault stations at 7.5 km depth (x = 0, +-4.5, +-7.5, +-12 km),
+          written into tpv205/stations/ with z = 0 (the 2-D mesh is the
+          horizontal slice at that depth, in the (x, y) plane)
 TPV104 and TPV205 stations are named like the SCEC reference files
-(x2_<strike km>_x3_<depth km>).
+(x2_<strike km>_x3_<depth km>); the 2-D ones keep the 3-D names of the same
+points.
 
 Usage (from miniapps/seas):
     python3 scripts/make_fault_stations.py                # all problems
@@ -44,6 +49,7 @@ _TPV102_POINTS = [(0, 3), (0, 7.5), (0, 12), (9, 7.5), (12, 3), (12, 12),
 _TPV205_POINTS = [(-12, 0), (-12, 7.5), (-7.5, 0), (-7.5, 7.5), (-4.5, 0), (-4.5, 7.5),
                   (0, 0), (0, 3), (0, 7.5), (0, 12), (4.5, 0), (4.5, 7.5),
                   (7.5, 0), (7.5, 7.5), (12, 0), (12, 7.5)]
+_TPV205_2D_STRIKE = [-12, -7.5, -4.5, 0, 4.5, 7.5, 12]   # all at 7.5 km depth
 
 
 def _km(v):
@@ -64,7 +70,11 @@ PROBLEMS = {
     "tpv102": ("SCEC TPV102 on-fault stations", [(flt_name(s, d), s, d) for s, d in _TPV102_POINTS]),
     "tpv104": ("SCEC TPV104 on-fault stations", [(scec_name(s, d), s, d) for s, d in _TPV102_POINTS]),
     "tpv205": ("SCEC TPV205 (TPV5) on-fault stations", [(scec_name(s, d), s, d) for s, d in _TPV205_POINTS]),
+    "tpv205_2d": ("SCEC TPV205-2D on-fault stations (the 7.5 km depth slice)",
+                  [(scec_name(s, 7.5), s, 7.5) for s in _TPV205_2D_STRIKE]),
 }
+# 2-D problems: (folder, the mesh plane's z); the depth is in the name only
+PLANE_2D = {"tpv205_2d": ("tpv205", 0.0)}
 
 
 def _num(v):
@@ -74,16 +84,22 @@ def _num(v):
 
 def render(problem):
     title, rows = PROBLEMS[problem]
-    out = [f"# {title}, written by scripts/make_fault_stations.py; do not edit by hand.",
-           "# Global frame of the mesh: X along strike, Y fault normal, Z up (m); fault on Y = 0.",
-           "name,x,y,z"]
+    out = [f"# {title}, written by scripts/make_fault_stations.py; do not edit by hand."]
+    if problem in PLANE_2D:
+        out.append("# 2-D mesh in the (x, y) plane: X along strike, Y fault normal (m), z = 0; "
+                   "fault on Y = 0.")
+    else:
+        out.append("# Global frame of the mesh: X along strike, Y fault normal, Z up (m); fault on Y = 0.")
+    out.append("name,x,y,z")
     for name, s, d in rows:
-        out.append(f"{name},{_num(1000.0 * s)},{_num(0.0)},{_num(0.0 - 1000.0 * d)}")
+        z = PLANE_2D[problem][1] if problem in PLANE_2D else 0.0 - 1000.0 * d
+        out.append(f"{name},{_num(1000.0 * s)},{_num(0.0)},{_num(z)}")
     return "\n".join(out) + "\n"
 
 
 def target(root, problem):
-    return os.path.join(root, problem, "stations", f"{problem}_fault_stations.csv")
+    folder = PLANE_2D[problem][0] if problem in PLANE_2D else problem
+    return os.path.join(root, folder, "stations", f"{problem}_fault_stations.csv")
 
 
 def main():

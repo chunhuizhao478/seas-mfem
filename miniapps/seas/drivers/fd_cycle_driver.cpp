@@ -212,7 +212,7 @@ void PrintDynamicSetup(const MPIContext &mpi, const cycle::CycleConfig &cfg,
    std::cout << std::setprecision(6)
              << "\n  dynamic regime (Nitsche, explicit central difference):\n"
              << "    dt = " << dyn.Dt() << " s (cfl " << dc.cfl << " x C(" << p << ") "
-             << cycle::DynPhase::kCeig[p] << "), set up in " << setup_s << " s\n"
+             << dyn.StableConstant() << "), set up in " << setup_s << " s\n"
              << "    Kelvin-Voigt: ";
    if (dyn.HasKelvinVoigt())
    {
