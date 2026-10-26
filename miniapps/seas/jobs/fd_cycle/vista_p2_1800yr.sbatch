@@ -123,15 +123,18 @@ grep -A10 "=== fd_cycle summary" "$LOG"
 ls -la "$OUT"/*.vtkhdf 2>/dev/null
 # The outcome from the log as well as the exit code, which comes through
 # ibrun and mpirun: a wall-limit stop is exit 8 whatever code arrives, and
-# exit 0 counts as the end only when the final time is t_final.
+# exit 0 counts as the end only when the driver's summary says "status:
+# done", which it prints when the QD run reaches t_final (this job passes
+# no --max-steps).  The summary's final time has 3 digits only, so it is
+# shown, not compared with t_final (1094928 reached t_final and failed
+# that comparison: exit 9, no DONE, no SCEC files).
 if [ $rc -ne 8 ] && grep -q "s reached at step .*checkpoint written, stopping" "$LOG"; then
    echo "the log shows the wall-limit stop (exit code $rc): treated as exit 8"; rc=8
 fi
 if [ $rc -eq 0 ]; then
-   TF=$(awk '$1 == "t_final:" { print $2; exit }' "$LOG")
-   FT=$(awk '$1 == "final" && $2 == "time:" { v = $3 } END { print v }' "$LOG")
-   awk -v a="$FT" -v b="$TF" 'BEGIN { exit !(a != "" && b != "" && a + 0 >= (b + 0) * (1 - 1e-9)) }' \
-      || { echo "ERROR: exit 0 but the final time '$FT' s is not t_final '$TF' s"; rc=9; }
+   grep -E "^  (t_final|final time|status): " "$LOG"
+   grep -q "^  status: done$" "$LOG" \
+      || { echo "ERROR: exit 0 but the summary does not say 'status: done'"; rc=9; }
 fi
 if [ $rc -eq 0 ]; then
    touch "$OUT/DONE"; echo "reached tfinal: the chain is finished"
