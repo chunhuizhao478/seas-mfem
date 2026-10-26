@@ -104,6 +104,17 @@
 // ones.  The deck's stress functions are evaluated at (x, y, 0) and must
 // give sigma_xz = sigma_yz = 0 on the fault (refused otherwise: the in-plane
 // model has no anti-plane traction).
+//
+// Normal-stress hook H-2D1 (2D in-plane design rev 3, phase D, section 5.9;
+// document/fd_cycle_dev/HOOKS.md): SetNormalStressModifier hands the
+// operator an IFaultNormalStressModifier (fault/fault_normal_stress_modifier.hpp),
+// e.g. thermal pressurization.  Box 9 then gives the law
+// sigma_law = sigma_eff - NormalStressReduction(j) (after Prakash-Clifton:
+// sigma* - NormalStressReduction(j)), range-checked like sigma_eff, and after
+// the closures of a step the modifier is advanced once with dt, the shear
+// traction |X_tan + gamma V| the law balanced and |V^{n+1}| per owned DOF.
+// The recorded sigma_eff (LastSigmaEff, the step record) stays the bulk's.
+// Null (the default) leaves every bit unchanged.
 
 #ifndef MFEM_SEAS_NITSCHE_WAVE_OPERATOR_HPP
 #define MFEM_SEAS_NITSCHE_WAVE_OPERATOR_HPP
@@ -119,6 +130,7 @@
 #include "../fault/fault_frame_field.hpp"
 #include "../fault/fault_frame.hpp"
 #include "../friction/fault_closure.hpp"
+#include "../fault/fault_normal_stress_modifier.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -465,6 +477,18 @@ public:
                   << " != 3 x " << no_ << " owned fault DOFs");
       S0_own_ = S0;
    }
+   /// Normal-stress hook (header; 2D in-plane design rev 3, section 5.9):
+   /// `m` covers the owned fault DOFs in this operator's order and must
+   /// outlive it; null switches the hook off.  Call before the first step.
+   void SetNormalStressModifier(IFaultNormalStressModifier *m)
+   {
+      MFEM_VERIFY(has_fault_, "SetNormalStressModifier: the operator has no fault");
+      MFEM_VERIFY(!m || m->NumPoints() == no_, "SetNormalStressModifier: the modifier "
+                  "covers " << m->NumPoints() << " points, the operator owns " << no_
+                  << " fault DOFs");
+      nsm_ = m;
+   }
+   const IFaultNormalStressModifier *NormalStressModifier() const { return nsm_; }
    const IFaultClosure &Closure() const { return *closure_; }
    real_t SigmaMin() const { return sigma_min_; }
    /// Global number of shared (cross-rank) fault faces, each counted once.
@@ -529,6 +553,8 @@ public:
    /// sigma_pc (Prakash-Clifton) *sigma_pc = E *sigma_pc + omE sigma_eff on
    /// return and the closure sees that value instead of sigma_eff.
    /// slip_abs = |d^n| of DOF j, passed to the closure as st.slip_abs.
+   /// With the normal-stress hook the closure sees that value less
+   /// NormalStressReduction(j); sigma_eff on return stays the bulk's.
    void CloseDOF(int j, const real_t TS[3], real_t psi, real_t V[3],
                  real_t &sigma_eff, real_t X[2], real_t *sigma_pc = nullptr,
                  real_t E = 0.0, real_t omE = 1.0, real_t slip_abs = 0.0) const
@@ -553,6 +579,21 @@ public:
       {
          *sigma_pc = E * (*sigma_pc) + omE * sigma_eff;
          sig_law = *sigma_pc;
+      }
+      if (nsm_)
+      {
+         // normal-stress hook (SetNormalStressModifier), e.g. p(0) - p_ini
+         const real_t red = nsm_->NormalStressReduction(j);
+         sig_law -= red;
+         if (!(sig_law >= sigma_min_))
+         {
+            MFEM_ABORT("NitscheWaveOperator: the normal stress the law sees left its "
+                       "range on rank " << Mpi::WorldRank() << ", owned fault DOF " << j
+                       << " at (" << x_own_(3 * j) << ", " << x_own_(3 * j + 1) << ", "
+                       << x_own_(3 * j + 2) << "), step " << steps_ << ", t = " << GetTime()
+                       << ": " << sig_law + red << " less the modifier's " << red << " = "
+                       << sig_law << " < sigma_min = " << sigma_min_);
+         }
       }
       real_t Vl[2];
       const real_t gamma = ClosureGamma(j);
@@ -1162,6 +1203,11 @@ private:
       real_t max_pc = -std::numeric_limits<real_t>::infinity();
       Xlast_.SetSize(2 * no_);
       siglast_.SetSize(no_);
+      if (nsm_)
+      {
+         nsm_tau_.SetSize(no_);
+         nsm_V_.SetSize(no_);
+      }
       for (int j = 0; j < no_; j++)
       {
          real_t TS[3], Vn[3], X[2], sig;
@@ -1189,6 +1235,14 @@ private:
                      "NitscheWaveOperator: slip rate not anti-parallel to the "
                      "shear traction on rank " << Mpi::WorldRank() << ", owned "
                      "fault DOF " << j << ", step " << steps_ << ": V.X = " << VX);
+         if (nsm_)
+         {
+            // the shear traction the law balanced (the station traction) and |V^{n+1}|
+            const real_t g = ClosureGamma(j);
+            nsm_tau_(j) = std::hypot(X[0] + g * fault_frame::Dot(Vn, dv),
+                                     X[1] + g * fault_frame::Dot(Vn, sv));
+            nsm_V_(j) = Vabs;
+         }
          const real_t ratio = Vabs * dt / Dc_own_(j);
          MFEM_VERIFY(ratio <= 2.0,
                      "NitscheWaveOperator: predictor stability |V| dt / Dc = "
@@ -1210,6 +1264,7 @@ private:
          max_V = std::max(max_V, Vabs);
          max_ratio = std::max(max_ratio, ratio);
       }
+      if (nsm_) { nsm_->Advance(dt, nsm_tau_.GetData(), nsm_V_.GetData()); }
       fault_sec_ += MPI_Wtime() - tf0;
       if (lts_defer_red_)
       {
@@ -1567,6 +1622,8 @@ private:
    bool pc_ = false, pc_seeded_ = false;   // Prakash-Clifton (header)
    real_t pc_vstar_ = 0.0, pc_len_ = 0.0;
    Vector sigpc_;                          // sigma* per owned DOF
+   IFaultNormalStressModifier *nsm_ = nullptr;   // normal-stress hook (header)
+   Vector nsm_tau_, nsm_V_;                      // its tau and |V| per owned DOF
    long steps_ = 0;
    NitscheStepRecord record_;
    bool lts_defer_red_ = false;   // LtsDeferRecordReduce

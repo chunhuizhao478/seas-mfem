@@ -23,6 +23,9 @@
 // (scientific, 10 digits, flushed every write).  The caller supplies the
 // state column per law: log10 theta for the aging law, psi for the slip law
 // with strong rate weakening, the slip path for slip weakening.
+// SetExtraColumns (2D in-plane design rev 3, phase D: T and p of thermal
+// pressurization) appends named columns after the state column, from a
+// value per snapped DOF; without it every byte is as before.
 //
 // dynamic/tpv102_stations.hpp, which the native TPV102 driver and the SAFS
 // driver use, is not edited.
@@ -210,6 +213,15 @@ class FaultStationWriter
 {
 public:
    using StateFn = std::function<real_t(const DOFData &)>;
+   /// Value of extra column c at owned fault DOF `dof`.
+   using ExtraFn = std::function<real_t(int dof, int c)>;
+
+   /// Extra columns after the state column (header); call before Open.
+   void SetExtraColumns(const std::vector<std::string> &labels, ExtraFn value)
+   {
+      extra_labels_ = labels;
+      extra_ = std::move(value);
+   }
 
    /// Opens the files of the stations this rank owns.  `state_label` names
    /// the ninth column; `state` computes it from a DOF's data.
@@ -232,7 +244,9 @@ public:
                    << ") m, snapped to the fault node (" << snap[s].node[0] << ", "
                    << snap[s].node[1] << ", " << snap[s].node[2] << ") m, distance "
                    << snap[s].distance << " m\n"
-                   << "# Columns: time slip1 slip2 V1 V2 tau1 tau2 sigma_n " << state_label << "\n"
+                   << "# Columns: time slip1 slip2 V1 V2 tau1 tau2 sigma_n " << state_label;
+         for (const std::string &l : extra_labels_) { files_[s] << " " << l; }
+         files_[s] << "\n"
                    << "# 1 = dip, 2 = strike; frame and signs in " << prefix
                    << "_station_conventions.txt\n";
       }
@@ -254,7 +268,12 @@ public:
                    << d.tau1_corr << " "
                    << d.tau2_corr << " "
                    << d.sigma_n_corr << " "
-                   << state_(d) << "\n";
+                   << state_(d);
+         for (size_t c = 0; c < extra_labels_.size(); c++)
+         {
+            files_[s] << " " << extra_(snap_[s].dof, static_cast<int>(c));
+         }
+         files_[s] << "\n";
          // flushed every write, so a job killed at its wall-time limit keeps its rows
          files_[s].flush();
       }
@@ -269,6 +288,8 @@ private:
    std::vector<FaultStation> st_;
    std::vector<FaultStationSnap> snap_;
    StateFn state_;
+   std::vector<std::string> extra_labels_;
+   ExtraFn extra_;
    std::vector<std::ofstream> files_;
 };
 

@@ -513,3 +513,84 @@ three points equal three one-point runs bit for bit, and a GetState /
 SetState restart continues a run bit for bit.
 
 Known behaviour changes in 3D: none.
+
+## Phase D, part 2: the normal-stress hook and TPV105-2D (D2)
+
+Thermal pressurization (part 1's module) now runs inside a rupture: an
+additive hook in the Nitsche operator (hook H-2D1 in
+`document/fd_cycle_dev/HOOKS.md`) lets a modifier lower the normal stress
+the friction law sees, and the driver builds the module behind it from a
+`[friction.thermal_pressurization]` deck table.  At owned fault DOF j the
+law sees sigma_eff - (p_j - p_ini), or sigma* - (p_j - p_ini) with
+Prakash-Clifton, with p_j from the end of the previous step; after the
+closures of every owned DOF the module is advanced once with the step's dt,
+tau_j = |X_tan + gamma V| (the shear traction the law balanced, the station
+traction) and |V_j^{n+1}| (design rev 3 section 5.9: a one-step lag).  The
+bulk keeps its sigma_eff: the modifier changes the strength only.  With
+local time stepping the fault cluster's step is the dt.
+
+New files (branch-owned): `fault/fault_normal_stress_modifier.hpp` (the
+interface), `fault/thermal_pressurization_modifier.hpp` (part 1's module
+behind it), `tests/2d_inplane/test_normal_stress_hook.cpp` (make target
+`test-normal-stress-hook`), `tpv105/configs/tpv105_2d_nitsche.toml` (gate
+G2) and `tpv105/stations/tpv105_2d_fault_stations.csv` (written by
+`scripts/make_fault_stations.py tpv105_2d`); make target `test-2d-driver-tp`.
+Both targets are part of `2d-inplane-all`.
+
+| Shared file | Change | Without the new inputs |
+|---|---|---|
+| `domain/nitsche_wave_operator.hpp` | additions only (57 lines): `SetNormalStressModifier` (checks the modifier's point count against the owned fault DOFs) and `NormalStressModifier()`; in `CloseDOF` the law's normal stress less `NormalStressReduction(j)`, refused with a message when that leaves [sigma_min, inf); in `AdvanceFault_` the step's tau and \|V\| per owned DOF and one `Advance` after the loop | the modifier pointer is null: no new branch is taken, every bit as before |
+| `dynamic/fault_station_file.hpp` | `SetExtraColumns(labels, value)`: named columns after the state column, in the header and in every row | no extra columns: the same bytes |
+| `drivers/nitsche_dyn_driver.cpp` | the `[friction.thermal_pressurization]` table (alpha_th, alpha_hy, rho_c, Lambda, h, T_ini, p_ini, dz0, growth, z_max, all required; scheme = "backward_euler" (default) or "crank_nicolson"; unknown keys refused); the module on the owned fault DOFs behind the hook and its log line; the station sigma_n column becomes the effective normal stress sigma_eff - (p - p_ini) (TPV105's "effective normal stress"), T and p follow the state column, averaged over the DG copies like the other columns; the conventions file names them; the fault CSV dump gains T and p; the step log and the last line print max T, max p and the smallest sigma_eff - (p - p_ini) | no table: the station copy average is called with no extra values and does the same arithmetic; the same output bytes |
+| `scripts/make_fault_stations.py` | problem `tpv105_2d`: the seven 2D stations of TPV105 (x = 0, +-9, +-15, +-18 km on the y = 7.5 km line), named as the 3D stations, written into `tpv105/stations/` with z = 0 | the other station files unchanged (`--check`) |
+| `tests/2d_inplane/compare_station_runs.py` | `--common`: compare the columns both runs have, by name, and list the others | without it the same checks and output |
+| `tests/2d_inplane/2d_inplane.mk` | `test-normal-stress-hook`, `test-2d-driver-tp` | - |
+| `document/fd_cycle_dev/HOOKS.md` | the H-2D1 row (not pinned: the cycle does not call it) | - |
+
+How it was checked (cloud container, 10-26).  test_normal_stress_hook 36 of
+36 and its 2 refusals: a modifier that takes off 0 Pa and thermal
+pressurization with Lambda = 0 give the run without a hook bit for bit
+(p = 1 and 2, Kelvin-Voigt and Prakash-Clifton on); the closure sees
+sigma - R_j; one Advance per step with the operator's dt, tau and |V| as
+the operator has them, tau = f (sigma - R_j) to 3.7e-16 while slipping;
+TPV105 thermal pressurization on the test rupture keeps the heat balance
+to 1.7e-15.  TPV105-2D (the committed deck and 100 m mesh, 15 s, 4 ranks):
+at p = 2 the arrivals are within 0.008 s of MDSBI and SPECFEM2D (the
+benchmark check of 10-25) at six of the seven stations (+18 km: 0.022 s)
+and the slip at 12.5 s within 0.5 % from -15 to +9 km (+15 km -2.6 %,
++18 km -6.9 %, -18 km -1.7 %, where the two codes differ by 14 %); p = 1
+arrives 0.05 s early, which p = 2 removes.  Without the table the rupture
+does not leave the nucleation patch.  Lambda = 0 against no table, 15 s:
+the 8 shared station columns bit for bit.  1 rank against 4 ranks (2 s):
+8.3e-11, the last printed digit; `test-2d-driver-tp` asserts it at 1 s with
+1e-9 and checks the three deck refusals.  Crank-Nicolson against backward
+Euler: final slip within 0.19 %, T and p within 0.4 %.  `--lts rate2`
+(4 clusters, ideal 1.97x): 1.52x faster, final slip within 0.73 %, the
+stations within 1.3e-3 (slip), 3.6e-2 (V), 1.7e-2 (tau), 3.8e-3 (T) and
+5.5e-3 (p) of the global step, relative to each column's largest value
+(the same size as Crank-Nicolson against backward Euler: this rupture
+amplifies small changes at the front).  Thermal pressurization adds 24 %
+to the p = 1 step on 4 ranks (6.12 to 7.59 ms; 77 unknowns and two
+tridiagonal solves per fault DOF on the ranks that hold the fault).
+
+The bulk sigma_eff at the stations moves by up to 2.5 MPa within about
+0.1 s of the rupture front and returns to 120 MPa; it does not shrink from
+p = 1 to p = 2 (TPV205-2D's +-1 MPa does).  A planar fault in a uniform
+medium has no such change; gate G2's n-stress comparison with MDSBI will
+show how much it matters.  Not changed here.
+
+3D parity against review 6's tree 3bd1bc23 (same container, all 31
+binaries rebuilt from clean): TPV205 and TPV104 on 2 ranks, the cycle QD and
+dynamic regimes on 1 rank and the 15 unit tests byte for byte (apart from
+the commit stamp); the cycle QD regime on 2 ranks 9.9e-10 and the BP5 quick
+check on 8 ranks 3.7e-8 (MUMPS run to run; C2: 1.9e-9 and 7.0e-8); the
+cycle dynamic regime on 2 ranks byte for byte but one off-fault station
+file at 2.2e-13, which is run to run: a second run of the same binary
+matches 3bd1bc23 byte for byte.  TPV205 1000 m with `--lts rate2` on 2
+ranks (1 s): byte for byte.  The fully-dynamic-cycle tests pass; their
+1-rank logs are identical apart from timings, the 2-rank P3 switch
+checkpoint 6.9e-12 (C2: 8.8e-12).  TPV205-2D at p = 1, 12 s on 4 ranks:
+byte for byte with phase C's final run.  `2d-inplane-all` passes, the
+three phase D targets included.
+
+Known behaviour changes in 3D: none.

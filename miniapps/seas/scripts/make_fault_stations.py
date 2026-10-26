@@ -28,6 +28,10 @@ The positions are the on-fault station lists of the benchmark descriptions:
           on-fault stations at 7.5 km depth (x = 0, +-4.5, +-7.5, +-12 km),
           written into tpv205/stations/ with z = 0 (the 2-D mesh is the
           horizontal slice at that depth, in the (x, y) plane)
+  tpv105_2d  SCEC_validation_TPV105.pdf, "Time Histories of Fields at Fault
+          Stations", the seven 2-D stations (x = 0, +-9, +-15, +-18 km on
+          the y = 7.5 km line of the 3-D fault), written into tpv105/stations/
+          with z = 0 (the 2-D mesh tpv105/mesh/tpv105_2d.geo, fault on y = 0)
 TPV104 and TPV205 stations are named like the SCEC reference files
 (x2_<strike km>_x3_<depth km>); the 2-D ones keep the 3-D names of the same
 points.
@@ -50,6 +54,7 @@ _TPV205_POINTS = [(-12, 0), (-12, 7.5), (-7.5, 0), (-7.5, 7.5), (-4.5, 0), (-4.5
                   (0, 0), (0, 3), (0, 7.5), (0, 12), (4.5, 0), (4.5, 7.5),
                   (7.5, 0), (7.5, 7.5), (12, 0), (12, 7.5)]
 _TPV205_2D_STRIKE = [-12, -7.5, -4.5, 0, 4.5, 7.5, 12]   # all at 7.5 km depth
+_TPV105_2D_STRIKE = [-18, -15, -9, 0, 9, 15, 18]         # all at y = 7.5 km
 
 
 def _km(v):
@@ -72,9 +77,11 @@ PROBLEMS = {
     "tpv205": ("SCEC TPV205 (TPV5) on-fault stations", [(scec_name(s, d), s, d) for s, d in _TPV205_POINTS]),
     "tpv205_2d": ("SCEC TPV205-2D on-fault stations (the 7.5 km depth slice)",
                   [(scec_name(s, 7.5), s, 7.5) for s in _TPV205_2D_STRIKE]),
+    "tpv105_2d": ("SCEC TPV105-2D on-fault stations (the y = 7.5 km line)",
+                  [(scec_name(s, 7.5), s, 7.5) for s in _TPV105_2D_STRIKE]),
 }
 # 2-D problems: (folder, the mesh plane's z); the depth is in the name only
-PLANE_2D = {"tpv205_2d": ("tpv205", 0.0)}
+PLANE_2D = {"tpv205_2d": ("tpv205", 0.0), "tpv105_2d": ("tpv105", 0.0)}
 
 
 def _num(v):

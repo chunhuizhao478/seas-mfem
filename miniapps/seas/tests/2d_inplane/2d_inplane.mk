@@ -13,6 +13,8 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d-nitsche          # phase C: 2D Nitsche operator
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d-driver           # phase C: the driver, TPV205-2D
 #   make -f tests/2d_inplane/2d_inplane.mk test-thermal-pressurization  # phase D: the TP module
+#   make -f tests/2d_inplane/2d_inplane.mk test-normal-stress-hook  # phase D: the hook, TP on a rupture
+#   make -f tests/2d_inplane/2d_inplane.mk test-2d-driver-tp        # phase D: the driver, TPV105-2D
 #   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
 # The 3D parity set (every phase must leave it bit for bit unchanged) is the
 # script tests/2d_inplane/parity_3d.sh (see its header).
@@ -270,8 +272,82 @@ test-thermal-pressurization: seas_test_thermal_pressurization
 	   else printf '%s\n' "$$out" | tail -15; echo "  FAILED: refusal $$n: exit $$rc, \"$$msg\" not found"; exit 1; fi; \
 	done
 
+# Phase D (part 2): the Nitsche operator's normal-stress hook and thermal
+# pressurization behind it, on the in-plane rupture of N5 (H1-H4), then each
+# refusal must exit non-zero with its message.
+TP_HOOK_HEADERS = fault/fault_normal_stress_modifier.hpp fault/thermal_pressurization.hpp \
+                  fault/thermal_pressurization_modifier.hpp
+TEST_NSH_SRC = tests/2d_inplane/test_normal_stress_hook.cpp
+TEST_NSH_OBJ = $(TEST_NSH_SRC:.cpp=.o)
+$(TEST_NSH_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(INPLANE_HEADERS) $(NITSCHE_2D_HEADERS) \
+                      $(TP_HOOK_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_normal_stress_hook: $(TEST_NSH_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_NSH_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+NSH_REFUSALS = 1:SetNormalStressModifier: the modifier covers|2:the normal stress the law sees left its range
+test-normal-stress-hook: seas_test_normal_stress_hook
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_normal_stress_hook
+	@list='$(NSH_REFUSALS)'; set -f; IFS='|'; for r in $$list; do n=$${r%%:*}; msg=$${r#*:}; \
+	   out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_normal_stress_hook --refuse $$n 2>&1); rc=$$?; \
+	   if [ $$rc -ne 0 ] && printf '%s' "$$out" | grep -qF "$$msg"; then \
+	      echo "  PASSED: refusal $$n: exit $$rc, \"$$msg\""; \
+	   else printf '%s\n' "$$out" | tail -15; echo "  FAILED: refusal $$n: exit $$rc, \"$$msg\" not found"; exit 1; fi; \
+	done
+
+# Phase D (part 2): the Nitsche driver on the TPV105-2D deck and its
+# committed 100 m mesh, 1 s (the rupture is under way, T and p rise): 1 rank
+# and 4 ranks give the same station files, T and p included, to
+# DRIVER_2D_RTOL; Lambda = 0 gives the deck without
+# [friction.thermal_pressurization] bit for bit in every column they share
+# (4 ranks both); then each deck refusal must exit non-zero with its message.
+DRIVER_TP_DECK = tpv105/configs/tpv105_2d_nitsche.toml
+DRIVER_TP_TMP = $(or $(TMPDIR),/tmp)/seas_test_2d_driver_tp
+DRIVER_TP_RUN = ./seas_nitsche_dyn_driver --tfinal 1.0 --log-every 1000
+DRIVER_TP_REFUSALS = unknown:[friction.thermal_pressurization]: unknown key|missing:[friction.thermal_pressurization] needs h; there are no defaults|scheme:scheme = "crank-nicolson"; use "backward_euler" or "crank_nicolson"
+test-2d-driver-tp: seas_nitsche_dyn_driver
+	@rm -rf $(DRIVER_TP_TMP); mkdir -p $(DRIVER_TP_TMP)
+	@d=$(DRIVER_TP_TMP); \
+	 sed -e 's/^Lambda   = 0.1e6 .*/Lambda   = 0.0/' $(DRIVER_TP_DECK) > $$d/lam0.toml; \
+	 awk '/^\[friction.thermal_pressurization\]/ {skip = 1; next} /^\[/ {skip = 0} !skip' $(DRIVER_TP_DECK) > $$d/notp.toml; \
+	 sed -e 's/^Lambda   = 0.1e6/lambda   = 0.1e6/' $(DRIVER_TP_DECK) > $$d/unknown.toml; \
+	 sed -e '/^h        = 0.01 /d' $(DRIVER_TP_DECK) > $$d/missing.toml; \
+	 sed -e 's/^scheme   = "backward_euler"/scheme   = "crank-nicolson"/' $(DRIVER_TP_DECK) > $$d/scheme.toml; \
+	 for f in lam0 notp unknown missing scheme; do cmp -s $(DRIVER_TP_DECK) $$d/$$f.toml \
+	    && { echo "  FAILED: the $$f edit did not change the deck"; exit 1; }; done; \
+	 grep -q '^\[friction.thermal_pressurization\]' $$d/notp.toml && { echo "  FAILED: notp still has the table"; exit 1; }; \
+	 grep -q '^\[nucleation\]' $$d/notp.toml || { echo "  FAILED: notp lost [nucleation]"; exit 1; }; true
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 $(DRIVER_TP_RUN) --config $(DRIVER_TP_DECK) --output-dir $(DRIVER_TP_TMP)/np1 \
+	   > $(DRIVER_TP_TMP)/np1.log 2>&1 || { tail -20 $(DRIVER_TP_TMP)/np1.log; echo "  FAILED: TPV105-2D on 1 rank"; exit 1; }
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 $(DRIVER_TP_RUN) --config $(DRIVER_TP_DECK) --output-dir $(DRIVER_TP_TMP)/np4 \
+	   > $(DRIVER_TP_TMP)/np4.log 2>&1 || { tail -20 $(DRIVER_TP_TMP)/np4.log; echo "  FAILED: TPV105-2D on 4 ranks"; exit 1; }
+	@for f in np1 np4; do grep -q "77 unknowns per fault DOF" $(DRIVER_TP_TMP)/$$f.log \
+	    && grep -q "# Columns: time slip1 slip2 V1 V2 tau1 tau2 sigma_n psi T p" $(DRIVER_TP_TMP)/$$f/tpv105_2d_station_x2_-9_x3_7.5.dat \
+	    || { echo "  FAILED: $$f lacks the thermal pressurization log line or the T p columns"; exit 1; }; done; \
+	 echo "  PASSED: TPV105-2D on 1 and 4 ranks (77 unknowns per fault DOF, columns T and p)"
+	python3 tests/2d_inplane/compare_station_runs.py $(DRIVER_TP_TMP)/np1 $(DRIVER_TP_TMP)/np4 --rtol $(DRIVER_2D_RTOL)
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 $(DRIVER_TP_RUN) --config $(DRIVER_TP_TMP)/lam0.toml --output-dir $(DRIVER_TP_TMP)/lam0 \
+	   > $(DRIVER_TP_TMP)/lam0.log 2>&1 || { tail -20 $(DRIVER_TP_TMP)/lam0.log; echo "  FAILED: Lambda = 0"; exit 1; }
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 $(DRIVER_TP_RUN) --config $(DRIVER_TP_TMP)/notp.toml --output-dir $(DRIVER_TP_TMP)/notp \
+	   > $(DRIVER_TP_TMP)/notp.log 2>&1 || { tail -20 $(DRIVER_TP_TMP)/notp.log; echo "  FAILED: no thermal pressurization"; exit 1; }
+	python3 tests/2d_inplane/compare_station_runs.py $(DRIVER_TP_TMP)/lam0 $(DRIVER_TP_TMP)/notp --common --rtol 0
+	@d=$(DRIVER_TP_TMP); list='$(DRIVER_TP_REFUSALS)'; set -f; IFS='|'; for r in $$list; do n=$${r%%:*}; msg=$${r#*:}; \
+	   out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_nitsche_dyn_driver --config $$d/$$n.toml \
+	      --tfinal 0.01 --output-dir $$d/out_$$n 2>&1); rc=$$?; \
+	   if [ $$rc -ne 0 ] && printf '%s' "$$out" | grep -qF "$$msg"; then \
+	      echo "  PASSED: refusal $$n: exit $$rc, \"$$msg\""; \
+	   else printf '%s\n' "$$out" | tail -15; echo "  FAILED: refusal $$n: exit $$rc, \"$$msg\" not found"; exit 1; fi; \
+	 done; rm -rf $$d
+
 2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
-                test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization
+                test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
+                test-normal-stress-hook test-2d-driver-tp
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
-        test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization 2d-inplane-all
+        test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
+        test-normal-stress-hook test-2d-driver-tp 2d-inplane-all

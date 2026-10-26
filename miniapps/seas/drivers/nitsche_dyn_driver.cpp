@@ -118,6 +118,23 @@
 // nucleation points with z != 0, [[stress_region]] z bounds, and the fault
 // ParaView output (fault.vtkhdf writes triangles; the 2-D fault is a
 // polyline, phase F).
+//
+// Thermal pressurization (2D in-plane design rev 3, phase D, section 5.9;
+// SCEC TPV105 eqs 11-12; Chunhui Zhao, 2026-10-26): an optional
+// [friction.thermal_pressurization] table with alpha_th, alpha_hy (m^2/s),
+// rho_c (J/(m^3 K)), Lambda (Pa/K), h (m), T_ini (K), p_ini (Pa), the z grid
+// dz0 (m), growth and z_max (m), all required, and scheme =
+// "backward_euler" (default) | "crank_nicolson".  Its presence builds
+// fault/thermal_pressurization.hpp on the owned fault DOFs (the same
+// parameters everywhere) and hands it to the operator's normal-stress hook:
+// the law sees sigma_eff - (p(0) - p_ini), after Prakash-Clifton when that is
+// on (sigma* - (p(0) - p_ini)), and the module is advanced with the step's
+// tau V.  [stress] holds the effective stress at t = 0 (for TPV105 the total
+// 200 MPa less p_ini 80 MPa).  The station sigma_n column becomes the
+// effective normal stress sigma_eff - (p(0) - p_ini) (TPV105's "effective
+// normal stress"), and two columns follow the state column: T (K) and p (Pa)
+// on the fault, averaged over the DG copies like the others; the fault CSV
+// dump gains T and p too.  Absent = every bit as before.
 
 #include "mfem.hpp"
 #include "../domain/nitsche_wave_operator.hpp"
@@ -127,6 +144,7 @@
 #include "../friction/rate_state_srw_closure.hpp"
 #include "../friction/slip_weakening_closure.hpp"
 #include "../fault/fault_frame.hpp"
+#include "../fault/thermal_pressurization_modifier.hpp"
 #include "../spatial/code/spatial_friction.hpp"
 #include "../dynamic/spatial_nucleation.hpp"
 #include "../dynamic/fault_station_file.hpp"
@@ -312,9 +330,14 @@ public:
    }
 
    /// Replace the station DOFs' data by the copy average; write the envelope.
-   void Apply(real_t t, std::vector<DOFData> &dd)
+   /// `extra` (optional): nx more values per owned DOF (e.g. T and p of
+   /// thermal pressurization), averaged the same way and replaced likewise.
+   void Apply(real_t t, std::vector<DOFData> &dd, std::vector<real_t> *extra = nullptr,
+              int nx = 0)
    {
       constexpr int nf = 8;   // slip1 slip2 V1 V2 tau1 tau2 sigma_n psi
+      if (!extra) { nx = 0; }
+      const int nt = nf + nx;
       std::vector<real_t> loc;
       for (int s = 0; s < ns_; s++)
       {
@@ -325,6 +348,7 @@ public:
                                         ca_(4 * j + 3), q.slip1, q.slip2, q.V1, q.V2,
                                         q.tau1_corr, q.tau2_corr, q.sigma_n_corr, q.psi};
             loc.insert(loc.end(), row, row + 5 + nf);
+            for (int c = 0; c < nx; c++) { loc.push_back((*extra)[nx * j + c]); }
          }
       }
       int nr = 0, n = static_cast<int>(loc.size());
@@ -339,10 +363,10 @@ public:
       }
       MPI_Gatherv(loc.data(), n, MPITypeMap<real_t>::mpi_type, all.data(), cnt.data(), dsp.data(),
                   MPITypeMap<real_t>::mpi_type, 0, MPI_COMM_WORLD);
-      std::vector<real_t> avg(ns_ * nf, 0.0);
+      std::vector<real_t> avg(ns_ * nt, 0.0);
       if (g_rank == 0)
       {
-         const int w = 5 + nf, nrow = static_cast<int>(all.size()) / w;
+         const int w = 5 + nt, nrow = static_cast<int>(all.size()) / w;
          std::vector<int> ord(nrow);
          for (int i = 0; i < nrow; i++) { ord[i] = i; }
          std::sort(ord.begin(), ord.end(), [&](int a, int b) {
@@ -361,28 +385,30 @@ public:
                wsum += r[4];
                for (int f = 0; f < nf; f++)
                {
-                  avg[s * nf + f] += r[4] * r[5 + f];
+                  avg[s * nt + f] += r[4] * r[5 + f];
                   lo[f] = std::min(lo[f], r[5 + f]);
                   hi[f] = std::max(hi[f], r[5 + f]);
                }
+               for (int f = nf; f < nt; f++) { avg[s * nt + f] += r[4] * r[5 + f]; }
             }
-            for (int f = 0; f < nf; f++) { avg[s * nf + f] /= wsum; }
+            for (int f = 0; f < nt; f++) { avg[s * nt + f] /= wsum; }
             env_[s] << std::scientific << std::setprecision(10) << t << " " << nc << " "
                     << lo[6] << " " << hi[6] << " " << lo[4] << " " << hi[4] << " " << lo[5] << " "
                     << hi[5] << " " << lo[2] << " " << hi[2] << " " << lo[3] << " " << hi[3] << "\n";
             env_[s].flush();
          }
       }
-      MPI_Bcast(avg.data(), ns_ * nf, MPITypeMap<real_t>::mpi_type, 0, MPI_COMM_WORLD);
+      MPI_Bcast(avg.data(), ns_ * nt, MPITypeMap<real_t>::mpi_type, 0, MPI_COMM_WORLD);
       for (int s = 0; s < ns_; s++)
       {
-         const real_t *a = &avg[s * nf];
+         const real_t *a = &avg[s * nt];
          for (int j : cand_[s])
          {
             DOFData &q = dd[j];
             q.slip1 = a[0]; q.slip2 = a[1]; q.V1 = a[2]; q.V2 = a[3];
             q.tau1_corr = a[4]; q.tau2_corr = a[5]; q.sigma_n_corr = a[6]; q.psi = a[7];
             q.slip_rate = std::hypot(a[2], a[3]);
+            for (int c = 0; c < nx; c++) { (*extra)[nx * j + c] = a[nf + c]; }
          }
       }
    }
@@ -805,6 +831,49 @@ int main(int argc, char *argv[])
       pc_len = TomlReal(t_pc, "length", 0.0);
       MFEM_VERIFY(pc_vstar > 0.0 && pc_len > 0.0, "[friction.prakash_clifton] v_star = "
                   << pc_vstar << ", length = " << pc_len << "; both must be > 0");
+   }
+   // [friction.thermal_pressurization] (header, "Thermal pressurization")
+   const toml::value *t_tp = (t_fric && t_fric->contains("thermal_pressurization"))
+                             ? &t_fric->at("thermal_pressurization") : nullptr;
+   const bool tp_on = t_tp != nullptr;
+   TPParameters tp_prm;
+   TPGridSpec tp_grid;
+   TPScheme tp_scheme = TPScheme::BackwardEuler;
+   std::string tp_scheme_s = "backward_euler";
+   if (tp_on)
+   {
+      MFEM_VERIFY(t_tp->is_table(), "[friction.thermal_pressurization] must be a table");
+      const char *req[10] = {"alpha_th", "alpha_hy", "rho_c", "Lambda", "h", "T_ini",
+                             "p_ini", "dz0", "growth", "z_max"};
+      for (const auto &kv : t_tp->as_table())
+      {
+         bool known = kv.first == "scheme";
+         for (const char *k : req) { known = known || kv.first == k; }
+         MFEM_VERIFY(known, "[friction.thermal_pressurization]: unknown key '" << kv.first
+                     << "' (alpha_th, alpha_hy, rho_c, Lambda, h, T_ini, p_ini, dz0, growth, "
+                     "z_max, scheme)");
+      }
+      for (const char *k : req)
+      {
+         MFEM_VERIFY(t_tp->contains(k), "[friction.thermal_pressurization] needs " << k
+                     << "; there are no defaults (only scheme defaults to backward_euler)");
+      }
+      tp_prm.alpha_th = TomlReal(t_tp, "alpha_th", 0.0);
+      tp_prm.alpha_hy = TomlReal(t_tp, "alpha_hy", 0.0);
+      tp_prm.rho_c = TomlReal(t_tp, "rho_c", 0.0);
+      tp_prm.Lambda = TomlReal(t_tp, "Lambda", 0.0);
+      tp_prm.h = TomlReal(t_tp, "h", 0.0);
+      tp_prm.T_ini = TomlReal(t_tp, "T_ini", 0.0);
+      tp_prm.p_ini = TomlReal(t_tp, "p_ini", 0.0);
+      tp_grid.dz0 = TomlReal(t_tp, "dz0", 0.0);
+      tp_grid.growth = TomlReal(t_tp, "growth", 0.0);
+      tp_grid.z_max = TomlReal(t_tp, "z_max", 0.0);
+      tp_scheme_s = TomlStr(t_tp, "scheme", "backward_euler");
+      MFEM_VERIFY(tp_scheme_s == "backward_euler" || tp_scheme_s == "crank_nicolson",
+                  "[friction.thermal_pressurization] scheme = \"" << tp_scheme_s
+                  << "\"; use \"backward_euler\" or \"crank_nicolson\"");
+      tp_scheme = tp_scheme_s == "backward_euler" ? TPScheme::BackwardEuler
+                                                  : TPScheme::CrankNicolson;
    }
    MFEM_VERIFY(p >= 1 && p <= 4, "order p must be in 1..4 (P3 constants); got " << p);
    MFEM_VERIFY(cfl > 0.0 && cfl <= 1.0, "[numerics] cfl (fraction of C(p)) must be in (0,1]");
@@ -1484,6 +1553,30 @@ int main(int argc, char *argv[])
       }
    }
 
+   // ------------------------------------------------------------ thermal pressurization
+   // (header): the module on the owned fault DOFs behind the operator's hook
+   std::unique_ptr<ThermalPressurization> tp;
+   std::unique_ptr<ThermalPressurizationModifier> tp_mod;
+   if (tp_on)
+   {
+      tp = std::make_unique<ThermalPressurization>(no, tp_grid, tp_scheme);
+      tp->SetParameters(tp_prm);
+      tp_mod = std::make_unique<ThermalPressurizationModifier>(*tp);
+      op.SetNormalStressModifier(tp_mod.get());
+      if (g_rank == 0)
+      {
+         std::cout << std::setprecision(10) << "  thermal pressurization (TPV105 eqs 11-12): "
+                   << "alpha_th " << tp_prm.alpha_th << ", alpha_hy " << tp_prm.alpha_hy
+                   << " m^2/s, rho_c " << tp_prm.rho_c << " J/(m^3 K), Lambda " << tp_prm.Lambda
+                   << " Pa/K, h " << tp_prm.h << " m, T_ini " << tp_prm.T_ini << " K, p_ini "
+                   << tp_prm.p_ini << " Pa; grid dz0 " << tp_grid.dz0 << " m, growth "
+                   << tp_grid.growth << ", z_max " << tp_grid.z_max << " m: " << tp->NumZ()
+                   << " unknowns per fault DOF (far node at " << tp->Z().back() << " m); "
+                   << tp_scheme_s << "; the law sees sigma_eff - (p(0) - p_ini)"
+                   << (pc_on ? " (sigma* - (p(0) - p_ini) with Prakash-Clifton)" : "") << "\n";
+      }
+   }
+
    // ------------------------------------------------------------ nucleation check
    // The projected SCEC along-strike traction -(S.shat) at the fault DOF
    // nearest the deck's hypocentre against the analytic tau_0 + delta_tau
@@ -1530,6 +1623,8 @@ int main(int argc, char *argv[])
    }
 
    // ------------------------------------------------------------ outputs
+   // T and p per owned fault DOF for the stations (thermal pressurization)
+   std::vector<real_t> tp_cols(tp_on ? 2 * no : 0, 0.0);
    // stations from the station file the deck names (header, "Stations")
    std::unique_ptr<FaultStationWriter> stations;
    std::unique_ptr<StationCopyAverage> station_avg;
@@ -1593,6 +1688,12 @@ int main(int argc, char *argv[])
          state_fn = [](const DOFData &d) { return d.psi; };
       }
       stations = std::make_unique<FaultStationWriter>();
+      if (tp_on)
+      {
+         stations->SetExtraColumns({"T", "p"}, [&tp_cols](int dof, int c) {
+            return tp_cols[2 * dof + c];
+         });
+      }
       stations->Open(out_dir, prefix, st_list, snap, state_label, state_fn);
       if (station_copies == "average")
       {
@@ -1607,7 +1708,8 @@ int main(int argc, char *argv[])
            << "#        shat = up x nhat / |up x nhat| = (" << ps[0] << ", " << ps[1] << ", " << ps[2]
            << "), dhat = shat x nhat = (" << pd[0] << ", " << pd[1] << ", " << pd[2] << ")\n"
            << "# pin: orientation propagated, pinned by the reference normal; plus side = side nhat points into\n"
-           << "# columns: t slip1 slip2 V1 V2 tau1 tau2 sigma_n " << state_label << "\n"
+           << "# columns: t slip1 slip2 V1 V2 tau1 tau2 sigma_n " << state_label
+           << (tp_on ? " T p" : "") << "\n"
            << "#   slip1 = delta.dhat (SCEC v-slip)      slip2 = delta.shat (SCEC h-slip)\n"
            << "#   V1    = V.dhat     (SCEC v-slip-rate) V2    = V.shat     (SCEC h-slip-rate)\n"
            << "#   tau1  = -T.dhat    (SCEC v-shear-stress, Pa)  tau2 = -T.shat (SCEC h-shear-stress, Pa)\n"
@@ -1617,6 +1719,13 @@ int main(int argc, char *argv[])
                                         ? ": log10 of theta = (Dc/V_0) exp((psi - f_0)/b), deck constants\n"
                                         : law.kind == LawKind::SlipWeakening
                                         ? ": accumulated slip path (m)\n" : ": state variable psi\n");
+         if (tp_on)
+         {
+            h << "#   thermal pressurization: sigma_n = -T.nhat - (p - p_ini), the effective normal "
+                 "stress the law sees (TPV105)\n"
+              << "#   T = temperature on the fault (K), p = pore pressure on the fault (Pa), "
+                 "p_ini = " << tp_prm.p_ini << " Pa, T_ini = " << tp_prm.T_ini << " K\n";
+         }
       }
    }
    else if (g_rank == 0)
@@ -1661,6 +1770,13 @@ int main(int argc, char *argv[])
          q.psi = psi(j);
          q.Dc = op.FaultDc()(j);
          q.slip_rate = std::hypot(q.V1, q.V2);
+         if (tp_on)
+         {
+            // TPV105's effective normal stress, T and p on the fault (header)
+            q.sigma_n_corr -= tp->PorePressureChange(j);
+            tp_cols[2 * j] = tp->Temperature(j);
+            tp_cols[2 * j + 1] = tp->PorePressure(j);
+         }
       }
    };
    std::unique_ptr<std::ofstream> dump;
@@ -1803,7 +1919,7 @@ int main(int argc, char *argv[])
          q.tau1_corr = q.tau2_corr = op.FaultSigmaFKV()(j);
          q.sigma_n_corr = 0.5 * op.FaultSigmaF()(j) * dt;
       }
-      if (station_avg) { station_avg->Apply(t, dofdata); }
+      if (station_avg) { station_avg->Apply(t, dofdata, tp_on ? &tp_cols : nullptr, 2); }
       stations->WriteStep(t, dofdata);
       if (g_rank == 0)
       {
@@ -1841,11 +1957,22 @@ int main(int argc, char *argv[])
    if (stations)
    {
       fill_dofdata();
-      if (station_avg) { station_avg->Apply(t, dofdata); }
+      if (station_avg) { station_avg->Apply(t, dofdata, tp_on ? &tp_cols : nullptr, 2); }
       stations->WriteStep(t, dofdata);
    }
    real_t max_ratio_run = 0.0, max_V_run = 0.0, min_sig_run = 1e300, max_sig_run = -1e300;
    real_t min_pc_run = 1e300, max_pc_run = -1e300;
+   // thermal pressurization, this rank: max T, max p, max -(sigma_eff - (p - p_ini))
+   real_t tp_run[3] = {-1e300, -1e300, -1e300};
+   auto tp_extremes = [&](real_t e[3]) {
+      const Vector &sg = op.LastSigmaEff();
+      for (int j = 0; j < no; j++)
+      {
+         e[0] = std::max(e[0], tp->Temperature(j));
+         e[1] = std::max(e[1], tp->PorePressure(j));
+         e[2] = std::max(e[2], -(sg(j) - tp->PorePressureChange(j)));
+      }
+   };
    // this rank's time inside ode.Step; step 1 is kept apart because it also
    // assembles K, K_eta, the fused pattern and the fault face operators
    double step_sec = 0.0, step1_sec = 0.0, fault_sec1 = 0.0;
@@ -1881,6 +2008,7 @@ int main(int argc, char *argv[])
          }
       }
       MFEM_VERIFY(std::isfinite(rec.max_V), "non-finite slip rate at step " << s);
+      if (tp_on) { tp_extremes(tp_run); }
       const Vector &V = op.SlipRate();
       for (int j = 0; j < no; j++)
       {
@@ -1898,7 +2026,7 @@ int main(int argc, char *argv[])
       if (stations && s % station_every == 0)
       {
          fill_dofdata();
-         if (station_avg) { station_avg->Apply(t, dofdata); }
+         if (station_avg) { station_avg->Apply(t, dofdata, tp_on ? &tp_cols : nullptr, 2); }
          stations->WriteStep(t, dofdata);
       }
       if (dump && s % dump_every == 0)
@@ -1914,6 +2042,7 @@ int main(int argc, char *argv[])
                   << "," << V(3 * j) << "," << V(3 * j + 1) << "," << V(3 * j + 2)
                   << "," << psi(j) << "," << Xs(2 * j) << "," << Xs(2 * j + 1) << "," << sg(j);
             if (pc_on) { *dump << "," << op.PrakashCliftonSigma()(j); }
+            if (tp_on) { *dump << "," << tp->Temperature(j) << "," << tp->PorePressure(j); }
             *dump << "\n";
          }
       }
@@ -1936,6 +2065,14 @@ int main(int argc, char *argv[])
       const bool log_now = lts_run ? (sync && (s >= lts_next_log || s == nsteps))
                                    : (s % log_every == 0 || s == nsteps);
       if (lts_run && log_now) { lts_next_log = (s / log_every + 1) * log_every; }
+      real_t tp_now[3] = {-1e300, -1e300, -1e300};
+      if (tp_on && log_now)
+      {
+         // collective: log_now is the same on every rank
+         tp_extremes(tp_now);
+         MPI_Allreduce(MPI_IN_PLACE, tp_now, 3, MPITypeMap<real_t>::mpi_type, MPI_MAX,
+                       MPI_COMM_WORLD);
+      }
       if (g_rank == 0 && log_now)
       {
          const real_t wall = std::chrono::duration<real_t>(std::chrono::steady_clock::now() - wall0).count();
@@ -1945,6 +2082,11 @@ int main(int argc, char *argv[])
          if (pc_on)
          {
             std::cout << "  sigma_pc in [" << rec.min_sigma_pc << ", " << rec.max_sigma_pc << "]";
+         }
+         if (tp_on)
+         {
+            std::cout << "  max T = " << tp_now[0] << " K  max p = " << tp_now[1]
+                      << " Pa  min sigma_n_eff - (p - p_ini) = " << -tp_now[2];
          }
          if (mon)
          {
@@ -2080,6 +2222,11 @@ int main(int argc, char *argv[])
                    << 1e6 * c_side << " us per fault-face side (w = " << c_side / c_tet << " " << elems << ")\n";
       }
    }
+   if (tp_on)
+   {
+      MPI_Allreduce(MPI_IN_PLACE, tp_run, 3, MPITypeMap<real_t>::mpi_type, MPI_MAX,
+                    MPI_COMM_WORLD);
+   }
    const real_t wall = std::chrono::duration<real_t>(std::chrono::steady_clock::now() - wall0).count();
    if (g_rank == 0)
    {
@@ -2087,6 +2234,11 @@ int main(int argc, char *argv[])
                 << " s; max|V| " << max_V_run << " m/s; max|V|dt/Dc " << max_ratio_run
                 << "; sigma_n_eff in [" << min_sig_run << ", " << max_sig_run << "] Pa";
       if (pc_on) { std::cout << "; sigma_pc in [" << min_pc_run << ", " << max_pc_run << "] Pa"; }
+      if (tp_on)
+      {
+         std::cout << "; max T " << tp_run[0] << " K, max p " << tp_run[1]
+                   << " Pa, min sigma_n_eff - (p - p_ini) " << -tp_run[2] << " Pa";
+      }
       std::cout << "; wall " << wall << " s ===\n";
    }
    return 0;

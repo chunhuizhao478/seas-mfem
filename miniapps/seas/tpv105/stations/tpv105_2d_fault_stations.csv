@@ -1,0 +1,10 @@
+# SCEC TPV105-2D on-fault stations (the y = 7.5 km line), written by scripts/make_fault_stations.py; do not edit by hand.
+# 2-D mesh in the (x, y) plane: X along strike, Y fault normal (m), z = 0; fault on Y = 0.
+name,x,y,z
+x2_-18_x3_7.5,-18000,0,0
+x2_-15_x3_7.5,-15000,0,0
+x2_-9_x3_7.5,-9000,0,0
+x2_0_x3_7.5,0,0,0
+x2_9_x3_7.5,9000,0,0
+x2_15_x3_7.5,15000,0,0
+x2_18_x3_7.5,18000,0,0
