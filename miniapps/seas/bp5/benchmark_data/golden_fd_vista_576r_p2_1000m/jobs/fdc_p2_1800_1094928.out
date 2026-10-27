@@ -1,0 +1,148 @@
+commit 3926e9c81c126214d9c12d4d9136d0ebec2f7d34, binaries built at 3926e9c81c126214d9c12d4d9136d0ebec2f7d34
+continuing /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927 from its checkpoint at QD step 605879
+H-matrix: reading /scratch/10024/zhaochun/seas-qd-green/bp5_fd_p2_h1e-10.bin (40697028608 B)
+host i615-021.vista.tacc.utexas.edu  nodes i615-[021-024]  ranks 576  output /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927  wall limit 162000 s
+seas_fd_cycle_driver exit 0 after 25909 s
+  QD stages: matrix, Green's function H-matrix eps 0.000000 (cache '', hcache '/scratch/10024/zhaochun/seas-qd-green/bp5_fd_p2_h1e-10.bin', check every 10000 stages)
+  benchmark output: 9 off-fault stations, 2 profiles
+  snapshots: fault dt_qd 315576000.000000 s, dt_dyn 0.100000 s; surface dt_qd 315576000.000000 s, dt_dyn 0.100000 s
+  restarted from /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr: step 605879, t = 4.97096e+10 s, next dt = 127139 s, dynamic phases 6, written by 3926e9c81c126214d9c12d4d9136d0ebec2f7d34
+  benchmark output: fault area 4e+09 m^2, domain A 1.35602e+09 m^2; off-fault stations blkst_strk-16fn+08dp+00 (rank 380) blkst_strk+00fn+08dp+00 (rank 401) blkst_strk+16fn+08dp+00 (rank 212) blkst_strk+00fn+16dp+00 (rank 204) blkst_strk+00fn+32dp+00 (rank 204) blkst_strk+00fn+48dp+00 (rank 310) blkst_strk+00fn+08dp+10 (rank 429) blkst_strk+00fn+16dp+10 (rank 310) blkst_strk+00fn+32dp+10 (rank 310)
+  fault snapshots: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr_fault_snapshots.vtkhdf (55872 points, 19925 snapshots so far)
+  surface snapshots: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr_surface_snapshots.vtkhdf (11256 points, 19925 snapshots so far)
+  snapshots: fault 23250, surface 23250
+=== fd_cycle dynamic phase 7 summary ===
+  commit: 3926e9c81c126214d9c12d4d9136d0ebec2f7d34
+  end: end_of_phase at t = 55227732137.233086 s (phase length 330.009145 s, 409160 steps of 0.000807 s); back to QD
+  max V: at the start (QD balance) 0.010007, after step 1 0.007322, over the phase 3.829798 m/s
+  max |V| dt / Dc: 0.022064 (the operator aborts above 2)
+  sigma_n_eff range: [7.682822, 35.820046] MPa; sigma_PC range: [7.686819, 35.817352] MPa
+  time per dynamic step: 0.003588 s (rank 0), 0.008918 s (slowest rank), on 576 ranks; loop with output 3858.540701 s
+  events: 7
+  files: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr_{<stations>,global,catalog,switch}.txt, /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr_fault_phase7.txt
+    409160   3.30009e+02   8.17832e-04   4.71160e-06   2.06965e+01   2.93671e+01  2.06965e+01  2.93672e+01   3.58822e-03    -31.00     0.00     0.00
+
+  back to QD at t = 55227732137.233086 s (TS step 685108, first dt 0.010000 s): max V dynamic 0.000818 m/s, QD balance 0.000919 m/s
+Checkpoint written: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr.partial (t=55227732137.23 s, step=685108)
+[QD-GREEN] dense G would be 139.55 GiB; kept as an H-matrix (dense rows only while compressing)
+[QD-GREEN] G 167616 x 111744 (N_f 55872, shear + normal rows), 45.75 GiB in all as an H-matrix, 0.39 GiB largest rank
+[QD-GREEN] H-matrix read from /scratch/10024/zhaochun/seas-qd-green/bp5_fd_p2_h1e-10.bin (N_f 55872, order 2, penalty factor 1, 3 components, compressed on 576 ranks from G read from /scratch/10024/zhaochun/seas-qd-green/bp5_prod_p2.bin)
+[QD-GREEN] compressed G ready 15.7 s after the start of the build
+[QD-GREEN] check against the solve path (t = 100 yr, test slip): max rel. difference shear 4.344e-15, normal 7.431e-14 (tolerance 1.000e-08)
+[QD-GREEN] check at stage 10000 (t = 4.990760e+10 s): rel. difference to the solve path shear 1.476e-10, normal 1.133e-10
+[QD-GREEN] check at stage 20000 (t = 5.010227e+10 s): rel. difference to the solve path shear 9.651e-11, normal 1.018e-10
+[QD-GREEN] check at stage 30000 (t = 5.029533e+10 s): rel. difference to the solve path shear 1.315e-10, normal 1.124e-10
+[QD-GREEN] check at stage 40000 (t = 5.048094e+10 s): rel. difference to the solve path shear 1.143e-10, normal 9.415e-11
+[QD-GREEN] check at stage 50000 (t = 5.066405e+10 s): rel. difference to the solve path shear 1.726e-10, normal 1.133e-10
+[QD-GREEN] check at stage 60000 (t = 5.084441e+10 s): rel. difference to the solve path shear 1.386e-10, normal 1.212e-10
+[QD-GREEN] check at stage 70000 (t = 5.102094e+10 s): rel. difference to the solve path shear 1.662e-10, normal 1.320e-10
+[QD-GREEN] check at stage 80000 (t = 5.119422e+10 s): rel. difference to the solve path shear 1.663e-10, normal 1.645e-10
+[QD-GREEN] check at stage 90000 (t = 5.136444e+10 s): rel. difference to the solve path shear 1.285e-10, normal 1.459e-10
+[QD-GREEN] check at stage 100000 (t = 5.153166e+10 s): rel. difference to the solve path shear 1.259e-10, normal 1.412e-10
+[QD-GREEN] check at stage 110000 (t = 5.169746e+10 s): rel. difference to the solve path shear 1.553e-10, normal 1.348e-10
+[QD-GREEN] check at stage 120000 (t = 5.185995e+10 s): rel. difference to the solve path shear 1.027e-10, normal 7.970e-11
+[QD-GREEN] check at stage 130000 (t = 5.202072e+10 s): rel. difference to the solve path shear 9.147e-11, normal 6.542e-11
+[QD-GREEN] check at stage 140000 (t = 5.217864e+10 s): rel. difference to the solve path shear 9.561e-11, normal 9.326e-11
+[QD-GREEN] check at stage 150000 (t = 5.233090e+10 s): rel. difference to the solve path shear 9.962e-11, normal 1.423e-10
+[QD-GREEN] check at stage 160000 (t = 5.248557e+10 s): rel. difference to the solve path shear 8.495e-11, normal 1.445e-10
+[QD-GREEN] check at stage 170000 (t = 5.263946e+10 s): rel. difference to the solve path shear 1.002e-10, normal 1.710e-10
+[QD-GREEN] check at stage 180000 (t = 5.278514e+10 s): rel. difference to the solve path shear 1.294e-10, normal 1.502e-10
+[QD-GREEN] check at stage 190000 (t = 5.292979e+10 s): rel. difference to the solve path shear 1.165e-10, normal 1.502e-10
+[QD-GREEN] check at stage 200000 (t = 5.307869e+10 s): rel. difference to the solve path shear 1.264e-10, normal 1.566e-10
+[QD-GREEN] check at stage 210000 (t = 5.322311e+10 s): rel. difference to the solve path shear 1.571e-10, normal 1.280e-10
+[QD-GREEN] check at stage 220000 (t = 5.336152e+10 s): rel. difference to the solve path shear 1.220e-10, normal 1.025e-10
+[QD-GREEN] check at stage 230000 (t = 5.349929e+10 s): rel. difference to the solve path shear 1.366e-10, normal 1.343e-10
+[QD-GREEN] check at stage 240000 (t = 5.364040e+10 s): rel. difference to the solve path shear 1.181e-10, normal 1.240e-10
+[QD-GREEN] check at stage 250000 (t = 5.378029e+10 s): rel. difference to the solve path shear 1.413e-10, normal 1.535e-10
+[QD-GREEN] check at stage 260000 (t = 5.391285e+10 s): rel. difference to the solve path shear 1.629e-10, normal 1.447e-10
+[QD-GREEN] check at stage 270000 (t = 5.403746e+10 s): rel. difference to the solve path shear 2.231e-10, normal 1.588e-10
+[QD-GREEN] check at stage 280000 (t = 5.416755e+10 s): rel. difference to the solve path shear 2.184e-10, normal 1.624e-10
+[QD-GREEN] check at stage 290000 (t = 5.430679e+10 s): rel. difference to the solve path shear 3.010e-10, normal 2.151e-10
+[QD-GREEN] check at stage 300000 (t = 5.444087e+10 s): rel. difference to the solve path shear 3.736e-10, normal 1.998e-10
+[QD-GREEN] check at stage 310000 (t = 5.454187e+10 s): rel. difference to the solve path shear 3.121e-10, normal 2.299e-10
+[QD-GREEN] check at stage 320000 (t = 5.462000e+10 s): rel. difference to the solve path shear 2.209e-10, normal 1.974e-10
+[QD-GREEN] check at stage 330000 (t = 5.469602e+10 s): rel. difference to the solve path shear 1.838e-10, normal 1.858e-10
+[QD-GREEN] check at stage 340000 (t = 5.480621e+10 s): rel. difference to the solve path shear 2.609e-10, normal 2.385e-10
+[QD-GREEN] check at stage 350000 (t = 5.492741e+10 s): rel. difference to the solve path shear 3.596e-10, normal 2.971e-10
+[QD-GREEN] check at stage 360000 (t = 5.505309e+10 s): rel. difference to the solve path shear 4.704e-10, normal 2.787e-10
+[QD-GREEN] check at stage 370000 (t = 5.517062e+10 s): rel. difference to the solve path shear 3.425e-10, normal 3.031e-10
+[QD-GREEN] check at stage 380000 (t = 5.521261e+10 s): rel. difference to the solve path shear 6.377e-10, normal 2.580e-10
+[QD-GREEN] check at stage 390000 (t = 5.522349e+10 s): rel. difference to the solve path shear 4.518e-10, normal 2.892e-10
+[QD-GREEN] check at stage 400000 (t = 5.522652e+10 s): rel. difference to the solve path shear 4.680e-10, normal 2.594e-10
+[QD-GREEN] check at stage 410000 (t = 5.522738e+10 s): rel. difference to the solve path shear 4.590e-10, normal 2.682e-10
+[QD-GREEN] check at stage 420000 (t = 5.522763e+10 s): rel. difference to the solve path shear 4.383e-10, normal 2.246e-10
+[QD-GREEN] check at stage 430000 (t = 5.522770e+10 s): rel. difference to the solve path shear 5.417e-10, normal 2.211e-10
+[QD-GREEN] check at stage 440000 (t = 5.522772e+10 s): rel. difference to the solve path shear 4.927e-10, normal 2.007e-10
+[QD-GREEN] check at stage 450000 (t = 5.522773e+10 s): rel. difference to the solve path shear 5.178e-10, normal 1.733e-10
+[QD-GREEN] check at stage 460000 (t = 5.522773e+10 s): rel. difference to the solve path shear 3.553e-10, normal 1.594e-10
+[QD-GREEN] check at stage 470000 (t = 5.522773e+10 s): rel. difference to the solve path shear 3.009e-10, normal 1.768e-10
+[QD-GREEN] check at stage 480000 (t = 5.522773e+10 s): rel. difference to the solve path shear 3.278e-10, normal 1.439e-10
+[QD-GREEN] check at stage 490000 (t = 5.522773e+10 s): rel. difference to the solve path shear 2.564e-10, normal 1.399e-10
+  QD -> dynamic at t = 5.523e+10 s (1.750e+03 yr): max V (QD balance) = 1.001e-02 m/s > V_on; dynamic phase 7
+  back to QD at t = 55227732137.233086 s (TS step 685108, first dt 0.010000 s): max V dynamic 0.000818 m/s, QD balance 0.000919 m/s
+[QD-GREEN] check at stage 500000 (t = 5.522773e+10 s): rel. difference to the solve path shear 1.114e-10, normal 7.656e-11
+[QD-GREEN] check at stage 510000 (t = 5.522774e+10 s): rel. difference to the solve path shear 1.191e-10, normal 8.535e-11
+[QD-GREEN] check at stage 520000 (t = 5.522778e+10 s): rel. difference to the solve path shear 1.197e-10, normal 8.461e-11
+[QD-GREEN] check at stage 530000 (t = 5.522802e+10 s): rel. difference to the solve path shear 1.139e-10, normal 1.174e-10
+[QD-GREEN] check at stage 540000 (t = 5.522896e+10 s): rel. difference to the solve path shear 1.168e-10, normal 1.127e-10
+[QD-GREEN] check at stage 550000 (t = 5.523207e+10 s): rel. difference to the solve path shear 1.025e-10, normal 1.137e-10
+[QD-GREEN] check at stage 560000 (t = 5.524057e+10 s): rel. difference to the solve path shear 1.206e-10, normal 8.956e-11
+[QD-GREEN] check at stage 570000 (t = 5.526282e+10 s): rel. difference to the solve path shear 9.004e-11, normal 6.317e-11
+[QD-GREEN] check at stage 580000 (t = 5.532783e+10 s): rel. difference to the solve path shear 1.016e-10, normal 3.976e-11
+[QD-GREEN] check at stage 590000 (t = 5.553176e+10 s): rel. difference to the solve path shear 1.123e-10, normal 4.825e-11
+[QD-GREEN] check at stage 600000 (t = 5.594793e+10 s): rel. difference to the solve path shear 1.087e-10, normal 5.067e-11
+[QD-GREEN] check at stage 610000 (t = 5.639136e+10 s): rel. difference to the solve path shear 1.427e-10, normal 5.508e-11
+[QD-GREEN] check at stage 620000 (t = 5.675546e+10 s): rel. difference to the solve path shear 1.210e-10, normal 6.742e-11
+[QD-GREEN] stages 621562, checks 62, largest rel. difference to the solve path: shear 6.377e-10, normal 3.031e-10
+--- bp5_fd_p2_1800yr_switch.txt
+# fd_cycle switch log, commit 3926e9c81c126214d9c12d4d9136d0ebec2f7d34
+# Columns: time(s), Vmax(m/s), from, to, reason
+0.000000000000E+00 3.000000000000E-02 QD dynamic start
+3.255795573472E+02 8.285527126616E-04 dynamic QD end_of_phase
+9.208946927323E+09 1.000065326911E-02 QD dynamic V_on
+9.208947257534E+09 8.219607140515E-04 dynamic QD end_of_phase
+1.841389500368E+10 1.000032002451E-02 QD dynamic V_on
+1.841389533365E+10 8.172730362733E-04 dynamic QD end_of_phase
+2.761748440188E+10 1.000025167998E-02 QD dynamic V_on
+2.761748473192E+10 8.183628972561E-04 dynamic QD end_of_phase
+3.682074855274E+10 1.000525869776E-02 QD dynamic V_on
+3.682074888275E+10 8.177972618067E-04 dynamic QD end_of_phase
+4.602431968164E+10 1.000447343615E-02 QD dynamic V_on
+4.602432001165E+10 8.179050561768E-04 dynamic QD end_of_phase
+5.522773180722E+10 1.000701383019E-02 QD dynamic V_on
+5.522773213723E+10 8.178315467658E-04 dynamic QD end_of_phase
+--- bp5_fd_p2_1800yr_catalog.txt
+# fd_cycle event catalog (start: max V > 0.001 m/s; end: 10 s below it), commit 3926e9c81c126214d9c12d4d9136d0ebec2f7d34
+# Columns: event, t_start(s), t_end(s), peak_Vmax(m/s)
+1.000000000000E+00 0.000000000000E+00 3.155799156815E+02 4.176433637746E+00
+2.000000000000E+00 9.208946821532E+09 9.208947247535E+09 3.747779614239E+00
+3.000000000000E+00 1.841389489808E+10 1.841389532365E+10 3.877987241548E+00
+4.000000000000E+00 2.761748429615E+10 2.761748472192E+10 3.817528959741E+00
+5.000000000000E+00 3.682074844709E+10 3.682074887275E+10 3.835685662280E+00
+6.000000000000E+00 4.602431957599E+10 4.602432000165E+10 3.827886708995E+00
+7.000000000000E+00 5.522773170158E+10 5.522773212723E+10 3.829798140402E+00
+--- bp5_fd_p2_1800yr_events.txt
+# fd_cycle events (start: max V > 0.001 m/s; end: 10 s below it; rupture area: DOFs with |V| >= 0.001 m/s), commit 3926e9c81c126214d9c12d4d9136d0ebec2f7d34
+# Columns: event, t_start(s), t_end(s), rupture_area(m^2), tau_avg_start(MPa), tau_avg_end(MPa), slip_avg(m)
+1.000000000000E+00 0.000000000000E+00 3.155799156815E+02 1.419698736529E+09 1.726374792170E+01 1.143750798140E+01 5.358464877589E+00
+2.000000000000E+00 9.208946821532E+09 9.208947247535E+09 1.408210259370E+09 1.724332110597E+01 1.144786325748E+01 5.317061725802E+00
+3.000000000000E+00 1.841389489808E+10 1.841389532365E+10 1.415048018363E+09 1.723806458131E+01 1.148345030744E+01 5.327519398416E+00
+4.000000000000E+00 2.761748429615E+10 2.761748472192E+10 1.412510288132E+09 1.723554944208E+01 1.147384579158E+01 5.318070418631E+00
+5.000000000000E+00 3.682074844709E+10 3.682074887275E+10 1.413074123155E+09 1.723666826544E+01 1.147501115404E+01 5.321407849375E+00
+6.000000000000E+00 4.602431957599E+10 4.602432000165E+10 1.412791236400E+09 1.723630360726E+01 1.147421920047E+01 5.320127128904E+00
+7.000000000000E+00 5.522773170158E+10 5.522773212723E+10 1.412791236400E+09 1.723658237072E+01 1.147381426800E+01 5.320644668523E+00
+=== fd_cycle summary ===
+  commit: 3926e9c81c126214d9c12d4d9136d0ebec2f7d34
+  final time: 5.68e+10 s (1.8e+03 yr)
+  TS steps: 705046
+  step rejections: 30320
+  dynamic phases: 7
+  events: 7
+  snapshots: fault 23250, surface 23250
+  status: done
+WARNING! There are options you set that were not used!
+WARNING! could be spelling mistake, etc!
+-rw------- 1 zhaochun G-821164 83150267440 Oct 26 13:04 /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr_fault_snapshots.vtkhdf
+-rw------- 1 zhaochun G-821164 12566697176 Oct 26 13:04 /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr_surface_snapshots.vtkhdf
+ERROR: exit 0 but the final time '5.68e+10' s is not t_final '5.68037e+10' s
+ERROR: driver exit 9; the chain stops here

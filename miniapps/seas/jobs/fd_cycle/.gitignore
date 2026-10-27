@@ -1,0 +1,4 @@
+# Slurm job logs (sbatch runs from this folder); not sources, so they must
+# not mark the cycle build -dirty (cycle/cycle.mk counts untracked files here).
+*.out
+*.err
