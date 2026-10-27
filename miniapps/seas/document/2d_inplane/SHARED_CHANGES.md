@@ -788,3 +788,167 @@ Known behaviour changes in 3D:
 - A deck with V_init_dip < 0, or a V_init field with negative values, is
   no longer refused.
 - Nothing else.
+
+## Phase F: BP3-FD, snapshots on 2D meshes, and the 2D Green's function (F)
+
+What SCEC BP3-FD needs beyond E2, and the quasi-dynamic stage operators and
+dense Green's function on 2D meshes (Chunhui Zhao, 2026-10-27, on the
+choice "Port the QD Green's function to 2D so BP3 runs take hours, not
+days?": "Port G to 2D (opt-in)").
+
+BP3-FD inputs:
+
+- `[cycle.prestress].a = "amax"` with `eta_V_init = false` (BP3-FD eqs
+  20-23): tau0 = sigma_n a_max asinh(V_init / (2 V0) exp(psi_bg / a_max)),
+  without eta V_init, and psi0 the kernel's inversion of the law at V_init
+  with the DOF's own a and that tau0 (eta = 0 in the inversion).  The two
+  E2 refusals "a = amax needs eta_V_init = true" and "a = amax needs ic =
+  gold" are removed; ic = "gold" keeps refusing switching and eta_V_init =
+  false.  The IC labels are "gold+a_max" (BP3-QD, unchanged) and
+  "scec_fd+a_max" (BP3-FD).  The psi0 of the two differ only by rounding;
+  tau0 differs by eta V_init = 4.62e-3 Pa.
+- `QDPhase::Setup`: with a = "amax" and ic = "scec_fd", the state's psi is
+  BuildPrestress's psi0 (not the uniform scec_fd value, which is out of
+  equilibrium where a < a_max), then one Solve(0) so that the slip rate and
+  traction of t = 0 belong to that state.  The QD regime keeps BP3-QD's
+  eta V in its balance.  Every other IC set is unchanged.
+- The five decks `config/fd_cycle/bp3_fd_{d30_thrust,d30_normal,d60_thrust,
+  d60_normal,d90}.toml`: the QD decks' geometry, mesh, fields and stations,
+  with ic = "scec_fd", eta_V_init = false, switching on (the BP5-FD switch:
+  V_on 1e-2, V_off 1e-3, T_dwell 10 s, T_max 1200 s, no phase limit), the
+  BP5-FD dynamic numerics (cfl 0.5, Kelvin-Voigt kv_eta 0.1, node scale,
+  inscribed length), penalty factor 1.0 in both regimes and no
+  Prakash-Clifton (BP3 eq. 15 has no normal-stress regularization).  The
+  dynamic regime's outer boundary is the QD one (Dirichlet sides at 400 km,
+  free bottom); BP3-FD's absorbing walls come with the fully-dynamic-cycle
+  merge.
+
+Snapshots on 2D meshes (`cycle/snapshots.hpp`): the fault and the surface
+are polylines, one line cell per fault face at p = 1 (its two DOFs) and per
+refined segment of a surface face, points in XYZ with z = 0, so the files
+keep the 3D layout.  p > 1 keeps one vertex cell per fault DOF.  The 3D
+branch's arithmetic is unchanged.  `tests/cycle/check_snapshots.py` reads
+line cells (segment candidates for the station match; on a segment, log V
+is compared as |V| against the segment's largest |V|, because a station
+1.5e-8 m off a vertex sees the 1e7 contrast across the face).
+
+The 2D Green's function:
+
+- `BuildQDStageOperators` and `BuildQDGreen` no longer call `Require3D_`,
+  which is removed.  The builder takes the mesh dimension: g(t) holds dim
+  values per Dirichlet point (`QDStageOperators::dim`, 3 by default), and
+  `EvaluateQDDirichletValues` and the two summaries count with it.  The
+  probes are the face loops' face-local functions, 2D since phases C and E.
+- In 2D the strike slot embeds to no displacement jump, so the strike
+  columns of B are zero: `BuildQDGreen` skips their solves (it verifies
+  that the right-hand side is exactly zero), N_f solves instead of 2 N_f.
+- After the build, `QDGreenOperator::PackPlanar` (2D only) verifies that the
+  strike rows and columns of G and the strike rows of T_D are exactly zero
+  and keeps the dip columns of the dip and normal rows: 2 N_f x N_f, a
+  third of the dense rows.  The stage product sums the even and the odd
+  dip columns in two chains; the full rows' four chains are these two
+  plus two sums of exact zeros, so the numbers are the same bit for bit.
+  The product reads a third of the memory: it took three quarters of a
+  step on the 25 m mesh (stack samples), so the step is about twice as
+  fast.  The cache file and `DenseRows` (the H-matrix) refuse packed rows.
+- The G cache file and the H-matrix key fault DOFs by 3D position and still
+  refuse 2D ("--qd-green-cache and --qd-green-compress need a 3-D mesh").
+- The ten BP3 decks run the stages through the stage operators and a dense
+  G (`operators = "matrix"`, `[cycle.qd.green] check_every = 10000`): N_f =
+  3200 at p = 1 on the 25 m meshes, 4800 at p = 2; G is kept at 0.16 and
+  0.37 GB (the build peaks at the full 0.49 and 1.1 GB).  G needs a linear
+  elastic bulk and loading linear in t; both hold for BP3, and the driver
+  checks the loading.
+
+| Shared file | Change | Without the new inputs |
+|---|---|---|
+| `cycle/prestress.hpp` | amax without eta V_init (tau0 and the inversion) | the amax branch with eta_V_init = true is the E2 expression; "local" untouched |
+| `cycle/cycle_config.hpp` | the two amax refusals removed, IC label for scec_fd + amax | the labels of every E2 deck unchanged |
+| `cycle/qd_phase.hpp` | Setup puts BuildPrestress's psi0 in the state for scec_fd + amax | not entered |
+| `cycle/snapshots.hpp` | line cells on a 2D mesh | the 3D path unchanged (test_cycle_snapshots passes) |
+| `tests/cycle/check_snapshots.py` | reads line cells; on a segment, log V as \|V\| against the segment's largest \|V\| | vertex cells as before (test_cycle_snapshots passes) |
+| `domain/elasticity_operator.hpp` | `Require3D_` removed (comment kept) | it passed on every 3D mesh |
+| `domain/elasticity_operator_qd.inl` | dim per Dirichlet point; 2D strike-column skip | dim = 3: the same instructions; the 3D block list is the same |
+| `domain/qd_stage_operators.hpp` | `dim` member, the summary's count | dim = 3 |
+| `domain/qd_green_operator.hpp` | `PackPlanar` and the packed stage product (2D); `WriteFile`, `DenseRows` refuse packed rows | not called in 3D: the dense loop as before |
+
+Tests (branch-owned):
+
+- `test_prestress_bp3` gains B6 (amax without eta V: tau0's closed form; it
+  differs from B1's by eta V_init to 1e-7 Pa, psi0 equals B1's to 1e-14,
+  the law's back-check) and B7 (each BP3-FD deck on its 1 km mesh at p = 1
+  and 2: label "scec_fd+a_max", switching on, the state's psi equals
+  psi0 bit for bit, the QD balance residual at most 1e-12, 0 < 1 - V/V_init
+  at most 2 eta / (a sigma_n)).  Refusal 1 is now switching = true on a QD
+  deck, refusal 4 eta_V_init = false on a QD deck.  With G in the decks,
+  B3 and B7 build the stage operators and G on the 1 km meshes (G against
+  the solve path at most 2.7e-15 (shear) and 1.6e-12 (normal)).  236 / 236 on 1 and on 2 ranks, and the eight refusals.
+- `test_2d_fault_layout` gains Q1: on the BP3 layout in miniature (dip 60,
+  p = 1 and 2, plate loading linear in t), the traction and normal
+  traction of a test slip at t = 100 yr from the face loops, the stage
+  operators and G agree to 2.2e-14 of their size on 1, 2 and 4 ranks, with
+  and without a strike slot in the slip; the strike traction is exactly 0
+  on every path.  Refusal 5 is now a G cache file on a 2D mesh.
+  139 / 139 on 1, 2 and 4 ranks, and the seven refusals.
+
+Runs (cloud container, not in the repo):
+
+- BP3-QD d60 thrust on the 1 km mesh, 1 rank, 200 steps (17.4 yr): G
+  against the solve path at most 1.1e-13 (shear) and 6.3e-13 (normal) over
+  24 checks; every fault output equals the face loops' to 6.5e-13.  The
+  off-fault QD velocity (srfst rows) differs from the face loops' by up to
+  1e-6 of its size from 2.6 yr on: the face loops skip a fault face whose
+  slip is below 1e-15 everywhere (`AssembleSlipContributionIP`), and
+  `QDPhase::Velocity` passes the slip rate V (m/s) as the slip, so faces of
+  the locked zone drop out once their V falls below 1e-15 m/s.  The stage
+  operators and G include them; given the same V the two solves agree to
+  2e-23 m/s while every face is above the threshold.  Pre-existing (3D as
+  well); not changed.
+- BP3-FD d60 thrust on the 1 km mesh (2 ranks): the switch QD -> dynamic
+  -> QD works (events at 130 and 187 yr; event 1's peak V 0.098 m/s, the
+  QD run's 0.056 m/s).  The third dynamic phase stops on the predictor
+  guard (|V| dt / Dc = 2.03 > 2 at t = 10.01 s): the 1 km mesh is too
+  coarse.  On a 250 m mesh the first phase stops on the same guard (2.07 at
+  7.87 s).  The 25 m runs are G4.
+- Restart across a dynamic phase (1 km, 2D, checkpoint every 1000 steps):
+  34 of 34 output files and the snapshots identical to the straight run.
+- Each of the ten decks on its 1 km mesh, 2 ranks, 600 steps (57.4 yr),
+  through G: the five QD decks against review 10's face-loop runs, fault
+  stations within 8.3e-13 of each column's size, profiles and source
+  1.9e-13, surface stations 1.7e-6 (the velocity, as above); the five FD
+  decks stay in the QD regime over that span and follow the QD decks
+  within 8.4e-8 (their tau0 is lower by eta V_init).
+
+3D parity against review 10's runs (E2's binaries, same container):
+every parity binary was rebuilt from the working tree.  23 differ from
+E2's (both drivers, seas_bp5_full and 20 unit tests, which include the
+changed domain headers), and their parity runs were repeated.  TPV205 and
+TPV104 on 2 ranks, the cycle QD and dynamic regimes on 1 rank and the 11
+unit-test runs are byte for byte (apart from the commit stamp; the logs
+differ in timings and in the order of rank prints).  The cycle QD regime
+on 2 ranks differs by 8.1e-10 and the dynamic regime's off-fault stations
+by 4.0e-9 (E2: 2.6e-9 and 4.0e-9, MUMPS run to run); the BP5 quick check
+on 8 ranks by 1.1e-7 (C1: 1.05e-7 between two runs of one binary; its
+stored golden fails at 7.4e-5 in this container, as at the branch point).
+The QD stage operators on the BP5 first-event deck (operators =
+"matrix", 1 rank, 3 steps): 13 of 13 files byte for byte with the binary
+before the port.  The fully-dynamic-cycle tests pass: the 1-rank logs
+differ only in paths and timings, and the 2-rank P3 switch checkpoint by
+1.1e-11 (E2: 7.9e-12).  The first try of the 2-rank P3 test was killed by
+the container's 14.3 GB memory limit, as at E1; run again alone, it
+passes.  test_cycle_snapshots passes.  `2d-inplane-all` passes (1474
+PASSED lines, no FAILED).
+
+After the packing of the 2D G (`qd_green_operator.hpp`), every parity binary
+was rebuilt again from a clean object tree; the same 23 differ from the
+binaries above, and their parity runs were repeated against the runs above:
+TPV205 and TPV104 on 2 ranks, the cycle regimes on 1 rank and the 11
+unit-test runs byte for byte; on 2 ranks the cycle QD regime 8.6e-10 and the
+dynamic regime 4.5e-13, the BP5 quick check 7.0e-8.  The fully-dynamic-cycle
+tests pass (1-rank logs differ only in paths and timings; the 2-rank P3
+switch checkpoint by 3.1e-11), and `2d-inplane-all` passes again (1474
+PASSED lines, no FAILED).  The ten BP3 decks on their 1 km meshes, 1 rank,
+600 steps: every output file of the packed G byte for byte with the full G
+(30 files per QD deck, 31 per FD deck); on 2 ranks within 1.2e-10.
+
+Known behaviour changes in 3D: none.

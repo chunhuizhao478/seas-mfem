@@ -23,7 +23,11 @@
 // Format: VTKHDF 2.0, a transient UnstructuredGrid whose mesh is written
 // once (ParaView 5.12 or later reads it; a time step per snapshot).  The
 // fault grid holds one triangle per fault face at p = 1 (the face's three
-// DOFs) and one vertex cell per DOF at p > 1.  Points are per face (the
+// DOFs) and one vertex cell per DOF at p > 1.  On a 2-D mesh (2D in-plane
+// design rev 3, phase F) the fault and the surface are polylines: one line
+// cell per fault face at p = 1 (its two DOFs) and per refined segment of a
+// surface face, points in XYZ with z = 0 and the surface vectors with a zero
+// z component, so the files keep the 3-D layout.  Points are per face (the
 // fault fields are discontinuous), in rank order then owned order, so a
 // restart needs the same rank count (the checkpoint needs it too).  Besides
 // /VTKHDF, the group /fd_cycle holds per snapshot: regime (0 QD, 1
@@ -441,13 +445,15 @@ public:
 
    static constexpr int kFaultFields = 8;
 
-   /// `fes`: the QD regime's displacement space (DG, vdim 3); `table` and
-   /// `nbf`: the owned fault DOFs, grouped by face (nbf per face).  With
+   /// `fes`: the QD regime's displacement space (DG, vdim = the mesh
+   /// dimension); `table` and `nbf`: the owned fault DOFs, grouped by face
+   /// (nbf per face).  With
    /// `restart` (a checkpoint's GetState), the files are continued.
    Snapshots(const CycleConfig &cfg, MPI_Comm comm, ParMesh &pmesh,
              const ParFiniteElementSpace &fes, const FaultDOFTable &table, int nbf,
              const std::string &commit, const std::vector<SnapshotFileState> *restart)
-      : cfg_(cfg.snapshots), comm_(comm), fes_(fes), order_(cfg.shared.mesh.order)
+      : cfg_(cfg.snapshots), comm_(comm), fes_(fes), order_(cfg.shared.mesh.order),
+        dim_(pmesh.Dimension())
    {
       MPI_Comm_rank(comm_, &rank_);
       MPI_Comm_size(comm_, &size_);
@@ -684,14 +690,33 @@ private:
    }
 
    /// p = 1: one triangle per fault face (its nbf = 3 consecutive owned
-   /// DOFs, which share the bulk element); p > 1: one vertex per DOF.
+   /// DOFs, which share the bulk element), on a 2-D mesh one line (nbf = 2);
+   /// p > 1: one vertex per DOF.
    void BuildFault_(const FaultDOFTable &table, int nbf)
    {
       const int N = table.Size();
       std::vector<double> xyz(static_cast<size_t>(3 * N));
       for (int i = 0; i < 3 * N; i++) { xyz[static_cast<size_t>(i)] = table.coords(i); }
       const bool tri = (order_ == 1);
-      if (tri)
+      const int per = tri ? dim_ : 1;   // DOFs per cell: 3 triangle, 2 line, 1 vertex
+      if (tri && dim_ == 2)
+      {
+         MFEM_VERIFY(nbf == 2 && N % 2 == 0, "snapshots: p = 1 on a 2-D mesh expects 2 "
+                     "DOFs per fault face; got nbf = " << nbf << ", " << N << " owned DOFs");
+         for (int f = 0; f < N / 2; f++)
+         {
+            const int e = table.elem[2 * f];
+            MFEM_VERIFY(table.elem[2 * f + 1] == e,
+                        "snapshots: owned fault DOFs " << 2 * f << ", " << 2 * f + 1
+                        << " are not one face (different bulk elements)");
+            const double *a = &xyz[6 * f], *b = a + 3;
+            const double u[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+            MFEM_VERIFY(u[0] * u[0] + u[1] * u[1] + u[2] * u[2] > 0.0,
+                        "snapshots: fault face of owned DOFs " << 2 * f << ", " << 2 * f + 1
+                        << " has zero length");
+         }
+      }
+      else if (tri)
       {
          MFEM_VERIFY(nbf == 3 && N % 3 == 0, "snapshots: p = 1 expects 3 DOFs per fault "
                      "face; got nbf = " << nbf << ", " << N << " owned DOFs");
@@ -716,24 +741,30 @@ private:
       const long long np = fault_.npts;
       fault_.conn.resize(static_cast<size_t>(np));
       for (long long j = 0; j < np; j++) { fault_.conn[static_cast<size_t>(j)] = j; }
-      const int per = tri ? 3 : 1;
       const long long nc = np / per;
       fault_.offsets.resize(static_cast<size_t>(nc + 1));
       for (long long c = 0; c <= nc; c++) { fault_.offsets[static_cast<size_t>(c)] = per * c; }
-      fault_.types.assign(static_cast<size_t>(nc), tri ? 5 : 1);   // VTK_TRIANGLE, VTK_VERTEX
+      // VTK_TRIANGLE, VTK_LINE, VTK_VERTEX
+      fault_.types.assign(static_cast<size_t>(nc), per == 3 ? 5 : (per == 2 ? 3 : 1));
    }
 
    /// The selected boundary faces: listed attribute, all vertices on the
-   /// plane.  Each face refined `order_` times (p = 1: its vertices).
+   /// plane.  Each face refined `order_` times (p = 1: its vertices).  A 3-D
+   /// mesh has triangular faces (triangle cells), a 2-D mesh segments (line
+   /// cells, points with z = 0).
    void BuildSurface_(ParMesh &pmesh)
    {
-      MFEM_VERIFY(fes_.GetVDim() == 3 && pmesh.Dimension() == 3,
-                  "snapshots: the surface needs a 3-D mesh and a vector displacement space");
+      MFEM_VERIFY(fes_.GetVDim() == dim_ && (dim_ == 2 || dim_ == 3),
+                  "snapshots: the surface needs a 2-D or 3-D mesh and a vector "
+                  "displacement space of its dimension (vdim " << fes_.GetVDim()
+                  << ", mesh " << dim_ << "-D)");
+      const Geometry::Type fgeom = (dim_ == 3) ? Geometry::TRIANGLE : Geometry::SEGMENT;
+      const int per = dim_;   // points per cell: triangle 3, line 2
       const std::array<real_t, 3> &n = cfg_.surface_normal;
       std::vector<double> xyz;
       std::vector<long long> conn;
       long long nloc_cells = 0;
-      Vector x(3);
+      Vector x(dim_);
       for (int be = 0; be < pmesh.GetNBE(); be++)
       {
          const int attr = pmesh.GetBdrAttribute(be);
@@ -751,21 +782,22 @@ private:
          if (!on) { continue; }
          FaceElementTransformations *T = pmesh.GetBdrFaceTransformations(be);
          MFEM_VERIFY(T, "snapshots: boundary element " << be << " has no face transformation");
-         MFEM_VERIFY(T->GetGeometryType() == Geometry::TRIANGLE,
-                     "snapshots: the surface handles triangular faces only");
-         RefinedGeometry *rg = GlobGeometryRefiner.Refine(Geometry::TRIANGLE, order_, 1);
+         MFEM_VERIFY(T->GetGeometryType() == fgeom,
+                     "snapshots: the surface handles " << ((dim_ == 3) ? "triangular" :
+                     "segment") << " faces only on a " << dim_ << "-D mesh");
+         RefinedGeometry *rg = GlobGeometryRefiner.Refine(fgeom, order_, 1);
          const long long first = static_cast<long long>(xyz.size() / 3);
          for (int i = 0; i < rg->RefPts.GetNPoints(); i++)
          {
             const IntegrationPoint &fip = rg->RefPts.IntPoint(i);
             T->SetAllIntPoints(&fip);
             T->Transform(fip, x);
-            for (int d = 0; d < 3; d++) { xyz.push_back(x(d)); }
+            for (int d = 0; d < 3; d++) { xyz.push_back(d < dim_ ? x(d) : 0.0); }
             elem_.push_back(T->Elem1No);
             eip_.push_back(T->GetElement1IntPoint());
          }
          for (int i = 0; i < rg->RefGeoms.Size(); i++) { conn.push_back(first + rg->RefGeoms[i]); }
-         nloc_cells += rg->RefGeoms.Size() / 3;
+         nloc_cells += rg->RefGeoms.Size() / per;
       }
       GatherPoints_(surf_, xyz);
       long long total_cells = 0;
@@ -788,24 +820,25 @@ private:
       {
          for (int i = cd[r]; i < cd[r] + cc[r]; i++) { surf_.conn[static_cast<size_t>(i)] += surf_.displs[r]; }
       }
-      const long long ncell = static_cast<long long>(surf_.conn.size() / 3);
+      const long long ncell = static_cast<long long>(surf_.conn.size() / per);
       surf_.offsets.resize(static_cast<size_t>(ncell + 1));
-      for (long long c = 0; c <= ncell; c++) { surf_.offsets[static_cast<size_t>(c)] = 3 * c; }
-      surf_.types.assign(static_cast<size_t>(ncell), 5);   // VTK_TRIANGLE
+      for (long long c = 0; c <= ncell; c++) { surf_.offsets[static_cast<size_t>(c)] = per * c; }
+      surf_.types.assign(static_cast<size_t>(ncell), per == 3 ? 5 : 3);   // VTK_TRIANGLE, VTK_LINE
    }
 
-   /// The displacement-space vector `w` at the surface points (3 per point).
+   /// The displacement-space vector `w` at the surface points (3 per point;
+   /// z = 0 on a 2-D mesh).
    void SampleSurface_(const Vector &w, Vector &out)
    {
       MFEM_VERIFY(w.Size() == fes_.GetVSize(), "snapshots: displacement vector size "
                   << w.Size() << " != " << fes_.GetVSize() << " (the QD regime's DG space)");
       ParGridFunction gf(const_cast<ParFiniteElementSpace *>(&fes_), const_cast<real_t *>(w.GetData()));
       out.SetSize(3 * static_cast<int>(elem_.size()));
-      Vector val(3);
+      Vector val(dim_);
       for (size_t i = 0; i < elem_.size(); i++)
       {
          gf.GetVectorValue(elem_[i], eip_[i], val);
-         for (int d = 0; d < 3; d++) { out(3 * static_cast<int>(i) + d) = val(d); }
+         for (int d = 0; d < 3; d++) { out(3 * static_cast<int>(i) + d) = d < dim_ ? val(d) : 0.0; }
       }
    }
 
@@ -880,6 +913,7 @@ private:
    MPI_Comm comm_;
    const ParFiniteElementSpace &fes_;
    int order_ = 1;
+   int dim_ = 3;   ///< mesh dimension
    int rank_ = 0, size_ = 1;
    Kind fault_, surf_;
    // Surface points: local element and its reference point.

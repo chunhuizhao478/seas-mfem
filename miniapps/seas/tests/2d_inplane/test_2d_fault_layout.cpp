@@ -37,12 +37,20 @@
 //   D2  (part 2) D1 on the BP3 mesh (dip 60, 25 m), p = 1, 2, 3, with
 //       METIS's partition and with one that cuts along the fault (every
 //       fault segment a rank-boundary face).
+//   Q1  (phase F) the QD stage operators and the dense Green's function in
+//       2D: on the BP3 layout in miniature (dip 60, p = 1, 2) with a plate
+//       loading linear in t, the traction and normal traction of a test
+//       slip at t = 100 yr from the face loops (Solve, ComputeTraction), the
+//       stage operators (SolveStage) and G (GreenStage) agree to 1e-10 of
+//       their size, with and without a strike slot in the slip (which
+//       embeds to no displacement jump in 2D).
 //
 //   seas_test_2d_fault_layout             (1, 2 or 4 ranks)
 //   seas_test_2d_fault_layout --refuse N  one refusal, must exit non-zero:
 //     1 a quadrilateral mesh in LoadScaledMesh, 2 a 2D fault without the
-//     frame field, 3 up off the plane, 4 ref_normal off the plane, 5 the
-//     QD stage operators in 2D (the solve itself opens in phase E), 6 up
+//     frame field, 3 up off the plane, 4 ref_normal off the plane, 5 a G
+//     cache file in 2D (the cache and the H-matrix key fault DOFs by 3D
+//     position; the stage operators and the dense G open in phase F), 6 up
 //     parallel to n in the QD basis, 7 BR2 in 2D.
 //
 // Scope (Chunhui Zhao, 2026-10-25).
@@ -861,6 +869,89 @@ static void TestMeshFile(const MeshFile &m, MPI_Comm comm)
                << ", side margin " << k.side << ")");
 }
 
+// ------------------------------------------------------------------- Q1
+// The plate loading of cycle/loading.hpp on the miniature: the plane is the
+// fault's (normal n = (sin 60, cos 60), through the origin), s = up-dip;
+// u = +-(Vp t / 2) s off the plane, Vp t s across the creep segment.
+static void PlateLoading2D(const Vector &x, real_t t, Vector &u)
+{
+   const real_t n[2] = {std::sqrt(3.0) / 2.0, 0.5}, sd[2] = {-0.5, std::sqrt(3.0) / 2.0};
+   const real_t Vp = 1e-9, d = x(0) * n[0] + x(1) * n[1];
+   const real_t Vh = (d > 1.0) ? 0.5 * Vp * t : (d < -1.0) ? -0.5 * Vp * t : Vp * t;
+   u.SetSize(2);
+   u(0) = Vh * sd[0];
+   u(1) = Vh * sd[1];
+}
+
+static void TestQDOperators2D(MPI_Comm comm)
+{
+   const real_t ref[3] = {1, 0, 0}, upB[3] = {0, 1, 0};
+   const real_t t = 100.0 * 365.25 * 86400.0;
+   for (int p : {1, 2})
+   {
+      if (g_rank == 0) { std::cout << "\n=== Q1 stage operators and G in 2D, p = " << p << " ===\n"; }
+      std::unique_ptr<Mesh> s(ShearBox(60.0));
+      ParMesh pm(comm, *s);
+      LinearElastic *model = new LinearElastic(kLambda, kMu);   // leaked: test lifetime
+      DomainConfig dc;
+      dc.fault_frames = Source(ref, upB);
+      BoundaryConfig bc = MakeBC(2, {5});
+      bc.default_dirichlet_func = PlateLoading2D;
+      Op op(pm, p, *model, 0.0, kWf, 2.0 * kLs, bc, DGMethod::IP, SolverType::MUMPS, dc);
+      op.BuildQDStageOperators(true);
+      op.BuildQDGreen(QDGreenConfig{});   // dense; its own check against SolveStage (1e-8)
+      const int nown = op.GetNumOwnedFaultDOFs(), nc = op.NumSlipComponents();
+      for (bool strike : {false, true})
+      {
+         // dip slip of order 1 m on every DOF (the face loops skip a face
+         // whose slip is below 1e-15 m everywhere)
+         Vector slip(nc * nown);
+         for (int i = 0; i < nown; i++)
+         {
+            slip(nc * i) = 1.0 + 0.5 * std::sin(0.37 * i + 0.1 + g_rank);
+            slip(nc * i + 1) = strike ? 0.3 * std::cos(0.11 * i + g_rank) : 0.0;
+         }
+         Vector local, lt, lnt, T1, Tn1, T2, Tn2, T3, Tn3;
+         ParGridFunction u1(&op.GetFESpace()), u2(&op.GetFESpace());
+         op.ExpandOwnedToLocalFault(slip, local, nc);
+         op.Solve(t, local, u1);
+         op.ComputeTraction(u1, local, lt, &lnt);
+         op.RestrictToOwnedFault(lt, T1, nc);
+         op.RestrictToOwnedFault(lnt, Tn1);
+         op.SolveStage(t, slip, u2, T2, &Tn2);
+         op.GreenStage(t, slip, T3, &Tn3);
+         auto rel = [&](const Vector &a, const Vector &b)
+         {
+            real_t d = 0.0, m = 0.0;
+            for (int i = 0; i < a.Size(); i++)
+            {
+               d = std::max(d, std::abs(a(i) - b(i)));
+               m = std::max(m, std::abs(b(i)));
+            }
+            d = RMax(d, comm);
+            m = RMax(m, comm);
+            return m > 0.0 ? d / m : d;
+         };
+         real_t ts = 0.0;   // the strike traction (exactly zero in 2D)
+         for (int i = 0; i < nown; i++)
+         {
+            ts = std::max({ts, std::abs(T1(nc * i + 1)), std::abs(T2(nc * i + 1)),
+                           std::abs(T3(nc * i + 1))});
+         }
+         ts = RMax(ts, comm);
+         const std::string tag = std::string("Q1 p = ") + std::to_string(p)
+                                 + (strike ? ", strike slot set" : ", dip slip only");
+         const real_t r_ms = rel(T2, T1), r_ns = rel(Tn2, Tn1);
+         const real_t r_gs = rel(T3, T1), r_gn = rel(Tn3, Tn1);
+         TEST_ASSERT(r_ms <= 1e-10 && r_ns <= 1e-10, tag << ": stage operators = face loops "
+                     "(shear " << r_ms << ", normal " << r_ns << ")");
+         TEST_ASSERT(r_gs <= 1e-10 && r_gn <= 1e-10, tag << ": G = face loops (shear "
+                     << r_gs << ", normal " << r_gn << ")");
+         TEST_ASSERT(ts == 0.0, tag << ": strike traction exactly 0 on every path");
+      }
+   }
+}
+
 // --------------------------------------------------------------- refusals
 static int Refuse(int n, MPI_Comm comm)
 {
@@ -898,6 +989,9 @@ static int Refuse(int n, MPI_Comm comm)
          ParMesh pm(comm, *s);
          auto op = MakeOp(pm, 1, Source(ref, upB));
          op->BuildQDStageOperators(false);
+         QDGreenConfig gc;
+         gc.cache_path = "test_2d_fault_layout_g.bin";   // refused before it is written
+         op->BuildQDGreen(gc);
          break;
       }
       case 6:
@@ -960,6 +1054,7 @@ int main(int argc, char *argv[])
       std::unique_ptr<Mesh> s(ShearBox(60.0));
       TestLayout(*s, comm, np);
    }
+   TestQDOperators2D(comm);
    for (const MeshFile &m : MeshFiles()) { TestMeshFile(m, comm); }
    {
       // D2: the layout on the BP3 mesh (dip 60, 25 m), with METIS's

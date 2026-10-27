@@ -129,10 +129,14 @@ def check_fault_vs_stations(fpath, run_dir, prefix, deck):
                  "shear_stress_strike", "shear_stress_dip", "state"]
         data = {n: pd[n][:].reshape(len(t), npts) for n in names}
     tri = conn.reshape(-1, 3) if np.all(types == 5) else None
+    # 2-D meshes: line cells (VTK_LINE), points with z = 0
+    seg = conn.reshape(-1, 2) if np.all(types == 3) else None
     nmatch = 0
     worst = 0.0
     for s in stations:
         xs = np.array(s["x"], dtype=float)
+        if xs.size == 2:
+            xs = np.append(xs, 0.0)   # a 2-D deck's [x, y]
         rows = read_station(f"{run_dir}/{prefix}_{s['name']}.txt")
         # Candidate interpolants: points at the station, else containing faces.
         d = np.linalg.norm(X - xs, axis=1)
@@ -146,6 +150,18 @@ def check_fault_vs_stations(fpath, run_dir, prefix, deck):
                 w = np.linalg.solve(A, np.array([xs[0], xs[2], 1.0]))
                 if np.all(w >= -1e-9):
                     cands.append(("face", list(c), list(w)))
+        # A 2-D station on a face vertex is interpolated in its owner face (a
+        # point candidate can sit 1e-8 m away after the km -> m scale), so the
+        # containing segments are candidates too.
+        if seg is not None:
+            for c in seg:
+                P = X[c]
+                e = P[1] - P[0]
+                L2 = float(np.dot(e, e))
+                r = float(np.dot(xs - P[0], e)) / L2
+                off = np.linalg.norm(P[0] + r * e - xs)
+                if -1e-9 <= r <= 1.0 + 1e-9 and off <= 1e-6 * math.sqrt(L2):
+                    cands.append(("seg", list(c), [1.0 - r, r]))
         if not cands:
             bad += fail(f"station {s['name']}: no fault point or face at {xs}")
             continue
@@ -163,7 +179,15 @@ def check_fault_vs_stations(fpath, run_dir, prefix, deck):
                 snap = [e["slip_strike"], e["slip_dip"], sl(abs(e["slip_rate_strike"])),
                         sl(abs(e["slip_rate_dip"])), e["shear_stress_strike"],
                         e["shear_stress_dip"], sl(e["state"])]
-                for a, b in zip(snap, row[1:8]):
+                for i, (a, b) in enumerate(zip(snap, row[1:8])):
+                    if kind == "seg" and i in (2, 3):
+                        # 2-D: |V| interpolated in a segment whose two DOFs can
+                        # differ by 1e7 (a locked end next to a slipping one):
+                        # compare |V| relative to the segment's largest |V|.
+                        vf = np.abs(data[names[i]][k, idx]).max()
+                        a, b = (10.0 ** a if a > -300 else 0.0), (10.0 ** b if b > -300 else 0.0)
+                        err = max(err, abs(a - b) / (vf + 1e-300))
+                        continue
                     err = max(err, abs(a - b) / (max(abs(a), abs(b)) + 1e-12))
                 n += 1
             if best is None or err < best[0]:

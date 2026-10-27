@@ -16,7 +16,7 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-normal-stress-hook  # phase D: the hook, TP on a rupture
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d-driver-tp        # phase D: the driver, TPV105-2D
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d-dislocation      # phase E: plane-strain dislocation
-#   make -f tests/2d_inplane/2d_inplane.mk test-prestress-bp3       # phase E: BP3 prestress, decks, outputs
+#   make -f tests/2d_inplane/2d_inplane.mk test-prestress-bp3       # phases E, F: BP3 prestress (QD, FD), decks, outputs
 #   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
 # The 3D parity set (every phase must leave it bit for bit unchanged) is the
 # script tests/2d_inplane/parity_3d.sh (see its header).
@@ -121,8 +121,9 @@ test-2d-dislocation: seas_test_2d_dislocation
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_2d_dislocation
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_2d_dislocation --quick
 
-# Phase E: BP3's prestress ([cycle.prestress].a = "amax"), the initial
-# state of the BP3 decks and their outputs at t = 0, and the station
+# Phases E and F: BP3's prestress ([cycle.prestress].a = "amax", with and
+# without eta |V|), the initial state of the BP3-QD and BP3-FD decks, the
+# QD decks' outputs at t = 0, and the station
 # location on segment faces (the deck loader, the QD phase and the output
 # writers: the cycle's flags and objects, as test-2d-deck).
 TEST_PRESTRESS_BP3_SRC = tests/2d_inplane/test_prestress_bp3.cpp
@@ -138,8 +139,8 @@ seas_test_prestress_bp3: $(TEST_PRESTRESS_BP3_OBJ) $(CYCLE_LINK_OBJS)
 	    $(CYCLE_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
-# B1-B5 on 1 and 2 ranks; then each refusal must exit non-zero with its message.
-PRESTRESS_BP3_REFUSALS = 1:needs ic = "gold"|2:must be "local" or "amax"|3:needs a_max > 0|4:needs eta_V_init = true|5:takes no axis2 or half2 on a 2-D mesh|6:needs axis2 and half2 on a 3-D mesh|7:half2 is required|8:from its node (DOF order != basis order)
+# B1-B7 on 1 and 2 ranks; then each refusal must exit non-zero with its message.
+PRESTRESS_BP3_REFUSALS = 1:is refused with ic = "gold"|2:must be "local" or "amax"|3:needs a_max > 0|4:eta_V_init = false with ic = "gold"|5:takes no axis2 or half2 on a 2-D mesh|6:needs axis2 and half2 on a 3-D mesh|7:half2 is required|8:from its node (DOF order != basis order)
 test-prestress-bp3: seas_test_prestress_bp3
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_prestress_bp3
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_prestress_bp3
@@ -167,7 +168,7 @@ seas_test_2d_fault_layout: $(TEST_2D_FAULT_LAYOUT_OBJ)
 
 # L1, C1-C3, S1, D1 on 1, 2 and 4 ranks; then each refusal must exit
 # non-zero with its message.
-LAYOUT_2D_REFUSALS = 1:triangle meshes only|2:needs the fault frame field|3:must lie in the mesh plane ([fault_geometry] up|4:FaultFrameField (2D): ref_normal|5:not available on a 2D mesh (the quasi-dynamic stage operators|6:up vector is nearly collinear|7:BR2 is 3D only
+LAYOUT_2D_REFUSALS = 1:triangle meshes only|2:needs the fault frame field|3:must lie in the mesh plane ([fault_geometry] up|4:FaultFrameField (2D): ref_normal|5:need a 3-D mesh (they key fault DOFs by position)|6:up vector is nearly collinear|7:BR2 is 3D only
 test-2d-fault-layout: seas_test_2d_fault_layout
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_2d_fault_layout
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_2d_fault_layout

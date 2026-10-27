@@ -38,6 +38,13 @@
 // stores a position key per fault DOF (its node, then its face's centroid,
 // 6 coordinates), and a read matches every owned DOF to a file row by its
 // key: one file serves any number of ranks.
+//
+// 2D (design rev 3, phase F): the strike rows and the strike columns of G
+// are zero (no strike slip, no strike traction in plane strain).  After the
+// build, PackPlanar() verifies that they are exactly zero and keeps the dip
+// columns of the dip and normal rows only, a third of the dense rows; the
+// stage product then reads a third of the memory and gives the same
+// numbers, bit for bit (see Apply).
 
 #ifndef MFEM_SEAS_QD_GREEN_OPERATOR_HPP
 #define MFEM_SEAS_QD_GREEN_OPERATOR_HPP
@@ -153,6 +160,8 @@ public:
    HYPRE_BigInt NumColumns() const { return ncols_; }
    /// Rows (fault DOFs × ncomp) this rank holds.
    int NumLocalRows() const { return nb_ * ncomp_; }
+   /// True after PackPlanar() (2D).
+   bool Planar() const { return planar_; }
    /// Bytes of G on this rank.
    double LocalBytes() const
    {
@@ -163,7 +172,11 @@ public:
    /// Fault DOFs whose rows rank r holds: [RowLo()[r], RowLo()[r + 1]).
    const std::vector<long long> &RowLo() const { return row_lo_; }
    /// This rank's dense rows (nb·ncomp × 2·N_f, row-major).
-   const real_t *DenseRows() const { return G_.data(); }
+   const real_t *DenseRows() const
+   {
+      MFEM_VERIFY(!planar_, "QD Green: the dense rows are packed (2D)");
+      return G_.data();
+   }
    /// This rank's rows of T_D (nb·ncomp); LoadingRowsWrite marks T_D set.
    const real_t *LoadingRows() const { return TD_.data(); }
    real_t *LoadingRowsWrite() { have_loading_ = true; return TD_.data(); }
@@ -280,6 +293,57 @@ public:
       return all_ok == 1;
    }
 
+   /// 2D (phase F): keep only the dip columns (even global slip index) of
+   /// the dip and normal rows (c = 0, 2), after verifying that every strike
+   /// row (c = 1), every strike column and T_D's strike rows are exactly
+   /// zero.  G_ becomes nb·(ncomp - 1) rows × N_f, row-major.  Call once,
+   /// after the build, on dense rows.  Collective.
+   void PackPlanar()
+   {
+      MFEM_VERIFY(!h_ && !planar_ &&
+                  G_.size() == static_cast<size_t>(nb_) * ncomp_ * ncols_,
+                  "QD Green: PackPlanar needs the full dense rows");
+      const size_t n = static_cast<size_t>(ncols_);
+      const size_t nf = static_cast<size_t>(nf_);
+      real_t loc = 0.0;
+      for (int b = 0; b < nb_; b++)
+      {
+         for (int c = 0; c < ncomp_; c++)
+         {
+            const real_t *a = G_.data() + (static_cast<size_t>(b) * ncomp_ +
+                                           c) * n;
+            for (size_t j = (c == 1 ? 0 : 1); j < n; j += (c == 1 ? 1 : 2))
+            {
+               loc = std::max(loc, std::abs(a[j]));
+            }
+         }
+         loc = std::max(loc, std::abs(TD_[static_cast<size_t>(b) * ncomp_ +
+                                          1]));
+      }
+      real_t glob = 0.0;
+      MPI_Allreduce(&loc, &glob, 1, MPITypeMap<real_t>::mpi_type, MPI_MAX,
+                    comm_);
+      MFEM_VERIFY(glob == 0.0, "QD Green (2D): a strike row or column of G, "
+                  "or a strike row of T_D, is nonzero (largest " << glob
+                  << ")");
+      const int nc = ncomp_ - 1;
+      std::vector<real_t> P(static_cast<size_t>(nb_) * nc * nf);
+      for (int b = 0; b < nb_; b++)
+      {
+         for (int cc = 0; cc < nc; cc++)
+         {
+            const int c = cc == 0 ? 0 : 2;
+            const real_t *a = G_.data() + (static_cast<size_t>(b) * ncomp_ +
+                                           c) * n;
+            real_t *q = P.data() + (static_cast<size_t>(b) * nc + cc) * nf;
+            for (size_t k = 0; k < nf; k++) { q[k] = a[2 * k]; }
+         }
+      }
+      G_.swap(P);
+      std::vector<real_t>().swap(P);
+      planar_ = true;
+   }
+
    /// [T; T_n] = G·δ + t·T_D on owned fault DOFs.  @a slip_owned: 2·nown;
    /// @a T_owned: 2·nown; @a Tn_owned: nown (with elastic sigma_n) or
    /// nullptr.  Times the all-gather as SlipExpand, the product as Solve
@@ -314,8 +378,41 @@ public:
                y_[row] += t * TD_[row];
             }
          }
+         if (planar_)
+         {
+            // 2D: the dip columns of the dip and normal rows.  Two partial
+            // sums, even and odd dip index: the full rows' four sums are
+            // these two plus two sums of exact zeros, so the result is the
+            // same bit for bit.
+            const size_t nf = static_cast<size_t>(nf_);
+            const int nc = ncomp_ - 1;
+            dip_.resize(nf);
+            for (size_t k = 0; k < nf; k++) { dip_[k] = d[2 * k]; }
+            const real_t *e = dip_.data();
+            for (int b = 0; b < nb_; b++)
+            {
+               const size_t row1 = static_cast<size_t>(b) * ncomp_ + 1;
+               y_[row1] = 0.0 + t * TD_[row1];
+               for (int cc = 0; cc < nc; cc++)
+               {
+                  const size_t row = static_cast<size_t>(b) * ncomp_ +
+                                     (cc == 0 ? 0 : 2);
+                  const real_t *a = G_.data() +
+                                    (static_cast<size_t>(b) * nc + cc) * nf;
+                  real_t s0 = 0.0, s1 = 0.0;
+                  size_t k = 0;
+                  for (; k + 2 <= nf; k += 2)
+                  {
+                     s0 += a[k] * e[k];
+                     s1 += a[k + 1] * e[k + 1];
+                  }
+                  for (; k < nf; k++) { s0 += a[k] * e[k]; }
+                  y_[row] = (s0 + s1) + t * TD_[row];
+               }
+            }
+         }
          const size_t n = static_cast<size_t>(ncols_);
-         for (size_t row = 0; !h_ && row < nrows; row++)
+         for (size_t row = 0; !h_ && !planar_ && row < nrows; row++)
          {
             const real_t *a = G_.data() + row * n;
             // Four partial sums: independent chains, so the loop streams
@@ -354,8 +451,8 @@ public:
    /// deleted and the run stops.
    void WriteFile(const std::string &path, const std::string &info) const
    {
-      MFEM_VERIFY(!h_ && !G_.empty(), "QD Green: WriteFile needs the dense "
-                  "rows");
+      MFEM_VERIFY(!h_ && !planar_ && !G_.empty(), "QD Green: WriteFile "
+                  "needs the full dense rows");
       MFEM_VERIFY(keys_.size() == static_cast<size_t>(kKey) * nown_,
                   "QD Green: SetKeys() was not called before WriteFile()");
       for (int o = 0; o < nown_; o++)
@@ -860,8 +957,9 @@ private:
    bool have_loading_ = false;
    std::vector<real_t> keys_;   ///< 6 per owned fault DOF (SetKeys)
    std::unique_ptr<QDHMatrix> h_;   ///< item 4: compressed G, or null
+   bool planar_ = false;   ///< 2D: G_ holds nb_·(ncomp_ - 1) rows × nf_
    mutable Vector delta_all_;
-   mutable std::vector<real_t> y_, send_, recv_;
+   mutable std::vector<real_t> y_, send_, recv_, dip_;
 };
 
 } // namespace seas

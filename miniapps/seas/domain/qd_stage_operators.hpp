@@ -170,11 +170,13 @@ struct QDStageOperators
    std::unique_ptr<HypreParMatrix> Nd;   ///< owned normal traction × slip
 
    /// Dirichlet points on this rank: boundary attribute (selects the
-   /// loading function) and physical coordinates; g(t) holds 3 values per
-   /// point, point p at entries 3p, 3p+1, 3p+2.
+   /// loading function) and physical coordinates; g(t) holds dim values
+   /// per point (the mesh dimension: 3, or 2 on a 2D in-plane mesh), point
+   /// p at entries dim p .. dim p + dim - 1.
    Array<int> g_attr;
-   Vector g_xyz;                   ///< [3 * points]
+   Vector g_xyz;                   ///< [dim * points]
    Vector g;                       ///< g(t) of the current stage
+   int dim = 3;                    ///< components per Dirichlet point
    int NumPoints() const { return g_attr.Size(); }
 
    double build_seconds = 0.0;     ///< probing + matrix construction
@@ -227,7 +229,7 @@ struct QDStageOperators
       {
          o << "[QD-OPERATORS] Dirichlet points " << static_cast<long long>(
               glob_pts) << " (g(t) size " << static_cast<long long>(
-              3 * glob_pts) << "); all matrices " << std::fixed
+              dim * glob_pts) << "); all matrices " << std::fixed
            << std::setprecision(1) << total_bytes / 1048576.0
            << " MiB; build " << std::setprecision(3) << bmax
            << " s (slowest rank)\n";

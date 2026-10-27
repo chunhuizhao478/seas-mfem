@@ -22,6 +22,7 @@
 //     [cycle.qd].operators = "matrix": op.SetQDOperators(true)  (QD speed item 1)
 //     [cycle.qd.green]: op.SetQDGreen(config, check_every)      (items 3, 4)
 //     op.SetInitialCondition(state)
+//     a = "amax" with ic = "scec_fd" (BP3-FD): psi(state) = pre.psi0, Solve(0)
 //   InitTS(dt0): PETSc TS (rk 5dp from the options file), adaptive, dt0;
 //     refuses a TS that is not RK with the FSAL property (seas_bp5_full's
 //     check, QD speed-up v2 item A): the monitor reads the caches of the
@@ -233,6 +234,19 @@ public:
       state_.SetSize(std::max(actual, 1));
       state_.SetSize(actual);
       op_->SetInitialCondition(state_);
+      // BP3-FD (a = "amax", ic = "scec_fd"; cycle/prestress.hpp): the
+      // kernel's scec psi0 is BP5's uniform f0 + b ln(V0 / V_bg) and its
+      // gold inversion subtracts eta |V_init|, so neither is BP3-FD's eq. 23.
+      // The state takes BuildPrestress's psi0, and one evaluation at t = 0
+      // leaves the slip rate and the traction consistent with it.
+      if (cfg_.prestress.AMax() && !cfg_.IsGold())
+      {
+         for (int i = 0; i < N; i++)
+         {
+            state_(FaultOp::StatePerNode * i + FaultOp::PsiIndex) = pre.psi0(i);
+         }
+         Solve(0.0);
+      }
    }
 
    Vector &State() { return state_; }

@@ -865,18 +865,13 @@ private:
       return (dot_ref < 0.0) ? -1.0 : 1.0;
    }
 
-   /// 2D in-plane design rev 3: phase B builds the 2D spaces, the fault
-   /// layout and the frames; phase C takes the dynamic path to 2D (the
-   /// stiffness, the slip and Dirichlet loads, the traction, the fault-face
-   /// penalties and operators); phase E opens the quasi-dynamic solve
-   /// (Solve, the face loops).  Its prebuilt stage operators and Green's
-   /// function (--qd-operators matrix, --qd-green) still refuse 2D.
-   void Require3D_(const char *what) const
-   {
-      MFEM_VERIFY(dim_ == 3, "ElasticityDomainOperator::" << what << ": not available "
-                  "on a 2D mesh (the quasi-dynamic stage operators and Green's function "
-                  "are 3D only; the 2D quasi-dynamic regime runs on the face loops)");
-   }
+   // 2D in-plane design rev 3: phase B builds the 2D spaces, the fault
+   // layout and the frames; phase C takes the dynamic path to 2D (the
+   // stiffness, the slip and Dirichlet loads, the traction, the fault-face
+   // penalties and operators); phase E opens the quasi-dynamic solve
+   // (Solve, the face loops); phase F its prebuilt stage operators and the
+   // dense Green's function (--qd-operators matrix, --qd-green).  The G
+   // cache and the H-matrix key fault DOFs by 3D position and refuse 2D.
 
    /// Reference normal handed to FaultBasis::ComputeOrientedFrame for
    /// fault face `bi` (basis order: interior faces, then shared): the

@@ -78,8 +78,12 @@
 //                   "scec_fd+eta_V_init" (IcLabel)          [ic == "gold"]
 //                   a: "local" (the DOF's own a in tau0, BP5) or "amax"
 //                   (BP3: a_max = the global maximum of a in tau0, psi0 by
-//                   the kernel's inversion; needs ic = "gold"; cycle/
-//                   prestress.hpp; IC set "gold+a_max")            ["local"]
+//                   inverting the law at V_init with the local a; cycle/
+//                   prestress.hpp).  With "gold" it is BP3-QD (eqs 25-26,
+//                   the kernel's inversion; IC set "gold+a_max"), with
+//                   "scec_fd" BP3-FD (eqs 22-23, no eta V_init; the
+//                   kernel takes BuildPrestress's psi0; IC set
+//                   "scec_fd+a_max")                               ["local"]
 //   [cycle.fields]  V_init_dip (the kernel dip component, either sign: on
 //                   a 2-D BP3 mesh the in-plane slip rate, d down-dip), and
 //                   the RectTaperFields a, Dc, V_init: center, axis1, axis2
@@ -426,8 +430,8 @@ struct CycleConfig
    /// a restart refuses a deck with the other prestress.
    std::string IcLabel() const
    {
-      if (prestress.AMax()) { return ic + "+a_max"; }
-      return (prestress.include_eta && !IsGold()) ? ic + "+eta_V_init" : ic;
+      const std::string base = prestress.AMax() ? ic + "+a_max" : ic;
+      return (prestress.include_eta && !IsGold()) ? base + "+eta_V_init" : base;
    }
 
    static CycleConfig Load(const std::string &deck);
@@ -817,11 +821,6 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       MFEM_VERIFY(c.prestress.a == "local" || c.prestress.AMax(),
                   "[cycle.prestress].a must be \"local\" or \"amax\"; got \""
                   << c.prestress.a << "\"");
-      MFEM_VERIFY(!c.prestress.AMax() || c.IsGold(),
-                  "[cycle.prestress].a = \"amax\" needs ic = \"gold\": its psi0 inverts the "
-                  "friction law at V_init with the local a (BP3 eqs 23, 26), the kernel's "
-                  "inversion mode; \"scec_fd\" sets the uniform psi0 = f0 + b ln(V0 / V_bg), "
-                  "which with the a_max tau0 is out of equilibrium where a < a_max");
    }
 
    MFEM_VERIFY(cy.contains("fields"), "[cycle.fields] is required");

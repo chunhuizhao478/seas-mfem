@@ -99,11 +99,25 @@ qd_radiation_damping = true
 mesh_scale           = 1000.0
 plate_rate           = 1.0e-9
 
+# The QD stages run through the stage operators and the discrete Green's
+# function (QD speed items 1 and 3; 2D since phase F): T = G delta + t T_D,
+# the face loops' discretization (test_2d_fault_layout Q1: within 1e-10).
+# G needs a linear elastic bulk and loading linear in t, as here.
 [cycle.qd]
 solver        = "mumps"
 petsc_options = "tests/verification/petsc_ts_rk45_tandem.cfg"
 ts_atol       = 1.0e-7
 ts_rtol       = 1.0e-50
+operators     = "matrix"
+
+# Dense G, built at setup by N_f solves: N_f = 3200 at p = 1 on the 25 m
+# mesh, 4800 at p = 2.  In 2D its strike rows and columns are zero: they are
+# skipped while building and dropped after, so G is kept as 2 N_f x N_f
+# (0.16 GB at p = 1, 0.37 GB at p = 2; the build peaks at the full
+# 3 N_f x 2 N_f, 0.49 and 1.1 GB).  No cache file.  Every 10000 stages the
+# solve path runs too and the largest difference is reported at the end.
+[cycle.qd.green]
+check_every = 10000
 
 [cycle.prestress]
 V_background = 1.0e-9            # psi_bg = f0 + b ln(V0 / V_init)

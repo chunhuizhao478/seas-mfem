@@ -23,7 +23,11 @@
 //   volume   true DOFs of the DG space (local DOFs = true DOFs)
 //   slip     owned fault DOFs x [dip, strike]; global index 2*g + c
 //   normal   owned fault DOFs; global index g
-//   g(t)     this rank's Dirichlet points x 3 components; 3*p + c + offset
+//   g(t)     this rank's Dirichlet points x dim components (the mesh
+//            dimension); dim*p + c + offset
+// On a 2D in-plane mesh (design rev 3, phase F) the probes are the 2D face
+// loops' own: the strike slot embeds to no displacement jump, so its B and
+// C_delta columns are zero, and the loading has 2 components per point.
 // g = global owned index of a fault DOF.  Every local copy of a fault DOF
 // (shared faces have one on each side) learns its owner's g by expanding a
 // vector holding g + 1 on the owned DOFs with ExpandOwnedToLocalFault, so the
@@ -93,7 +97,6 @@ template <typename MeshType>
 void ElasticityDomainOperator<MeshType>::BuildQDStageOperators(
    bool with_normal)
 {
-   Require3D_("BuildQDStageOperators");
    if constexpr (!IsParallelMesh<MeshType>::value)
    {
       MFEM_ABORT("--qd-operators matrix needs a parallel mesh (with_normal = "
@@ -115,7 +118,7 @@ void ElasticityDomainOperator<MeshType>::BuildQDStageOperators(
       pfes->ExchangeFaceNbrData();
       const HYPRE_BigInt *nbr_gdof = pfes->GetFaceNbrGlobalDofMap();
 
-      const int dim = 3;
+      const int dim = dim_;
       const int nbf = nbf_per_face_;
       const int n_int = fault_interior_faces_.Size();
       const int n_slots = n_int + fault_shared_faces_.Size();
@@ -312,7 +315,7 @@ void ElasticityDomainOperator<MeshType>::BuildQDStageOperators(
       // ---- Dirichlet faces: D and the points g(t) is evaluated at ----
       // Same faces, rules, points and skeleton signs as
       // AssembleDirichletLoading; the sign goes into D, g holds the raw
-      // callback values.  Columns are local (3p + c) until the offset of
+      // callback values.  Columns are local (dim p + c) until the offset of
       // this rank's points is known.
       std::vector<int> pt_attr;
       std::vector<real_t> pt_xyz;
@@ -352,7 +355,7 @@ void ElasticityDomainOperator<MeshType>::BuildQDStageOperators(
                u_D_3d = 0.0;
                u_D_3d(c * nq + q) = 1.0;
                integ.AssembleBoundaryFaceRHS(*fe, *FTr, u_D_3d, elvec1);
-               add_rhs(tD, vdofs1, elvec1, 3 * (p0 + q) + c);
+               add_rhs(tD, vdofs1, elvec1, dim * (p0 + q) + c);
             }
          }
       }
@@ -404,19 +407,20 @@ void ElasticityDomainOperator<MeshType>::BuildQDStageOperators(
                u_D_3d(c * nq + q) = sign_q(q);
                integ.AssembleSlipFaceRHS(*fe1, *fe2, *FTr, u_D_3d,
                                          elvec1, elvec2);
-               add_rhs(tD, vdofs1, elvec1, 3 * (p0 + q) + c);
-               if (!shared) { add_rhs(tD, vdofs2, elvec2, 3 * (p0 + q) + c); }
+               add_rhs(tD, vdofs1, elvec1, dim * (p0 + q) + c);
+               if (!shared) { add_rhs(tD, vdofs2, elvec2, dim * (p0 + q) + c); }
             }
          }
       }
 
-      const int ng = 3 * static_cast<int>(pt_attr.size());
+      const int ng = dim * static_cast<int>(pt_attr.size());
       const HYPRE_BigInt ng_glob = MakeQDPartition(comm, ng, g_part, g_first);
       tD.OffsetColumns(g_first);
 
       // ---- Matrices ----
       auto ops = std::unique_ptr<QDStageOperators>(new QDStageOperators);
       ops->with_normal = with_normal;
+      ops->dim = dim;
       ops->B = tB.Build(comm, nvol, nvol_glob, vol_part, nslip_glob, slip_part);
       ops->D = tD.Build(comm, nvol, nvol_glob, vol_part, ng_glob, g_part);
       ops->Cu = tCu.Build(comm, 2 * nown, nslip_glob, slip_part,
@@ -455,12 +459,13 @@ void ElasticityDomainOperator<MeshType>::EvaluateQDDirichletValues(
    // The callback runs on the host; on a device, the previous stage left g
    // there, so mark the host copy as the one being written.
    real_t *g = ops.g.HostWrite();
-   Vector u_D_val(3);
+   const int dim = ops.dim;
+   Vector u_D_val(dim);
    for (int p = 0; p < ops.NumPoints(); p++)
    {
-      const Vector x(ops.g_xyz.GetData() + 3 * p, 3);
+      const Vector x(ops.g_xyz.GetData() + dim * p, dim);
       EvalDirichletFunc(ops.g_attr[p], x, time, u_D_val);
-      for (int c = 0; c < 3; c++) { g[3 * p + c] = u_D_val(c); }
+      for (int c = 0; c < dim; c++) { g[dim * p + c] = u_D_val(c); }
    }
    ops.g_eval_seconds += MPI_Wtime() - t0;
    ops.g_evals++;
@@ -577,7 +582,7 @@ void ElasticityDomainOperator<MeshType>::PrintQDStageEvalSummary(
      << (ops.g_evals > 0 ? 1e3 * sec_max / ops.g_evals : 0.0)
      << " ms per evaluation (slowest rank, at most "
      << static_cast<long long>(pts_max) << " points = "
-     << static_cast<long long>(3 * pts_max) << " values per rank); ";
+     << static_cast<long long>(ops.dim * pts_max) << " values per rank); ";
    if (on_device)
    {
       o << "host-to-device copy " << copy_max << " s total, "
@@ -622,7 +627,6 @@ template <typename MeshType>
 void ElasticityDomainOperator<MeshType>::BuildQDGreen(
    const QDGreenConfig &config)
 {
-   Require3D_("BuildQDGreen");
    if constexpr (!IsParallelMesh<MeshType>::value)
    {
       MFEM_ABORT("--qd-green needs a parallel mesh (block = "
@@ -778,8 +782,11 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
          {
             const int m = static_cast<int>(
                std::min<HYPRE_BigInt>(m_max, nslip_glob - j0));
-            Array<const Vector *> Rp(m);
-            Array<Vector *> Xp(m);
+            // 2D (design rev 3, phase F): the strike slot embeds to no
+            // displacement jump, so a strike column (odd global index) of B
+            // is zero and its solve is skipped (X = 0): half the solves.
+            Array<const Vector *> Rp;
+            Array<Vector *> Xp;
             for (int i = 0; i < m; i++)
             {
                E[i] = 0.0;
@@ -787,11 +794,18 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
                if (jl >= 0 && jl < 2 * nown) { E[i](static_cast<int>(jl)) = 1.0; }
                ops.B->Mult(E[i], R[i]);
                X[i] = 0.0;
-               Rp[i] = &R[i];
-               Xp[i] = &X[i];
+               if (dim_ == 2 && (j0 + i) % 2 == 1)
+               {
+                  MFEM_VERIFY(R[i].Normlinf() == 0.0, "--qd-green (2D): slip "
+                              "column " << j0 + i << " (strike) has a nonzero "
+                              "right-hand side " << R[i].Normlinf());
+                  continue;
+               }
+               Rp.Append(&R[i]);
+               Xp.Append(&X[i]);
             }
             const double t0 = MPI_Wtime();
-            solver_->ArrayMult(Rp, Xp);
+            if (Rp.Size() > 0) { solver_->ArrayMult(Rp, Xp); }
             const double t1 = MPI_Wtime();
             for (int i = 0; i < m; i++)
             {
@@ -848,6 +862,9 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
          hsummary = green->HMatrix()->Summary("read from " +
                                               config.hcache_path);
       }
+      // 2D: keep the dip columns of the dip and normal rows (the strike
+      // rows and columns are verified zero), a third of the dense rows.
+      if (dim_ == 2) { green->PackPlanar(); }
       const double t_ready = MPI_Wtime() - t_start;
       qd_green_ = std::move(green);
 
@@ -896,7 +913,14 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
            << (with_normal ? "shear + normal" : "shear") << " rows), "
            << std::fixed << std::setprecision(2) << btot / 1073741824.0
            << " GiB in all" << (compress ? " as an H-matrix" : "") << ", "
-           << bmax / 1073741824.0 << " GiB largest rank\n";
+           << bmax / 1073741824.0 << " GiB largest rank";
+         if (qd_green_->Planar())
+         {
+            o << "; 2D: kept the dip columns of the "
+              << (with_normal ? "dip and normal" : "dip") << " rows, "
+              << (qd_green_->NComp() - 1) * nf_glob << " x " << nf_glob;
+         }
+         o << "\n";
          if (h_loaded)
          {
             o << "[QD-GREEN] H-matrix read from " << config.hcache_path

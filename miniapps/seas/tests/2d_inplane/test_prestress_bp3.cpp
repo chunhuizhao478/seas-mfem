@@ -1,7 +1,7 @@
 // tests/2d_inplane/test_prestress_bp3.cpp — 2D in-plane design rev 3,
-// phase E (decision D5, derivation 10.4): BP3's prestress,
+// phases E and F (decision D5, derivation 10.4): BP3's prestress,
 // [cycle.prestress].a = "amax" (cycle/prestress.hpp), and the initial state
-// of the BP3-QD decks on a 2D mesh.
+// of the BP3-QD and BP3-FD decks on a 2D mesh.
 //
 // BP3 Table 1: sigma_n 50 MPa, a0 0.010, a_max 0.025, b 0.015, L 0.008 m,
 // V0 1e-6 m/s, f0 0.6, V_init = V_p = 1e-9 m/s, eta = mu / (2 cs).  With
@@ -45,6 +45,20 @@
 //       (s: [cycle.loading].slip_dir, + on the side x > 0, into which n
 //       points, - on the other; 0+ and 0- by their `toward`) along e1 =
 //       (1, 0), e2 = (0, -1), to 1e-8 of V_p / 2
+//   B6  no mesh, a = "amax" without eta |V| (BP3-FD, eqs 22-23), both
+//       senses: tau0 the same at every DOF bit for bit and equal to
+//       sigma_n [f0 + (a_max - b) ln(V_init / V0)] (1e-12 rel.), B1's tau0
+//       less eta V_init (to 1e-7 Pa); anti-parallel to V_init; psi0 = B1's
+//       closed form (1e-12) and B1's psi0 (1e-14); the law at (V_init, psi0,
+//       the DOF's a) gives tau0 back with no eta V (1e-12 rel.)
+//   B7  each BP3-FD deck (config/fd_cycle/bp3_fd_*.toml) on its 1 km mesh,
+//       p = 1 and 2: IcLabel "scec_fd+a_max", switching on; tau0 the same at
+//       every DOF; after QDPhase::Setup the state's psi is BuildPrestress's
+//       psi0 bit for bit, and the kernel's slip rate solves the QD balance
+//       tau0 - eta V = sigma_n a asinh(V / (2 V0) exp(psi0 / a)) (1e-12
+//       rel.), just below V_init: 0 < 1 - V / V_init <= 2 eta / (a sigma_n)
+//       (the deck outputs are B4's: the FD decks differ from the QD ones in
+//       the prefix only)
 //   B5  no mesh: LocateOnFaces with segment faces (face_dim = 1) on six
 //       collinear segments of 1 km at p = 1, 2, 3, every other one listed
 //       from its far end, in two orders: a degree-p polynomial of x2 at
@@ -54,11 +68,11 @@
 //       orders; a point 1 m off the line gets the nearest DOF (its
 //       distance), not a segment
 //
-// Modes: (default) B1-B5;  --refuse N (N = 1..7) must abort with:
-//   1 a = "amax" with ic = "scec_fd"        "needs ic = \"gold\""
+// Modes: (default) B1-B7;  --refuse N (N = 1..8) must abort with:
+//   1 a BP3-QD deck with switching = true   "is refused with ic = \"gold\""
 //   2 a = "maximum"                         "must be \"local\" or \"amax\""
 //   3 BuildPrestress, amax, a_max = 0       "needs a_max > 0"
-//   4 BuildPrestress, amax, no eta |V|      "needs eta_V_init = true"
+//   4 a BP3-QD deck with eta_V_init = false "eta_V_init = false with ic = \"gold\""
 //   5 2-D deck, a field with axis2, half2   "takes no axis2 or half2 on a 2-D mesh"
 //   6 3-D deck, a field without them        "needs axis2 and half2 on a 3-D mesh"
 //   7 a field with axis2 but no half2       "half2 is required"
@@ -67,7 +81,9 @@
 //
 //   make -f tests/2d_inplane/2d_inplane.mk test-prestress-bp3
 //
-// Scope (Chunhui Zhao, 2026-10-26).
+// Scope (Chunhui Zhao, 2026-10-26; B6, B7 and refusals 1, 4 phase F,
+// 2026-10-27: "amax" with "scec_fd" and without eta |V| are BP3-FD's and no
+// longer refused).
 
 #include "mfem.hpp"
 #include "../../cycle/scaled_mesh.hpp"
@@ -239,6 +255,55 @@ static void TestLocal()
                "B2 psi0 = psi_bg = f0 + b ln(V0 / V_init) = " << psi_bg << " at every DOF");
 }
 
+// ------------------------------------------------------------------- B6
+static void TestAmaxFD()
+{
+   if (g_rank == 0) { std::cout << "\n=== B6: a = \"amax\" without eta |V| (BP3-FD), no mesh ===\n"; }
+   const std::vector<real_t> a = {kA0, kA0, 0.0175, kAmax, kAmax};
+   const real_t ln = std::log(kVp / kV0);
+   const real_t tau_cf = kSigma * (kF0 + (kAmax - kB) * ln);
+   for (const real_t v : {kVp, -kVp})
+   {
+      const std::string sense = (v > 0.0) ? "V_init +1e-9" : "V_init -1e-9";
+      const cycle::FaultParams par = Params(a, v);
+      cycle::PrestressConfig c = Amax();
+      c.include_eta = false;
+      const cycle::Prestress pre = cycle::BuildPrestress(par, c);
+      const cycle::Prestress qd = cycle::BuildPrestress(par, Amax());
+      const int N = static_cast<int>(a.size());
+      bool same = true, anti = true;
+      real_t e_tau = 0.0, e_psi = 0.0, e_qd = 0.0, e_back = 0.0, e_eta = 0.0;
+      const real_t tau = -pre.tau0(0) * ((v > 0.0) ? 1.0 : -1.0);
+      for (int i = 0; i < N; i++)
+      {
+         same = same && pre.tau0(2 * i) == pre.tau0(0) && pre.tau0(2 * i + 1) == pre.tau0(1);
+         anti = anti && pre.tau0(2 * i) * v < 0.0 && pre.tau0(2 * i + 1) == 0.0;
+         e_tau = std::max(e_tau, Rel(std::abs(pre.tau0(2 * i)), tau_cf));
+         e_eta = std::max(e_eta, std::abs(std::abs(qd.tau0(2 * i)) - std::abs(pre.tau0(2 * i))
+                                          - Eta() * kVp));
+         const real_t psi_cf = kF0 + (kAmax - kB - a[i]) * ln;
+         e_psi = std::max(e_psi, std::abs(pre.psi0(i) - psi_cf));
+         e_qd = std::max(e_qd, std::abs(pre.psi0(i) - qd.psi0(i)));
+         // the law at (V_init, psi0, the DOF's a), no eta V_init
+         const real_t back = kSigma * a[i] * std::asinh(kVp / (2.0 * kV0) *
+                                                         std::exp(pre.psi0(i) / a[i]));
+         e_back = std::max(e_back, Rel(back, tau));
+      }
+      TEST_ASSERT(same, "B6 " << sense << ": tau0 the same at every DOF, bit for bit ("
+                  << tau * 1e-6 << " MPa)");
+      TEST_ASSERT(e_tau <= 1e-12, "B6 " << sense << ": |tau0| = sigma_n [f0 + (a_max - b) "
+                  "ln(V_init / V0)] = " << tau_cf * 1e-6 << " MPa (rel. " << e_tau << ")");
+      TEST_ASSERT(e_eta <= 1e-7, "B6 " << sense << ": B1's |tau0| less this one = eta V_init = "
+                  << Eta() * kVp << " Pa (to " << e_eta << " Pa)");
+      TEST_ASSERT(anti, "B6 " << sense << ": tau0 anti-parallel to V_init (dip slot "
+                  "-sgn(V) |tau0|, strike slot 0)");
+      TEST_ASSERT(e_psi <= 1e-12 && e_qd <= 1e-14, "B6 " << sense << ": psi0 = f0 + (a_max - b "
+                  "- a) ln(V_init / V0) (" << e_psi << "), = B1's psi0 (" << e_qd << ")");
+      TEST_ASSERT(e_back <= 1e-12, "B6 " << sense << ": the law at (V_init, psi0, local a) "
+                  "gives tau0 back, no eta V_init (rel. " << e_back << ")");
+   }
+}
+
 // ------------------------------------------------------------------- B3
 static const char *kDecks[] = {"config/fd_cycle/bp3_qd_d30_thrust.toml",
                                "config/fd_cycle/bp3_qd_d30_normal.toml",
@@ -260,7 +325,15 @@ static std::string CoarseMesh(const std::string &path)
 static void TestOutputs(cycle::CycleConfig cfg, cycle::QDPhase &qd, ParMesh &pmesh,
                         MPIContext &mpi, const std::string &tag);
 
-static void TestDeck(const std::string &deck, int p, MPIContext &mpi)
+static const char *kDecksFD[] = {"config/fd_cycle/bp3_fd_d30_thrust.toml",
+                                 "config/fd_cycle/bp3_fd_d30_normal.toml",
+                                 "config/fd_cycle/bp3_fd_d60_thrust.toml",
+                                 "config/fd_cycle/bp3_fd_d60_normal.toml",
+                                 "config/fd_cycle/bp3_fd_d90.toml"
+                                };
+
+/// B3 (a BP3-QD deck) or B7 (fd: a BP3-FD deck).
+static void TestDeck(const std::string &deck, int p, MPIContext &mpi, bool fd = false)
 {
    cycle::CycleConfig cfg = cycle::CycleConfig::Load(deck);
    cfg.shared.mesh.path = CoarseMesh(cfg.shared.mesh.path);
@@ -270,9 +343,11 @@ static void TestDeck(const std::string &deck, int p, MPIContext &mpi)
    ParMesh pmesh(mpi.GetComm(), *smesh);
    smesh.reset();
    std::ostringstream tag;
-   tag << "B3 " << deck.substr(deck.rfind('/') + 1) << " p = " << p << ": ";
-   TEST_ASSERT(pmesh.Dimension() == 2 && cfg.IcLabel() == "gold+a_max",
-               tag.str() << "2-D mesh, CheckDimension passed, IC set " << cfg.IcLabel());
+   tag << (fd ? "B7 " : "B3 ") << deck.substr(deck.rfind('/') + 1) << " p = " << p << ": ";
+   TEST_ASSERT(pmesh.Dimension() == 2 &&
+               cfg.IcLabel() == (fd ? "scec_fd+a_max" : "gold+a_max") && cfg.switching == fd,
+               tag.str() << "2-D mesh, CheckDimension passed, IC set " << cfg.IcLabel()
+               << ", switching " << (cfg.switching ? "on" : "off"));
 
    cycle::QDPhase qd(pmesh, mpi, cfg);
    const spatial::SpatialFrictionConfig &s = cfg.shared;
@@ -322,6 +397,33 @@ static void TestDeck(const std::string &deck, int p, MPIContext &mpi)
    MPI_Allreduce(MPI_IN_PLACE, counts, 2, MPI_INT, MPI_SUM, mpi.GetComm());
    TEST_ASSERT(counts[0] > 0 && counts[1] > 0, tag.str() << counts[0] << " DOFs with a = a0, "
                << counts[1] << " with a = a_max, " << qd.NumGlobalFaultDOFs() << " in all");
+   if (fd)
+   {
+      // BP3-FD: psi0 copied into the state; V from the QD balance with eta.
+      real_t e_bal = 0.0, below_lo = 1.0, below_hi = 0.0, bound = 0.0;
+      for (int i = 0; i < N; i++)
+      {
+         const real_t a = par.rs.a(i), v = std::abs(V(2 * i)), vi = std::abs(par.V_init(2 * i));
+         const real_t tau = std::abs(pre.tau0(2 * i));
+         const real_t F = kSigma * a * std::asinh(v / (2.0 * kV0) * std::exp(psi(i) / a));
+         e_bal = std::max(e_bal, Rel(F + Eta() * v, tau));
+         const real_t below = 1.0 - v / vi;
+         below_lo = std::min(below_lo, below);
+         below_hi = std::max(below_hi, below / (2.0 * Eta() / (a * kSigma)));
+         bound = std::max(bound, 2.0 * Eta() / (a * kSigma));
+      }
+      e_bal = mpi.GlobalMax(e_bal);
+      below_lo = mpi.GlobalMin(below_lo);
+      below_hi = mpi.GlobalMax(below_hi);
+      TEST_ASSERT(e_psi == 0.0, tag.str() << "state psi = BuildPrestress psi0 bit for bit ("
+                  << e_psi << ")");
+      TEST_ASSERT(e_bal <= 1e-12 && v_s == 0.0, tag.str() << "kernel slip rate at t = 0 "
+                  "solves tau0 - eta V = F(V, psi0) (rel. " << e_bal << "), strike slot " << v_s);
+      TEST_ASSERT(below_lo > 0.0 && below_hi <= 1.0, tag.str() << "V just below V_init: 1 - V / "
+                  "V_init in [" << below_lo << ", " << below_hi << " x 2 eta / (a sigma_n)] (bound "
+                  << bound << ")");
+      return;
+   }
    TEST_ASSERT(e_psi <= 1e-12, tag.str() << "kernel psi = BuildPrestress psi0 (" << e_psi << ")");
    TEST_ASSERT(e_v <= 1e-9 && v_s == 0.0, tag.str() << "kernel slip rate at t = 0: dip slot = "
                "V_init (rel. " << e_v << "), strike slot " << v_s);
@@ -601,19 +703,19 @@ static int Refuse(int n)
    std::string text;
    switch (n)
    {
-      case 1: text = Swap(bp3, "ic                   = \"gold\"", "ic                   = \"scec_fd\""); break;
+      case 1: text = Swap(bp3, "switching            = false", "switching            = true"); break;
       case 2: text = Swap(bp3, a_line, "a            = \"maximum\""); break;
       case 3:
-      case 4:
       {
          cycle::PrestressConfig c = Amax();
-         if (n == 3) { c.a_max = 0.0; }
-         else { c.include_eta = false; }
+         c.a_max = 0.0;
          if (g_rank == 0) { std::cout << "--refuse " << n << ": BuildPrestress\n"; }
          cycle::BuildPrestress(Params({kA0, kAmax}, kVp), c);   // must abort
          if (g_rank == 0) { std::cout << "--refuse " << n << ": accepted\n"; }
          return 0;
       }
+      case 4: text = Swap(bp3, "eta_V_init   = true              # eq. 25",
+                          "eta_V_init   = false"); break;
       case 5: text = Swap(bp3, "half1   = 15.0e3", "half1   = 15.0e3\naxis2   = [0.8660254037844386, 0.5]\n"
                           "half2   = 1.0e6"); break;
       case 6: text = Swap(bp5, "axis2   = [0.0, 0.0, 1.0]\nhalf1   = 30.0e3\nhalf2   = 6.0e3",
@@ -632,7 +734,7 @@ static int Refuse(int n)
    }
    const std::string p = WriteDeck("refuse" + std::to_string(n), text);
    if (g_rank == 0) { std::cout << "--refuse " << n << ": loading " << p << "\n"; }
-   cycle::CycleConfig c = cycle::CycleConfig::Load(p);   // 1, 2, 7 abort here
+   cycle::CycleConfig c = cycle::CycleConfig::Load(p);   // 1, 2, 4, 7 abort here
    std::remove(p.c_str());
    c.CheckDimension(n == 5 ? 2 : 3);                     // 5, 6 abort here
    if (g_rank == 0) { std::cout << "--refuse " << n << ": the deck was accepted\n"; }
@@ -651,11 +753,12 @@ int main(int argc, char *argv[])
    if (refuse) { return Refuse(refuse); }
    if (g_rank == 0)
    {
-      std::cout << "test_prestress_bp3 (2D in-plane design rev 3, phase E, decision D5) on "
+      std::cout << "test_prestress_bp3 (2D in-plane design rev 3, phases E and F, decision D5) on "
                 << mpi.Size() << " rank(s)\n";
    }
    TestAmax();
    TestLocal();
+   TestAmaxFD();
    if (g_rank == 0) { std::cout << "\n=== B5: segment faces (LocateOnFaces, face_dim = 1) ===\n"; }
    TestSegments();
    if (g_rank == 0) { std::cout << "\n=== B3: the BP3 decks on the 1 km meshes ===\n"; }
@@ -663,6 +766,11 @@ int main(int argc, char *argv[])
    for (const char *d : kDecks)
    {
       for (int p : {1, 2}) { TestDeck(d, p, mpi); }
+   }
+   if (g_rank == 0) { std::cout << "\n=== B7: the BP3-FD decks on the 1 km meshes ===\n"; }
+   for (const char *d : kDecksFD)
+   {
+      for (int p : {1, 2}) { TestDeck(d, p, mpi, true); }
    }
    MFEMFinalizePetsc();
    if (g_rank == 0)

@@ -35,11 +35,16 @@
 // allreduce) and the DOF's own a in psi0: a uniform tau0, equilibrium at
 // V_init everywhere, steady state only where a = a_max.  psi0 is then the
 // kernel's inversion (DieterichRuinaFriction::InitialStatePsi, called here),
-// which the kernel runs with ic = "gold"; the config refuses "amax" with
-// "scec_fd" (whose uniform psi0 would leave the weakening region out of
-// equilibrium at t = 0) and BuildPrestress refuses it without eta |V| (the
-// inversion subtracts eta |V|; BP3-FD's eq. 22 is phase F's).  The "local"
-// arithmetic is unchanged to the character.
+// which the kernel runs itself with ic = "gold".  Without eta |V|
+// (include_eta = false, BP3-FD's eqs 22-23, phase F) the + eta |V| term
+// and the inversion's - eta |V| both drop out:
+//   tau   = sigma_n a_max asinh( |V| / (2 V0) exp(psi0 / a_max) )
+//   psi0  = a ln[ (2 V0 / |V|) sinh( tau / (a sigma_n) ) ]
+// the same psi0 as BP3-QD's to round-off, with a tau0 lower by eta |V|.
+// The kernel then takes this psi0 as it is (ic = "scec_fd": QDPhase::Setup
+// writes it into the state), since its own inversion subtracts its eta |V|.
+// The "local" arithmetic is unchanged to the character, and so is "amax"
+// with include_eta = true.
 
 #ifndef MFEM_SEAS_CYCLE_PRESTRESS_HPP
 #define MFEM_SEAS_CYCLE_PRESTRESS_HPP
@@ -95,9 +100,6 @@ inline Prestress BuildPrestress(const FaultParams &par, const PrestressConfig &i
                "BuildPrestress: a must be \"local\" or \"amax\"; got \"" << ic.a << "\"");
    MFEM_VERIFY(!ic.AMax() || ic.a_max > 0.0,
                "BuildPrestress: a = \"amax\" needs a_max > 0 (GlobalMaxA)");
-   MFEM_VERIFY(!ic.AMax() || ic.include_eta,
-               "BuildPrestress: a = \"amax\" needs eta_V_init = true: its psi0 is the "
-               "kernel's inversion, which subtracts eta |V_init| from tau0");
    const spatial::RateStatePerDOFParams &rs = par.rs;
    const int N = rs.a.Size();
    MFEM_VERIFY(par.V_init.Size() == 2 * N && rs.sigma_n_eff.Size() == N &&
@@ -121,11 +123,14 @@ inline Prestress BuildPrestress(const FaultParams &par, const PrestressConfig &i
       if (ic.AMax())
       {
          // BP3 (see the file comment): the expression below with a_max, and
-         // psi0 by the kernel's own inversion with the DOF's a.
+         // psi0 by the kernel's own inversion with the DOF's a; one
+         // expression per branch, as below.
          const real_t am = ic.a_max;
          const real_t em = std::exp(psi0 / am);
          const real_t tau =
-            sigma_n * am * std::asinh((Vi_abs / (2.0 * V0)) * em) + rs.eta(i) * Vi_abs;
+            ic.include_eta
+            ? sigma_n * am * std::asinh((Vi_abs / (2.0 * V0)) * em) + rs.eta(i) * Vi_abs
+            : sigma_n * am * std::asinh((Vi_abs / (2.0 * V0)) * em);
          DieterichRuinaFriction::Constants fc;
          fc.V0 = V0;
          fc.f0 = rs.f_0(i);
@@ -134,7 +139,8 @@ inline Prestress BuildPrestress(const FaultParams &par, const PrestressConfig &i
          p.tau0(2 * i) = -tau * Vi[0] / Vi_abs;
          p.tau0(2 * i + 1) = -tau * Vi[1] / Vi_abs;
          p.sigma0(i) = sigma_n;
-         p.psi0(i) = law.InitialStatePsi(tau, Vi_abs, sigma_n, rs.eta(i), a);
+         p.psi0(i) = law.InitialStatePsi(tau, Vi_abs, sigma_n,
+                                         ic.include_eta ? rs.eta(i) : 0.0, a);
          continue;
       }
       const real_t e = std::exp(psi0 / a);
