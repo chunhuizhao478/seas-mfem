@@ -26,6 +26,10 @@
 #      or 2; from miniapps/seas of the Horizon clone after h_d2_build passed
 #      at the same commit; or H_CHAIN="build d4" bash jobs/horizon/h_d2_submit.sh)
 #
+# DEVICE_FAULT=1 adds --device-fault 1 (GPU plan D3: the fault on the GPU
+# too, the first full-GPU timing); the job then also fails when the summary
+# does not say the fault ran on the device, and the output folder is
+# d4_200m_<PROB>_p<P>_df1_<jobid>.
 # The mesh is the clone's, or else MESH_SRC's (h_dyn_env.sh) read in place,
 # and must have the gold's sha256 (D4_MESH_SHA256).  CPU_GOLD=<folder of a CPU run's
 # station files and driver.log> compares with that run instead of the gold.
@@ -53,6 +57,9 @@ esac
 case "$P" in 1|2) ;; *) echo "ERROR: P is 1 or 2, not '$P'"; exit 2 ;; esac
 DECK=$PROB/configs/${PROB}_nitsche.toml
 MF_LAYOUT=${MF_LAYOUT:-auto}
+DEVICE_FAULT=${DEVICE_FAULT:-0}
+case "$DEVICE_FAULT" in 0|1) ;; *) echo "ERROR: DEVICE_FAULT is 0 or 1, not '$DEVICE_FAULT'"; exit 2 ;; esac
+DF_TAG=""; [ "$DEVICE_FAULT" = 0 ] || DF_TAG="_df1"
 ROOT=$(cd "$SLURM_SUBMIT_DIR/../.." && pwd)              # submitted from miniapps/seas
 # shellcheck source=jobs/horizon/h_dyn_env.sh
 source "$SLURM_SUBMIT_DIR/jobs/horizon/h_dyn_env.sh" || exit 1
@@ -82,11 +89,11 @@ else
    GOLD=${_golds[0]}/results
 fi
 [ -f "$GOLD/driver.log" ] || { echo "ERROR: no CPU run in $GOLD (driver.log)"; exit 2; }
-OUT=$SCRATCH/gpu_dyn/d4_200m_${PROB}_p${P}_$SLURM_JOB_ID
+OUT=$SCRATCH/gpu_dyn/d4_200m_${PROB}_p${P}${DF_TAG}_$SLURM_JOB_ID
 mkdir -p "$OUT/run"
 d1_gh_modules
 { echo "job $SLURM_JOB_ID on $(hostname), $(date -u +%FT%TZ), $NP rank(s) on ${SLURM_NNODES:-1} node(s), commit $SHA ($ROOT)"
-  echo "case $PROB p$P, deck $DECK, mesh $MDIR/$MESH $(cd "$MDIR" && sha256sum "$MESH" | cut -d' ' -f1), --mf-layout $MF_LAYOUT"
+  echo "case $PROB p$P, deck $DECK, mesh $MDIR/$MESH $(cd "$MDIR" && sha256sum "$MESH" | cut -d' ' -f1), --mf-layout $MF_LAYOUT, --device-fault $DEVICE_FAULT"
   echo "CPU gold $GOLD"
   echo "modules: $(module -t list 2>&1 | tr '\n' ' ')"
   nvidia-smi --query-gpu=name,compute_mode,driver_version --format=csv,noheader; } | tee "$OUT/RUN_INFO.txt"
@@ -96,7 +103,7 @@ O=$OUT/run
 t=$(date +%s)
 ibrun -n "$NP" ./seas_nitsche_dyn_driver --config "$DECK" --mesh "$MDIR/$MESH" --order "$P" --tfinal 12.0 \
       --output-dir "$O" --log-every 1000 --device cuda --matrix-free 1 --mf-layout "$MF_LAYOUT" \
-      > "$O/driver.log" 2>&1
+      --device-fault "$DEVICE_FAULT" > "$O/driver.log" 2>&1
 rc=$?
 echo $rc > "$O/exit_code"
 echo "RUN $PROB 200 m p$P on $NP GPU(s): exit $rc in $(( $(date +%s) - t )) s"
@@ -107,6 +114,8 @@ if [ "$rc" != 0 ] || ! grep -a -q "^=== done: " "$O/driver.log"; then
    echo "RUN: FAIL (exit $rc; last lines of $O/driver.log:)"; tail -20 "$O/driver.log"; fail=1
 elif ! grep -a -q "device step on" "$O/driver.log"; then
    echo "RUN: FAIL (the summary does not say the device step ran)"; fail=1
+elif [ "$DEVICE_FAULT" = 1 ] && ! grep -a -q "fault on the device: " "$O/driver.log"; then
+   echo "RUN: FAIL (the summary does not say the fault ran on the device)"; fail=1
 fi
 
 if [ "$fail" = 0 ]; then
@@ -136,5 +145,5 @@ EOF
    fi
 fi
 
-echo "D4 200 m $PROB p$P, $NP GPU(s): $([ $fail = 0 ] && echo DONE || echo FAIL); commit $SHA; out $OUT; total $(( $(date +%s) - T0 )) s"
+echo "D4 200 m $PROB p$P, $NP GPU(s), --device-fault $DEVICE_FAULT: $([ $fail = 0 ] && echo DONE || echo FAIL); commit $SHA; out $OUT; total $(( $(date +%s) - T0 )) s"
 exit $fail

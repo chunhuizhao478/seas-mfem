@@ -75,6 +75,12 @@
 //   the host and reads the values of U and Udot it needs, gathered from the
 //   device each step.  It needs --fast-fault 1 and refuses decks with
 //   Dirichlet faces.
+//   --device-fault 0|1 (GPU plan D3) with 1 the fault (boxes 3-11) runs on
+//                      the device too, and the driver's rupture time with
+//                      it; the station rows copy only the station DOFs to
+//                      the host (default 0: the host fault above).  Needs a
+//                      device and --matrix-free 1; slip weakening and the
+//                      rate-and-state laws (aging, slip, SRW) only.
 //
 // Station copies (Chunhui Zhao, 2026-10-14): a station sits on a fault point
 // that carries one DOF per adjacent fault face (DG copies).  With
@@ -606,6 +612,9 @@ public:
       const Vector &d = op_.Slip(), &V = op_.SlipRate(), &psi = op_.State();
       const Vector &Fr = op_.FaultFrames();
       Vector Xs = op_.LastShear(), sg = op_.LastSigmaEff();
+      // with the device fault (plan D3) a copy may be valid on the device only
+      Xs.HostReadWrite();
+      sg.HostReadWrite();
       const bool have_x = Xs.Size() == 2 * no;
       if (!have_x)
       {
@@ -836,7 +845,7 @@ int main(int argc, char *argv[])
                       " [--fast-fault-output 0|1] [--paraview-fault-deflate-level n|none]"
                       " [--stage-timers n] [--max-steps n]"
                       " [--perturb-initial-state seed] [--device cpu|cuda|debug]"
-                      " [--device-id n] [--matrix-free 0|1]"
+                      " [--device-id n] [--matrix-free 0|1] [--device-fault 0|1]"
                       " [--mf-layout auto|element|team2|team4|team8]"
                       " [--lts-report 0|1]"
                       " [--lts-report-cap n] [--lts-report-ranks a,b,...]"
@@ -888,6 +897,10 @@ int main(int argc, char *argv[])
    const int matrix_free = ArgInt(argc, argv, "--matrix-free", 0);
    const std::string mf_layout_s = ArgStr(argc, argv, "--mf-layout", "auto");
    MFEM_VERIFY(matrix_free == 0 || matrix_free == 1, "--matrix-free " << matrix_free
+               << ": expected 0 or 1");
+   // GPU plan D3 (header): the fault on the device
+   const int device_fault = ArgInt(argc, argv, "--device-fault", 0);
+   MFEM_VERIFY(device_fault == 0 || device_fault == 1, "--device-fault " << device_fault
                << ": expected 0 or 1");
    NitscheSipgOperator::Layout mf_layout = NitscheSipgOperator::kAuto;
    int mf_batch = 2;
@@ -1699,6 +1712,15 @@ int main(int argc, char *argv[])
       std::cout << "  matrix-free K u + K_eta v (NitscheSipgOperator), layout " << mf_layout_s
                 << "; K and K_eta are not assembled\n";
    }
+   // --device-fault 1 (plan D3): the fault step runs inside the device step
+   MFEM_VERIFY(!device_fault || (Device::IsEnabled() && matrix_free == 1),
+               "--device-fault 1 runs the fault inside the device step: use --device cuda "
+               "(or debug) and --matrix-free 1");
+   op.SetDeviceFault(device_fault != 0);
+   if (device_fault && g_rank == 0)
+   {
+      std::cout << "  device fault: boxes 3-11 and the rupture time on the device\n";
+   }
 
    // --perturb-initial-state (test only): perturb the prestress the initial
    // fault state is seeded from (header)
@@ -1988,9 +2010,16 @@ int main(int argc, char *argv[])
       std::cout << "  no [output.stations] table: no station files\n";
    }
    std::vector<DOFData> dofdata(no);
+   // device fault (plan D3): host copies of the station DOFs only
+   Array<int> station_arr(static_cast<int>(station_dofs.size()));
+   for (int i = 0; i < station_arr.Size(); i++) { station_arr[i] = station_dofs[i]; }
+   Vector sd, sV, spsi, sXs, ssg;
    auto fill_dofdata = [&]() {
-      const Vector &d = op.Slip(), &V = op.SlipRate(), &psi = op.State();
-      const bool have_x = op.LastShear().Size() == 2 * no;
+      const bool dev_fault = op.DeviceFaultActive();
+      if (dev_fault) { op.GatherFaultDofs(station_arr, sd, sV, spsi, sXs, ssg); }
+      const Vector &d = dev_fault ? sd : op.Slip(), &V = dev_fault ? sV : op.SlipRate(),
+                   &psi = dev_fault ? spsi : op.State();
+      const bool have_x = op.HasLastAdvance();
       Vector Xb, sgb;
       if (!have_x)
       {
@@ -2007,7 +2036,8 @@ int main(int argc, char *argv[])
             ff::ToLocal(&S(3 * j), 0.0, n, dd, ss, Xb(2 * j), Xb(2 * j + 1), sgb(j));
          }
       }
-      const Vector &Xs = have_x ? op.LastShear() : Xb, &sg = have_x ? op.LastSigmaEff() : sgb;
+      const Vector &Xs = !have_x ? Xb : dev_fault ? sXs : op.LastShear();
+      const Vector &sg = !have_x ? sgb : dev_fault ? ssg : op.LastSigmaEff();
       for (int j : station_dofs)
       {
          const real_t *dd = &op.FaultFrames()(9 * j + 3), *ss = &op.FaultFrames()(9 * j + 6);
@@ -2048,7 +2078,9 @@ int main(int argc, char *argv[])
       }
       E.RestrictToOwnedFault(cl, cf, 3);
    }
-   std::vector<real_t> trupt(no, -1.0);
+   // first |V| > 1 mm/s per owned DOF (on the device with --device-fault 1)
+   Vector trupt(no);
+   trupt = -1.0;
 
    // fault ParaView output (one fault.vtkhdf per run)
 #ifdef MFEM_USE_HDF5
@@ -2276,12 +2308,7 @@ int main(int argc, char *argv[])
          }
       }
       MFEM_VERIFY(std::isfinite(rec.max_V), "non-finite slip rate at step " << s);
-      const Vector &V = op.SlipRate();
-      for (int j = 0; j < no; j++)
-      {
-         if (trupt[j] < 0.0 && std::sqrt(V(3 * j) * V(3 * j) + V(3 * j + 1) * V(3 * j + 1)
-                                         + V(3 * j + 2) * V(3 * j + 2)) > 1e-3) { trupt[j] = t; }
-      }
+      op.MarkRuptureTime(trupt, t, 1e-3);
       real_t rho = 0.0;
       if (mon && sync)
       {
@@ -2311,7 +2338,7 @@ int main(int argc, char *argv[])
       }
       if (dump && s % dump_every == 0)
       {
-         const Vector &d = op.Slip(), &psi = op.State();
+         const Vector &d = op.Slip(), &V = op.SlipRate(), &psi = op.State();
          const Vector &Xs = op.LastShear(), &sg = op.LastSigmaEff();
          const Vector &X = op.FaultPositions();
          for (int j = 0; j < no; j++)
@@ -2399,9 +2426,10 @@ int main(int argc, char *argv[])
       std::ofstream rt(out_dir + "/" + prefix + "_rupture_time_r" + std::to_string(g_rank) + ".csv");
       rt << std::setprecision(12) << "# x y z t_rupture (first |V| > 1e-3 m/s; -1 = never)\n";
       const Vector &X = op.FaultPositions();
+      trupt.HostRead();
       for (int j = 0; j < no; j++)
       {
-         rt << X(3 * j) << " " << X(3 * j + 1) << " " << X(3 * j + 2) << " " << trupt[j] << "\n";
+         rt << X(3 * j) << " " << X(3 * j + 1) << " " << X(3 * j + 2) << " " << trupt(j) << "\n";
       }
    }
 #ifdef MFEM_USE_HDF5
@@ -2430,6 +2458,9 @@ int main(int argc, char *argv[])
       MPI_Allreduce(MPI_IN_PLACE, &mx, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
       MPI_Allreduce(MPI_IN_PLACE, &sm, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
       MPI_Allreduce(MPI_IN_PLACE, &s1, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+      // device fault (plan D3): owned fault DOFs and bytes of its device data
+      long long dfc[2] = {op.DeviceFaultActive() ? no : 0, op.DeviceFaultBytes()};
+      MPI_Allreduce(MPI_IN_PLACE, dfc, 2, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
       if (g_rank == 0)
       {
          std::cout << std::setprecision(6) << "  time in ode.Step per rank after step 1: min " << mn
@@ -2455,7 +2486,12 @@ int main(int argc, char *argv[])
                       << mf_layout_s << ")";
          }
          std::cout << ", device step " << (op.DeviceStepActive() ? "on" : "off");
-         if (op.DeviceStepActive() && op.HasFault())
+         if (op.DeviceFaultActive())
+         {
+            std::cout << " (fault on the device: " << dfc[0] << " owned fault DOFs, "
+                      << dfc[1] / 1e6 << " MB of device fault data over all ranks)";
+         }
+         else if (op.DeviceStepActive() && op.HasFault())
          {
             std::cout << " (fault gather " << op.DeviceGatherValues() << " values per step over all ranks)";
          }

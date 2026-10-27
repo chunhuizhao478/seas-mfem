@@ -23,6 +23,12 @@
 # GPUs.  On Horizon (4 GB200 per node) all three fit on one node,
 # jobs/horizon/h_d2_gate.sbatch with sbatch -n NP.
 #
+# GPU dynamic-rupture plan D3 (plan rev2 §4.4 acceptance, "gate at 1e-8 on
+# 1, 2 and 4 GPUs"): DEVICE_FAULT=1 adds --device-fault 1, so the fault runs
+# on the GPU too, and a case then also fails when the summary does not say
+# so ("fault on the device: N owned fault DOFs"); the output folder is
+# d2_gh_gate_r<NP>_df1_<jobid>.
+#
 # MF_LAYOUT (default auto: element at p = 1, team2 at p = 2 on the GPU) is
 # passed as --mf-layout.  A case fails when the driver's summary does not say
 # the device step ran.  Both step times are printed (the reference is the gg
@@ -34,6 +40,9 @@ export LC_ALL=C LANG=C
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 TOL=${TOL:-1e-8}
 MF_LAYOUT=${MF_LAYOUT:-auto}
+DEVICE_FAULT=${DEVICE_FAULT:-0}
+case "$DEVICE_FAULT" in 0|1) ;; *) echo "ERROR: DEVICE_FAULT is 0 or 1, not '$DEVICE_FAULT'"; exit 2 ;; esac
+DF_TAG=""; [ "$DEVICE_FAULT" = 0 ] || DF_TAG="_df1"
 ROOT=$(cd "$SLURM_SUBMIT_DIR/../.." && pwd)              # submitted from miniapps/seas
 NP=${SLURM_NTASKS:?run with sbatch -N NODES -n NP}
 NGPU=$(nvidia-smi -L | grep -c '^GPU ')
@@ -55,10 +64,10 @@ grep -q '^MFEM_USE_CUDA *= YES' "$ROOT/config/config.mk" \
 d1_check_build "$ROOT" BUILD_COMMIT_CUDA
 d1_check_meshes "$ROOT/miniapps/seas" || exit 2
 NEW_SHA=$(git -C "$ROOT" rev-parse HEAD)
-OUT=$SCRATCH/gpu_dyn/d2_gh_gate_r${NP}_$SLURM_JOB_ID
+OUT=$SCRATCH/gpu_dyn/d2_gh_gate_r${NP}${DF_TAG}_$SLURM_JOB_ID
 mkdir -p "$OUT"
 d1_gh_modules
-{ echo "job $SLURM_JOB_ID on $(hostname), $(date -u +%FT%TZ), NP $NP, TOL $TOL, --mf-layout $MF_LAYOUT"
+{ echo "job $SLURM_JOB_ID on $(hostname), $(date -u +%FT%TZ), NP $NP, TOL $TOL, --mf-layout $MF_LAYOUT, --device-fault $DEVICE_FAULT"
   echo "new $NEW_SHA ($ROOT)"; echo "reference $REF_RUNS"; head -3 "$REF_RUNS/../RUN_INFO.txt"
   echo "modules: $(module -t list 2>&1 | tr '\n' ' ')"
   nvidia-smi --query-gpu=name,compute_mode,driver_version --format=csv,noheader; } | tee "$OUT/RUN_INFO.txt"
@@ -75,7 +84,7 @@ for c in "${D1_CASES[@]}"; do
       t=$(date +%s)
       ibrun -n "$NP" ./seas_nitsche_dyn_driver --config "$DECK" --mesh "$MESH" --order "$P" \
             --output-dir "$O" --log-every 1000 --device cuda --matrix-free 1 --mf-layout "$MF_LAYOUT" \
-            > "$O/driver.log" 2>&1
+            --device-fault "$DEVICE_FAULT" > "$O/driver.log" 2>&1
       rc=$?
       echo $rc > "$O/exit_code"
       echo "$CASE cuda: exit $rc in $(( $(date +%s) - t )) s; $(grep -a "=== done" "$O/driver.log" || echo 'no done line')"
@@ -83,6 +92,8 @@ for c in "${D1_CASES[@]}"; do
       grep -a "time in ode.Step" "$G/driver.log" | sed 's/^ */   ref: /'
       if ! grep -a -q "device step on" "$O/driver.log"; then
          echo "RUN $CASE cuda: FAIL (the summary does not say the device step ran)"; fail=1
+      elif [ "$DEVICE_FAULT" = 1 ] && ! grep -a -q "fault on the device: " "$O/driver.log"; then
+         echo "RUN $CASE cuda: FAIL (the summary does not say the fault ran on the device)"; fail=1
       elif bash jobs/horizon/check_dyn_gate.sh "$O" "$PROB" "$G" "$PROB" "$TOL" "$O/driver.log" "$rc" \
             > "$O/gate.log" 2>&1; then
          echo "RUN $CASE cuda vs gg ref, $NP GPU(s): PASS"
@@ -93,5 +104,5 @@ for c in "${D1_CASES[@]}"; do
    done
 done
 
-echo "D2 gh gate, $NP GPU(s): $([ $fail = 0 ] && echo PASS || echo FAIL); new $NEW_SHA; runs in $OUT/runs; total $(( $(date +%s) - T0 )) s"
+echo "D2 gh gate, $NP GPU(s), --device-fault $DEVICE_FAULT: $([ $fail = 0 ] && echo PASS || echo FAIL); new $NEW_SHA; runs in $OUT/runs; total $(( $(date +%s) - T0 )) s"
 exit $fail

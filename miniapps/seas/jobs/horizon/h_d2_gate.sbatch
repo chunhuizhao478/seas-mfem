@@ -12,6 +12,7 @@
 # at the same rank count, TOL = 1e-8) on NP GPUs of one GB200 node, one rank
 # each, with the settings of jobs/horizon/h_dyn_env.sh.  REF_RUNS, unless
 # set, is the one d1_gg_check_r<NP>_*/runs under D1_REF_ROOT.
+# DEVICE_FAULT=1 runs the fault on the GPU too (plan D3).
 #
 #   sbatch -n NP jobs/horizon/h_d2_gate.sbatch   (NP = 1, 2 or 4, from
 #                                  miniapps/seas of the Horizon clone after

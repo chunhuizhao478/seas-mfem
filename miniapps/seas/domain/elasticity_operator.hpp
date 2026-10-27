@@ -428,6 +428,15 @@ public:
    /// D2 copies the blocks G_f and the vdofs the traction reads to the
    /// device (domain/nitsche_device_fault.hpp).
    const auto &GetFaultFaceOps() const { return ffo_; }
+   /// The maps of RestrictToOwnedFault and ExpandOwnedToLocalFault,
+   /// read-only: GPU dynamic-rupture plan D3 copies them to the device
+   /// (domain/nitsche_device_fault.hpp).
+   const Array<int> &OwnedFaultDofToLocalDof() const { return owned_fault_dof_to_local_dof_; }
+   const std::vector<SharedFaultCommBlock> &SharedFaultCommBlocks() const
+   {
+      return shared_fault_comm_blocks_;
+   }
+   const Array<int> &CanonicalToLocalPerm() const { return canonical_to_local_perm_; }
    /// ComputeTraction(u, slip_bc, traction, &normal_traction) through the
    /// stored A_f.  `u` is the local (true) displacement vector.  Collective:
    /// exchanges u on the neighbour elements of shared fault faces only.

@@ -74,6 +74,9 @@ public:
    }
 
    StateLaw Law() const { return law_; }
+   /// The friction law (its constants also build the state law); the device
+   /// closure of friction/device_closures.hpp reads them.
+   const DieterichRuinaFriction &Friction() const { return fr_; }
 
 private:
    const DieterichRuinaFriction &fr_;

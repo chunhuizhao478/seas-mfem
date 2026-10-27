@@ -25,6 +25,10 @@
 //     FromKernel: T = eps_f (tau1^k t1^k + tau2^k t2^k - sigma_n n_k)
 //   Not wired into the Nitsche operator until P6.
 //
+//   Cross, Dot, ToLocal, Embed, ToKernel and FromKernel are MFEM_HOST_DEVICE:
+//   the device fault step of the GPU dynamic-rupture plan (D3) calls them
+//   in its kernels, so host and device share one copy of the arithmetic.
+//
 // Scope (Chunhui Zhao, 2026-10-14): tetrahedral meshes, planar fault faces.
 
 #ifndef MFEM_SEAS_FAULT_FRAME_HPP
@@ -46,14 +50,14 @@ namespace seas
 namespace fault_frame
 {
 
-inline void Cross(const real_t a[3], const real_t b[3], real_t c[3])
+MFEM_HOST_DEVICE inline void Cross(const real_t a[3], const real_t b[3], real_t c[3])
 {
    c[0] = a[1] * b[2] - a[2] * b[1];
    c[1] = a[2] * b[0] - a[0] * b[2];
    c[2] = a[0] * b[1] - a[1] * b[0];
 }
 
-inline real_t Dot(const real_t a[3], const real_t b[3])
+MFEM_HOST_DEVICE inline real_t Dot(const real_t a[3], const real_t b[3])
 {
    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
@@ -132,7 +136,7 @@ inline bool ComputeFrame(const real_t n[3], const real_t up[3], real_t eps_deg,
 }
 
 /// Global -> local before the constitutive evaluation (A3, C3).
-inline void ToLocal(const real_t T[3], real_t sigma0_n, const real_t n[3],
+MFEM_HOST_DEVICE inline void ToLocal(const real_t T[3], real_t sigma0_n, const real_t n[3],
                     const real_t d[3], const real_t s[3],
                     real_t &X1, real_t &X2, real_t &sigma_n_eff)
 {
@@ -144,7 +148,7 @@ inline void ToLocal(const real_t T[3], real_t sigma0_n, const real_t n[3],
 }
 
 /// Local -> global after the constitutive evaluation (A3).
-inline void Embed(real_t V1, real_t V2, const real_t d[3], const real_t s[3],
+MFEM_HOST_DEVICE inline void Embed(real_t V1, real_t V2, const real_t d[3], const real_t s[3],
                   real_t V[3])
 {
    for (int i = 0; i < 3; i++) { V[i] = V1 * d[i] + V2 * s[i]; }
@@ -167,7 +171,7 @@ inline real_t EpsilonF(const real_t n[3], const real_t n_k[3])
 }
 
 /// Into the kernel: d_i^k = eps_f delta . t_i^k.
-inline void ToKernel(const real_t delta[3], real_t eps_f, const real_t t1k[3],
+MFEM_HOST_DEVICE inline void ToKernel(const real_t delta[3], real_t eps_f, const real_t t1k[3],
                      const real_t t2k[3], real_t &d1k, real_t &d2k)
 {
    d1k = eps_f * Dot(delta, t1k);
@@ -175,7 +179,7 @@ inline void ToKernel(const real_t delta[3], real_t eps_f, const real_t t1k[3],
 }
 
 /// Out of the kernel: T = eps_f (tau1^k t1^k + tau2^k t2^k - sigma_n n_k).
-inline void FromKernel(real_t tau1k, real_t tau2k, real_t sigma_n, real_t eps_f,
+MFEM_HOST_DEVICE inline void FromKernel(real_t tau1k, real_t tau2k, real_t sigma_n, real_t eps_f,
                        const real_t nk[3], const real_t t1k[3],
                        const real_t t2k[3], real_t T[3])
 {

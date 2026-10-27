@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""d2_trace_check.py — GPU dynamic-rupture plan D2: the host-device copies
-in an Nsight Systems trace of seas_nitsche_dyn_driver's device step, placed
-in the driver's NVTX ranges.
+"""d2_trace_check.py — GPU dynamic-rupture plans D2 and D3: the host-device
+copies in an Nsight Systems trace of seas_nitsche_dyn_driver's device step,
+placed in the driver's NVTX ranges.
 
     python3 jobs/vista/d2_trace_check.py REPORT.sqlite --log driver.log [--gate]
 
@@ -32,9 +32,17 @@ The copies of the slip to the device (DeviceSlipLoad) are smaller and
 reported.  Without --gate the script only reports (traces of several
 ranks, where the halo may stage through the host).
 
+With the device fault (--device-fault 1, plan rev2 §4.4 D3; the log's
+summary says "fault on the device: N owned fault DOFs") there is no gather.
+The gate is then the plan's D3 trace check: no host-to-device or
+device-to-host copy in step of FAULT_BYTES = 8 x N bytes or more (8 bytes
+per fault DOF), so nothing of fault size crosses inside a step; the step's
+scalars (the record's reduction) and the output steps' station and frame
+copies (in output) are reported.
+
 Exit: 0 pass (or report only), 1 gate failed, 2 the trace or the log cannot
 answer (no copies table, fewer than two seas:dyn_step ranges, the device
-step off, no gather seen).
+step off, no gather seen without the device fault).
 """
 
 import argparse
@@ -51,15 +59,18 @@ HOST_DEVICE = ("HtoD", "DtoH")
 
 
 def read_log(path):
-    """(device step on, gathered values per step, tets, order) from the
-    driver's log; None where the log does not say."""
+    """(device step on, gathered values per step, owned fault DOFs of the
+    device fault, tets, order) from the driver's log; None where the log
+    does not say."""
     text = open(path, errors="replace").read()
     on = "device step on" in text
     m = re.search(r"fault gather (\d+) values per step", text)
     gather = int(m.group(1)) if m else None
+    m = re.search(r"fault on the device: (\d+) owned fault DOFs", text)
+    fault_dofs = int(m.group(1)) if m else None
     m = re.search(r": (\d+) tets; p = (\d+)", text)
     ne, p = (int(m.group(1)), int(m.group(2))) if m else (None, None)
-    return on, gather, ne, p
+    return on, gather, fault_dofs, ne, p
 
 
 def step_index(ranges, tid, pid_key, t):
@@ -94,17 +105,20 @@ def main():
     ap.add_argument("sqlite")
     ap.add_argument("--log", required=True, help="the traced run's output")
     ap.add_argument("--gate", action="store_true",
-                    help="exit 1 on a copy in a step larger than the gather")
+                    help="exit 1 on a copy in a step larger than the gather (with the device fault: of 8 bytes per fault DOF or more)")
     ap.add_argument("--top", type=int, default=10)
     args = ap.parse_args()
 
-    on, gather, ne, p = read_log(args.log)
+    on, gather, fault_dofs, ne, p = read_log(args.log)
+    d3 = fault_dofs is not None
     broken = []  # the trace or log cannot answer: exit 2 either way
     if not on:
         broken.append("the log does not say 'device step on'")
-    if not gather:
-        broken.append("the log has no 'fault gather M values per step'")
+    if not d3 and not gather:
+        broken.append("the log has no 'fault gather M values per step' "
+                      "(nor 'fault on the device: N owned fault DOFs')")
     gather_bytes = 8 * (gather or 0)
+    fault_bytes = 8 * (fault_dofs or 0)
     volume_bytes = 8 * 3 * (p + 1) * (p + 2) * (p + 3) // 6 * ne \
         if ne else None
 
@@ -116,12 +130,18 @@ def main():
 
     print(f"Trace: {args.sqlite}")
     print(f"Log: {args.log}")
-    print(f"Gathered values per step {gather}: GATHER_BYTES = {gather_bytes} "
-          f"({mb(gather_bytes):.3f} MB)")
+    if d3:
+        print(f"Device fault, {fault_dofs} owned fault DOFs: FAULT_BYTES = "
+              f"{fault_bytes} ({mb(fault_bytes):.3f} MB); no gather")
+    else:
+        print(f"Gathered values per step {gather}: GATHER_BYTES = "
+              f"{gather_bytes} ({mb(gather_bytes):.3f} MB)")
     if volume_bytes:
+        ref, rname = (fault_bytes, "FAULT_BYTES") if d3 else \
+            (gather_bytes, "GATHER_BYTES")
         print(f"Volume {ne} tets, p = {p}: VOLUME_BYTES = {volume_bytes} "
-              f"({mb(volume_bytes):.3f} MB, {volume_bytes / max(gather_bytes, 1):.0f}"
-              f" x GATHER_BYTES)")
+              f"({mb(volume_bytes):.3f} MB, {volume_bytes / max(ref, 1):.0f}"
+              f" x {rname})")
     n_step = g4.count_ranges(ranges, "seas:dyn_step")
     n_out = g4.count_ranges(ranges, "seas:dyn_output")
     n_traction = g4.count_ranges(ranges, "seas:dyn_fault_traction")
@@ -150,9 +170,9 @@ def main():
         s[1] += nbytes
         s[2] = max(s[2], nbytes)
         if ctx == "step" and kname in HOST_DEVICE:
-            if nbytes > gather_bytes:
+            if (nbytes >= fault_bytes) if d3 else (nbytes > gather_bytes):
                 over.append((nbytes, kname, t))
-            if kname == "DtoH" and nbytes == gather_bytes:
+            if not d3 and kname == "DtoH" and nbytes == gather_bytes:
                 gathers += 1
 
     steps = max(n_step - 1, 1)
@@ -168,16 +188,20 @@ def main():
                   f"{per:>9}")
 
     print()
-    print(f"Steps after step 1: {n_step - 1}; device-to-host copies of "
-          f"GATHER_BYTES in them (the planned gather): {gathers}")
-    print(f"Host-device copies in them larger than GATHER_BYTES: {len(over)}")
+    limit = "FAULT_BYTES or more" if d3 else "larger than GATHER_BYTES"
+    if d3:
+        print(f"Steps after step 1: {n_step - 1}")
+    else:
+        print(f"Steps after step 1: {n_step - 1}; device-to-host copies of "
+              f"GATHER_BYTES in them (the planned gather): {gathers}")
+    print(f"Host-device copies in them of {limit}: {len(over)}")
     if over:
         print(f"Largest (top {args.top}):")
         for nbytes, kname, t in sorted(over, key=lambda x: -x[0])[:args.top]:
             vol = f" ({nbytes / volume_bytes:.2f} x VOLUME_BYTES)" \
                 if volume_bytes else ""
             print(f"  {kname:<5} {nbytes:>11} bytes{vol} at t = {t} ns")
-    if not broken and gathers == 0:
+    if not broken and not d3 and gathers == 0:
         broken.append("no device-to-host copy of GATHER_BYTES in a step: the "
                       "trace does not show the planned gather")
 
@@ -185,10 +209,10 @@ def main():
     if broken:
         print("TRACE CHECK: NO RESULT (" + "; ".join(broken) + ")")
         return 2
-    found = (f"{len(over)} host-device copies larger than the gather in a "
-             f"step" if over else
-             "no host-device copy larger than the gather in a step after "
-             "step 1")
+    what = "of 8 bytes per fault DOF or more" if d3 else \
+        "larger than the gather"
+    found = (f"{len(over)} host-device copies {what} in a step" if over else
+             f"no host-device copy {what} in a step after step 1")
     if args.gate:
         print(f"TRACE CHECK: {'FAIL' if over else 'PASS'} ({found})")
         return 1 if over else 0

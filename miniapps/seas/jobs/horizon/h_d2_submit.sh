@@ -13,7 +13,9 @@
 # gates, d4.  GATE_NPS (default "1 2 4") are the gates' GPU counts, D4_CASES
 # (default "tpv205:1 tpv205:2 tpv104:1 tpv104:2") the 200 m cases, PROB:P,
 # one h_d4_200m job each.  AFTER=<job id> makes the first job wait on that
-# one.  Job ids go to h_d2_submit_<date>.txt.
+# one.  DEVICE_FAULT=1 (GPU plan D3) runs the gates and the 200 m runs with
+# the fault on the GPU (sbatch passes it on; the build job always traces
+# both).  Job ids go to h_d2_submit_<date>.txt.
 #
 # Before anything is submitted it checks, on this login node, that the clone
 # is clean at its upstream commit, that the meshes, the D1 references (for
@@ -32,6 +34,8 @@ source jobs/vista/d1_env.sh
 H_CHAIN="${H_CHAIN:-build gates}"
 GATE_NPS="${GATE_NPS:-1 2 4}"
 D4_CASES="${D4_CASES:-tpv205:1 tpv205:2 tpv104:1 tpv104:2}"
+export DEVICE_FAULT="${DEVICE_FAULT:-0}"
+case "${DEVICE_FAULT}" in 0|1) ;; *) echo "ERROR: DEVICE_FAULT is 0 or 1, not '${DEVICE_FAULT}'." >&2; exit 1 ;; esac
 
 missing=0
 if [ -n "$(git status --porcelain --untracked-files=no)" ] ||
@@ -76,7 +80,7 @@ if [ ! -f "${HDF5_ROOT}/hdf5-${HDF5_VERSION}-cuda/include/hdf5.h" ] &&
    missing=1
 fi
 [ "${missing}" = 0 ] || exit 1
-echo "Checks passed for '${H_CHAIN}': clone at $(git rev-parse HEAD), meshes, references, HDF5."
+echo "Checks passed for '${H_CHAIN}' (DEVICE_FAULT=${DEVICE_FAULT}): clone at $(git rev-parse HEAD), meshes, references, HDF5."
 
 log="h_d2_submit_$(date +%Y%m%d_%H%M%S).txt"
 dep="${AFTER:-}"
@@ -98,10 +102,10 @@ submit () {
          printf '%s\n' "${out}" >&2
          exit 1
       fi
-      echo "${name}: ${id}  (${cmd[*]})" | tee -a "${log}" >&2
+      echo "${name}: ${id}  (DEVICE_FAULT=${DEVICE_FAULT} ${cmd[*]})" | tee -a "${log}" >&2
       echo "${id}"
    else
-      echo "dry run, ${name}: ${cmd[*]}" >&2
+      echo "dry run, ${name}: DEVICE_FAULT=${DEVICE_FAULT} ${cmd[*]}" >&2
       echo "<${name}>"
    fi
 }

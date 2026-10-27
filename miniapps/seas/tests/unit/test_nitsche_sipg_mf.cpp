@@ -39,6 +39,15 @@
 //   [Gd]   DeviceSlipLoad::AddMult against AddSlipLoadFast (rhs += G s)
 //   [T]    ComputeTractionFast on the values FaultGather brought back from
 //          the device against the same call on the host vector (exact)
+// and the fault of plan D3 (--device-fault 1) on the device:
+//   [DM]   DeviceFaultMaps::ToKernelLocal (owned three-vectors to local
+//          kernel slip, with the shared-face ghost copies) against
+//          ExpandOwnedToLocalFault and fault_frame::ToKernel on the host,
+//          random triads and eps_f (--mtol)
+//   [DT]   DeviceFaultTraction::Mult (with the neighbour exchange) against
+//          ComputeTractionFast on the host (--tol)
+// On the CPU and the debug device [DM] and [DT] repeat the host arithmetic
+// and their errors are 0.
 //
 // Usage (from miniapps/seas):
 //   mpirun -np N ./seas_test_nitsche_sipg_mf --mesh tpv205/mesh/tpv2053d_1000m.msh
@@ -429,6 +438,43 @@ int main(int argc, char *argv[])
          MPI_Allreduce(MPI_IN_PLACE, &ng, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
          Check(err == 0.0, "[T]  fault traction from the " + std::to_string(ng)
                + " gathered values (all ranks): rel err " + Sci(err));
+
+         // plan D3: the owned -> local kernel slip map and the traction on
+         // the device
+         const int ndl = elast->GetNumFaultDOFs(), nol = elast->GetNumOwnedFaultDOFs();
+         DenseMatrix Bk(9, ndl);
+         std::vector<real_t> eps(ndl);
+         for (int k = 0; k < ndl; k++)
+         {
+            for (int r = 0; r < 9; r++) { Bk(r, k) = U(rng); }
+            eps[k] = U(rng) < 0.0 ? -1.0 : 1.0;
+         }
+         Vector dow(3 * nol), dloc, skh(2 * ndl), skd;
+         for (int i = 0; i < 3 * nol; i++) { dow(i) = 1e-2 * U(rng); }
+         elast->ExpandOwnedToLocalFault(dow, dloc, 3);
+         for (int k = 0; k < ndl; k++)
+         {
+            real_t t1[3], t2[3];
+            for (int c = 0; c < 3; c++)
+            {
+               t1[c] = Bk(3 + c, k);
+               t2[c] = Bk(6 + c, k);
+            }
+            fault_frame::ToKernel(&dloc(3 * k), eps[k], t1, t2, skh(2 * k), skh(2 * k + 1));
+         }
+         DeviceFaultMaps maps(*elast, Bk, eps, MPI_COMM_WORLD);
+         maps.ToKernelLocal(dow, skd);
+         err = RelErr(skd, skh);
+         Check(err <= mtol, "[DM] owned -> local kernel slip on the device: rel err " + Sci(err));
+
+         DeviceFaultTraction dtr(*elast, MPI_COMM_WORLD);
+         Vector sld(ns), T3, N3;
+         sld.UseDevice(true);
+         sld = sl;
+         dtr.Mult(ud, sld, T3, N3);
+         err = std::max(RelErr(T3, T1), RelErr(N3, N1));
+         Check(err <= tol, "[DT] fault traction on the device (" + std::to_string(dtr.Bytes())
+               + " bytes of face blocks on rank 0): rel err " + Sci(err));
       }
    }
 
