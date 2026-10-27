@@ -874,7 +874,11 @@ DOMAIN_HEADERS = common/seas_types.hpp \
                  domain/elasticity_operator_qd.inl \
                  domain/qd_stage_operators.hpp \
                  domain/qd_green_operator.hpp \
+                 domain/qd_hmatrix_operator.hpp \
                  domain/matrix_stats.hpp \
+                 domain/elasticity_operator_fault_ops.inl \
+                 domain/fused_stiffness_pair.hpp \
+                 domain/dense_block_stiffness.hpp \
                  domain/boundary_config.hpp \
                  domain/domain_config.hpp \
                  domain/seas_boundary_tags.hpp \
@@ -3012,6 +3016,530 @@ seas_test_constant_tensor_sign: $(TEST_CONSTANT_TENSOR_SIGN_OBJ) \
 
 test-constant-tensor-sign: seas_test_constant_tensor_sign
 	./seas_test_constant_tensor_sign
+
+# Nitsche dynamic rupture P0 (gates G0.2, G0.5): read-only probes of the
+# quasi-static ElasticityDomainOperator on the TPV102 inline box + the
+# tpv102_spatial.toml material check.  Run from miniapps/seas.
+TEST_NITSCHE_GATES_SRC = tests/verification/test_nitsche_gates.cpp
+TEST_NITSCHE_GATES_OBJ = $(TEST_NITSCHE_GATES_SRC:.cpp=.o)
+$(TEST_NITSCHE_GATES_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                spatial/code/spatial_friction.hpp \
+                                $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+seas_test_nitsche_gates: $(TEST_NITSCHE_GATES_OBJ) \
+                         $(SPATIAL_STRESS_OBJ) \
+                         $(SPATIAL_FRICTION_OBJ) \
+                         $(STRESS_FIELD_3D_OBJ) \
+                         $(DATA_FIELD_3D_OBJ) \
+                         $(FIELD_COEFFICIENT_OBJ) \
+                         $(HETEROGENEOUS_MATERIAL_OBJ) \
+                         $(MATERIAL_COEFFICIENTS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_GATES_OBJ) \
+	    $(SPATIAL_STRESS_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(STRESS_FIELD_3D_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) \
+	    $(FIELD_COEFFICIENT_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MATERIAL_COEFFICIENTS_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS) $(SEAS_FS_LIB)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-gates: seas_test_nitsche_gates
+	./seas_test_nitsche_gates
+
+# Nitsche dynamic rupture P1 (C-01 ApplyStiffness, C-09 spatially varying
+# Lame coefficients, per-element material sample): T-01, T-19(a), penalty.
+TEST_NITSCHE_P1_SRC = tests/verification/test_nitsche_p1.cpp
+TEST_NITSCHE_P1_OBJ = $(TEST_NITSCHE_P1_SRC:.cpp=.o)
+$(TEST_NITSCHE_P1_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             domain/nitsche_wave_operator.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_p1: $(TEST_NITSCHE_P1_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_P1_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-p1: seas_test_nitsche_p1
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_p1
+
+# Nitsche dynamic rupture P2 (C-02 NitscheMass, density-weighted inverse DG
+# vector mass): T-02(a) contrast, T-02(b) bit-identity, operator layout.
+TEST_NITSCHE_P2_SRC = tests/verification/test_nitsche_p2.cpp
+TEST_NITSCHE_P2_OBJ = $(TEST_NITSCHE_P2_SRC:.cpp=.o)
+$(TEST_NITSCHE_P2_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             domain/nitsche_wave_operator.hpp \
+                             domain/nitsche_mass.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_p2: $(TEST_NITSCHE_P2_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_P2_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-p2: seas_test_nitsche_p2
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_p2
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_p2
+
+# Nitsche dynamic rupture P3 (N-01 fault-free NitscheWaveOperator, N-02
+# ComputeMaxDt + CentralDifferenceSolver): T-09(b,c,d), T-10.
+TEST_NITSCHE_P3_SRC = tests/verification/test_nitsche_p3.cpp
+TEST_NITSCHE_P3_OBJ = $(TEST_NITSCHE_P3_SRC:.cpp=.o)
+$(TEST_NITSCHE_P3_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             domain/nitsche_material_sample.hpp \
+                             domain/nitsche_wave_operator.hpp \
+                             domain/nitsche_mass.hpp \
+                             solver/nitsche_cfl.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_p3: $(TEST_NITSCHE_P3_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_P3_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Profiling plan item 7 (local time stepping), phases P1 and P2: the operator
+# split by element owner and the serial multirate leapfrog (L-1 .. L-6), with
+# Kelvin-Voigt damping and absorbing faces per cluster (L-7 .. L-10); one rank.
+TEST_NITSCHE_LTS_SRC = tests/verification/test_nitsche_lts.cpp
+TEST_NITSCHE_LTS_OBJ = $(TEST_NITSCHE_LTS_SRC:.cpp=.o)
+$(TEST_NITSCHE_LTS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             domain/nitsche_material_sample.hpp \
+                             domain/nitsche_wave_operator.hpp \
+                             domain/nitsche_mass.hpp \
+                             solver/nitsche_cfl.hpp \
+                             solver/nitsche_lts_setup.hpp \
+                             solver/nitsche_lts_stepper.hpp \
+                             solver/nitsche_lts_run.hpp \
+                             integrator/dg_elasticity_ip_combined_integrator.hpp \
+                             dynamic/lts_clustering.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_lts: $(TEST_NITSCHE_LTS_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+                       $(LTS_CLUSTERING_OBJ) $(LTS_PARTITION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_LTS_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) $(LTS_CLUSTERING_OBJ) \
+	    $(LTS_PARTITION_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-lts: seas_test_nitsche_lts
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_lts
+
+# Kelvin-Voigt layer prototype (Chunhui Zhao, 2026-10-14): fault-free box,
+# CFL with damping, P_kv <= 0, energy balance, smooth vs grid-scale damping.
+TEST_NITSCHE_KV_SRC = tests/verification/test_nitsche_kv.cpp
+TEST_NITSCHE_KV_OBJ = $(TEST_NITSCHE_KV_SRC:.cpp=.o)
+$(TEST_NITSCHE_KV_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             domain/nitsche_material_sample.hpp \
+                             domain/nitsche_wave_operator.hpp \
+                             domain/nitsche_mass.hpp \
+                             solver/nitsche_cfl.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_kv: $(TEST_NITSCHE_KV_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_KV_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-kv: seas_test_nitsche_kv
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_kv
+
+test-nitsche-p3: seas_test_nitsche_p3
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_p3
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_p3 --np2
+
+# Nitsche dynamic rupture P4 (dashpot absorbing boundary: C-03, N-06, C-02
+# damping block): T-03, T-12(a)-(d).
+TEST_NITSCHE_P4_SRC = tests/verification/test_nitsche_p4.cpp
+TEST_NITSCHE_P4_OBJ = $(TEST_NITSCHE_P4_SRC:.cpp=.o)
+$(TEST_NITSCHE_P4_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             domain/nitsche_material_sample.hpp \
+                             domain/nitsche_wave_operator.hpp \
+                             domain/nitsche_mass.hpp \
+                             integrator/dg_absorbing_bc_integrator.hpp \
+                             solver/nitsche_cfl.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_p4: $(TEST_NITSCHE_P4_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_P4_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-p4: seas_test_nitsche_p4
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_p4
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_p4
+
+# Nitsche dynamic rupture P5 (N-03 fault closure interface, N-04 rate-and-
+# state adapter): T-06, T-07, T-11.
+TEST_NITSCHE_P5_SRC = tests/verification/test_nitsche_p5.cpp
+TEST_NITSCHE_P5_OBJ = $(TEST_NITSCHE_P5_SRC:.cpp=.o)
+$(TEST_NITSCHE_P5_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             friction/fault_closure.hpp \
+                             friction/rate_state_closure.hpp \
+                             domain/nitsche_wave_operator.hpp \
+                             solver/nitsche_cfl.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_p5: $(TEST_NITSCHE_P5_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_P5_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-p5: seas_test_nitsche_p5
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_p5
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_p5
+
+# Nitsche dynamic rupture PF (fault coordinate layer: N-08 orientation, N-09
+# frame, the kernel dictionary): T-14, T-16, spec T11(a)/T12.
+TEST_NITSCHE_PF_SRC = tests/verification/test_nitsche_pf.cpp
+TEST_NITSCHE_PF_OBJ = $(TEST_NITSCHE_PF_SRC:.cpp=.o)
+$(TEST_NITSCHE_PF_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             fault/fault_orientation.hpp \
+                             fault/fault_frame.hpp \
+                             friction/rate_state_closure.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_pf: $(TEST_NITSCHE_PF_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_NITSCHE_PF_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-pf: seas_test_nitsche_pf
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_pf
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_pf
+
+# Station output of the Nitsche driver (speed-next O2, Chunhui Zhao
+# 2026-10-20): buffered rows, the members-only copy average against the world
+# version, the signal flag (O2-1 .. O2-4).
+TEST_STATION_OUTPUT_SRC = tests/verification/test_station_output.cpp
+TEST_STATION_OUTPUT_OBJ = $(TEST_STATION_OUTPUT_SRC:.cpp=.o)
+$(TEST_STATION_OUTPUT_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             dynamic/fault_station_file.hpp \
+                             dynamic/station_copy_average.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_station_output: $(TEST_STATION_OUTPUT_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_STATION_OUTPUT_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-station-output: seas_test_station_output
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_station_output
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_station_output
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 3 ./seas_test_station_output
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_station_output
+	rm -rf test_station_output_out
+
+# The parallel mesh from parts sent by rank 0 (Chunhui Zhao 2026-10-22,
+# partition-memory report rev1 option D, speed-next S1): the same mesh, DOF
+# numbers and element values as ParMesh(comm, serial mesh, partition)
+# (MP-1 .. MP-7), and the part files of S1 step 2 (MP-8).
+TEST_MESH_PARTS_SRC = tests/verification/test_mesh_parts.cpp
+TEST_MESH_PARTS_OBJ = $(TEST_MESH_PARTS_SRC:.cpp=.o)
+$(TEST_MESH_PARTS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             dynamic/mesh_parts.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_mesh_parts: $(TEST_MESH_PARTS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_MESH_PARTS_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-mesh-parts: seas_test_mesh_parts
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_mesh_parts
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_mesh_parts
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 3 ./seas_test_mesh_parts
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_mesh_parts
+	rm -rf test_mesh_parts_out
+
+# Nitsche dynamic rupture P6 (first rupture, TPV102 on the inline mesh; plan
+# N-01 fault path, C-04, N-10 fixture): T-04, T-13(a), T-15, T-20, T-21.
+# The abort modes must exit non-zero (MFEM_USE_EXCEPTIONS=NO: tested by exit
+# status and message).
+TEST_NITSCHE_TPV102_INLINE_SRC = tests/verification/test_nitsche_tpv102_inline.cpp
+TEST_NITSCHE_TPV102_INLINE_OBJ = $(TEST_NITSCHE_TPV102_INLINE_SRC:.cpp=.o)
+$(TEST_NITSCHE_TPV102_INLINE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             domain/nitsche_wave_operator.hpp \
+                             domain/elasticity_operator_penalty.inl \
+                             fault/fault_orientation.hpp \
+                             fault/fault_frame.hpp \
+                             friction/rate_state_closure.hpp \
+                             solver/nitsche_cfl.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_tpv102_inline: $(TEST_NITSCHE_TPV102_INLINE_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_TPV102_INLINE_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# mode:expected-message pairs; a mode passes only if it exits non-zero AND
+# prints its own abort message.
+NITSCHE_P6_ABORT_MODES = --abort-fac0:fac0 --abort-fac1:fac1 \
+                         --abort-twice:called.twice --abort-linacc:fac0 \
+                         --t04-curved-n01:not.constant.on.fault.face
+test-nitsche-tpv102-inline: seas_test_nitsche_tpv102_inline
+	for np in 1 2 4 8; do $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_nitsche_tpv102_inline || exit 1; done
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_tpv102_inline --t04-curved
+	for np in 2 4 8; do $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_nitsche_tpv102_inline --interior-rank || exit 1; done
+	for np in 1 2; do for mm in $(NITSCHE_P6_ABORT_MODES); do \
+	  m=$${mm%%:*}; msg=$${mm#*:}; \
+	  if $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_nitsche_tpv102_inline $$m > p6_abort.log 2>&1; \
+	  then echo "FAILED: $$m (np $$np) did not abort"; exit 1; fi; \
+	  if grep -q "$$msg" p6_abort.log; then echo "PASSED: $$m (np $$np) aborted: $$msg"; \
+	  else echo "FAILED: $$m (np $$np) aborted without '$$msg'"; exit 1; fi; \
+	done; done; rm -f p6_abort.log
+
+# Nitsche dynamic rupture: Prakash-Clifton regularization of the normal
+# stress the law sees (NitscheWaveOperator::SetPrakashClifton; Chunhui Zhao,
+# 2026-10-14).  PC-b exact update, PC-c L -> 0 == off bitwise, PC-d
+# equilibrium, PC-s active; --abort-unseeded must abort.
+TEST_NITSCHE_PC_SRC = tests/verification/test_nitsche_pc.cpp
+TEST_NITSCHE_PC_OBJ = $(TEST_NITSCHE_PC_SRC:.cpp=.o)
+$(TEST_NITSCHE_PC_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             domain/nitsche_wave_operator.hpp \
+                             domain/elasticity_operator_penalty.inl \
+                             fault/fault_orientation.hpp \
+                             fault/fault_frame.hpp \
+                             friction/rate_state_closure.hpp \
+                             solver/nitsche_cfl.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_pc: $(TEST_NITSCHE_PC_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_PC_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-pc: seas_test_nitsche_pc
+	for np in 1 2 4; do $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_nitsche_pc || exit 1; done
+	if $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_pc --abort-unseeded > pc_abort.log 2>&1; \
+	then echo "FAILED: --abort-unseeded did not abort"; exit 1; fi; \
+	if grep -q "never seeded" pc_abort.log; then echo "PASSED: --abort-unseeded aborted: never seeded"; \
+	else echo "FAILED: --abort-unseeded aborted without 'never seeded'"; exit 1; fi; rm -f pc_abort.log
+
+# Nitsche hook H-B1 (benchmark plan rev 1.3, gate L-10): a spy closure sees
+# |d^n| and the stored per-point parameters; a rejecting CheckParameters
+# must stop the setup (exit non-zero with its message).
+TEST_NITSCHE_HOOK_SPY_SRC = tests/verification/test_nitsche_hook_spy.cpp
+TEST_NITSCHE_HOOK_SPY_OBJ = $(TEST_NITSCHE_HOOK_SPY_SRC:.cpp=.o)
+$(TEST_NITSCHE_HOOK_SPY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             domain/nitsche_wave_operator.hpp \
+                             domain/elasticity_operator_penalty.inl \
+                             fault/fault_orientation.hpp \
+                             fault/fault_frame.hpp \
+                             friction/fault_closure.hpp \
+                             friction/rate_state_closure.hpp \
+                             solver/nitsche_cfl.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_hook_spy: $(TEST_NITSCHE_HOOK_SPY_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_HOOK_SPY_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-hook-spy: seas_test_nitsche_hook_spy
+	for np in 1 2 4; do $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_nitsche_hook_spy || exit 1; done
+	if $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_hook_spy --abort-reject > hook_spy_abort.log 2>&1; \
+	then echo "FAILED: --abort-reject did not abort"; exit 1; fi; \
+	if grep -q "closure rejects the parameters" hook_spy_abort.log; then echo "PASSED: --abort-reject aborted: closure rejects the parameters"; \
+	else echo "FAILED: --abort-reject aborted without 'closure rejects the parameters'"; exit 1; fi; rm -f hook_spy_abort.log
+
+# Nitsche linear slip weakening (benchmark plan rev 1.3, phase B2): the
+# closure's stick and slip branches, its derivative and its agreement with
+# the ADER TPV205 solve (L-01 to L-04).  Pointwise, one rank.
+TEST_NITSCHE_LSW_SRC = tests/verification/test_nitsche_lsw.cpp
+TEST_NITSCHE_LSW_OBJ = $(TEST_NITSCHE_LSW_SRC:.cpp=.o)
+$(TEST_NITSCHE_LSW_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             friction/fault_closure.hpp \
+                             friction/slip_weakening_closure.hpp \
+                             dynamic/tpv205_friction.hpp \
+                             config/tpv205_params.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_lsw: $(TEST_NITSCHE_LSW_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_NITSCHE_LSW_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-lsw: seas_test_nitsche_lsw
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_lsw
+
+# Nitsche linear slip weakening on the inline box (benchmark plan rev 1.3,
+# phase B3): L-05 mirror symmetry, L-08 rank invariance against one rank,
+# L-09 Prakash-Clifton and Kelvin-Voigt (default mode, np 1, 2, 4); the
+# long checks L-06 energy balance and L-07 coupled dt refinement.
+TEST_NITSCHE_LSW_INLINE_SRC = tests/verification/test_nitsche_lsw_inline.cpp
+TEST_NITSCHE_LSW_INLINE_OBJ = $(TEST_NITSCHE_LSW_INLINE_SRC:.cpp=.o)
+$(TEST_NITSCHE_LSW_INLINE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             domain/nitsche_wave_operator.hpp \
+                             domain/nitsche_energy.hpp \
+                             domain/elasticity_operator_penalty.inl \
+                             fault/fault_orientation.hpp \
+                             fault/fault_frame.hpp \
+                             friction/fault_closure.hpp \
+                             friction/slip_weakening_closure.hpp \
+                             solver/nitsche_cfl.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_lsw_inline: $(TEST_NITSCHE_LSW_INLINE_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_LSW_INLINE_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-lsw-inline: seas_test_nitsche_lsw_inline
+	for np in 1 2 4; do $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_nitsche_lsw_inline || exit 1; done
+
+test-nitsche-lsw-inline-long: seas_test_nitsche_lsw_inline
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_nitsche_lsw_inline --l06 8 8 4 2 2.0
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 8 ./seas_test_nitsche_lsw_inline --l07 8 8 4 2 1.5 2 0.1
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 8 ./seas_test_nitsche_lsw_inline --l07 8 8 4 1 1.5 2 0.1
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 8 ./seas_test_nitsche_lsw_inline --l07 8 8 4 2 1.5 2 0
+
+# Nitsche rate and state, slip law with strong rate weakening (benchmark
+# plan rev 1.3, phase B5): S-01 adapter, S-02 initial state, S-03 Heun
+# against the frozen-V exponential, S-04 low speed.  Pointwise, one rank.
+TEST_NITSCHE_SRW_SRC = tests/verification/test_nitsche_srw.cpp
+TEST_NITSCHE_SRW_OBJ = $(TEST_NITSCHE_SRW_SRC:.cpp=.o)
+$(TEST_NITSCHE_SRW_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             friction/fault_closure.hpp \
+                             friction/rate_state_srw_closure.hpp \
+                             friction/slip_law_srw_psi.hpp \
+                             config/tpv104_params.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_srw: $(TEST_NITSCHE_SRW_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_NITSCHE_SRW_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-srw: seas_test_nitsche_srw
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_srw
+
+# Nitsche dynamic rupture P7: the driver (plan N-07).  Reads the SAFS deck
+# through spatial::LoadSpatialFrictionConfig (toml11) and the constant
+# material; links the friction parser, the material and the nucleation
+# objects (no HDF5 objects: the sidecar materials are P8).
+NITSCHE_DYN_DRIVER_SRC = drivers/nitsche_dyn_driver.cpp
+NITSCHE_DYN_DRIVER_OBJ = $(NITSCHE_DYN_DRIVER_SRC:.cpp=.o)
+$(NITSCHE_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             domain/nitsche_wave_operator.hpp \
+                             domain/nitsche_mass.hpp \
+                             solver/nitsche_cfl.hpp \
+                             integrator/dg_elasticity_ip_combined_integrator.hpp \
+                             dynamic/lts_partition.hpp \
+                             dynamic/lts_clustering.hpp \
+                             solver/nitsche_lts_setup.hpp \
+                             solver/nitsche_lts_run.hpp \
+                             domain/nitsche_energy.hpp \
+                             spatial/code/spatial_friction.hpp \
+                             dynamic/fault_station_file.hpp \
+                             dynamic/station_copy_average.hpp \
+                             dynamic/mesh_parts.hpp \
+                             friction/rate_state_closure.hpp \
+                             friction/rate_state_srw_closure.hpp \
+                             friction/slip_weakening_closure.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) $(TOML_FLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_nitsche_dyn_driver: $(NITSCHE_DYN_DRIVER_OBJ) $(SPATIAL_FRICTION_OBJ) \
+                         $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+                         $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(NITSCHE_DYN_DRIVER_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Speed-next profiling (Chunhui Zhao, 2026-10-20): the same driver with debug
+# information (-g) for a sampling profiler (Linaro MAP, perf).  -g does not
+# change the generated code: jobs/vista_profiling/build_map_vista.sbatch
+# checks that its object without the debug sections is byte-identical to
+# drivers/nitsche_dyn_driver.o.
+NITSCHE_DYN_DRIVER_G_OBJ = drivers/nitsche_dyn_driver_g.o
+$(NITSCHE_DYN_DRIVER_G_OBJ): $(SRC)$(NITSCHE_DYN_DRIVER_SRC) $(NITSCHE_DYN_DRIVER_OBJ)
+	$(MFEM_CXX) $(MFEM_FLAGS) -g $(SEAS_INCLUDES) $(HDF5_INCFLAGS) $(TOML_FLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_nitsche_dyn_driver_g: $(NITSCHE_DYN_DRIVER_G_OBJ) $(SPATIAL_FRICTION_OBJ) \
+                           $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+                           $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(NITSCHE_DYN_DRIVER_G_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# P6 long checks (minutes each; np=8 unless noted): T-15 energy balance and
+# its NIPG control, T-20 coupled dt refinement (dt0/4..dt0/16 vs dt0/64),
+# T-21(c) hand loop (np 1, 2), and the L2 gate on the widened graded box
+# (TPV102 p=1 to 5.5 s; decision Chunhui Zhao 2026-10-14).
+test-nitsche-tpv102-inline-long: seas_test_nitsche_tpv102_inline
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_tpv102_inline --t15 8 8 4 2 2.0
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_nitsche_tpv102_inline --t15-nipg 8 8 4 2 2.0
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 8 ./seas_test_nitsche_tpv102_inline --t20 8 8 4 2 1.5 4
+	for np in 1 2; do $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_nitsche_tpv102_inline --t21c 8 8 4 2 1000 || exit 1; done
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 8 ./seas_test_nitsche_tpv102_inline --graded 1000 1 5.5 - 8 1.2 10000
 
 # =====================================================================
 #  Phase 10 (TPV31) unit tests
@@ -6384,3 +6912,16 @@ seas_test_lsw_rk_mixed_flux_bimaterial: $(TEST_LSW_RK_MIXED_FLUX_BIMATERIAL_OBJ)
 
 test-lsw-rk-mixed-flux-bimaterial: seas_test_lsw_rk_mixed_flux_bimaterial
 	./seas_test_lsw_rk_mixed_flux_bimaterial
+
+# Profiling plan (nitsche-profiling, 2026-10-17): kernel timings and
+# equivalence checks for the proposed Nitsche-step speedups.
+BENCH_NITSCHE_KERNELS_SRC = tests/unit/bench_nitsche_kernels.cpp
+BENCH_NITSCHE_KERNELS_OBJ = $(BENCH_NITSCHE_KERNELS_SRC:.cpp=.o)
+$(BENCH_NITSCHE_KERNELS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_bench_nitsche_kernels: $(BENCH_NITSCHE_KERNELS_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) $(LTS_PARTITION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(BENCH_NITSCHE_KERNELS_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) $(LTS_PARTITION_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)

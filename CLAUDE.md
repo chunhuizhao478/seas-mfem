@@ -1,3 +1,35 @@
+# Version control: GitHub first (MANDATORY, Chunhui Zhao 2026-10-15)
+
+GitHub is the single source of truth for every version that runs on a cluster
+(Frontera, Discovery, condo, any HPC).  BP5 fully dynamic and all later work
+build on these runs, so a cluster run must always be reproducible from a
+GitHub commit.
+
+1. Commit and push FIRST, then pull on the cluster.  Every change to code,
+   Makefiles, input decks (`*.toml`) and job scripts (`*.sbatch`) that a
+   cluster job will use is committed and pushed to GitHub before the cluster
+   sees it.  The cluster checkout gets it with `git fetch` + `git checkout` /
+   `git pull` of that pushed commit.
+2. Never patch, scp or edit source on the cluster: no `git apply` of patches,
+   no copied `.cpp/.hpp/Makefile`, no `git stash` there.  A cluster checkout
+   has no uncommitted tracked changes when it builds or runs.
+3. Decks and job scripts live in the repo (e.g. `miniapps/seas/<problem>/configs/`)
+   and are committed as they run; the job reads them from the checkout.
+4. Every build/run job script starts with this guard and logs the commit:
+   ```bash
+   cd $ROOT
+   git fetch -q origin || { echo "ERROR: git fetch failed"; exit 2; }
+   [ -z "$(git status --porcelain --untracked-files=no)" ] \
+      || { echo "ERROR: uncommitted changes in $ROOT"; git status --short; exit 2; }
+   [ -n "$(git branch -r --contains HEAD)" ] \
+      || { echo "ERROR: HEAD $(git rev-parse --short HEAD) is not on GitHub"; exit 2; }
+   echo "commit $(git rev-parse HEAD)"
+   ```
+   A binary must be built by a job that passed this guard at the same commit.
+5. Results record the commit hash (job stdout / driver log); comparisons cite it.
+6. Exceptions (e.g. a throw-away debug build) need Chunhui Zhao's explicit
+   approval in the conversation, and such runs are never used as results.
+
 # Project Instructions
 
 ## SEAS Miniapp Development

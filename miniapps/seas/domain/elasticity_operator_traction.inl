@@ -397,6 +397,31 @@ void ElasticityDomainOperator<MeshType>::ExpandOwnedToLocalFault(
    }
 }
 
+template <typename MeshType>
+void ElasticityDomainOperator<MeshType>::ApplyStiffness(
+   const Vector &u, Vector &Ku) const
+{
+   if (!stiffness_assembled_)
+   {
+      AssembleStiffness();
+   }
+   MFEM_VERIFY(u.Size() == X_.Size(),
+               "ApplyStiffness: input size " << u.Size()
+               << " != stiffness true size " << X_.Size());
+   Ku.SetSize(u.Size());
+
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+#ifdef MFEM_USE_MPI
+      cached_Ah_.As<HypreParMatrix>()->Mult(u, Ku);
+#endif
+   }
+   else
+   {
+      cached_a_->SpMat().Mult(u, Ku);
+   }
+}
+
 // Solve K X_ = B_ (B_ already loaded), run the post-solve checks (residual,
 // NaN, iterative convergence) and copy X_ to displacement.  Shared by Solve
 // (face loops) and SolveStage (stage operators, GPU plan G2).
@@ -406,6 +431,8 @@ void ElasticityDomainOperator<MeshType>::SolveLoadedRHS(
 {
    X_ = 0.0;
 
+   MFEM_VERIFY(solver_, "ElasticityDomainOperator::Solve: built with "
+               "SolverType::OperatorOnly (no solver)");
    {
       ScopedStageTimer timer(stage_timers_, StageTimers::Solve);
       solver_->Mult(B_, X_);
@@ -884,7 +911,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
 
          // Step 1: Traction at quad points (Tandem compute_traction)
          DGElasticityIPCombinedIntegrator trac_integ(
-            lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
+            *lambda_ptr_, *mu_ptr_, dim, epsilon_, penalty_factor_);
          Vector T_quad_new, nl_q_vec;
          Vector T_stress_quad_dec, T_corr_quad_dec, R_quad_dec;
          trac_integ.ComputeTractionAtQuadPointsDecomposed(
@@ -1386,7 +1413,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             }
 
             DGElasticityIPCombinedIntegrator trac_integ_sh(
-               lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
+               *lambda_ptr_, *mu_ptr_, dim, epsilon_, penalty_factor_);
             Vector T_quad_sh, nl_q_sh;
             Vector T_stress_quad_sh, T_corr_quad_sh, R_quad_sh;
             trac_integ_sh.ComputeTractionAtQuadPointsDecomposed(

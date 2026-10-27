@@ -25,8 +25,8 @@ These lessons were learned through extensive debugging (v1-v62). Violating any o
 
 ### Sign Conventions
 
-- **Slip rate direction**: PARALLEL to traction tau (not antiparallel). `V_vec = (V_abs / tau_abs) * tau_vec`. Antiparallel sign creates positive feedback -> unbounded growth (debug v8).
-- **Pre-stress direction**: PARALLEL to initial velocity. `tau_pre = tau0_scalar * Vi / |Vi|` (debug v8).
+- **Slip rate direction (quasi-static / BP5 / Nitsche path)**: ANTI-PARALLEL to traction tau. `V_vec = -(tau_vec / tau_abs) * V_abs` in `DieterichRuinaFriction::SolveSlipRateVectorPsi` (friction/dieterich_ruina.hpp:492-494), matching Tandem `DieterichRuinaBase.h:174`; adopted in debug v55 D8 (bp5_debug_v55.md §9, §20.1) with the GetSlip/SetSlip negation, identical trajectory. The parallel form of debug v8 is superseded. The direction is not a free convention: it is fixed once the fault normal n̂ (ref_normal) and the jump [[·]] are fixed, because tau is the traction on the face with normal n̂. The velocity-stress (upwind) dynamic path has its own traction / jump definitions and uses PARALLEL: `V = V_abs * tau / (strength + eta_s V_abs)` (dynamic/fault_face_flux.cpp:254, 261-262).
+- **Pre-stress direction**: same rule as the slip rate, per path. BP5 / quasi-static: ANTI-PARALLEL to the initial slip rate, `tau_pre = -tau0_scalar * Vi / |Vi|` (config/bp5_params.hpp:379-380, Tandem bp5.lua). TPV102 velocity-stress dynamic: PARALLEL (`tau2_corr = +tau_ini`, `V2 = +V_ini`, dynamic/tpv102_setup.hpp:104-110). In both, slip accumulates in the direction of V_init.
 - **Dip direction**: (0, 0, +1) = downward into earth. Was wrongly (0, 0, -1) = upward (debug v10).
 - **DG face sign**: `sign = (nor(0) > 0) ? -1.0 : 1.0` applied consistently to slip embedding and traction extraction.
 - **Normal stress**: sigma_n > 0 = compression (geology convention).

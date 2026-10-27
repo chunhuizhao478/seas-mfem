@@ -89,7 +89,11 @@ hid_t VTKHDF::EnsureDataset(hid_t f, const std::string &name, hid_t type,
 {
    const char *name_c = name.c_str();
 
-   const herr_t status = H5LTfind_dataset(f, name_c);
+   // Exact name test, as in EnsureGroup.  Before HDF5 1.14.5, H5LTfind_dataset
+   // compared only strlen(name) characters (HDFGroup/hdf5#4780), so a new
+   // "normal_stress" matched an existing "normal_stress_pc" and the open below
+   // failed (HDF5 1.14.3 on USC Discovery, 2026-10-16).
+   const htri_t status = H5Lexists(f, name_c, H5P_DEFAULT);
    Barrier();
 
    if (status == 0)
@@ -112,6 +116,10 @@ hid_t VTKHDF::EnsureDataset(hid_t f, const std::string &name, hid_t type,
          chunk_size_bytes /= dims[i];
       }
       chunk[0] = chunk_size_bytes / t_bytes;
+      if (chunk_to_first_append)
+      {
+         chunk[0] = std::min<hsize_t>(chunk[0], std::max<hsize_t>(dims[0], 1024));
+      }
       const hid_t dcpl = H5Pcreate(H5P_DATASET_CREATE);
       H5Pset_chunk(dcpl, ndims, chunk);
 
@@ -195,7 +203,7 @@ hid_t VTKHDF::EnsureDataset(hid_t f, const std::string &name, hid_t type,
    }
    else
    {
-      // Error occurred in H5LTfind_dataset.
+      // Error occurred in H5Lexists.
       MFEM_ABORT("Error finding HDF5 dataset " << name);
    }
 }
@@ -838,6 +846,20 @@ void VTKHDF::SaveGridFunction(const GridFunction &gf, const std::string &name)
    point_data_offsets[name].Update(offset_total.total);
 }
 
+template <typename FP_T>
+void VTKHDF::SavePointData(const std::string &name, const std::vector<FP_T> &values,
+                           int vdim)
+{
+   EnsureGroup("PointData", point_data);
+   MFEM_VERIFY(vdim >= 1 && values.size() == size_t(vdim) * last_np,
+               "VTKHDF::SavePointData: " << values.size() << " values for "
+               << last_np << " points x " << vdim << " components");
+   Dims dims(vdim == 1 ? 1 : 2);
+   if (vdim > 1) { dims[1] = vdim; }
+   auto offset_total = AppendParVector(point_data, name, values, dims);
+   point_data_offsets[name].Update(offset_total.total);
+}
+
 void VTKHDF::Flush()
 {
    H5Fflush(file, H5F_SCOPE_GLOBAL);
@@ -860,6 +882,10 @@ template void VTKHDF::SaveGridFunction<float>(const GridFunction&,
                                               const std::string&);
 template void VTKHDF::SaveGridFunction<double>(const GridFunction&,
                                                const std::string&);
+template void VTKHDF::SavePointData<float>(const std::string&,
+                                           const std::vector<float>&, int);
+template void VTKHDF::SavePointData<double>(const std::string&,
+                                            const std::vector<double>&, int);
 
 } // namespace mfem
 

@@ -63,15 +63,17 @@
       const auto &dir_attrs = bdr_config_.dirichlet_attrs;
 
       // ---- Check global attr existence ----
-      int local_has_fault = 0, local_has_dir = 0;
+      int local_has_fault = 0, local_has_dir = 0, local_has_abs = 0;
       for (int be = 0; be < mesh_.GetNBE(); be++)
       {
          int attr = mesh_.GetBdrAttribute(be);
          if (attr == fault_attr) { local_has_fault = 1; }
          if (dir_attrs.count(attr)) { local_has_dir = 1; }
+         if (bdr_config_.absorbing_attrs.count(attr)) { local_has_abs = 1; }
       }
       int global_has_fault = local_has_fault;
       int global_has_dir = local_has_dir;
+      int global_has_abs = local_has_abs;
       if constexpr (IsParallelMesh<MeshType>::value)
       {
 #ifdef MFEM_USE_MPI
@@ -79,15 +81,25 @@
                        MPI_MAX, mesh_.GetComm());
          MPI_Allreduce(MPI_IN_PLACE, &global_has_dir, 1, MPI_INT,
                        MPI_MAX, mesh_.GetComm());
+         MPI_Allreduce(MPI_IN_PLACE, &global_has_abs, 1, MPI_INT,
+                       MPI_MAX, mesh_.GetComm());
 #endif
       }
       bool has_fault = (global_has_fault > 0);
       bool has_dirichlet = (global_has_dir > 0);
+      bool has_absorbing = (global_has_abs > 0);
+      // Origin: 347f62d ("BP5 requires both Physical Surface tags"),
+      // generalised to BoundaryConfig in 00dd4b4.  A static solve with a
+      // fault needs Dirichlet faces (K is otherwise singular); an explicit
+      // dynamic run only inverts the mass matrix, so absorbing faces suffice
+      // (decision, Chunhui Zhao, 2026-10-14: "Allow Dirichlet or absorbing").
       if (has_fault)
       {
-         MFEM_VERIFY(has_dirichlet,
+         MFEM_VERIFY(has_dirichlet || has_absorbing,
             "ERROR: Mesh has fault faces (attr " << fault_attr
-            << ") but no Dirichlet faces. Requires both.");
+            << ") but no Dirichlet or absorbing faces. A static solve needs "
+               "Dirichlet faces; an explicit dynamic run needs Dirichlet or "
+               "absorbing faces.");
       }
       if (!has_fault && !has_dirichlet) { return; }
 
@@ -630,11 +642,53 @@
       }
    }
 
+   /// C-03 (Nitsche P4): collect the exterior boundary faces tagged with an
+   /// absorbing attribute.  Additive: absorbing faces stay FacetBC::None for
+   /// K (natural, zero traction); the dashpot C is assembled separately from
+   /// this list.  Also asserts absorbing attrs are disjoint from the Dirichlet attrs
+   /// and the fault attr.
+   void CollectAbsorbingFaces()
+   {
+      const auto &abs_attrs = bdr_config_.absorbing_attrs;
+      const auto &dir_attrs = bdr_config_.dirichlet_attrs;
+      for (int a : abs_attrs)
+      {
+         MFEM_VERIFY(dir_attrs.count(a) == 0,
+            "ERROR: boundary attr " << a << " is both absorbing and "
+            "Dirichlet; absorbing_attrs, dirichlet_attrs and fault_attr "
+            "must be disjoint.");
+         MFEM_VERIFY(a != bdr_config_.fault_attr,
+            "ERROR: boundary attr " << a << " is both absorbing and the "
+            "fault attr; absorbing_attrs, dirichlet_attrs and fault_attr "
+            "must be disjoint.");
+      }
+      // (fault vs Dirichlet overlap is not checked here: the legacy
+      // BCMode::AllDirichlet path puts the fault attr in dirichlet_attrs on
+      // purpose and BuildFacetBCTables resolves it with fault priority.)
+
+      absorbing_bdr_faces_.SetSize(0);
+      absorbing_bdr_elems_.SetSize(0);
+      if (abs_attrs.empty()) { return; }
+      for (int be = 0; be < mesh_.GetNBE(); be++)
+      {
+         const int attr = mesh_.GetBdrAttribute(be);
+         if (!abs_attrs.count(attr)) { continue; }
+         const int f = mesh_.GetBdrElementFaceIndex(be);
+         MFEM_VERIFY(mesh_.GetFaceInformation(f).IsBoundary(),
+            "ERROR: absorbing boundary element " << be << " (attr " << attr
+            << ") lies on an interior or shared face " << f
+            << "; absorbing attrs must tag exterior boundary faces only.");
+         absorbing_bdr_faces_.Append(f);
+         absorbing_bdr_elems_.Append(be);
+      }
+   }
+
    void SetupFaultInfo()
    {
       // Build facet BC tables (single source of truth) and derive
       // legacy face arrays. Includes exact canonical-key validation.
       BuildFacetBCTables();
+      CollectAbsorbingFaces();
 
       num_fault_faces_ = fault_interior_faces_.Size() + fault_shared_faces_.Size();
 
@@ -652,6 +706,36 @@
       // IP: use the same nodal triangle order as the volume space, matching
       // Tandem's fault discretization even at p=1.
       // BR2: keep the legacy face-averaged path (nbf=1).
+      //
+      // The IP fault DOF layout below is hard-wired to TRIANGLE faces. On a
+      // non-triangular fault face (e.g. a hex mesh) its nodal points cover
+      // only half of the face and ComputeTraction returns silently wrong
+      // values (measured 21% error on the TPV102 hex box), so refuse it.
+      if (method_ == DGMethod::IP)
+      {
+         for (int i = 0; i < fault_interior_faces_.Size(); i++)
+         {
+            const int f = fault_interior_faces_[i];
+            MFEM_VERIFY(mesh_.GetFaceGeometry(f) == Geometry::TRIANGLE,
+               "ERROR: DGMethod::IP requires triangular fault faces "
+               "(tetrahedral mesh); fault face " << f << " has geometry "
+               << Geometry::Name[mesh_.GetFaceGeometry(f)] << ".");
+         }
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            for (int i = 0; i < fault_shared_faces_.Size(); i++)
+            {
+               const int f = mesh_.GetSharedFace(fault_shared_faces_[i]);
+               MFEM_VERIFY(mesh_.GetFaceGeometry(f) == Geometry::TRIANGLE,
+                  "ERROR: DGMethod::IP requires triangular fault faces "
+                  "(tetrahedral mesh); shared fault face " << f
+                  << " has geometry "
+                  << Geometry::Name[mesh_.GetFaceGeometry(f)] << ".");
+            }
+#endif
+         }
+      }
       int face_fe_order = (method_ == DGMethod::IP) ? order_ : 0;
       face_quad_ = std::make_unique<FaceQuadrature>(face_fe_order,
                                                      std::max(order_, 1),

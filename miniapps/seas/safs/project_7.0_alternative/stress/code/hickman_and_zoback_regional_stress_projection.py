@@ -36,7 +36,7 @@ References
 - Aochi & Madariaga (2003) BSSA 93, 1249-1266 -- stress resolution onto
   non-planar faults, the methodology this code implements.
 
-Author: written for Andy Zhao (USC / SCEC), May 2026.
+Author: written for Chunhui Zhao (USC / SCEC), May 2026.
 """
 
 from __future__ import annotations

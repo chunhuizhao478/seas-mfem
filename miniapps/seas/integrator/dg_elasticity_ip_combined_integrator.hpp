@@ -53,6 +53,19 @@ public:
 
    using BilinearFormIntegrator::AssembleFaceMatrix;
 
+   /// Profiling plan item 7 (local time stepping; lts-kernels-design-rev1
+   /// §3.4 step 2, §7.3): on interior faces keep only the half of the form
+   /// that belongs to side s (1 = Elem1, 2 = Elem2): that side's consistency
+   /// and symmetry terms, -1/2 sigma(u_s) n . [w] - 1/2 sigma(w_s) n . [u],
+   /// and its penalty share pi p_s / 4, so the two halves sum to the whole
+   /// form.  0 (the default) is the whole form, every bit as before.
+   /// Boundary faces belong to their one element and ignore it.
+   void SetSide(int s)
+   {
+      MFEM_VERIFY(s >= 0 && s <= 2, "DGElasticityIPCombinedIntegrator::SetSide: " << s);
+      side_ = s;
+   }
+
    /// Assemble the full face matrix: consistency + symmetry + penalty.
    /// Mirrors Tandem's assembleSurface kernel.
    void AssembleFaceMatrix(const FiniteElement &el1,
@@ -116,7 +129,18 @@ public:
 
          // Penalty (Tandem formula)
          real_t penalty = ComputePenalty(el1, el2, detJ1, detJ2,
-                                         lam1, mu1, nl_q, is_interior);
+                                         lam1, mu1, lam2, mu2, nl_q,
+                                         is_interior);
+         // SetSide: keep side 1's (s1) or side 2's (s2) terms; both are 1
+         // for the whole form
+         const real_t s1 = (side_ == 2) ? 0.0 : 1.0;
+         const real_t s2 = (side_ == 1) ? 0.0 : 1.0;
+         if (is_interior && side_ != 0)
+         {
+            penalty = (side_ == 1)
+                      ? ComputeSidePenalty(el1, el2, detJ1, lam1, mu1, nl_q)
+                      : ComputeSidePenalty(el1, el2, detJ2, lam2, mu2, nl_q);
+         }
 
          // Coefficients matching Tandem's assembleSurface
          // Skeleton: c0=-0.5, c1=eps/2, c2=+penalty (same side)
@@ -132,8 +156,8 @@ public:
             lam1, mu1, detJ1,
             lam1, mu1, detJ1,
             nor, nl_q, w_q,
-            is_interior ? -0.5 : -1.0,  // c0
-            is_interior ? 0.5*epsilon_ : epsilon_,  // c1
+            is_interior ? -0.5*s1 : -1.0,  // c0
+            is_interior ? 0.5*epsilon_*s1 : epsilon_,  // c1
             penalty,  // c2 (same side)
             elmat);
 
@@ -147,8 +171,8 @@ public:
             lam2, mu2, detJ2,  // trial = elem2 for consistency
             lam1, mu1, detJ1,  // test = elem1 for symmetry (but c1 uses trial side)
             nor, nl_q, w_q,
-            -0.5,               // c0 (same as block 00 — test is elem1)
-            -0.5*epsilon_,       // c1 (negated — trial is elem2)
+            -0.5*s2,            // c0 (same as block 00 — test is elem1)
+            -0.5*epsilon_*s1,    // c1 (negated — trial is elem2)
             -penalty,            // c2 (cross side)
             elmat);
 
@@ -160,8 +184,8 @@ public:
             lam1, mu1, detJ1,  // trial = elem1
             lam2, mu2, detJ2,  // test = elem2
             nor, nl_q, w_q,
-            0.5,                // c0 (negated — test is elem2)
-            0.5*epsilon_,        // c1 (trial is elem1)
+            0.5*s1,             // c0 (negated — test is elem2)
+            0.5*epsilon_*s2,     // c1 (trial is elem1)
             -penalty,            // c2 (cross side)
             elmat);
 
@@ -173,8 +197,8 @@ public:
             lam2, mu2, detJ2,
             lam2, mu2, detJ2,
             nor, nl_q, w_q,
-            0.5,                // c0
-            -0.5*epsilon_,       // c1
+            0.5*s2,             // c0
+            -0.5*epsilon_*s2,    // c1
             penalty,             // c2 (same side)
             elmat);
       }
@@ -258,7 +282,7 @@ public:
          real_t mu2 = mu_ptr_->Eval(*Trans.Elem2, eip2);
 
          real_t penalty = ComputePenalty(fe1, fe2, detJ1, detJ2,
-                                          lam1, mu1, nl_q, true);
+                                          lam1, mu1, lam2, mu2, nl_q, true);
 
          // Slip at this quad point
          real_t f_q[3];
@@ -380,7 +404,7 @@ public:
 
          // Boundary penalty: single element (Tandem: penalty_[fctNo] = p(0))
          real_t penalty = ComputePenalty(fe1, fe1, detJ1, detJ1,
-                                          lam1, mu1, nl_q, false);
+                                          lam1, mu1, lam1, mu1, nl_q, false);
 
          // Prescribed Dirichlet value at this quad point
          real_t f_q[3];
@@ -533,7 +557,7 @@ public:
          real_t detJ1 = Trans.Elem1->Weight();
          real_t detJ2 = Trans.Elem2->Weight();
          real_t penalty = ComputePenalty(fe1, fe2, detJ1, detJ2,
-                                          lam1t, mu1t, nl, true);
+                                          lam1t, mu1t, lam2t, mu2t, nl, true);
 
          fe1.CalcShape(eip1, shape1);
          fe2.CalcShape(eip2, shape2);
@@ -658,7 +682,7 @@ public:
          real_t detJ1 = Trans.Elem1->Weight();
          real_t detJ2 = Trans.Elem2->Weight();
          real_t penalty = ComputePenalty(fe1, fe2, detJ1, detJ2,
-                                          lam1t, mu1t, nl, true);
+                                          lam1t, mu1t, lam2t, mu2t, nl, true);
 
          fe1.CalcShape(eip1, shape1);
          fe2.CalcShape(eip2, shape2);
@@ -824,6 +848,7 @@ private:
    int dim_;
    real_t epsilon_;
    real_t penalty_factor_;
+   int side_ = 0;   // SetSide
 
 public:
    /// Public accessor for diagnostic use.
@@ -831,33 +856,67 @@ public:
                      real_t detJ1, real_t detJ2,
                      real_t lam, real_t mu_val, real_t nl_q) const
    {
-      return ComputePenalty(fe1, fe2, detJ1, detJ2, lam, mu_val, nl_q, true);
+      return ComputePenalty(fe1, fe2, detJ1, detJ2, lam, mu_val, lam, mu_val,
+                            nl_q, true);
+   }
+
+   /// Public accessor for diagnostic use: interior-face penalty with
+   /// per-side moduli (side 1: lam1, mu1; side 2: lam2, mu2).
+   real_t GetPenalty(const FiniteElement &fe1, const FiniteElement &fe2,
+                     real_t detJ1, real_t detJ2,
+                     real_t lam1, real_t mu1, real_t lam2, real_t mu2,
+                     real_t nl_q) const
+   {
+      return ComputePenalty(fe1, fe2, detJ1, detJ2, lam1, mu1, lam2, mu2,
+                            nl_q, true);
    }
 
 private:
    /// Compute IP penalty matching Tandem's formula.
    /// penalty = (p0+p1)/4 for interior, p0 for boundary.
-   /// p_i = (D+1) * c_N_1 * (D*nl_q/detJ_i) * (c1^2/c0)
+   /// p_i = (D+1) * c_N_1 * (D*nl_q/detJ_i) * (c1_i^2/c0_i)
+   /// with per-side moduli c0_i = 2 mu_i, c1_i = D lam_i + 2 mu_i.
+   /// With (lam2, mu2) == (lam1, mu1) the arithmetic is identical to the
+   /// former single-moduli form, so constant material is bit-identical.
    real_t ComputePenalty(const FiniteElement &fe1,
                           const FiniteElement &fe2,
                           real_t detJ1, real_t detJ2,
-                          real_t lam, real_t mu_val,
+                          real_t lam1, real_t mu1,
+                          real_t lam2, real_t mu2,
                           real_t nl_q, bool is_interior) const
    {
       int p = std::max(fe1.GetOrder(),
                        is_interior ? fe2.GetOrder() : fe1.GetOrder());
       real_t c_N_1 = p * (p + dim_ - 1.0) / dim_;
-      real_t c0 = 2.0 * mu_val;
-      real_t c1 = dim_ * lam + 2.0 * mu_val;
-      real_t ratio = c1 * c1 / c0;
+      real_t c0_1 = 2.0 * mu1;
+      real_t c1_1 = dim_ * lam1 + 2.0 * mu1;
+      real_t ratio1 = c1_1 * c1_1 / c0_1;
 
-      real_t p0 = (dim_ + 1) * c_N_1 * (real_t(dim_) * nl_q / detJ1) * ratio;
+      real_t p0 = (dim_ + 1) * c_N_1 * (real_t(dim_) * nl_q / detJ1) * ratio1;
       if (!is_interior)
       {
          return penalty_factor_ * p0;
       }
-      real_t p1 = (dim_ + 1) * c_N_1 * (real_t(dim_) * nl_q / detJ2) * ratio;
+      real_t c0_2 = 2.0 * mu2;
+      real_t c1_2 = dim_ * lam2 + 2.0 * mu2;
+      real_t ratio2 = c1_2 * c1_2 / c0_2;
+      real_t p1 = (dim_ + 1) * c_N_1 * (real_t(dim_) * nl_q / detJ2) * ratio2;
       return penalty_factor_ * (p0 + p1) / 4.0;
+   }
+
+   /// pi p_s / 4 of one side of an interior face (SetSide): that side's
+   /// share of ComputePenalty's penalty_factor (p0 + p1) / 4.
+   real_t ComputeSidePenalty(const FiniteElement &fe1, const FiniteElement &fe2,
+                             real_t detJ_s, real_t lam_s, real_t mu_s,
+                             real_t nl_q) const
+   {
+      int p = std::max(fe1.GetOrder(), fe2.GetOrder());
+      real_t c_N_1 = p * (p + dim_ - 1.0) / dim_;
+      real_t c0_s = 2.0 * mu_s;
+      real_t c1_s = dim_ * lam_s + 2.0 * mu_s;
+      real_t ratio_s = c1_s * c1_s / c0_s;
+      real_t p_s = (dim_ + 1) * c_N_1 * (real_t(dim_) * nl_q / detJ_s) * ratio_s;
+      return penalty_factor_ * p_s / 4.0;
    }
 
    /// Assemble one (test, trial) block of the face matrix.

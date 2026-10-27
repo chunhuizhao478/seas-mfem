@@ -39,6 +39,8 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <map>
+#include <vector>
 
 namespace mfem
 {
@@ -47,7 +49,11 @@ namespace seas
 
 /// Linear solver type for the elasticity domain operator.  CUDSS: cuDSS on
 /// the GPU (MFEM_USE_CUDSS), for the stage operators of GPU plan G3.
-enum class SolverType { CG_AMG, MUMPS, MUMPS_BLR, GMRES_BlockILU, GMRES_AMG, SUPERLU, STRUMPACK, CUDSS };
+/// OperatorOnly: assemble K as a HypreParMatrix for ApplyStiffness and
+/// build no solver; the serial bilinear form is released after
+/// ParallelAssemble (explicit time stepping never calls Solve).
+enum class SolverType { CG_AMG, MUMPS, MUMPS_BLR, GMRES_BlockILU, GMRES_AMG, SUPERLU, STRUMPACK,
+                        CUDSS, OperatorOnly };
 
 /// Boundary condition mode for the elasticity domain operator
 ///
@@ -135,6 +141,49 @@ public:
       mu_val_ = le->GetMu();
       lambda_coeff_.constant = lambda_val_;
       mu_coeff_.constant = mu_val_;
+
+      InitOperator();
+   }
+
+   /// @brief Construct with spatially varying Lame coefficients (C-09).
+   ///
+   /// `lambda` and `mu` (e.g. per-element GridFunctionCoefficients) feed
+   /// every bilinear-form integrator and the IP traction integrator; they
+   /// must outlive this operator.  `lambda_fb`/`mu_fb` are the scalar
+   /// fallbacks kept in lambda_val_/mu_val_ for the scalar-only paths.
+   /// IP only: the BR2 branches use the scalars.
+   ElasticityDomainOperator(MeshType &mesh, int order,
+                             Coefficient &lambda, Coefficient &mu,
+                             real_t lambda_fb, real_t mu_fb,
+                             real_t Vp, real_t Wf, real_t lf,
+                             const BoundaryConfig &bdr_config,
+                             DGMethod method,
+                             SolverType solver_type,
+                             const DomainConfig &config = {})
+      : mesh_(mesh), order_(order),
+        lambda_val_(lambda_fb), mu_val_(mu_fb),
+        bdr_config_(bdr_config),
+        Vp_(Vp), Wf_(Wf), lf_(lf),
+        method_(method), solver_type_(solver_type),
+        bc_mode_(BCMode::FarField),
+        check_residual_(config.check_residual),
+        lambda_coeff_(lambda_fb), mu_coeff_(mu_fb),
+        mass_inv_computed_(false),
+        fault_depths_computed_(false),
+        fault_coords_computed_(false),
+        face_basis_type_(config.face_basis_type),
+        penalty_factor_(config.penalty_factor),
+        blr_tol_(config.blr_tol),
+        match_quad_order_(config.match_quad_order)
+   {
+      owned_model_ = std::make_unique<LinearElastic>(lambda_fb, mu_fb);
+      model_ = owned_model_.get();
+      lambda_ptr_ = &lambda;
+      mu_ptr_ = &mu;
+      material_is_constant_ = false;
+      MFEM_VERIFY(material_is_constant_ || method_ == DGMethod::IP,
+                  "ElasticityDomainOperator: spatially varying material "
+                  "requires DGMethod::IP (BR2 uses the scalar moduli only)");
 
       InitOperator();
    }
@@ -238,6 +287,29 @@ public:
    /// without Dirichlet loading.
    void AssembleSlipOnlyRHS(Vector &rhs, const Vector &slip_bc) const;
 
+   /// Apply the assembled DG stiffness: Ku = K u (C-01).  Assembles K on
+   /// first use.  `u` must have the true-vector layout Solve uses (X_/B_).
+   void ApplyStiffness(const Vector &u, Vector &Ku) const;
+
+#ifdef MFEM_USE_MPI
+   /// The assembled parallel K (assembles on first use; parallel meshes).
+   HypreParMatrix &ParStiffness() const
+   {
+      if (!stiffness_assembled_) { AssembleStiffness(); }
+      HypreParMatrix *K = cached_Ah_.As<HypreParMatrix>();
+      MFEM_VERIFY(K, "ParStiffness: no HypreParMatrix (serial mesh?)");
+      return *K;
+   }
+#endif
+   /// Free the assembled K (and the serial form, if kept).  The next
+   /// ApplyStiffness / Solve / ParStiffness assembles it again.
+   void ReleaseStiffness()
+   {
+      cached_Ah_.Clear();
+      cached_a_.reset();
+      stiffness_assembled_ = false;
+   }
+
    /// Assemble only the Dirichlet loading RHS contribution into the DG
    /// displacement space. Debug utility for first-step RHS comparison.
    void AssembleDirichletOnlyRHS(Vector &rhs, real_t time) const;
@@ -310,6 +382,11 @@ public:
 
    const Array<int> &GetFaultInteriorFaces() const { return fault_interior_faces_; }
    const Array<int> &GetFaultSharedFaces() const { return fault_shared_faces_; }
+   /// C-03: exterior boundary faces (face index / boundary-element index)
+   /// tagged with an absorbing attr.  They are natural (zero traction) in K.
+   const Array<int> &GetAbsorbingBdrFaces() const { return absorbing_bdr_faces_; }
+   const Array<int> &GetAbsorbingBdrElements() const { return absorbing_bdr_elems_; }
+   const BoundaryConfig &GetBoundaryConfig() const { return bdr_config_; }
    const Array<int> &GetOwnedFaultFaceMap() const
    { return owned_fault_face_to_local_face_; }
    int GetNumOwnedFaultFaces() const { return num_owned_fault_faces_; }
@@ -325,6 +402,36 @@ public:
    int GetNumFaultFaces() const override { return num_fault_faces_; }
    int GetNbfPerFace() const override { return nbf_per_face_; }
    const FaceQuadrature *GetFaceQuadrature() const { return face_quad_.get(); }
+
+   /// C-04: interior-penalty coefficient sigma_F [Pa/m] of each fault face,
+   /// in the face order of GetFaultInteriorFaces() followed by
+   /// GetFaultSharedFaces() -- the order ComputeTraction fills fault DOFs,
+   /// nbf_per_face_ per face.
+   /// sigma_F_face(f): mean over the face's traction quadrature points of the
+   ///                  value ComputePenalty uses there.
+   /// spread(f):       max_q |sigma_F(q) - mean| / mean.  The Nitsche path's
+   ///                  scalar gamma_F is the kernel's derivative only where
+   ///                  this is round-off (plan, "The scalar gamma").
+   /// IP only.  Implementation: elasticity_operator_penalty.inl.
+   void GetFaultFacePenalties(Vector &sigma_F_face, Vector &spread) const;
+
+   /// Profiling plan item 3: precompute, per fault face, the dense operators
+   /// of the IP traction recovery (A_f) and of the slip load (G_f) from the
+   /// production per-face kernels.  Collective.  IP only.
+   /// Implementation: elasticity_operator_fault_ops.inl.
+   void BuildFaultFaceOps();
+   bool HasFaultFaceOps() const { return ffo_.built; }
+   /// Local fault faces in the per-face operators: interior, shared.
+   int FaultFaceOpsInterior() const { return ffo_.nfi; }
+   int FaultFaceOpsShared() const { return ffo_.nf - ffo_.nfi; }
+   /// ComputeTraction(u, slip_bc, traction, &normal_traction) through the
+   /// stored A_f.  `u` is the local (true) displacement vector.  Collective:
+   /// exchanges u on the neighbour elements of shared fault faces only.
+   void ComputeTractionFast(const Vector &u, const Vector &slip_bc,
+                            Vector &traction, Vector &normal_traction) const;
+   /// rhs += AssembleSlipOnlyRHS(slip_bc) through the stored G_f (no
+   /// communication; rhs is not cleared).
+   void AddSlipLoadFast(const Vector &slip_bc, Vector &rhs) const;
 
    /// Access the constitutive model.
    const ConstitutiveModel &GetModel() const { return *model_; }
@@ -539,6 +646,9 @@ private:
    // Per-face boundary attr (parallel to dirichlet_interior/shared_faces_)
    Array<int> dirichlet_interior_attrs_;
    Array<int> dirichlet_shared_attrs_;
+   // C-03: absorbing exterior boundary faces (not part of K)
+   Array<int> absorbing_bdr_faces_;
+   Array<int> absorbing_bdr_elems_;
 
    // Element-pair keys for fault faces (populated during BC table build)
    std::set<long> fault_face_keys_;
@@ -547,6 +657,11 @@ private:
 
    // Coefficients (mutable: used in const assembly methods, MFEM Coefficient::Eval is non-const)
    mutable ConstantCoefficient lambda_coeff_, mu_coeff_;
+   // Coefficients actually fed to the integrators (C-09).  Default to the
+   // constant members above; the Coefficient constructor repoints them.
+   Coefficient *lambda_ptr_ = &lambda_coeff_;
+   Coefficient *mu_ptr_ = &mu_coeff_;
+   bool material_is_constant_ = true;
 
    // FE spaces
    std::unique_ptr<DG_FECollection> fec_;
@@ -582,6 +697,32 @@ private:
 
    // Multi-DOF fault discretization (v45, Phase 2)
    std::unique_ptr<FaceQuadrature> face_quad_;
+
+   /// Per-fault-face operators (BuildFaultFaceOps); faces in ComputeTraction
+   /// order (interior, then shared).
+   struct FaultFaceOps
+   {
+      bool built = false;
+      int nf = 0, nfi = 0;
+      std::vector<int> n1, n2;              ///< element vdofs per side
+      std::vector<int> off_vd, vd;          ///< local vdofs (side 2 of a shared face: -1)
+      std::vector<int> off_A, off_G;
+      std::vector<real_t> A, G;             ///< row-major blocks
+      std::vector<int> nbr_face_elem;       ///< shared face -> face-neighbour element
+      std::vector<int> nbr_off;             ///< shared face -> offset in recv_buf
+      std::vector<int> recv_ranks, recv_off, send_ranks, send_off, send_elems, send_vd;
+      mutable std::vector<real_t> recv_buf, send_buf, x;
+#ifdef MFEM_USE_MPI
+      mutable std::vector<MPI_Request> reqs;
+#endif
+   };
+   FaultFaceOps ffo_;
+   void FaultFaceTractionKernel_(int idx, FaceElementTransformations &FTr,
+                                 const FiniteElement &fe1, const FiniteElement &fe2,
+                                 const Vector &u1, const Vector &u2,
+                                 const Vector &slip_bc, Vector &out) const;
+   void BuildFaultNbrExchange_();
+   void FaultNbrExchange_(const Vector &u) const;
    int nbf_per_face_ = 1;   // BR2: 1, IP: (p+1)(p+2)/2 on triangle faces
    int num_fault_faces_ = 0; // number of fault faces (interior + shared)
    int num_owned_fault_faces_ = 0;
@@ -686,6 +827,8 @@ private:
 
 
 #include "elasticity_operator_traction.inl"
+#include "elasticity_operator_penalty.inl"
+#include "elasticity_operator_fault_ops.inl"
 
 
 #include "elasticity_operator_qd.inl"

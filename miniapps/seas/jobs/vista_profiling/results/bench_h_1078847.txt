@@ -1,0 +1,8 @@
+[H] fault writer back end: 104882 triangles, 12 cell fields, 20 frames
+  deflate 1 (decks)  first frame 648.7 ms, later frames 538.8 ms each
+  deflate 0          first frame 311.4 ms, later frames 277.7 ms each
+  no filter          first frame 278.7 ms, later frames 236 ms each
+  SAFS writer        first frame 605.3 ms, later frames 546.1 ms each (deflate 1, production call; file 236.4 MB)
+  SAFS writer        first frame 301.2 ms, later frames 247.2 ms each (no filter, production call; file 631.9 MB)
+  FaultHDFStream     first frame 340.5 ms, later frames 231.3 ms each (deflate 1, production call; file 199.2 MB)
+  FaultHDFStream     first frame 57.82 ms, later frames 6.635 ms each (no filter, production call; file 524.9 MB)

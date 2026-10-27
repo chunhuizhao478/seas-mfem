@@ -1,0 +1,36 @@
+commit ac3adeb9b9e5781b9110139eac2ba2e39bbfdd74
+host i617-031.vista.tacc.utexas.edu  nodes 4  ranks 512
+deck tpv104/configs/tpv104_nitsche.toml  mesh tpv104/mesh/tpv104_200m.msh sha256 10cecfd73d0c7cb93cfa188aac08e4a99a6ec81d439a3363bd7175e3a8ae4aa0  order 1  tfinal 12.0  gold tpv104/gold/nitsche-kv0p1_p1_cd_pc_200m_jobid1075919_git81759da/results
+modules: ucc/1.9.0 ucx/1.22.0 cmake/4.1.1 xalt/3.1 TACC gcc/14.2.0 nvpl/26.9 cuda/12.6 openmpi/5.0.5 hypre/2.31.0 metis/5.1.0.3 phdf5/1.14.6 
+=== gts [] 0 -> 1.0 s: driver exit 1, 76 s in the job
+Mesh::GeneratePartitioning:  error in METIS_PartGraphKway!
+
+
+Mesh::GeneratePartitioning:  error in METIS_PartGraphKway!
+
+
+Mesh::GeneratePartitioning:  error in METIS_PartGraphKway!
+
+
+Mesh::GeneratePartitioning:  error in METIS_PartGraphKway!
+
+
+Mesh::GeneratePartitioning:  error in METIS_PartGraphKway!
+--------------------------------------------------------------------------
+prterun has exited due to process rank 357 with PID 1828860 on node i617-131 calling
+"abort". This may have caused other processes in the application to be
+terminated by signals sent by prterun (as reported here).
+--------------------------------------------------------------------------
+TACC:  MPI job exited with code: 1 
+TACC:  Shutdown complete. Exiting. 
+first node memory: peak in use 128.1 GB of 237.6 GB (2 s samples)
+=== lts [--lts rate2] 0 -> 12.0 s: driver exit 134, 88 s in the job
+  LTS (plan item 7): rate2, 4 clusters (hard cap 4), dt0 = 0.000245096 s; tets per cluster 239340 219781 1031158 976270; ideal 3.38322x; fault (75856 tets, 157010 buffer tets in 3 layer(s)) in cluster 0 after 2 clustering(s)
+  partition: multi-constraint (BuildLtsAwarePartition, fault weight w = 0); max/mean overall 1.054, per cluster 1.063 1.048 1.05 1.05, fault tets 1.228
+first node memory: peak in use 126.8 GB of 237.6 GB (2 s samples)
+=== stations (per quantity: max |a - b| over max |a| of slip, V, tau, sigma_n at that station) ===
+512	/scratch/10024/zhaochun/nitsche_profiling/lts_tpv104_200m_p1_1082387/RUN_INFO.txt
+420K	/scratch/10024/zhaochun/nitsche_profiling/lts_tpv104_200m_p1_1082387/gts
+507K	/scratch/10024/zhaochun/nitsche_profiling/lts_tpv104_200m_p1_1082387/lts
+7.0K	/scratch/10024/zhaochun/nitsche_profiling/lts_tpv104_200m_p1_1082387/tpv104_nitsche.toml
+total 164 s
