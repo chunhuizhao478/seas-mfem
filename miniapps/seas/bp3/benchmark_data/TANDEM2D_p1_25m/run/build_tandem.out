@@ -1,0 +1,35 @@
+##### p=1 configure Mon Oct 26 22:01:26 PDT 2026
++ PKG_CONFIG_PATH=/Users/chunhuizhao/miniforge/envs/tandem-petsc321/lib/pkgconfig
++ /Users/chunhuizhao/miniforge/envs/mfem-dev/bin/cmake /Users/chunhuizhao/projects/tandem -DCMAKE_BUILD_TYPE=Release -DDOMAIN_DIMENSION=2 -DPOLYNOMIAL_DEGREE=1 -DARCH=noarch -DCMAKE_C_COMPILER=/Users/chunhuizhao/miniforge/envs/tandem-petsc321/bin/mpicc -DCMAKE_CXX_COMPILER=/Users/chunhuizhao/miniforge/envs/tandem-petsc321/bin/mpicxx -DPKG_CONFIG_EXECUTABLE=/Users/chunhuizhao/miniforge/envs/easi-harness/bin/pkg-config -DEigen3_DIR=/Users/chunhuizhao/miniforge/envs/mfem-dev/share/eigen3/cmake -DLUA_INCLUDE_DIR=/Users/chunhuizhao/miniforge/envs/easi-harness/include -DLUA_LIBRARY=/Users/chunhuizhao/miniforge/envs/easi-harness/lib/liblua.5.4.dylib -DPython3_EXECUTABLE=/usr/bin/python3 -DCMAKE_PREFIX_PATH=/Users/chunhuizhao/miniforge/envs/tandem-petsc321 -DOpenMP_ROOT=/Users/chunhuizhao/miniforge/envs/tandem-petsc321
++ rc=0
++ set +x
+configure rc 0 (10 s)
+awk: syntax error at source line 1
+ context is
+	 >>> print <<<  $6
+awk: bailing out at source line 1
+binary /Users/chunhuizhao/projects/tandem/build_2d_p1/app/tandem  binary /Users/chunhuizhao/projects/tandem/build_2d_p1/app/tandem -rwxr-xr-x@ 1 chunhuizhao  staff  3220856 Oct 26 22:02 /Users/chunhuizhao/projects/tandem/build_2d_p1/app/tandem binary /Users/chunhuizhao/projects/tandem/build_2d_p1/app/tandem -rwxr-xr-x@ 1 chunhuizhao  staff  3220856 Oct 26 22:02 /Users/chunhuizhao/projects/tandem/build_2d_p1/app/tandem
+	@rpath/liblua.5.4.dylib (compatibility version 5.4.0, current version 5.4.8)
+	@rpath/libparmetis.dylib (compatibility version 0.0.0, current version 0.0.0)
+	/Users/chunhuizhao/miniforge/envs/tandem-petsc321/lib/libpetsc.3.21.dylib (compatibility version 3.21.0, current version 3.21.6)
+	@rpath/libmpi.40.dylib (compatibility version 81.0.0, current version 81.7.0)
+--help rc 0 (      21 lines)
+make tandem rc 0 (26 s)
+##### p=2 configure Mon Oct 26 22:02:02 PDT 2026
++ PKG_CONFIG_PATH=/Users/chunhuizhao/miniforge/envs/tandem-petsc321/lib/pkgconfig
++ /Users/chunhuizhao/miniforge/envs/mfem-dev/bin/cmake /Users/chunhuizhao/projects/tandem -DCMAKE_BUILD_TYPE=Release -DDOMAIN_DIMENSION=2 -DPOLYNOMIAL_DEGREE=2 -DARCH=noarch -DCMAKE_C_COMPILER=/Users/chunhuizhao/miniforge/envs/tandem-petsc321/bin/mpicc -DCMAKE_CXX_COMPILER=/Users/chunhuizhao/miniforge/envs/tandem-petsc321/bin/mpicxx -DPKG_CONFIG_EXECUTABLE=/Users/chunhuizhao/miniforge/envs/easi-harness/bin/pkg-config -DEigen3_DIR=/Users/chunhuizhao/miniforge/envs/mfem-dev/share/eigen3/cmake -DLUA_INCLUDE_DIR=/Users/chunhuizhao/miniforge/envs/easi-harness/include -DLUA_LIBRARY=/Users/chunhuizhao/miniforge/envs/easi-harness/lib/liblua.5.4.dylib -DPython3_EXECUTABLE=/usr/bin/python3 -DCMAKE_PREFIX_PATH=/Users/chunhuizhao/miniforge/envs/tandem-petsc321 -DOpenMP_ROOT=/Users/chunhuizhao/miniforge/envs/tandem-petsc321
++ rc=0
++ set +x
+configure rc 0 (9 s)
+awk: syntax error at source line 1
+ context is
+	 >>> print <<<  $6
+awk: bailing out at source line 1
+binary /Users/chunhuizhao/projects/tandem/build_2d_p2/app/tandem  binary /Users/chunhuizhao/projects/tandem/build_2d_p2/app/tandem -rwxr-xr-x@ 1 chunhuizhao  staff  3311176 Oct 26 22:02 /Users/chunhuizhao/projects/tandem/build_2d_p2/app/tandem binary /Users/chunhuizhao/projects/tandem/build_2d_p2/app/tandem -rwxr-xr-x@ 1 chunhuizhao  staff  3311176 Oct 26 22:02 /Users/chunhuizhao/projects/tandem/build_2d_p2/app/tandem
+	@rpath/liblua.5.4.dylib (compatibility version 5.4.0, current version 5.4.8)
+	@rpath/libparmetis.dylib (compatibility version 0.0.0, current version 0.0.0)
+	/Users/chunhuizhao/miniforge/envs/tandem-petsc321/lib/libpetsc.3.21.dylib (compatibility version 3.21.0, current version 3.21.6)
+	@rpath/libmpi.40.dylib (compatibility version 81.0.0, current version 81.7.0)
+--help rc 0 (      21 lines)
+make tandem rc 0 (28 s)
+lock released

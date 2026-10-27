@@ -1,0 +1,6 @@
+start Tue Oct 27 04:30:42 PDT 2026
+commit 9503fe25ba84a4a3a999d701760f82b9a0e800d5 dirty        0
+binary sha256 4f18eb090554757b9a460d6776de85178f88ff805f13f7ef4f1e16f7a5f4adaf
+env mumps-petsc, OMP_NUM_THREADS=1
+cmd mpirun -np 4 ./seas_fd_cycle_driver --deck config/fd_cycle/bp3_qd_d60_thrust.toml --output-dir /Users/chunhuizhao/projects/seas-mfem-2d-inplane-results/g3-bp3/seas_p1_d60_thrust/out
+end Tue Oct 27 09:52:38 PDT 2026 rc 0 wall 19316 s

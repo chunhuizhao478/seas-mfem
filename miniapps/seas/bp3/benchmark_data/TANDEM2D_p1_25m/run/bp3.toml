@@ -1,0 +1,49 @@
+final_time = 47304000000
+mesh_file = "/Users/chunhuizhao/projects/seas-mfem-2d-inplane/miniapps/seas/bp3/mesh/bp3_d60_25m.msh"
+lib = "bp3.lua"
+scenario = "bp3_d60_reverse"
+mode = "QD"
+type = "elasticity"
+ref_normal = [1, 0]
+boundary_linear = true
+
+[fault_probe_output]
+prefix = "out/fltst_"
+t_max = 9460800
+probes = [
+    { name = "dp000", x = [0.0, -0.0] },
+    { name = "dp025", x = [1.2500000000000002, -2.1650635094610964] },
+    { name = "dp050", x = [2.5000000000000004, -4.330127018922193] },
+    { name = "dp075", x = [3.750000000000001, -6.495190528383289] },
+    { name = "dp100", x = [5.000000000000001, -8.660254037844386] },
+    { name = "dp125", x = [6.250000000000002, -10.825317547305483] },
+    { name = "dp150", x = [7.500000000000002, -12.990381056766578] },
+    { name = "dp175", x = [8.750000000000002, -15.155444566227676] },
+    { name = "dp200", x = [10.000000000000002, -17.32050807568877] },
+    { name = "dp250", x = [12.500000000000004, -21.650635094610966] },
+    { name = "dp300", x = [15.000000000000004, -25.980762113533157] },
+    { name = "dp350", x = [17.500000000000004, -30.31088913245535] }
+]
+
+# Added for G3 (Chunhui Zhao, 2026-10-27): SCEC BP3 off-fault (free-surface) stations.
+# Tandem coordinates for this mesh are km, x1 along the surface, x2 = 0 on the free surface;
+# the fault (tag 3) leaves the surface at (0, 0) and dips toward +x1, so x1 > 0 is the
+# hanging wall (bp3.lua: dist = x + y / tan(dip) > 1 is the hanging-wall side).
+# fn-00 / fn+00: 1 m to either side of the trace.
+[domain_probe_output]
+prefix = "out/srfst_"
+t_max = 9460800
+probes = [
+    { name = "fn-32", x = [-32.0, 0.0] },
+    { name = "fn-16", x = [-16.0, 0.0] },
+    { name = "fn-08", x = [-8.0, 0.0] },
+    { name = "fn-00", x = [-0.001, 0.0] },
+    { name = "fn+00", x = [0.001, 0.0] },
+    { name = "fn+08", x = [8.0, 0.0] },
+    { name = "fn+16", x = [16.0, 0.0] },
+    { name = "fn+32", x = [32.0, 0.0] }
+]
+
+# Added for the QDGreen restart (2026-10-27): Green's-function files inside this run folder.
+[gf_checkpoint]
+prefix = "gf_checkpoint"

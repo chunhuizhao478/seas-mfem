@@ -1,0 +1,75 @@
+ours minus reference; the denser series interpolated onto the sparser one's times
+ev 16 window: -100 to +300 s from each code's own onset, excluding +-2 s around either code's front (log10 V crossing -3) at that station
+interseismic: 0 to the cut, excluding onset - 1 day to onset + 30 days of every event of either code
+Tandem p=1 (Mac)   0 to cut, interseismic     logV  dp150      -0.32477 log10 m/s  at t = 63.5255 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     logV  dp100    -0.0094161 log10 m/s  at t = 412.223 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     logV  dp025    +0.0061879 log10 m/s  at t = 0.302959 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     logV  dp075    +0.0061873 log10 m/s  at t = 0.302959 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     logV  dp000    +0.0061865 log10 m/s  at t = 0.302959 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     logV  dp125    +0.0061826 log10 m/s  at t = 0.302959 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     logV  dp050    +0.0061819 log10 m/s  at t = 0.302959 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     logV  dp250    +0.0020764 log10 m/s  at t = 1482.68 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     logV  dp175     +0.001482 log10 m/s  at t = 0.302959 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     logV  dp350   -0.00054019 log10 m/s  at t = 446.891 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     logV  dp200    -0.0003923 log10 m/s  at t = 1482.68 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     logV  dp300   +0.00022117 log10 m/s  at t = 1482.98 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     slip  dp100   +0.00019254 m          at t = 1482.56 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     slip  dp200    +0.0001198 m          at t = 1482.68 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     slip  dp150   -9.8386e-05 m          at t = 68.3589 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     slip  dp175   +8.7835e-05 m          at t = 1482.68 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     slip  dp250   +7.0048e-05 m          at t = 1307.42 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     slip  dp125   -6.7355e-05 m          at t = 1110.15 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     slip  dp300   +2.6181e-05 m          at t = 1307.82 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     slip  dp350   +1.3089e-05 m          at t = 1308.52 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     slip  dp050   -7.6019e-06 m          at t = 1482.88 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     slip  dp075   -7.5886e-06 m          at t = 1491.6 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     slip  dp025   -7.1998e-06 m          at t = 1482.78 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     slip  dp000   -6.9804e-06 m          at t = 1482.68 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     tau   dp150      -0.37584 MPa        at t = 63.5255 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     tau   dp100     +0.016462 MPa        at t = 1110.15 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     tau   dp125    +0.0031675 MPa        at t = 603.671 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     tau   dp250    +0.0028528 MPa        at t = 1482.68 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     tau   dp350    -0.0015617 MPa        at t = 446.891 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     tau   dp175   -0.00044894 MPa        at t = 848.188 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     tau   dp200   -0.00044606 MPa        at t = 1482.68 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     tau   dp300    -0.0002946 MPa        at t = 288.843 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     tau   dp075   +0.00018418 MPa        at t = 1482.56 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     tau   dp050   +6.5633e-05 MPa        at t = 1482.56 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     tau   dp025   +3.2324e-05 MPa        at t = 1482.56 yr
+Tandem p=1 (Mac)   0 to cut, interseismic     tau   dp000   +3.1152e-05 MPa        at t = 1482.68 yr
+Tandem p=1 (Mac)   ev 16 window, off front    logV  dp050      +0.10021 log10 m/s  at t = 17.66 s
+Tandem p=1 (Mac)   ev 16 window, off front    logV  dp175     +0.073489 log10 m/s  at t = 24.72 s
+Tandem p=1 (Mac)   ev 16 window, off front    logV  dp075     +0.061704 log10 m/s  at t = 15.07 s
+Tandem p=1 (Mac)   ev 16 window, off front    logV  dp100     +0.056754 log10 m/s  at t = 13.47 s
+Tandem p=1 (Mac)   ev 16 window, off front    logV  dp025     +0.056245 log10 m/s  at t = 18.91 s
+Tandem p=1 (Mac)   ev 16 window, off front    logV  dp000     -0.055557 log10 m/s  at t = 32.72 s
+Tandem p=1 (Mac)   ev 16 window, off front    logV  dp125     -0.037614 log10 m/s  at t = 32.21 s
+Tandem p=1 (Mac)   ev 16 window, off front    logV  dp150     +0.034215 log10 m/s  at t = 14.97 s
+Tandem p=1 (Mac)   ev 16 window, off front    logV  dp200     +0.015491 log10 m/s  at t = 17.46 s
+Tandem p=1 (Mac)   ev 16 window, off front    logV  dp250    +0.0049292 log10 m/s  at t = 17.46 s
+Tandem p=1 (Mac)   ev 16 window, off front    logV  dp300    +0.0023644 log10 m/s  at t = 17.46 s
+Tandem p=1 (Mac)   ev 16 window, off front    logV  dp350    +0.0015456 log10 m/s  at t = 24.82 s
+Tandem p=1 (Mac)   ev 16 window, off front    slip  dp025     +0.058468 m          at t = 25.02 s
+Tandem p=1 (Mac)   ev 16 window, off front    slip  dp000     +0.044348 m          at t = 26.71 s
+Tandem p=1 (Mac)   ev 16 window, off front    slip  dp050     +0.035962 m          at t = 25.42 s
+Tandem p=1 (Mac)   ev 16 window, off front    slip  dp125     +0.029551 m          at t = 17.26 s
+Tandem p=1 (Mac)   ev 16 window, off front    slip  dp075     +0.025534 m          at t = 25.62 s
+Tandem p=1 (Mac)   ev 16 window, off front    slip  dp100     +0.025288 m          at t = 18.2196 s
+Tandem p=1 (Mac)   ev 16 window, off front    slip  dp150    +0.0096899 m          at t = 26.51 s
+Tandem p=1 (Mac)   ev 16 window, off front    slip  dp175    +0.0062793 m          at t = 29.1 s
+Tandem p=1 (Mac)   ev 16 window, off front    slip  dp300   -6.2122e-06 m          at t = 105.866 s
+Tandem p=1 (Mac)   ev 16 window, off front    slip  dp350   -2.9041e-06 m          at t = 105.866 s
+Tandem p=1 (Mac)   ev 16 window, off front    slip  dp200   -2.5865e-06 m          at t = 105.866 s
+Tandem p=1 (Mac)   ev 16 window, off front    slip  dp250   +8.8337e-07 m          at t = -2.14682 s
+Tandem p=1 (Mac)   ev 16 window, off front    tau   dp175       -0.5981 MPa        at t = 29.1 s
+Tandem p=1 (Mac)   ev 16 window, off front    tau   dp000      -0.16478 MPa        at t = 26.71 s
+Tandem p=1 (Mac)   ev 16 window, off front    tau   dp050      +0.10891 MPa        at t = 17.66 s
+Tandem p=1 (Mac)   ev 16 window, off front    tau   dp100     -0.085015 MPa        at t = 13.67 s
+Tandem p=1 (Mac)   ev 16 window, off front    tau   dp075      +0.07036 MPa        at t = 15.07 s
+Tandem p=1 (Mac)   ev 16 window, off front    tau   dp025     +0.060266 MPa        at t = 18.91 s
+Tandem p=1 (Mac)   ev 16 window, off front    tau   dp200     +0.044908 MPa        at t = 17.46 s
+Tandem p=1 (Mac)   ev 16 window, off front    tau   dp150     +0.037133 MPa        at t = 14.97 s
+Tandem p=1 (Mac)   ev 16 window, off front    tau   dp250     +0.014875 MPa        at t = 17.46 s
+Tandem p=1 (Mac)   ev 16 window, off front    tau   dp125     +0.014061 MPa        at t = 12.86 s
+Tandem p=1 (Mac)   ev 16 window, off front    tau   dp300    +0.0075201 MPa        at t = 24.82 s
+Tandem p=1 (Mac)   ev 16 window, off front    tau   dp350    +0.0050548 MPa        at t = 24.82 s

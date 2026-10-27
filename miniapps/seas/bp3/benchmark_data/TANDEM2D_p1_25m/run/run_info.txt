@@ -1,0 +1,7 @@
+start Mon Oct 26 22:51:00 PDT 2026
+history: 1st start 22:22:10 PDT (stack 7 MiB) -> aborted_stack7MiB/; 2nd start 22:24:03 PDT (QD, stack 63 MiB, about 0.5 s/step, projected 30-40 h) -> aborted_default_mode/; this run: --mode QDGreen with [gf_checkpoint] prefix = gf_checkpoint, otherwise unchanged
+tandem commit a26753d645af96af68a869d402a8e751a4aba3e0 (status:  M jobs/run_bp5_1000m_p1_normal_diag.sbatch )
+PETSc env /Users/chunhuizhao/miniforge/envs/tandem-petsc321 (3.21.6.)
+ulimit -s 65520
+cmd mpirun -np 4 /Users/chunhuizhao/projects/tandem/build_2d_p1/app/tandem bp3.toml --mode QDGreen --petsc -options_file /Users/chunhuizhao/projects/tandem/examples/options/lu_mumps.cfg -options_file /Users/chunhuizhao/projects/tandem/examples/options/rk45.cfg -ts_monitor
+end Tue Oct 27 02:32:47 PDT 2026 rc 0 wall 13307 s

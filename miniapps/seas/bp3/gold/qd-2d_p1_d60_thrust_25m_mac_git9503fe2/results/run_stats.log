@@ -1,0 +1,4 @@
+2026-10-26 22:20:41 wall 22 s peak_tree_rss 1650 MB rc 0 :: make -f cycle/cycle.mk -j6 SEAS_FS_LIB= seas_fd_cycle_driver
+2026-10-26 22:21:02 wall 21 s peak_tree_rss 5663 MB rc 0 :: mpirun -np 4 ./seas_fd_cycle_driver --deck config/fd_cycle/bp3_qd_d60_thrust.toml --max-steps 20 --output-dir /Users/chunhuizhao/projects/seas-mfem-2d-inplane-results/g3-bp3/seasmfem_p1_d60_thrust_check
+2026-10-27 04:30:27 wall 23 s peak_tree_rss 1348 MB rc 0 :: make -f cycle/cycle.mk -j6 SEAS_FS_LIB= seas_fd_cycle_driver
+2026-10-27 09:52:38 wall 19316 s peak_tree_rss 8157 MB rc 0 :: mpirun -np 4 ./seas_fd_cycle_driver --deck config/fd_cycle/bp3_qd_d60_thrust.toml --output-dir /Users/chunhuizhao/projects/seas-mfem-2d-inplane-results/g3-bp3/seas_p1_d60_thrust/out

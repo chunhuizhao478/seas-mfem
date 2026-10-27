@@ -1,0 +1,14 @@
+event 16: front arrival (log10 V crosses -3), s after each code's own onset
+st         ours     T p1    d(p1)
+dp000    24.600   24.704   -0.104
+dp025    22.215   22.371   -0.156
+dp050    19.715   20.524   -0.809
+dp075    17.127   17.243   -0.117
+dp100    -0.135   -0.020   -0.115
+dp125    14.921   15.039   -0.118
+dp150    16.999   17.149   -0.150
+dp175    26.761   26.880   -0.119
+dp200       nan      nan     +nan
+dp250       nan      nan     +nan
+dp300       nan      nan     +nan
+dp350       nan      nan     +nan

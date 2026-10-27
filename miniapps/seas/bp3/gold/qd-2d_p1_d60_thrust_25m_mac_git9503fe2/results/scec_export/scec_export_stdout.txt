@@ -1,0 +1,23 @@
+fltst_dp000.dat: 28004 rows (0 repeated times dropped) from bp3_qd_d60_thrust_fltst_dp000.txt
+fltst_dp025.dat: 28004 rows (0 repeated times dropped) from bp3_qd_d60_thrust_fltst_dp025.txt
+fltst_dp050.dat: 28004 rows (0 repeated times dropped) from bp3_qd_d60_thrust_fltst_dp050.txt
+fltst_dp075.dat: 28004 rows (0 repeated times dropped) from bp3_qd_d60_thrust_fltst_dp075.txt
+fltst_dp100.dat: 28004 rows (0 repeated times dropped) from bp3_qd_d60_thrust_fltst_dp100.txt
+fltst_dp125.dat: 28004 rows (0 repeated times dropped) from bp3_qd_d60_thrust_fltst_dp125.txt
+fltst_dp150.dat: 28004 rows (0 repeated times dropped) from bp3_qd_d60_thrust_fltst_dp150.txt
+fltst_dp175.dat: 28004 rows (0 repeated times dropped) from bp3_qd_d60_thrust_fltst_dp175.txt
+fltst_dp200.dat: 28004 rows (0 repeated times dropped) from bp3_qd_d60_thrust_fltst_dp200.txt
+fltst_dp250.dat: 28004 rows (0 repeated times dropped) from bp3_qd_d60_thrust_fltst_dp250.txt
+fltst_dp300.dat: 28004 rows (0 repeated times dropped) from bp3_qd_d60_thrust_fltst_dp300.txt
+fltst_dp350.dat: 28004 rows (0 repeated times dropped) from bp3_qd_d60_thrust_fltst_dp350.txt
+srfst_fn+00.dat: 28004 rows (0 repeated times dropped) from bp3_qd_d60_thrust_srfst_fn+00.txt
+srfst_fn+08.dat: 28004 rows (0 repeated times dropped) from bp3_qd_d60_thrust_srfst_fn+08.txt
+srfst_fn+16.dat: 28004 rows (0 repeated times dropped) from bp3_qd_d60_thrust_srfst_fn+16.txt
+srfst_fn+32.dat: 28004 rows (0 repeated times dropped) from bp3_qd_d60_thrust_srfst_fn+32.txt
+srfst_fn-00.dat: 28004 rows (0 repeated times dropped) from bp3_qd_d60_thrust_srfst_fn-00.txt
+srfst_fn-08.dat: 28004 rows (0 repeated times dropped) from bp3_qd_d60_thrust_srfst_fn-08.txt
+srfst_fn-16.dat: 28004 rows (0 repeated times dropped) from bp3_qd_d60_thrust_srfst_fn-16.txt
+srfst_fn-32.dat: 28004 rows (0 repeated times dropped) from bp3_qd_d60_thrust_srfst_fn-32.txt
+slip.dat: 1993 rows x 81 points (0 repeated times dropped) from bp3_qd_d60_thrust_profile_dip_slip_3.txt
+shear_stress.dat: 1993 rows x 81 points (0 repeated times dropped) from bp3_qd_d60_thrust_profile_dip_stress_3.txt
+normal_stress.dat: 1993 rows x 81 points (0 repeated times dropped) from bp3_qd_d60_thrust_profile_dip_sigma_n.txt
