@@ -10,6 +10,7 @@
 #   make -f cycle/cycle.mk test-cycle-p2          # P2, regime hand-over tests
 #   make -f cycle/cycle.mk test-cycle-p3          # P3, the switch back to QD
 #   make -f cycle/cycle.mk test-cycle-p4          # P4, QD -> dynamic at t > 0
+#   make -f cycle/cycle.mk test-cycle-absorbing   # P5, absorbing outer faces
 #   make -f cycle/cycle.mk test-cycle-snapshots   # the snapshot files, 7 runs
 #   make -f cycle/cycle.mk test-cycle-bench       # the SCEC benchmark writer
 #   make -f cycle/cycle.mk test-cycle-bench-run   # the p = 2 deck's options, driver runs
@@ -194,6 +195,28 @@ test-cycle-p4: seas_test_cycle_p4
 	      --deck $(CYCLE_P4_DECK) || exit 1; \
 	done
 
+# P5 tests: the dynamic regime's absorbing outer faces ([cycle.absorbing],
+# cycle/absorbing_faces.hpp, hook H3).  Needs PETSc; one QD factorization.
+CYCLE_ABS_SRC = tests/cycle/test_cycle_absorbing.cpp
+CYCLE_ABS_OBJ = $(CYCLE_ABS_SRC:.cpp=.o)
+$(CYCLE_ABS_OBJ): %.o: $(SRC)%.cpp $(CYCLE_HEADERS) $(CYCLE_STAMP) \
+                  $(CYCLE_SHARED_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
+
+seas_test_cycle_absorbing: $(CYCLE_ABS_OBJ) $(CYCLE_LINK_OBJS)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(CYCLE_ABS_OBJ) $(CYCLE_LINK_OBJS) \
+	    $(CYCLE_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+CYCLE_ABS_NPS ?= 1 2
+CYCLE_ABS_DECK ?= config/fd_cycle/bp5_fd_first_event.toml
+test-cycle-absorbing: seas_test_cycle_absorbing
+	@for n in $(CYCLE_ABS_NPS); do \
+	   $(MFEM_MPIEXEC) $(CYCLE_P2_MPIFLAGS) $(MFEM_MPIEXEC_NP) $$n ./seas_test_cycle_absorbing \
+	      --deck $(CYCLE_ABS_DECK) || exit 1; \
+	done
+
 # The fault and surface snapshot files (tests/cycle/test_cycle_snapshots.sh):
 # seven short runs on CYCLE_SNAP_NP ranks in CYCLE_SNAP_WORK (replaced).
 CYCLE_SNAP_NP ?= 2
@@ -270,15 +293,17 @@ cycle-owned-check:
 	echo "PASSED: every changed file is under an owned path, a hook file changed by additions only, or an import (rule M1)"
 
 cycle-all: seas_fd_cycle_driver seas_test_cycle_params_parity seas_test_cycle_p2 \
-           seas_test_cycle_p3 seas_test_cycle_p4 seas_test_cycle_bench test-cycle-api-pin \
-           cycle-owned-check
+           seas_test_cycle_p3 seas_test_cycle_p4 seas_test_cycle_absorbing \
+           seas_test_cycle_bench test-cycle-api-pin cycle-owned-check
 
 cycle-clean:
 	rm -f $(FD_CYCLE_DRIVER_OBJ) $(CYCLE_API_PIN_OBJ) $(CYCLE_PARITY_OBJ) $(CYCLE_P2_OBJ) \
-	      $(CYCLE_P3_OBJ) $(CYCLE_P4_OBJ) $(CYCLE_BENCH_OBJ) seas_fd_cycle_driver \
-	      seas_test_cycle_api_pin seas_test_cycle_params_parity seas_test_cycle_p2 \
-	      seas_test_cycle_p3 seas_test_cycle_p4 seas_test_cycle_bench $(CYCLE_STAMP)
+	      $(CYCLE_P3_OBJ) $(CYCLE_P4_OBJ) $(CYCLE_ABS_OBJ) $(CYCLE_BENCH_OBJ) \
+	      seas_fd_cycle_driver seas_test_cycle_api_pin seas_test_cycle_params_parity \
+	      seas_test_cycle_p2 seas_test_cycle_p3 seas_test_cycle_p4 seas_test_cycle_absorbing \
+	      seas_test_cycle_bench $(CYCLE_STAMP)
 
 .PHONY: cycle-all cycle-clean cycle-owned-check test-cycle-api-pin \
         test-cycle-params-parity test-cycle-p2 test-cycle-p3 test-cycle-p4 \
+        test-cycle-absorbing \
         test-cycle-snapshots test-cycle-bench test-cycle-bench-run

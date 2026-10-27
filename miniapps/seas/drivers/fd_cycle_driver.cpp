@@ -228,6 +228,20 @@ void PrintDynamicSetup(const MPIContext &mpi, const cycle::CycleConfig &cfg,
       std::cout << "v_star " << dc.pc_v_star << " m/s, length " << dc.pc_length << " m\n";
    }
    else { std::cout << "off\n"; }
+   std::cout << "    absorbing boundary: ";
+   if (cfg.absorbing.On())
+   {
+      const cycle::OuterFaceTags &ab = dyn.AbsorbingFaces();
+      std::cout << cfg.absorbing.faces << ", " << ab.natural
+                << " traction-free faces (attribute " << ab.natural_to << ")";
+      if (cfg.absorbing.Walls())
+      {
+         std::cout << ", " << ab.dirichlet << " wall faces (attribute " << ab.dirichlet_to
+                   << ", frozen load)";
+      }
+      std::cout << "; " << ab.free_surface << " free-surface faces stay traction-free\n";
+   }
+   else { std::cout << "off (reflecting)\n"; }
    std::cout << "    shared fault faces: " << dyn.NumSharedFaultFaces()
              << "; frame checks: ghost copies " << dyn.GhostFrameMismatch()
              << ", eps_f n_k vs oriented normal " << dyn.NormalMismatch() << "\n"

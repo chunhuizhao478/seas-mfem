@@ -48,6 +48,24 @@
 // faces (no bc_velocity, the Nitsche driver's production setting); the
 // true wall and creep velocities are Vp/2 and Vp, about 1e-9 m/s.
 //
+// [cycle.absorbing] (P5; plan 6.4, 11.2): W is built on the dynamic
+// regime's own copy of the mesh, in which RetagOuterFaces
+// (absorbing_faces.hpp) moves the exterior traction-free faces that do not
+// face up (the bottom) and, with faces = "outer", the exterior Dirichlet
+// faces (the side walls) to new attributes that W lists as absorbing
+// (dashpots).  The QD regime keeps the mesh as it is.  Without the walls'
+// penalty, u_s is no longer an equilibrium of W, so every Enter freezes
+// the walls' static reaction (hook H3):
+//   b = K_abs u_s - G d_s - F_c(t_s) on the DOFs of the elements with a wall
+//       face, 0 elsewhere;   W.SetConstantLoad(b)
+// (K_abs: W's K, through W's own path; F_c: the creep plane's load).  Off
+// the walls b would only repeat the QD solve residual r, so it is left out
+// there: the first acceleration is then the clamped walls' one, M^-1 (-r +
+// G_eta V_s) (plan 11.1), except on the wall elements, where it is 0.  The
+// walls then absorb only what changes after the switch.
+// Their motion during a phase, Vp T / 2 (2e-7 m in 330 s), is neglected.
+// An absorbing bottom changes neither K nor the load.
+//
 // Station fields in the dynamic regime use the kernel components of the
 // end-of-step traction X* + gamma V (the friction strength along -V, as the
 // Nitsche driver's stations; gamma includes sigma_F^eta with Kelvin-Voigt)
@@ -65,6 +83,7 @@
 #include "prestress.hpp"
 #include "state_bridge.hpp"
 #include "fd_cycle_output.hpp"
+#include "absorbing_faces.hpp"
 
 #include "../domain/nitsche_wave_operator.hpp"
 #include "../domain/boundary_config.hpp"
@@ -188,9 +207,26 @@ public:
          st.Dc = Dc(it->second);
       };
 
+      // [cycle.absorbing]: W on a copy of the mesh with the outer faces re-tagged
+      ParMesh *wmesh = &pmesh;
+      if (cfg.absorbing.On())
+      {
+         MFEM_VERIFY(!(lts != nullptr && lts->on),
+                     "DynPhase: [cycle.absorbing] with local time stepping");
+         dmesh_ = std::make_unique<ParMesh>(pmesh, true);
+         tags_ = RetagOuterFaces(*dmesh_, bc_.natural_attrs, bc_.dirichlet_attrs,
+                                 cfg.absorbing.Walls(), dc.up,
+                                 cfg.absorbing.free_surface_min_up);
+         MFEM_VERIFY(tags_.natural + tags_.dirichlet > 0, "DynPhase: [cycle.absorbing] faces = \""
+                     << cfg.absorbing.faces << "\" but no exterior face qualifies");
+         if (tags_.natural > 0) { bc_.absorbing_attrs.insert(tags_.natural_to); }
+         if (tags_.dirichlet > 0) { bc_.absorbing_attrs.insert(tags_.dirichlet_to); }
+         wmesh = dmesh_.get();
+      }
+
       DomainConfig dcfg;
       dcfg.penalty_factor = cfg.penalty_factor;
-      W_ = std::make_unique<NitscheWaveOperator>(pmesh, p, *material_, bc_, dcfg, &fs);
+      W_ = std::make_unique<NitscheWaveOperator>(*wmesh, p, *material_, bc_, dcfg, &fs);
       MFEM_VERIFY(W_->Orientation().GetReport().junction_edges == 0,
                   "DynPhase: the fault has " << W_->Orientation().GetReport().junction_edges
                   << " junction edges ([fault_geometry] junction_policy = \"refuse\")");
@@ -204,6 +240,7 @@ public:
       }
 
       BuildFrames_();
+      if (tags_.dirichlet > 0) { CollectWallDofs_(); }
       Vector S0;
       frames_.TractionToGlobal(pre.tau0, pre.sigma0, S0);
       W_->SetBackgroundTraction(S0);   // hook H2
@@ -261,6 +298,18 @@ public:
                   << W_->GetTime() << ", not 0 (the loads would read t_s + clock)");
       W_->SetFaultState(d, V, psi);
       if (W_->HasPrakashClifton()) { W_->SetPrakashCliftonState(sigma_n); }
+      if (tags_.dirichlet > 0)
+      {
+         // Plan 11.2: the walls' static reaction at t_s, frozen for the phase
+         Vector Ku, Gd, Fc;
+         W_->StiffnessMult(u_s, Ku);                                  // hook H3
+         W_->SlipLoad(d, Gd);
+         W_->Elasticity().AssembleDirichletOnlyRHS(Fc, W_->GetTime());   // t_s
+         b_.SetSize(Ku.Size());
+         b_ = 0.0;
+         for (int i : wall_vdofs_) { b_(i) = Ku(i) - Gd(i) - Fc(i); }
+         W_->SetConstantLoad(b_);                                     // hook H3
+      }
       U_ = u_s;
       Ud_ = 0.0;
       if (lts_) { lts_->Init(U_, Ud_, 0.0); }
@@ -526,6 +575,10 @@ public:
    const Vector &Ud() const { return Ud_; }
    const DieterichRuinaFriction &Friction() const { return *fr_; }
    const BoundaryConfig &Boundaries() const { return bc_; }
+   /// [cycle.absorbing]: the re-tagged faces (zero counts when off).
+   const OuterFaceTags &AbsorbingFaces() const { return tags_; }
+   /// The frozen wall load of the last Enter (empty without absorbing walls).
+   const Vector &FrozenWallLoad() const { return b_; }
 
    /// Station fields on owned fault DOFs (kernel components; see the file
    /// comment).  Before the first step the traction is T_h(U, d) plus the
@@ -594,6 +647,28 @@ public:
    real_t NormalMismatch() const { return normal_mismatch_; }
 
 private:
+   /// The local DOFs of the elements with an absorbing wall face.
+   void CollectWallDofs_()
+   {
+      ParMesh &wm = W_->GetMesh();
+      const ParFiniteElementSpace &fes = W_->Elasticity().GetFESpace();
+      std::vector<char> on(fes.GetVSize(), 0);
+      Array<int> vd;
+      for (int be = 0; be < wm.GetNBE(); be++)
+      {
+         if (wm.GetBdrAttribute(be) != tags_.dirichlet_to) { continue; }
+         int e = -1, info = 0;
+         wm.GetBdrElementAdjacentElement(be, e, info);
+         fes.GetElementVDofs(e, vd);
+         for (int i = 0; i < vd.Size(); i++) { on[vd[i] >= 0 ? vd[i] : -1 - vd[i]] = 1; }
+      }
+      wall_vdofs_.clear();
+      for (int i = 0; i < static_cast<int>(on.size()); i++)
+      {
+         if (on[i]) { wall_vdofs_.push_back(i); }
+      }
+   }
+
    void BuildFrames_()
    {
       ElasticityDomainOperator<ParMesh> &E = W_->Elasticity();
@@ -643,6 +718,10 @@ private:
    std::shared_ptr<real_t> t0_;   ///< held by the wall-load wrapper too
    std::unique_ptr<MaterialField> material_;
    BoundaryConfig bc_;
+   std::unique_ptr<ParMesh> dmesh_;   ///< [cycle.absorbing]: W's mesh (outlives W)
+   OuterFaceTags tags_;
+   std::vector<int> wall_vdofs_;      ///< DOFs of the elements with a wall face
+   Vector b_;                         ///< the frozen wall load (hook H3)
    std::unique_ptr<DieterichRuinaFriction> fr_;
    std::unique_ptr<RateStateClosure> closure_;
    std::unique_ptr<NitscheWaveOperator> W_;

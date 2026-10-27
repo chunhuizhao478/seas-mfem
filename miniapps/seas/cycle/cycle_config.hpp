@@ -127,6 +127,17 @@
 //                   rate2 needs [numerics] cfl <= 0.6 and kv_scale = "node",
 //                   and partitions the mesh with BuildLtsAwarePartition
 //                   (both regimes then use that partition)
+//   [cycle.absorbing]  the dynamic regime's absorbing outer boundary (P5,
+//                   cycle/absorbing_faces.hpp; QD is unchanged): faces
+//                   ["off" | "bottom" | "outer"]: "bottom" = the exterior
+//                   traction-free faces that do not face up, "outer" =
+//                   those and the exterior Dirichlet faces (the side walls,
+//                   whose static reaction is frozen at each switch, hook
+//                   H3); free_surface_min_up [0.5]: an exterior
+//                   traction-free face with outward normal n stays
+//                   traction-free when n . up >= this.  Not with
+//                   [cycle.lts] rate2 (the LTS run assembles its own load,
+//                   and it is not tested on the dynamic regime's mesh copy)
 //
 // The dynamic regime reads the keys the Nitsche driver reads, from the same
 // shared sections (drivers/nitsche_dyn_driver.cpp:616-648, 708-736,
@@ -285,6 +296,15 @@ struct LtsConfig
    bool On() const { return mode == "rate2"; }
 };
 
+/// [cycle.absorbing] (P5): the dynamic regime's absorbing outer faces.
+struct AbsorbingConfig
+{
+   std::string faces = "off";         ///< "off", "bottom" or "outer"
+   real_t free_surface_min_up = 0.5;  ///< n . up at or above it: free surface
+   bool On() const { return faces != "off"; }
+   bool Walls() const { return faces == "outer"; }
+};
+
 /// [cycle.switch]: the regime controller (plan 3.3 g).  Defaults: Thrase's
 /// BP1-FD thresholds, the spec's 10 s event end, T_max about six times the
 /// longest Tandem p=1 phase (plan 6.5).
@@ -347,6 +367,7 @@ struct CycleConfig
    SnapshotConfig snapshots;
    BenchmarkConfig bench;
    LtsConfig lts;
+   AbsorbingConfig absorbing;
    int checkpoint_every = 0;
 
    // Shortcuts into `shared`, checked by Load.
@@ -593,7 +614,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
    OnlyKeys(cy, "cycle", {"ic", "switching", "qd_radiation_damping", "mesh_scale",
                           "plate_rate", "penalty_factor", "qd", "switch", "probe",
                           "prestress", "fields", "output", "checkpoint", "snapshots",
-                          "benchmark", "lts"});
+                          "benchmark", "lts", "absorbing"});
    c.ic = Str(cy, "cycle", "ic", "", true);
    MFEM_VERIFY(c.ic == "gold" || c.ic == "scec_fd",
                "[cycle].ic must be \"gold\" or \"scec_fd\"; got \"" << c.ic << "\"");
@@ -949,6 +970,21 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
                   "fault_weight >= 0");
    }
 
+   if (cy.contains("absorbing"))
+   {
+      const std::string sec = "cycle.absorbing";
+      const toml::value &ab = cy.at("absorbing");
+      OnlyKeys(ab, sec, {"faces", "free_surface_min_up"});
+      AbsorbingConfig &ac = c.absorbing;
+      ac.faces = Str(ab, sec, "faces", ac.faces);
+      ac.free_surface_min_up = Real(ab, sec, "free_surface_min_up", ac.free_surface_min_up);
+      MFEM_VERIFY(ac.faces == "off" || ac.faces == "bottom" || ac.faces == "outer",
+                  "[" << sec << "].faces must be \"off\", \"bottom\" or \"outer\"; got \""
+                  << ac.faces << "\"");
+      MFEM_VERIFY(ac.free_surface_min_up > -1.0 && ac.free_surface_min_up <= 1.0,
+                  "[" << sec << "].free_surface_min_up must be in (-1, 1]");
+   }
+
    // ---- the dynamic regime's numerics (shared sections, Nitsche keys) ----
    {
       DynamicConfig &d = c.dyn;
@@ -1023,6 +1059,10 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
                   "<= 0.6 (the rate-2 clusters' stability margin); got " << c.dyn.cfl);
       MFEM_VERIFY(c.dyn.kv_scale == "node", "[cycle.lts] mode = \"rate2\" needs "
                   "[numerics].kv_scale = \"node\" (a dt-scaled KV would differ per cluster)");
+      MFEM_VERIFY(!c.absorbing.On(), "[cycle.lts] mode = \"rate2\" and [cycle.absorbing] "
+                  "faces = \"" << c.absorbing.faces << "\": the LTS run assembles its own "
+                  "load (it would not see the frozen wall load, hook H3) and is not tested on "
+                  "the dynamic regime's mesh copy; use global stepping");
    }
    return c;
 #endif

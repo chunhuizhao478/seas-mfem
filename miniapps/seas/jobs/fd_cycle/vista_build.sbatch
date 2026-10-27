@@ -20,7 +20,7 @@
 #   0. python3 with numpy, h5py and tomllib (CYCLE_PY), checked before the
 #      build: the snapshot test reads its files back with it
 #   1. build_vista.sh deps mfem seas: PETSc 3.24.6 with MUMPS and HDF5,
-#      MFEM, cycle-all (driver, tests, 247 API pins, owned-paths check M1)
+#      MFEM, cycle-all (driver, tests, 251 API pins, owned-paths check M1)
 #   2. test-cycle-params-parity: the decks against BP5Params, 1 rank
 #   3. test-cycle-p3 on 1 and 2 ranks (bit for bit on 1 rank)
 #   4. test-cycle-p2 (frame_map on 1, 2, 4, 8 ranks; the rest on 2)
@@ -36,8 +36,10 @@
 #  11. test-cycle-bench-run on 4 ranks: the p = 2 deck's options in short
 #      p = 1 runs (restart with the SCEC files, the QD velocity, the stage
 #      operators, LTS against global stepping), MUMPS
+#  12. test-cycle-absorbing on 1 and 2 ranks: the dynamic regime's absorbing
+#      outer faces ([cycle.absorbing], P5) from a loaded QD state
 # FDC_PART splits the job (submit_vista_p2.sh): "build" runs steps 0 and 1
-# only, "tests" steps 0 and 2 to 11 on the binaries a build job made at
+# only, "tests" steps 0 and 2 to 12 on the binaries a build job made at
 # this commit (it refuses to start if make would rebuild them, since
 # vista_p2_check.sbatch may be running them), "all" (the default) both.
 # Exits non-zero when any step fails.  Cost: 1 node x <= 6 h (<= 2 SU).
@@ -181,6 +183,13 @@ SOLVER=mumps $MK test-cycle-bench-run CYCLE_BENCH_RUN_WORK="$RUNS/bench_run" CYC
    > "$RUNS/test_bench_run.log" 2>&1; rc=$?
 echo "test-cycle-bench-run exit $rc in $(( $(date +%s) - s )) s"
 grep -E "^(---|PASSED|FAILED)|: exit|  FAIL|test_cycle_bench_run: " "$RUNS/test_bench_run.log"
+[ $rc -eq 0 ] || fails=$((fails + 1))
+
+# 12. P5 tests: absorbing outer faces in the dynamic regime
+s=$(date +%s)
+$MK test-cycle-absorbing > "$RUNS/test_absorbing.log" 2>&1; rc=$?
+echo "test-cycle-absorbing exit $rc in $(( $(date +%s) - s )) s"
+grep -E "^  (ok  |FAIL)|test_cycle_absorbing: (PASSED|FAILED)" "$RUNS/test_absorbing.log"
 [ $rc -eq 0 ] || fails=$((fails + 1))
 
 echo "total $(( $(date +%s) - T0 )) s, failing steps: $fails"

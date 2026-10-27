@@ -433,6 +433,44 @@ public:
                   << " != 3 x " << no_ << " owned fault DOFs");
       S0_own_ = S0;
    }
+   /// Hook H3 (fully-dynamic-cycle, document/fd_cycle_dev/HOOKS.md): a
+   /// constant load b (size Height(), the layout of K x), added to F(t) in
+   /// every acceleration of Mult and ImplicitSolve; an empty vector removes
+   /// it.  Global stepping only: NitscheLtsRun assembles its own load and
+   /// does not see b.
+   void SetConstantLoad(const Vector &b)
+   {
+      MFEM_VERIFY(b.Size() == 0 || b.Size() == height, "SetConstantLoad: size "
+                  << b.Size() << " != " << height);
+      b_const_ = b;
+   }
+   const Vector &ConstantLoad() const { return b_const_; }
+   /// Hook H3: K x through the path a step uses (the dense blocks, the
+   /// fused K/K_eta sweep with zero velocity, or the assembled K), so a load
+   /// formed from it cancels the step's K x to rounding, and the matrices a
+   /// step freed are not assembled again.  Collective on the first call,
+   /// as a step.
+   void StiffnessMult(const Vector &x, Vector &Kx) const
+   {
+      Kx.SetSize(height);
+      if (UseDense_())
+      {
+         if (kv_)
+         {
+            zero_v_.SetSize(height);
+            zero_v_ = 0.0;
+            dense_.Mult(x, zero_v_, Kx);
+         }
+         else { dense_.Mult(x, Kx); }
+      }
+      else if (kv_ && UseFused_())
+      {
+         zero_v_.SetSize(height);
+         zero_v_ = 0.0;
+         fused_.Mult(x, zero_v_, Kx);
+      }
+      else { elast_->ApplyStiffness(x, Kx); }
+   }
    const IFaultClosure &Closure() const { return *closure_; }
    real_t SigmaMin() const { return sigma_min_; }
    /// Global number of shared (cross-rank) fault faces, each counted once.
@@ -946,6 +984,7 @@ private:
       else { elast_->ApplyStiffness(x, Kx_); }
       elast_->AssembleDirichletOnlyRHS(F_, GetTime());
       F_ -= Kx_;
+      if (b_const_.Size() > 0) { F_ += b_const_; }   // hook H3
       if (d)
       {
          const double tf0 = MPI_Wtime();
@@ -1479,6 +1518,8 @@ private:
    real_t dt_ = 0.0;
    real_t last_solve_time_ = std::numeric_limits<real_t>::quiet_NaN();
    mutable Vector Kx_, F_, Cv_;
+   Vector b_const_;            ///< hook H3: the constant load (empty: none)
+   mutable Vector zero_v_;     ///< hook H3: zero velocity for StiffnessMult
 
    // Fault (P6)
    bool has_fault_ = false;

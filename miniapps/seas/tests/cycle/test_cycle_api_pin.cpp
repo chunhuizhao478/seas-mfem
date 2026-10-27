@@ -283,6 +283,11 @@ PIN(LV<W>().SetKelvinVoigt(real_t(), W::KVScale::Node, real_t(), W::KVLength::In
 // P2: hook H2, then what DynPhase, the first-event path and test_cycle_p2
 // read from the operator.
 PIN(LV<W>().SetBackgroundTraction(CLV<Vector>()));                     // H2
+// P5: hook H3 and what DynPhase's absorbing walls read.
+PIN(LV<W>().SetConstantLoad(CLV<Vector>()));                           // H3
+PIN_TYPE(const Vector &, CLV<W>().ConstantLoad());                     // H3
+PIN(CLV<W>().StiffnessMult(CLV<Vector>(), LV<Vector>()));              // H3
+PIN_TYPE(ParMesh &, CLV<W>().GetMesh());
 PIN_TYPE(real_t, CLV<W>().GetTime());
 PIN_TYPE(real_t, CLV<W>().ClosureGamma(int()));
 PIN_TYPE(const Vector &, CLV<W>().LastShear());
@@ -505,6 +510,6 @@ constexpr int kPinCount = __COUNTER__ - kPinBase - 1;
 int main()
 {
    std::cout << "PASSED: test_cycle_api_pin: " << kPinCount
-             << " API pins compiled (hooks H1a, H1b, H2 on nitsche-dynamic-rupture b1f5446)\n";
+             << " API pins compiled (hooks H1a, H1b, H2, H3 on nitsche-dynamic-rupture e9a35a05)\n";
    return 0;
 }
