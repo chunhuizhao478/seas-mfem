@@ -1,13 +1,17 @@
 """Compare the fault station files of two Nitsche runs (Chunhui Zhao, 2026-10-17).
 
-usage: python3 -I compare_stations.py A B [--tmax T]
+usage: python3 -I compare_stations.py A B [--tmax T] [--time-tol E] [--groups] [--bitwise]
 
 A and B are folders holding <prob>_station_*.dat (columns: t slip1 slip2 V1 V2 tau1 tau2
 sigma_n slip_path).  Rows are matched by line; with --tmax only the rows with t <= T + 1e-9
 are used, so a short run can be compared with the start of a longer one.  The times must
-agree.  For each station and quantity (slip = columns 1-2, V = 3-4, tau = 5-6, sigma_n = 7)
-it reports max |a - b| / max |a| over the rows, and prints the largest over all stations,
-plus the number of stations whose rows are bitwise equal as printed.  Standard library only.
+agree (exactly, or within E seconds with --time-tol E: local time stepping sums its
+instants per sync interval, so its printed times can differ from global stepping's in the
+last digit).  For each station and quantity (slip = columns 1-2, V = 3-4, tau = 5-6,
+sigma_n = 7) it reports max |a - b| / max |a| over the rows, and prints the largest over all
+stations, plus the number of stations whose rows are bitwise equal as printed; --groups
+also prints the largest per quantity; with --bitwise the exit status is 1 unless every station is
+bitwise equal.  Standard library only.
 """
 import glob
 import os
@@ -36,6 +40,18 @@ def main():
         i = args.index('--tmax')
         tmax = float(args[i + 1])
         del args[i:i + 2]
+    ttol = 0.0
+    if '--time-tol' in args:
+        i = args.index('--time-tol')
+        ttol = float(args[i + 1])
+        del args[i:i + 2]
+    groups = '--groups' in args
+    if groups:
+        args.remove('--groups')
+    bitwise = '--bitwise' in args
+    if bitwise:
+        args.remove('--bitwise')
+    gworst = {name: (0.0, None) for name, _ in GROUPS}
     a_dir, b_dir = args
     files = sorted(f for f in glob.glob(os.path.join(a_dir, '*_station_*.dat'))
                    if not f.endswith('_copies.dat'))
@@ -49,7 +65,7 @@ def main():
         A, B = load(fa, tmax), load(fb, tmax)
         if len(A) != len(B):
             sys.exit(f'{os.path.basename(fa)}: {len(A)} rows against {len(B)}')
-        if any(float(x[0]) != float(y[0]) for x, y in zip(A, B)):
+        if any(abs(float(x[0]) - float(y[0])) > ttol for x, y in zip(A, B)):
             sys.exit(f'{os.path.basename(fa)}: times differ')
         same += A == B
         for name, cols in GROUPS:
@@ -57,10 +73,19 @@ def main():
             d = max(abs(float(x[c]) - float(y[c])) for x, y in zip(A, B) for c in cols) / scale
             if d > worst:
                 worst, where = d, f'{os.path.basename(fa)} {name}'
+            if d > gworst[name][0]:
+                gworst[name] = (d, os.path.basename(fa))
         n += 1
     rows = len(load(files[0], tmax))
     print(f'{b_dir} vs {a_dir}: {n} stations, {rows} rows each; {same} bitwise equal as printed; '
           f'largest difference {worst:.3e}' + (f' ({where})' if where else ''))
+    if groups:
+        for name, _ in GROUPS:
+            d, f = gworst[name]
+            print(f'  {name:8s} {d:.3e}' + (f' ({f})' if f else ''))
+    if bitwise and same != n:
+        print(f'NOT bitwise equal: {n - same} of {n} stations differ')
+        sys.exit(1)
 
 
 if __name__ == '__main__':

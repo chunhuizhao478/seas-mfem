@@ -38,7 +38,7 @@ namespace seas
 
 /// Per-element CFL length: inscribed diameter 6 V / A_total for a tet
 /// (vol^{1/3} if the face area vanishes), as BimaterialWaveOperator.
-inline real_t NitscheElementLength(ParMesh &mesh, int e)
+inline real_t NitscheElementLength(Mesh &mesh, int e)
 {
    MFEM_VERIFY(mesh.GetElementBaseGeometry(e) == Geometry::TETRAHEDRON,
                "NitscheElementLength: element " << e << " is a "

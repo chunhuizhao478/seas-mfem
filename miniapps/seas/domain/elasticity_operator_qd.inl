@@ -637,6 +637,8 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
                   "--qd-green with --device reads G from --qd-green-cache, "
                   "written by a CPU run (same model, no --device); building "
                   "G on the device is not implemented");
+      MFEM_VERIFY(config.compress == 0.0 || !on_device,
+                  "--qd-green-compress runs on the CPU only (no --device)");
       MFEM_VERIFY(config.block >= 1, "--qd-green-block must be >= 1, got "
                   << config.block);
       if (!stiffness_assembled_)
@@ -686,24 +688,39 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
                      << ").  Run without --qd-green.");
       }
 
+      // QD speed item 4 (--qd-green-compress): G as an H-matrix
+      const bool compress = config.compress > 0.0;
       if (rank == 0)
       {
          const double gib = double(with_normal ? 3 : 2) * double(nf_glob) *
                             double(nslip_glob) * sizeof(real_t) / 1073741824.0;
-         mfem::out << "[QD-GREEN] allocating G: " << std::fixed
-                   << std::setprecision(2) << gib << " GiB in all, about "
-                   << gib / nranks << " GiB per rank (rows split over all "
-                   << nranks << " ranks)\n";
+         if (compress)
+         {
+            mfem::out << "[QD-GREEN] dense G would be " << std::fixed
+                      << std::setprecision(2) << gib << " GiB; kept as an "
+                      "H-matrix (dense rows only while compressing)\n";
+         }
+         else
+         {
+            mfem::out << "[QD-GREEN] allocating G: " << std::fixed
+                      << std::setprecision(2) << gib << " GiB in all, about "
+                      << gib / nranks << " GiB per rank (rows split over all "
+                      << nranks << " ranks)\n";
+         }
          mfem::out.flush();
       }
+      MFEM_VERIFY(config.hcache_path.empty() || compress,
+                  "--qd-green-hcache needs --qd-green-compress");
+      const double mem_node = config.compress_mem_gib * 1073741824.0;
       auto green = std::unique_ptr<QDGreenOperator>(new QDGreenOperator(
-         comm, nf_glob, fault_first, nown, with_normal));
-      if (!config.cache_path.empty())
+         comm, nf_glob, fault_first, nown, with_normal, !compress));
+      if (!config.cache_path.empty() || compress)
       {
          // Position key of each owned fault DOF (node, face centroid), so
          // the cache file can be read on another partition.
-         MFEM_VERIFY(mesh_.SpaceDimension() == 3, "--qd-green-cache needs "
-                     "a 3-D mesh (the file keys fault DOFs by position)");
+         MFEM_VERIFY(mesh_.SpaceDimension() == 3, "--qd-green-cache and "
+                     "--qd-green-compress need a 3-D mesh (they key fault "
+                     "DOFs by position)");
          Vector xyz, keys(6 * nown);
          GetFaultDOFCoords3D(xyz);
          const int nbf = nbf_per_face_;
@@ -721,9 +738,31 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
          }
          green->SetKeys(keys);
       }
+      std::unique_ptr<QDHMatrix> hmat;
+      std::string hinfo;
+      bool h_loaded = false;
+      if (compress)
+      {
+         std::vector<real_t> keys_all;
+         green->GatherKeysAll(keys_all);
+         hmat.reset(new QDHMatrix(comm, nf_glob, with_normal ? 3 : 2,
+                                  green->RowLo(), keys_all, config.leaf,
+                                  config.eta));
+         if (!config.hcache_path.empty())
+         {
+            std::vector<real_t> td(green->NumLocalRows());
+            h_loaded = hmat->ReadFile(config.hcache_path, config.compress,
+                                      mem_node, td.data(), hinfo);
+            if (h_loaded)
+            {
+               std::copy(td.begin(), td.end(), green->LoadingRowsWrite());
+            }
+         }
+         if (!h_loaded) { green->AllocateDense(); }
+      }
       std::string info;
       bool loaded = false;
-      if (!config.cache_path.empty())
+      if (!h_loaded && !config.cache_path.empty())
       {
          loaded = green->ReadFile(config.cache_path, info);
       }
@@ -732,7 +771,7 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
                   "a CPU run of the same model (no --device, same "
                   "--qd-green-cache), then rerun on the device.");
       double t_solve = 0.0, t_cols = 0.0;
-      if (!loaded)
+      if (!loaded && !h_loaded)
       {
          const int m_max = config.block;
          std::vector<Vector> E(m_max), R(m_max), X(m_max), Ts(m_max),
@@ -781,10 +820,11 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
          QDStageTraction(x, zero, TDs, with_normal ? &TDn : nullptr);
          green->SetLoading(TDs, TDn);
       }
+      if (h_loaded) { green->SetCompressed(std::move(hmat)); }
       MFEM_VERIFY(green->Complete(), "--qd-green: G is incomplete after "
-                  << (loaded ? "reading" : "building") << " it");
+                  << (loaded || h_loaded ? "reading" : "building") << " it");
       const double t_built = MPI_Wtime() - t_start;
-      if (!loaded && !config.cache_path.empty())
+      if (!loaded && !h_loaded && !config.cache_path.empty())
       {
          std::ostringstream o;
          o << "N_f " << nf_glob << ", order " << order_ << ", penalty factor "
@@ -792,6 +832,31 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
            << " components, built on " << nranks << " ranks";
          green->WriteFile(config.cache_path, o.str());
       }
+      std::string hsummary;
+      if (compress && !h_loaded)
+      {
+         const bool keep = !config.hcache_path.empty();
+         hmat->Compress(green->DenseRows(), config.compress, mem_node, keep);
+         if (keep)
+         {
+            std::ostringstream o;
+            o << "N_f " << nf_glob << ", order " << order_
+              << ", penalty factor " << penalty_factor_ << ", "
+              << (with_normal ? 3 : 2) << " components, compressed on "
+              << nranks << " ranks from G "
+              << (loaded ? "read from " + config.cache_path
+                  : std::string("built by solves"));
+            hmat->WriteFile(config.hcache_path, o.str(), green->LoadingRows());
+         }
+         hsummary = hmat->Summary("compressed");
+         green->SetCompressed(std::move(hmat));
+      }
+      else if (h_loaded)
+      {
+         hsummary = green->HMatrix()->Summary("read from " +
+                                              config.hcache_path);
+      }
+      const double t_ready = MPI_Wtime() - t_start;
       qd_green_ = std::move(green);
       double t_upload = 0.0, dev_bytes = 0.0;
       if (on_device)
@@ -842,8 +907,9 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
       double bytes = qd_green_->LocalBytes(), bmax = 0.0, btot = 0.0;
       MPI_Reduce(&bytes, &bmax, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
       MPI_Reduce(&bytes, &btot, 1, MPI_DOUBLE, MPI_SUM, 0, comm);
-      double tm[4] = {t_built, t_solve, t_cols, t_upload}, tmax[4];
-      MPI_Reduce(tm, tmax, 4, MPI_DOUBLE, MPI_MAX, 0, comm);
+      double tm[5] = {t_built, t_solve, t_cols, t_ready, t_upload},
+             tmax[5];
+      MPI_Reduce(tm, tmax, 5, MPI_DOUBLE, MPI_MAX, 0, comm);
       double dbmax = 0.0;
       MPI_Reduce(&dev_bytes, &dbmax, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
       if (rank == 0)
@@ -853,8 +919,14 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
            << nslip_glob << " (N_f " << nf_glob << ", "
            << (with_normal ? "shear + normal" : "shear") << " rows), "
            << std::fixed << std::setprecision(2) << btot / 1073741824.0
-           << " GiB in all, " << bmax / 1073741824.0 << " GiB largest rank\n";
-         if (loaded)
+           << " GiB in all" << (compress ? " as an H-matrix" : "") << ", "
+           << bmax / 1073741824.0 << " GiB largest rank\n";
+         if (h_loaded)
+         {
+            o << "[QD-GREEN] H-matrix read from " << config.hcache_path
+              << " (" << hinfo << ")\n";
+         }
+         else if (loaded)
          {
             o << "[QD-GREEN] read from " << config.cache_path << " in "
               << std::setprecision(1) << tmax[0] << " s (" << info << ")\n";
@@ -871,11 +943,17 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
             }
             o << "\n";
          }
+         if (compress)
+         {
+            o << hsummary << "[QD-GREEN] compressed G ready "
+              << std::fixed << std::setprecision(1) << tmax[3]
+              << " s after the start of the build\n";
+         }
          if (on_device)
          {
             o << "[QD-GREEN] on the device (" << qd_green_->ProductName()
               << "): moved in " << std::fixed << std::setprecision(1)
-              << tmax[3] << " s, device memory used " << std::setprecision(2)
+              << tmax[4] << " s, device memory used " << std::setprecision(2)
               << dbmax / 1073741824.0 << " GiB on the largest rank"
               << (nranks > 1 ? (config.gpu_mpi ? "; MPI on device buffers"
                                                : "; MPI staged through the host")
@@ -893,7 +971,9 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
       MFEM_VERIFY(rel_s <= config.tol && rel_n <= config.tol,
                   "--qd-green: G differs from the solve path by " << rel_s
                   << " (shear), " << rel_n << " (normal), above --qd-green-tol "
-                  << config.tol << (loaded ? ".  The cache file "
+                  << config.tol << (h_loaded ? ".  The H-matrix file "
+                  "belongs to another model: remove it or pass another "
+                  "--qd-green-hcache." : loaded ? ".  The cache file "
                   "belongs to another model: remove it or pass another "
                   "--qd-green-cache." : "."));
    }

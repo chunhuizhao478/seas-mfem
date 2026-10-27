@@ -1,0 +1,24 @@
+PASS  1 SCEC pass/fail as the gold: lts 1:True 2:True 3:None (peak count 7); gold 1:True 2:True 3:None (peak count 7)
+PASS  2a arrival within 5 ms: max 0.34 ms (x2_12_x3_3)
+PASS  2b peak slip rate within 1 %: max 0.224 % (x2_0_x3_12)
+PASS  2c final slip within 0.5 %: max 0.043 % (x2_12_x3_3)
+PASS  3 noise RMS within 10 %: max |ratio - 1| 0.5 % (x2_0_x3_12)
+PASS  4 period-2 tau_h worst station within 2x gold or below 10 Pa per 1 s window: ratio per window 1.00 1.00 1.00 1.01 1.00 1.00 1.00 1.01 1.61 4.45 5.24 12.79; above 2x but below 10 Pa in 3 window(s)
+      gold  (MPa) 3.3e-06 2.8e-06 0.00013 2.6e-06 8.9e-05 0.00021 6e-06 5e-05 3.1e-07 5.5e-07 6.9e-07 5.7e-07
+      lts   (MPa) 3.3e-06 2.8e-06 0.00013 2.6e-06 8.9e-05 0.00021 6e-06 5e-05 5.1e-07 2.5e-06 3.6e-06 7.3e-06
+PASS  4 period-2 sigma_n worst station within 2x gold or below 10 Pa per 1 s window: ratio per window 1.07 1.02 1.00 1.00 1.00 1.00 1.00 1.01 1.11 1.54 1.17 1.68
+      gold  (MPa) 4.7e-08 2.1e-06 2.7e-05 1.2e-05 2.8e-05 3.4e-05 2.3e-05 1.8e-05 1e-06 3.4e-07 6.3e-07 3.6e-07
+      lts   (MPa) 5e-08 2.1e-06 2.7e-05 1.2e-05 2.8e-05 3.4e-05 2.3e-05 1.8e-05 1.1e-06 5.2e-07 7.4e-07 6.1e-07
+info  per station max period-2 ratio over windows (tau_h, sigma_n): x2_-12_x3_12 12.08/1.80, x2_-12_x3_3 6.68/1.03, x2_-9_x3_7.5 6.66/4.36, x2_0_x3_12 15.72/2.73, x2_0_x3_3 150.10/16.02, x2_0_x3_7.5 13.67/13.96, x2_12_x3_12 14.99/4.39, x2_12_x3_3 10.64/1.04, x2_9_x3_7.5 6.48/1.10
+info  max |lts - gold| / max |gold| over 0-12 s: slip 0.00151 (x2_0_x3_12), V 0.0225 (x2_0_x3_12), tau_h 0.0104 (x2_0_x3_12)
+info  per station |d arrival| ms, |d peak| %, |d slip| %, noise ratios sn/th/tv:
+      x2_-12_x3_12        0.23   0.034   0.017  1.00/1.00/1.00
+      x2_-12_x3_3         0.23   0.007   0.043  1.00/1.00/1.00
+      x2_-9_x3_7.5        0.11   0.032   0.029  1.00/1.00/1.00
+      x2_0_x3_12          0.11   0.224   0.005  1.00/1.00/1.00
+      x2_0_x3_3           0.11   0.026   0.017  1.00/1.00/1.00
+      x2_0_x3_7.5         0.00   0.004   0.018  1.00/1.00/1.00
+      x2_12_x3_12         0.23   0.039   0.017  1.00/1.00/1.00
+      x2_12_x3_3          0.34   0.007   0.043  1.00/1.00/1.00
+      x2_9_x3_7.5         0.11   0.041   0.029  1.00/1.00/1.00
+VERDICT ALL PASS

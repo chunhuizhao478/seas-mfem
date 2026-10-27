@@ -312,6 +312,9 @@
             }
          }
 
+         // --exit-after-assembly: K and its statistics only, no solver.
+         if (assemble_matrix_only_) { return; }
+
          if (solver_type_ == SolverType::OperatorOnly)
          {
             // Explicit time stepping: only ApplyStiffness is used, and in
@@ -321,9 +324,6 @@
             stiffness_assembled_ = true;
             return;
          }
-
-         // --exit-after-assembly: K and its statistics only, no solver.
-         if (assemble_matrix_only_) { return; }
 
          // Direct solvers (MUMPS, MUMPS BLR, cuDSS) behind one interface,
          // solver/qd_linear_solver.hpp (GPU plan G3).  cuDSS reads and

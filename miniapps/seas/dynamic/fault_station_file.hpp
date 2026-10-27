@@ -20,9 +20,19 @@
 // <prefix>_station_<name>.dat, written by the rank that owns the snapped
 // DOF, with TPV102StationWriter's columns and number format
 //     t slip1 slip2 V1 V2 tau1 tau2 sigma_n state
-// (scientific, 10 digits, flushed every write).  The caller supplies the
-// state column per law: log10 theta for the aging law, psi for the slip law
-// with strong rate weakening, the slip path for slip weakening.
+// (scientific, 10 digits).  The caller supplies the state column per law:
+// log10 theta for the aging law, psi for the slip law with strong rate
+// weakening, the slip path for slip weakening.
+//
+// Buffered rows (speed-next O2, Chunhui Zhao 2026-10-20): StationRowFile
+// keeps the rows in memory and writes them every flush_every rows (Open's
+// argument; 1 = every row, as before), at Flush and at Close, so a file
+// always ends on a whole row.  InstallStationSignalHandlers makes SIGTERM
+// (the wall-time limit), SIGINT and SIGUSR1 set a flag (StationSignal) that
+// the time loop polls after each step; the driver then flushes every file
+// and writes every row from there on.  The process keeps running until it
+// is killed, so no rank leaves a collective its neighbours are still in; a
+// second SIGTERM or SIGINT ends it as the default action would.
 //
 // dynamic/tpv102_stations.hpp, which the native TPV102 driver and the SAFS
 // driver use, is not edited.
@@ -34,7 +44,9 @@
 #include "fault_face_flux.hpp"   // DOFData
 
 #include <cctype>
+#include <csignal>
 #include <cmath>
+#include <cstring>
 #include <cstdlib>
 #include <fstream>
 #include <functional>
@@ -205,6 +217,84 @@ inline std::vector<FaultStationSnap> SnapFaultStations(const std::vector<FaultSt
    return snap;
 }
 
+/// A text file written in whole rows (header comment, "Buffered rows").
+/// Header lines and rows are formatted into Text(); EndRow() closes a row.
+class StationRowFile
+{
+public:
+   StationRowFile() = default;
+   StationRowFile(StationRowFile &&) = default;
+   StationRowFile &operator=(StationRowFile &&) = default;
+   ~StationRowFile() { Close(); }
+
+   void Open(const std::string &name, int flush_every)
+   {
+      f_.open(name);
+      MFEM_VERIFY(f_.is_open(), "station file " << name << " cannot be written");
+      SetFlushEvery(flush_every);
+   }
+   bool IsOpen() const { return f_.is_open(); }
+   std::ostream &Text() { return text_; }
+   void EndRow() { if (++rows_ % every_ == 0) { Flush(); } }
+   void SetFlushEvery(int n)
+   {
+      MFEM_VERIFY(n >= 1, "station files: flush every " << n << " rows; it must be >= 1");
+      every_ = n;
+   }
+   /// Write the rows held in memory and flush the file.
+   void Flush()
+   {
+      if (!f_.is_open()) { return; }
+      const std::string t = text_.str();
+      f_.write(t.data(), static_cast<std::streamsize>(t.size()));
+      f_.flush();
+      text_.str(std::string());
+   }
+   void Close()
+   {
+      if (!f_.is_open()) { return; }
+      Flush();
+      f_.close();
+   }
+
+private:
+   std::ofstream f_;
+   std::ostringstream text_;
+   int every_ = 1;
+   long rows_ = 0;
+};
+
+/// The station signal flag (header comment, "Buffered rows"): 0, or the
+/// first signal received.
+inline volatile std::sig_atomic_t g_station_signal = 0;
+
+inline void StationSignalHandler(int sig)
+{
+   if (g_station_signal != 0 && sig != SIGUSR1)
+   {
+      std::signal(sig, SIG_DFL);   // async-signal-safe, as raise (POSIX)
+      std::raise(sig);
+      return;
+   }
+   g_station_signal = sig;
+}
+
+inline void InstallStationSignalHandlers()
+{
+   struct sigaction sa;
+   std::memset(&sa, 0, sizeof(sa));
+   sa.sa_handler = StationSignalHandler;
+   sigemptyset(&sa.sa_mask);
+   sa.sa_flags = SA_RESTART;
+   for (int sig : {SIGTERM, SIGINT, SIGUSR1})
+   {
+      MFEM_VERIFY(sigaction(sig, &sa, nullptr) == 0, "station files: cannot install the "
+                  "handler of signal " << sig);
+   }
+}
+
+inline int StationSignal() { return g_station_signal; }
+
 /// Per-station time-series files (format in the header comment).
 class FaultStationWriter
 {
@@ -212,10 +302,11 @@ public:
    using StateFn = std::function<real_t(const DOFData &)>;
 
    /// Opens the files of the stations this rank owns.  `state_label` names
-   /// the ninth column; `state` computes it from a DOF's data.
+   /// the ninth column; `state` computes it from a DOF's data; the rows reach
+   /// the files every `flush_every` rows.
    void Open(const std::string &dir, const std::string &prefix,
              const std::vector<FaultStation> &st, const std::vector<FaultStationSnap> &snap,
-             const std::string &state_label, StateFn state)
+             const std::string &state_label, StateFn state, int flush_every = 1)
    {
       st_ = st;
       snap_ = snap;
@@ -225,9 +316,8 @@ public:
       {
          if (!snap[s].owner) { continue; }
          const std::string fname = dir + "/" + prefix + "_station_" + st[s].name + ".dat";
-         files_[s].open(fname);
-         MFEM_VERIFY(files_[s].is_open(), "station file " << fname << " cannot be written");
-         files_[s] << std::setprecision(12) << "# fault station " << st[s].name << ": requested ("
+         files_[s].Open(fname, flush_every);
+         files_[s].Text() << std::setprecision(12) << "# fault station " << st[s].name << ": requested ("
                    << st[s].x[0] << ", " << st[s].x[1] << ", " << st[s].x[2]
                    << ") m, snapped to the fault node (" << snap[s].node[0] << ", "
                    << snap[s].node[1] << ", " << snap[s].node[2] << ") m, distance "
@@ -243,9 +333,9 @@ public:
    {
       for (size_t s = 0; s < st_.size(); s++)
       {
-         if (!snap_[s].owner || !files_[s].is_open()) { continue; }
+         if (!snap_[s].owner || !files_[s].IsOpen()) { continue; }
          const DOFData &d = dd[snap_[s].dof];
-         files_[s] << std::scientific << std::setprecision(10)
+         files_[s].Text() << std::scientific << std::setprecision(10)
                    << t << " "
                    << d.slip1 << " "
                    << d.slip2 << " "
@@ -255,21 +345,27 @@ public:
                    << d.tau2_corr << " "
                    << d.sigma_n_corr << " "
                    << state_(d) << "\n";
-         // flushed every write, so a job killed at its wall-time limit keeps its rows
-         files_[s].flush();
+         files_[s].EndRow();
       }
    }
 
-   void Close()
+   void SetFlushEvery(int n) { for (auto &f : files_) { f.SetFlushEvery(n); } }
+   void Flush() { for (auto &f : files_) { f.Flush(); } }
+   void Close() { for (auto &f : files_) { f.Close(); } }
+
+   /// The owned DOFs whose data WriteStep reads.
+   std::vector<int> Dofs() const
    {
-      for (auto &f : files_) { if (f.is_open()) { f.close(); } }
+      std::vector<int> d;
+      for (const FaultStationSnap &q : snap_) { if (q.owner) { d.push_back(q.dof); } }
+      return d;
    }
 
 private:
    std::vector<FaultStation> st_;
    std::vector<FaultStationSnap> snap_;
    StateFn state_;
-   std::vector<std::ofstream> files_;
+   std::vector<StationRowFile> files_;
 };
 
 } // namespace seas

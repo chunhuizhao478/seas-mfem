@@ -1,0 +1,50 @@
+commit ac3adeb9b9e5781b9110139eac2ba2e39bbfdd74
+host i617-031.vista.tacc.utexas.edu  nodes 4  ranks 576
+deck tpv205/configs/tpv205_nitsche.toml  mesh tpv205/mesh/tpv2053d_200m.msh sha256 30c63b923781177830330a36aebcc4159cfc8043374ea4dcd883a9b2eec13538  order 1  tfinal 12.0  gold tpv205/gold/nitsche-kv0p1_p1_cd_pc_200m_jobid1076378_git81759da/results
+modules: ucc/1.9.0 ucx/1.22.0 cmake/4.1.1 xalt/3.1 TACC gcc/14.2.0 nvpl/26.9 cuda/12.6 openmpi/5.0.5 hypre/2.31.0 metis/5.1.0.3 phdf5/1.14.6 
+=== gts [] 0 -> 1.0 s: driver exit 1, 62 s in the job
+Mesh::GeneratePartitioning:  error in METIS_PartGraphKway!
+
+
+Mesh::GeneratePartitioning:  error in METIS_PartGraphKway!
+
+
+Mesh::GeneratePartitioning:  error in METIS_PartGraphKway!
+
+
+Mesh::GeneratePartitioning:  error in METIS_PartGraphKway!
+
+
+Mesh::GeneratePartitioning:  error in METIS_PartGraphKway!
+--------------------------------------------------------------------------
+prterun has exited due to process rank 359 with PID 1826931 on node i617-131 calling
+"abort". This may have caused other processes in the application to be
+terminated by signals sent by prterun (as reported here).
+--------------------------------------------------------------------------
+TACC:  MPI job exited with code: 1 
+TACC:  Shutdown complete. Exiting. 
+first node memory: peak in use 135.2 GB of 237.6 GB (2 s samples)
+=== lts [--lts rate2] 0 -> 12.0 s: driver exit 0, 362 s in the job
+  LTS (plan item 7): rate2, 4 clusters (hard cap 4), dt0 = 0.000288365 s; tets per cluster 169867 313803 712947 697966; ideal 3.19895x; fault (52456 tets, 106114 buffer tets in 3 layer(s)) in cluster 0 after 2 clustering(s)
+  partition: multi-constraint (BuildLtsAwarePartition, fault weight w = 0); max/mean overall 1.056, per cluster 1.078 1.05 1.049 1.05, fault tets 1.296
+  LTS: dt0 = 0.00028836497268 s, global dt = 0.00028836497268 s (relative difference 0); fault step dt_F = 0.00028836497268 s
+  fault ParaView output: /scratch/10024/zhaochun/nitsche_profiling/lts_tpv205_200m_p1_1082386/lts/fault.vtkhdf, 26228 fault faces x 4 sub-triangles (13152 faces re-wound to nhat); face map vs DOF positions max error 0 m
+  LTS: 5202 sync intervals of 8 ticks (0.002306919781 s), the fault every 1 tick(s): 41616 fault steps to t = 12.0005967 s
+  LTS: cluster blocks 14800.1 MB over all ranks, built in 0.455706 s (with the first forces)
+  fault ParaView output: 603 frames in /scratch/10024/zhaochun/nitsche_profiling/lts_tpv205_200m_p1_1082386/lts/fault.vtkhdf; on rank 0 136.789 s (0.226847 s/frame: pack 2.09402e-05, gather + HDF write 0.226826 = gather 0.00330058 + write 0.223415; fast writer)
+  time in ode.Step per rank after step 1: min 78.0458 s, mean 130.551 s, max 249.026 s (5.98404 ms/step at the max); step 1 0.00282106 s (with the operator assembly); fast fault on, fused K/K_eta off, dense blocks off
+  LTS: 41616 ticks; patch element kicks 75098860272 = 0.476244 of global stepping's per tick; halo rounds 41617 per rank (= ticks + 1 on every rank), 245271432168 values received over all ranks; halo wait max 144.889 s, mean 12.3243 s, largest share of a rank's stepping 0.660345
+  fault work: 0.1234 ms/step on the busiest rank; cost per step 0.9277 us per tet, 0.9425 us per fault-face side (w = 1.016 tets)
+=== done: 41616 steps, t = 12.0006 s; max|V| 8.12351 m/s; max|V|dt/Dc 0.00585634; sigma_n_eff in [4.34471e+07, 1.92216e+08] Pa; sigma_pc in [4.34567e+07, 1.92214e+08] Pa; wall 356.857 s ===
+first node memory: peak in use 117.1 GB of 237.6 GB (2 s samples)
+=== stations (per quantity: max |a - b| over max |a| of slip, V, tau, sigma_n at that station) ===
+/scratch/10024/zhaochun/nitsche_profiling/lts_tpv205_200m_p1_1082386/lts vs tpv205/gold/nitsche-kv0p1_p1_cd_pc_200m_jobid1076378_git81759da/results: 16 stations, 41614 rows each; 0 bitwise equal as printed; largest difference 1.569e-02 (tpv205_station_x2_-7.5_x3_0.dat V)
+  slip     1.293e-03 (tpv205_station_x2_4.5_x3_0.dat)
+  V        1.569e-02 (tpv205_station_x2_-7.5_x3_0.dat)
+  tau      7.180e-03 (tpv205_station_x2_-7.5_x3_0.dat)
+  sigma_n  8.850e-04 (tpv205_station_x2_7.5_x3_0.dat)
+512	/scratch/10024/zhaochun/nitsche_profiling/lts_tpv205_200m_p1_1082386/RUN_INFO.txt
+475K	/scratch/10024/zhaochun/nitsche_profiling/lts_tpv205_200m_p1_1082386/gts
+4.5G	/scratch/10024/zhaochun/nitsche_profiling/lts_tpv205_200m_p1_1082386/lts
+6.5K	/scratch/10024/zhaochun/nitsche_profiling/lts_tpv205_200m_p1_1082386/tpv205_nitsche.toml
+total 428 s

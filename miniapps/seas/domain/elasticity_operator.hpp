@@ -47,14 +47,13 @@ namespace mfem
 namespace seas
 {
 
-/// Linear solver type for the elasticity domain operator.
+/// Linear solver type for the elasticity domain operator.  CUDSS: cuDSS on
+/// the GPU (MFEM_USE_CUDSS), for the stage operators of GPU plan G3.
 /// OperatorOnly: assemble K as a HypreParMatrix for ApplyStiffness and
 /// build no solver; the serial bilinear form is released after
 /// ParallelAssemble (explicit time stepping never calls Solve).
-/// CUDSS: cuDSS on the GPU (MFEM_USE_CUDSS), for the stage operators of
-/// GPU plan G3.
 enum class SolverType { CG_AMG, MUMPS, MUMPS_BLR, GMRES_BlockILU, GMRES_AMG, SUPERLU, STRUMPACK,
-                        OperatorOnly, CUDSS };
+                        CUDSS, OperatorOnly };
 
 /// Boundary condition mode for the elasticity domain operator
 ///
