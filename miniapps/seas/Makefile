@@ -3238,6 +3238,56 @@ test-nitsche-pf: seas_test_nitsche_pf
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_pf
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_pf
 
+# Station output of the Nitsche driver (speed-next O2, Chunhui Zhao
+# 2026-10-20): buffered rows, the members-only copy average against the world
+# version, the signal flag (O2-1 .. O2-4).
+TEST_STATION_OUTPUT_SRC = tests/verification/test_station_output.cpp
+TEST_STATION_OUTPUT_OBJ = $(TEST_STATION_OUTPUT_SRC:.cpp=.o)
+$(TEST_STATION_OUTPUT_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             dynamic/fault_station_file.hpp \
+                             dynamic/station_copy_average.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_station_output: $(TEST_STATION_OUTPUT_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_STATION_OUTPUT_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-station-output: seas_test_station_output
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_station_output
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_station_output
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 3 ./seas_test_station_output
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_station_output
+	rm -rf test_station_output_out
+
+# The parallel mesh from parts sent by rank 0 (Chunhui Zhao 2026-10-22,
+# partition-memory report rev1 option D, speed-next S1): the same mesh, DOF
+# numbers and element values as ParMesh(comm, serial mesh, partition)
+# (MP-1 .. MP-7), and the part files of S1 step 2 (MP-8).
+TEST_MESH_PARTS_SRC = tests/verification/test_mesh_parts.cpp
+TEST_MESH_PARTS_OBJ = $(TEST_MESH_PARTS_SRC:.cpp=.o)
+$(TEST_MESH_PARTS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             dynamic/mesh_parts.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_mesh_parts: $(TEST_MESH_PARTS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_MESH_PARTS_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-mesh-parts: seas_test_mesh_parts
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_mesh_parts
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_mesh_parts
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 3 ./seas_test_mesh_parts
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_mesh_parts
+	rm -rf test_mesh_parts_out
+
 # Nitsche dynamic rupture P6 (first rupture, TPV102 on the inline mesh; plan
 # N-01 fault path, C-04, N-10 fixture): T-04, T-13(a), T-15, T-20, T-21.
 # The abort modes must exit non-zero (MFEM_USE_EXCEPTIONS=NO: tested by exit
@@ -3440,6 +3490,8 @@ $(NITSCHE_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
                              domain/nitsche_energy.hpp \
                              spatial/code/spatial_friction.hpp \
                              dynamic/fault_station_file.hpp \
+                             dynamic/station_copy_average.hpp \
+                             dynamic/mesh_parts.hpp \
                              friction/rate_state_closure.hpp \
                              friction/rate_state_srw_closure.hpp \
                              friction/slip_weakening_closure.hpp \
@@ -3452,6 +3504,24 @@ seas_nitsche_dyn_driver: $(NITSCHE_DYN_DRIVER_OBJ) $(SPATIAL_FRICTION_OBJ) \
                          $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
                          $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(NITSCHE_DYN_DRIVER_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Speed-next profiling (Chunhui Zhao, 2026-10-20): the same driver with debug
+# information (-g) for a sampling profiler (Linaro MAP, perf).  -g does not
+# change the generated code: jobs/vista_profiling/build_map_vista.sbatch
+# checks that its object without the debug sections is byte-identical to
+# drivers/nitsche_dyn_driver.o.
+NITSCHE_DYN_DRIVER_G_OBJ = drivers/nitsche_dyn_driver_g.o
+$(NITSCHE_DYN_DRIVER_G_OBJ): $(SRC)$(NITSCHE_DYN_DRIVER_SRC) $(NITSCHE_DYN_DRIVER_OBJ)
+	$(MFEM_CXX) $(MFEM_FLAGS) -g $(SEAS_INCLUDES) $(HDF5_INCFLAGS) $(TOML_FLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_nitsche_dyn_driver_g: $(NITSCHE_DYN_DRIVER_G_OBJ) $(SPATIAL_FRICTION_OBJ) \
+                           $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+                           $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(NITSCHE_DYN_DRIVER_G_OBJ) \
 	    $(SPATIAL_FRICTION_OBJ) $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
 	    $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)

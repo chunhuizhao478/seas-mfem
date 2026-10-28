@@ -1,0 +1,539 @@
+commit 3926e9c81c126214d9c12d4d9136d0ebec2f7d34, binaries built at 3926e9c81c126214d9c12d4d9136d0ebec2f7d34
+first link: a fresh run in /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927
+H-matrix: reading /scratch/10024/zhaochun/seas-qd-green/bp5_fd_p2_h1e-10.bin (40697028608 B)
+host i618-044.vista.tacc.utexas.edu  nodes i618-[044,051-053]  ranks 576  output /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927  wall limit 162000 s
+seas_fd_cycle_driver exit 8 after 162007 s
+  QD stages: matrix, Green's function H-matrix eps 0.000000 (cache '', hcache '/scratch/10024/zhaochun/seas-qd-green/bp5_fd_p2_h1e-10.bin', check every 10000 stages)
+  benchmark output: 9 off-fault stations, 2 profiles
+  snapshots: fault dt_qd 315576000.000000 s, dt_dyn 0.100000 s; surface dt_qd 315576000.000000 s, dt_dyn 0.100000 s
+  benchmark output: fault area 4e+09 m^2, domain A 1.35602e+09 m^2; off-fault stations blkst_strk-16fn+08dp+00 (rank 380) blkst_strk+00fn+08dp+00 (rank 401) blkst_strk+16fn+08dp+00 (rank 212) blkst_strk+00fn+16dp+00 (rank 204) blkst_strk+00fn+32dp+00 (rank 204) blkst_strk+00fn+48dp+00 (rank 310) blkst_strk+00fn+08dp+10 (rank 429) blkst_strk+00fn+16dp+10 (rank 310) blkst_strk+00fn+32dp+10 (rank 310)
+  fault snapshots: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr_fault_snapshots.vtkhdf (55872 points, 0 snapshots so far)
+  surface snapshots: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr_surface_snapshots.vtkhdf (11256 points, 0 snapshots so far)
+  wall limit 1.620e+05 s reached at step 605879, t = 1.575e+03 yr: checkpoint written, stopping
+  snapshots: fault 19925, surface 19925
+=== fd_cycle dynamic phase 1 summary ===
+  commit: 3926e9c81c126214d9c12d4d9136d0ebec2f7d34
+  end: end_of_phase at t = 325.579557 s (phase length 325.579557 s, 403668 steps of 0.000807 s); back to QD
+  max V: at the start (QD balance) 0.030000, after step 1 0.019891, over the phase 4.176434 m/s
+  max |V| dt / Dc: 0.024061 (the operator aborts above 2)
+  sigma_n_eff range: [9.153714, 35.013368] MPa; sigma_PC range: [9.154713, 35.011380] MPa
+  time per dynamic step: 0.003562 s (rank 0), 0.008765 s (slowest rank), on 576 ranks; loop with output 3802.494839 s
+  events: 1
+  files: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr_{<stations>,global,catalog,switch}.txt, /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr_fault.txt
+    403668   3.25580e+02   8.28553e-04   4.77337e-06   2.13942e+01   2.89894e+01  2.13942e+01  2.89895e+01   3.56186e-03    -32.00     0.00     0.00
+
+  back to QD at t = 325.579557 s (TS step 0, first dt 0.010000 s): max V dynamic 0.000829 m/s, QD balance 0.000930 m/s
+Checkpoint written: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr.partial (t=325.58 s, step=0)
+--
+=== fd_cycle dynamic phase 2 summary ===
+  commit: 3926e9c81c126214d9c12d4d9136d0ebec2f7d34
+  end: end_of_phase at t = 9208947257.534498 s (phase length 330.211590 s, 409411 steps of 0.000807 s); back to QD
+  max V: at the start (QD balance) 0.010001, after step 1 0.007318, over the phase 3.747780 m/s
+  max |V| dt / Dc: 0.021591 (the operator aborts above 2)
+  sigma_n_eff range: [7.099257, 36.122183] MPa; sigma_PC range: [7.105968, 36.118711] MPa
+  time per dynamic step: 0.003564 s (rank 0), 0.008832 s (slowest rank), on 576 ranks; loop with output 3880.829563 s
+  events: 2
+  files: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr_{<stations>,global,catalog,switch}.txt, /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr_fault_phase2.txt
+    409411   3.30212e+02   8.21961e-04   4.73539e-06   2.06815e+01   2.93816e+01  2.06816e+01  2.93817e+01   3.56398e-03    -31.00     0.00     0.00
+
+  back to QD at t = 9208947257.534498 s (TS step 113534, first dt 0.010000 s): max V dynamic 0.000822 m/s, QD balance 0.000922 m/s
+Checkpoint written: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr.partial (t=9208947257.53 s, step=113534)
+--
+=== fd_cycle dynamic phase 3 summary ===
+  commit: 3926e9c81c126214d9c12d4d9136d0ebec2f7d34
+  end: end_of_phase at t = 18413895333.648079 s (phase length 329.964785 s, 409105 steps of 0.000807 s); back to QD
+  max V: at the start (QD balance) 0.010000, after step 1 0.007318, over the phase 3.877987 m/s
+  max |V| dt / Dc: 0.022341 (the operator aborts above 2)
+  sigma_n_eff range: [7.936819, 35.655592] MPa; sigma_PC range: [7.939928, 35.653005] MPa
+  time per dynamic step: 0.003545 s (rank 0), 0.008752 s (slowest rank), on 576 ranks; loop with output 3849.929772 s
+  events: 3
+  files: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr_{<stations>,global,catalog,switch}.txt, /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr_fault_phase3.txt
+    409105   3.29965e+02   8.17273e-04   4.70838e-06   2.07118e+01   2.93649e+01  2.07119e+01  2.93649e+01   3.54539e-03    -31.00     0.00     0.00
+
+  back to QD at t = 18413895333.648079 s (TS step 228035, first dt 0.010000 s): max V dynamic 0.000817 m/s, QD balance 0.000919 m/s
+Checkpoint written: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr.partial (t=18413895333.65 s, step=228035)
+--
+=== fd_cycle dynamic phase 4 summary ===
+  commit: 3926e9c81c126214d9c12d4d9136d0ebec2f7d34
+  end: end_of_phase at t = 27617484731.921005 s (phase length 330.043827 s, 409203 steps of 0.000807 s); back to QD
+  max V: at the start (QD balance) 0.010000, after step 1 0.007318, over the phase 3.817529 m/s
+  max |V| dt / Dc: 0.021993 (the operator aborts above 2)
+  sigma_n_eff range: [7.587192, 35.882212] MPa; sigma_PC range: [7.591592, 35.879544] MPa
+  time per dynamic step: 0.003555 s (rank 0), 0.008882 s (slowest rank), on 576 ranks; loop with output 3932.479599 s
+  events: 4
+  files: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr_{<stations>,global,catalog,switch}.txt, /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr_fault_phase4.txt
+    409203   3.30044e+02   8.18363e-04   4.71466e-06   2.06951e+01   2.93696e+01  2.06952e+01  2.93696e+01   3.55532e-03    -31.00     0.00     0.00
+
+  back to QD at t = 27617484731.921005 s (TS step 342269, first dt 0.010000 s): max V dynamic 0.000818 m/s, QD balance 0.000919 m/s
+Checkpoint written: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr.partial (t=27617484731.92 s, step=342269)
+--
+=== fd_cycle dynamic phase 5 summary ===
+  commit: 3926e9c81c126214d9c12d4d9136d0ebec2f7d34
+  end: end_of_phase at t = 36820748882.750671 s (phase length 330.006726 s, 409157 steps of 0.000807 s); back to QD
+  max V: at the start (QD balance) 0.010005, after step 1 0.007321, over the phase 3.835686 m/s
+  max |V| dt / Dc: 0.022098 (the operator aborts above 2)
+  sigma_n_eff range: [7.705352, 35.808482] MPa; sigma_PC range: [7.709248, 35.805783] MPa
+  time per dynamic step: 0.003689 s (rank 0), 0.008870 s (slowest rank), on 576 ranks; loop with output 3958.401089 s
+  events: 5
+  files: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr_{<stations>,global,catalog,switch}.txt, /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr_fault_phase5.txt
+    409157   3.30007e+02   8.17797e-04   4.71140e-06   2.06986e+01   2.93670e+01  2.06987e+01  2.93671e+01   3.68897e-03    -31.00     0.00     0.00
+
+  back to QD at t = 36820748882.750671 s (TS step 456566, first dt 0.010000 s): max V dynamic 0.000818 m/s, QD balance 0.000919 m/s
+Checkpoint written: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr.partial (t=36820748882.75 s, step=456566)
+--
+=== fd_cycle dynamic phase 6 summary ===
+  commit: 3926e9c81c126214d9c12d4d9136d0ebec2f7d34
+  end: end_of_phase at t = 46024320011.653313 s (phase length 330.015598 s, 409168 steps of 0.000807 s); back to QD
+  max V: at the start (QD balance) 0.010004, after step 1 0.007320, over the phase 3.827887 m/s
+  max |V| dt / Dc: 0.022053 (the operator aborts above 2)
+  sigma_n_eff range: [7.669372, 35.829431] MPa; sigma_PC range: [7.673419, 35.826736] MPa
+  time per dynamic step: 0.003578 s (rank 0), 0.008842 s (slowest rank), on 576 ranks; loop with output 4001.260330 s
+  events: 6
+  files: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr_{<stations>,global,catalog,switch}.txt, /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr_fault_phase6.txt
+    409168   3.30016e+02   8.17905e-04   4.71203e-06   2.06963e+01   2.93675e+01  2.06964e+01  2.93675e+01   3.57819e-03    -31.00     0.00     0.00
+
+  back to QD at t = 46024320011.653313 s (TS step 570834, first dt 0.010000 s): max V dynamic 0.000818 m/s, QD balance 0.000919 m/s
+Checkpoint written: /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr.partial (t=46024320011.65 s, step=570834)
+[QD-GREEN] dense G would be 139.55 GiB; kept as an H-matrix (dense rows only while compressing)
+[QD-GREEN] G 167616 x 111744 (N_f 55872, shear + normal rows), 45.75 GiB in all as an H-matrix, 0.39 GiB largest rank
+[QD-GREEN] H-matrix read from /scratch/10024/zhaochun/seas-qd-green/bp5_fd_p2_h1e-10.bin (N_f 55872, order 2, penalty factor 1, 3 components, compressed on 576 ranks from G read from /scratch/10024/zhaochun/seas-qd-green/bp5_prod_p2.bin)
+[QD-GREEN] compressed G ready 15.7 s after the start of the build
+[QD-GREEN] check against the solve path (t = 100 yr, test slip): max rel. difference shear 4.464e-15, normal 7.371e-14 (tolerance 1.000e-08)
+  back to QD at t = 325.579557 s (TS step 0, first dt 0.010000 s): max V dynamic 0.000829 m/s, QD balance 0.000930 m/s
+[QD-GREEN] check at stage 10000 (t = 3.732083e+03 s): rel. difference to the solve path shear 1.813e-11, normal 8.211e-12
+[QD-GREEN] check at stage 20000 (t = 3.818661e+04 s): rel. difference to the solve path shear 1.604e-11, normal 1.508e-11
+[QD-GREEN] check at stage 30000 (t = 2.268298e+05 s): rel. difference to the solve path shear 1.346e-11, normal 1.791e-11
+[QD-GREEN] check at stage 40000 (t = 1.027605e+06 s): rel. difference to the solve path shear 1.372e-11, normal 1.423e-11
+[QD-GREEN] check at stage 50000 (t = 3.843021e+06 s): rel. difference to the solve path shear 1.215e-11, normal 1.318e-11
+[QD-GREEN] check at stage 60000 (t = 1.184154e+07 s): rel. difference to the solve path shear 1.792e-11, normal 1.276e-11
+[QD-GREEN] check at stage 70000 (t = 3.292055e+07 s): rel. difference to the solve path shear 1.442e-11, normal 6.583e-12
+[QD-GREEN] check at stage 80000 (t = 9.398554e+07 s): rel. difference to the solve path shear 1.043e-11, normal 5.555e-12
+[QD-GREEN] check at stage 90000 (t = 2.855757e+08 s): rel. difference to the solve path shear 1.170e-11, normal 4.899e-12
+[QD-GREEN] check at stage 100000 (t = 6.962544e+08 s): rel. difference to the solve path shear 1.178e-11, normal 5.217e-12
+[QD-GREEN] check at stage 110000 (t = 1.146035e+09 s): rel. difference to the solve path shear 1.466e-11, normal 7.014e-12
+[QD-GREEN] check at stage 120000 (t = 1.510971e+09 s): rel. difference to the solve path shear 1.332e-11, normal 6.893e-12
+[QD-GREEN] check at stage 130000 (t = 1.799697e+09 s): rel. difference to the solve path shear 1.333e-11, normal 7.227e-12
+[QD-GREEN] check at stage 140000 (t = 2.048489e+09 s): rel. difference to the solve path shear 1.794e-11, normal 8.050e-12
+[QD-GREEN] check at stage 150000 (t = 2.274991e+09 s): rel. difference to the solve path shear 1.587e-11, normal 8.146e-12
+[QD-GREEN] check at stage 160000 (t = 2.492729e+09 s): rel. difference to the solve path shear 1.240e-11, normal 8.190e-12
+[QD-GREEN] check at stage 170000 (t = 2.705098e+09 s): rel. difference to the solve path shear 1.408e-11, normal 8.958e-12
+[QD-GREEN] check at stage 180000 (t = 2.919148e+09 s): rel. difference to the solve path shear 1.466e-11, normal 8.919e-12
+[QD-GREEN] check at stage 190000 (t = 3.132621e+09 s): rel. difference to the solve path shear 1.096e-11, normal 1.058e-11
+[QD-GREEN] check at stage 200000 (t = 3.343958e+09 s): rel. difference to the solve path shear 1.071e-11, normal 1.002e-11
+[QD-GREEN] check at stage 210000 (t = 3.550588e+09 s): rel. difference to the solve path shear 1.424e-11, normal 1.043e-11
+[QD-GREEN] check at stage 220000 (t = 3.755495e+09 s): rel. difference to the solve path shear 1.655e-11, normal 1.113e-11
+[QD-GREEN] check at stage 230000 (t = 3.951026e+09 s): rel. difference to the solve path shear 1.587e-11, normal 1.145e-11
+[QD-GREEN] check at stage 240000 (t = 4.146304e+09 s): rel. difference to the solve path shear 1.569e-11, normal 1.234e-11
+[QD-GREEN] check at stage 250000 (t = 4.337610e+09 s): rel. difference to the solve path shear 1.887e-11, normal 1.430e-11
+[QD-GREEN] check at stage 260000 (t = 4.522234e+09 s): rel. difference to the solve path shear 1.850e-11, normal 1.336e-11
+[QD-GREEN] check at stage 270000 (t = 4.704146e+09 s): rel. difference to the solve path shear 1.719e-11, normal 1.695e-11
+[QD-GREEN] check at stage 280000 (t = 4.884380e+09 s): rel. difference to the solve path shear 1.760e-11, normal 1.509e-11
+[QD-GREEN] check at stage 290000 (t = 5.059369e+09 s): rel. difference to the solve path shear 3.039e-11, normal 1.641e-11
+[QD-GREEN] check at stage 300000 (t = 5.233094e+09 s): rel. difference to the solve path shear 2.394e-11, normal 1.715e-11
+[QD-GREEN] check at stage 310000 (t = 5.400990e+09 s): rel. difference to the solve path shear 2.581e-11, normal 1.936e-11
+[QD-GREEN] check at stage 320000 (t = 5.568224e+09 s): rel. difference to the solve path shear 1.629e-11, normal 1.808e-11
+[QD-GREEN] check at stage 330000 (t = 5.732684e+09 s): rel. difference to the solve path shear 1.562e-11, normal 1.248e-11
+[QD-GREEN] check at stage 340000 (t = 5.893829e+09 s): rel. difference to the solve path shear 1.423e-11, normal 8.698e-12
+[QD-GREEN] check at stage 350000 (t = 6.054810e+09 s): rel. difference to the solve path shear 1.564e-11, normal 1.185e-11
+[QD-GREEN] check at stage 360000 (t = 6.210207e+09 s): rel. difference to the solve path shear 1.153e-11, normal 1.690e-11
+[QD-GREEN] check at stage 370000 (t = 6.362037e+09 s): rel. difference to the solve path shear 1.028e-11, normal 1.744e-11
+[QD-GREEN] check at stage 380000 (t = 6.517732e+09 s): rel. difference to the solve path shear 1.330e-11, normal 1.819e-11
+[QD-GREEN] check at stage 390000 (t = 6.669140e+09 s): rel. difference to the solve path shear 1.450e-11, normal 2.618e-11
+[QD-GREEN] check at stage 400000 (t = 6.812956e+09 s): rel. difference to the solve path shear 2.120e-11, normal 1.928e-11
+[QD-GREEN] check at stage 410000 (t = 6.959872e+09 s): rel. difference to the solve path shear 1.742e-11, normal 1.798e-11
+[QD-GREEN] check at stage 420000 (t = 7.108760e+09 s): rel. difference to the solve path shear 2.366e-11, normal 2.133e-11
+[QD-GREEN] check at stage 430000 (t = 7.250400e+09 s): rel. difference to the solve path shear 2.203e-11, normal 1.697e-11
+[QD-GREEN] check at stage 440000 (t = 7.388185e+09 s): rel. difference to the solve path shear 2.297e-11, normal 1.785e-11
+[QD-GREEN] check at stage 450000 (t = 7.527030e+09 s): rel. difference to the solve path shear 2.045e-11, normal 1.804e-11
+[QD-GREEN] check at stage 460000 (t = 7.668167e+09 s): rel. difference to the solve path shear 2.009e-11, normal 1.588e-11
+[QD-GREEN] check at stage 470000 (t = 7.805349e+09 s): rel. difference to the solve path shear 2.065e-11, normal 1.857e-11
+[QD-GREEN] check at stage 480000 (t = 7.934836e+09 s): rel. difference to the solve path shear 1.980e-11, normal 1.944e-11
+[QD-GREEN] check at stage 490000 (t = 8.061183e+09 s): rel. difference to the solve path shear 2.456e-11, normal 2.214e-11
+[QD-GREEN] check at stage 500000 (t = 8.196342e+09 s): rel. difference to the solve path shear 3.039e-11, normal 2.754e-11
+[QD-GREEN] check at stage 510000 (t = 8.336876e+09 s): rel. difference to the solve path shear 3.261e-11, normal 2.810e-11
+[QD-GREEN] check at stage 520000 (t = 8.457495e+09 s): rel. difference to the solve path shear 4.141e-11, normal 3.523e-11
+[QD-GREEN] check at stage 530000 (t = 8.545658e+09 s): rel. difference to the solve path shear 3.198e-11, normal 4.777e-11
+[QD-GREEN] check at stage 540000 (t = 8.618264e+09 s): rel. difference to the solve path shear 3.890e-11, normal 3.544e-11
+[QD-GREEN] check at stage 550000 (t = 8.703659e+09 s): rel. difference to the solve path shear 2.827e-11, normal 3.151e-11
+[QD-GREEN] check at stage 560000 (t = 8.830757e+09 s): rel. difference to the solve path shear 2.870e-11, normal 3.649e-11
+[QD-GREEN] check at stage 570000 (t = 8.964537e+09 s): rel. difference to the solve path shear 4.023e-11, normal 3.439e-11
+[QD-GREEN] check at stage 580000 (t = 9.103198e+09 s): rel. difference to the solve path shear 5.295e-11, normal 4.244e-11
+[QD-GREEN] check at stage 590000 (t = 9.181050e+09 s): rel. difference to the solve path shear 5.033e-11, normal 4.459e-11
+[QD-GREEN] check at stage 600000 (t = 9.201217e+09 s): rel. difference to the solve path shear 6.380e-11, normal 4.189e-11
+[QD-GREEN] check at stage 610000 (t = 9.206745e+09 s): rel. difference to the solve path shear 5.499e-11, normal 4.406e-11
+[QD-GREEN] check at stage 620000 (t = 9.208313e+09 s): rel. difference to the solve path shear 4.932e-11, normal 3.839e-11
+[QD-GREEN] check at stage 630000 (t = 9.208762e+09 s): rel. difference to the solve path shear 6.207e-11, normal 4.669e-11
+[QD-GREEN] check at stage 640000 (t = 9.208892e+09 s): rel. difference to the solve path shear 4.832e-11, normal 3.286e-11
+[QD-GREEN] check at stage 650000 (t = 9.208930e+09 s): rel. difference to the solve path shear 5.067e-11, normal 3.325e-11
+[QD-GREEN] check at stage 660000 (t = 9.208942e+09 s): rel. difference to the solve path shear 5.292e-11, normal 3.124e-11
+[QD-GREEN] check at stage 670000 (t = 9.208945e+09 s): rel. difference to the solve path shear 5.388e-11, normal 2.792e-11
+[QD-GREEN] check at stage 680000 (t = 9.208946e+09 s): rel. difference to the solve path shear 7.871e-11, normal 2.663e-11
+[QD-GREEN] check at stage 690000 (t = 9.208947e+09 s): rel. difference to the solve path shear 4.824e-11, normal 2.599e-11
+[QD-GREEN] check at stage 700000 (t = 9.208947e+09 s): rel. difference to the solve path shear 3.911e-11, normal 2.445e-11
+[QD-GREEN] check at stage 710000 (t = 9.208947e+09 s): rel. difference to the solve path shear 3.702e-11, normal 2.187e-11
+  QD -> dynamic at t = 9.209e+09 s (2.918e+02 yr): max V (QD balance) = 1.000e-02 m/s > V_on; dynamic phase 2
+  back to QD at t = 9208947257.534498 s (TS step 113534, first dt 0.010000 s): max V dynamic 0.000822 m/s, QD balance 0.000922 m/s
+[QD-GREEN] check at stage 720000 (t = 9.208949e+09 s): rel. difference to the solve path shear 3.139e-11, normal 1.532e-11
+[QD-GREEN] check at stage 730000 (t = 9.208967e+09 s): rel. difference to the solve path shear 3.938e-11, normal 1.968e-11
+[QD-GREEN] check at stage 740000 (t = 9.209075e+09 s): rel. difference to the solve path shear 3.196e-11, normal 2.306e-11
+[QD-GREEN] check at stage 750000 (t = 9.209555e+09 s): rel. difference to the solve path shear 2.441e-11, normal 2.750e-11
+[QD-GREEN] check at stage 760000 (t = 9.211313e+09 s): rel. difference to the solve path shear 2.571e-11, normal 2.530e-11
+[QD-GREEN] check at stage 770000 (t = 9.216469e+09 s): rel. difference to the solve path shear 2.162e-11, normal 2.353e-11
+[QD-GREEN] check at stage 780000 (t = 9.230033e+09 s): rel. difference to the solve path shear 2.505e-11, normal 2.056e-11
+[QD-GREEN] check at stage 790000 (t = 9.266680e+09 s): rel. difference to the solve path shear 2.680e-11, normal 1.088e-11
+[QD-GREEN] check at stage 800000 (t = 9.379471e+09 s): rel. difference to the solve path shear 3.061e-11, normal 9.293e-12
+[QD-GREEN] check at stage 810000 (t = 9.692038e+09 s): rel. difference to the solve path shear 2.792e-11, normal 1.067e-11
+[QD-GREEN] check at stage 820000 (t = 1.014595e+10 s): rel. difference to the solve path shear 2.472e-11, normal 1.223e-11
+[QD-GREEN] check at stage 830000 (t = 1.055532e+10 s): rel. difference to the solve path shear 2.851e-11, normal 1.353e-11
+[QD-GREEN] check at stage 840000 (t = 1.087768e+10 s): rel. difference to the solve path shear 3.680e-11, normal 1.662e-11
+[QD-GREEN] check at stage 850000 (t = 1.114192e+10 s): rel. difference to the solve path shear 2.696e-11, normal 1.606e-11
+[QD-GREEN] check at stage 860000 (t = 1.137726e+10 s): rel. difference to the solve path shear 3.527e-11, normal 1.851e-11
+[QD-GREEN] check at stage 870000 (t = 1.159658e+10 s): rel. difference to the solve path shear 3.521e-11, normal 1.799e-11
+[QD-GREEN] check at stage 880000 (t = 1.181147e+10 s): rel. difference to the solve path shear 2.725e-11, normal 1.853e-11
+[QD-GREEN] check at stage 890000 (t = 1.202466e+10 s): rel. difference to the solve path shear 2.546e-11, normal 1.903e-11
+[QD-GREEN] check at stage 900000 (t = 1.223907e+10 s): rel. difference to the solve path shear 2.193e-11, normal 2.158e-11
+[QD-GREEN] check at stage 910000 (t = 1.244880e+10 s): rel. difference to the solve path shear 2.727e-11, normal 2.150e-11
+[QD-GREEN] check at stage 920000 (t = 1.265687e+10 s): rel. difference to the solve path shear 2.546e-11, normal 2.252e-11
+[QD-GREEN] check at stage 930000 (t = 1.286388e+10 s): rel. difference to the solve path shear 3.246e-11, normal 2.401e-11
+[QD-GREEN] check at stage 940000 (t = 1.306305e+10 s): rel. difference to the solve path shear 2.675e-11, normal 2.527e-11
+[QD-GREEN] check at stage 950000 (t = 1.325732e+10 s): rel. difference to the solve path shear 2.431e-11, normal 2.626e-11
+[QD-GREEN] check at stage 960000 (t = 1.345122e+10 s): rel. difference to the solve path shear 3.102e-11, normal 2.878e-11
+[QD-GREEN] check at stage 970000 (t = 1.363723e+10 s): rel. difference to the solve path shear 3.646e-11, normal 2.514e-11
+[QD-GREEN] check at stage 980000 (t = 1.382103e+10 s): rel. difference to the solve path shear 4.137e-11, normal 2.965e-11
+[QD-GREEN] check at stage 990000 (t = 1.400110e+10 s): rel. difference to the solve path shear 4.520e-11, normal 3.743e-11
+[QD-GREEN] check at stage 1000000 (t = 1.417815e+10 s): rel. difference to the solve path shear 4.536e-11, normal 3.474e-11
+[QD-GREEN] check at stage 1010000 (t = 1.435182e+10 s): rel. difference to the solve path shear 5.576e-11, normal 3.821e-11
+[QD-GREEN] check at stage 1020000 (t = 1.452279e+10 s): rel. difference to the solve path shear 4.728e-11, normal 3.959e-11
+[QD-GREEN] check at stage 1030000 (t = 1.468998e+10 s): rel. difference to the solve path shear 3.760e-11, normal 3.755e-11
+[QD-GREEN] check at stage 1040000 (t = 1.485617e+10 s): rel. difference to the solve path shear 4.568e-11, normal 3.750e-11
+[QD-GREEN] check at stage 1050000 (t = 1.501870e+10 s): rel. difference to the solve path shear 3.185e-11, normal 2.527e-11
+[QD-GREEN] check at stage 1060000 (t = 1.517942e+10 s): rel. difference to the solve path shear 2.531e-11, normal 1.936e-11
+[QD-GREEN] check at stage 1070000 (t = 1.533831e+10 s): rel. difference to the solve path shear 3.140e-11, normal 2.393e-11
+[QD-GREEN] check at stage 1080000 (t = 1.548993e+10 s): rel. difference to the solve path shear 2.980e-11, normal 3.521e-11
+[QD-GREEN] check at stage 1090000 (t = 1.564433e+10 s): rel. difference to the solve path shear 2.101e-11, normal 4.188e-11
+[QD-GREEN] check at stage 1100000 (t = 1.579856e+10 s): rel. difference to the solve path shear 2.610e-11, normal 5.131e-11
+[QD-GREEN] check at stage 1110000 (t = 1.594514e+10 s): rel. difference to the solve path shear 3.415e-11, normal 4.572e-11
+[QD-GREEN] check at stage 1120000 (t = 1.608918e+10 s): rel. difference to the solve path shear 3.899e-11, normal 4.973e-11
+[QD-GREEN] check at stage 1130000 (t = 1.623827e+10 s): rel. difference to the solve path shear 4.879e-11, normal 4.476e-11
+[QD-GREEN] check at stage 1140000 (t = 1.638333e+10 s): rel. difference to the solve path shear 3.557e-11, normal 4.323e-11
+[QD-GREEN] check at stage 1150000 (t = 1.652205e+10 s): rel. difference to the solve path shear 3.659e-11, normal 3.187e-11
+[QD-GREEN] check at stage 1160000 (t = 1.665931e+10 s): rel. difference to the solve path shear 3.422e-11, normal 3.713e-11
+[QD-GREEN] check at stage 1170000 (t = 1.679960e+10 s): rel. difference to the solve path shear 3.801e-11, normal 5.634e-11
+[QD-GREEN] check at stage 1180000 (t = 1.693998e+10 s): rel. difference to the solve path shear 3.990e-11, normal 4.545e-11
+[QD-GREEN] check at stage 1190000 (t = 1.707387e+10 s): rel. difference to the solve path shear 5.074e-11, normal 6.203e-11
+[QD-GREEN] check at stage 1200000 (t = 1.719866e+10 s): rel. difference to the solve path shear 5.663e-11, normal 4.788e-11
+[QD-GREEN] check at stage 1210000 (t = 1.732616e+10 s): rel. difference to the solve path shear 7.278e-11, normal 6.020e-11
+[QD-GREEN] check at stage 1220000 (t = 1.746428e+10 s): rel. difference to the solve path shear 9.286e-11, normal 6.683e-11
+[QD-GREEN] check at stage 1230000 (t = 1.760107e+10 s): rel. difference to the solve path shear 1.112e-10, normal 5.891e-11
+[QD-GREEN] check at stage 1240000 (t = 1.770773e+10 s): rel. difference to the solve path shear 6.863e-11, normal 7.395e-11
+[QD-GREEN] check at stage 1250000 (t = 1.778790e+10 s): rel. difference to the solve path shear 8.879e-11, normal 7.554e-11
+[QD-GREEN] check at stage 1260000 (t = 1.786015e+10 s): rel. difference to the solve path shear 5.229e-11, normal 5.366e-11
+[QD-GREEN] check at stage 1270000 (t = 1.796001e+10 s): rel. difference to the solve path shear 5.542e-11, normal 5.951e-11
+[QD-GREEN] check at stage 1280000 (t = 1.808151e+10 s): rel. difference to the solve path shear 9.955e-11, normal 8.392e-11
+[QD-GREEN] check at stage 1290000 (t = 1.820579e+10 s): rel. difference to the solve path shear 1.036e-10, normal 8.828e-11
+[QD-GREEN] check at stage 1300000 (t = 1.833158e+10 s): rel. difference to the solve path shear 1.274e-10, normal 9.446e-11
+[QD-GREEN] check at stage 1310000 (t = 1.839266e+10 s): rel. difference to the solve path shear 1.701e-10, normal 8.985e-11
+[QD-GREEN] check at stage 1320000 (t = 1.840799e+10 s): rel. difference to the solve path shear 1.064e-10, normal 8.849e-11
+[QD-GREEN] check at stage 1330000 (t = 1.841223e+10 s): rel. difference to the solve path shear 1.378e-10, normal 1.058e-10
+[QD-GREEN] check at stage 1340000 (t = 1.841342e+10 s): rel. difference to the solve path shear 1.500e-10, normal 8.875e-11
+[QD-GREEN] check at stage 1350000 (t = 1.841376e+10 s): rel. difference to the solve path shear 1.102e-10, normal 8.530e-11
+[QD-GREEN] check at stage 1360000 (t = 1.841385e+10 s): rel. difference to the solve path shear 1.078e-10, normal 7.437e-11
+[QD-GREEN] check at stage 1370000 (t = 1.841388e+10 s): rel. difference to the solve path shear 1.148e-10, normal 6.982e-11
+[QD-GREEN] check at stage 1380000 (t = 1.841389e+10 s): rel. difference to the solve path shear 1.154e-10, normal 6.380e-11
+[QD-GREEN] check at stage 1390000 (t = 1.841389e+10 s): rel. difference to the solve path shear 1.042e-10, normal 5.367e-11
+[QD-GREEN] check at stage 1400000 (t = 1.841389e+10 s): rel. difference to the solve path shear 1.050e-10, normal 5.317e-11
+[QD-GREEN] check at stage 1410000 (t = 1.841389e+10 s): rel. difference to the solve path shear 8.441e-11, normal 5.142e-11
+[QD-GREEN] check at stage 1420000 (t = 1.841389e+10 s): rel. difference to the solve path shear 8.254e-11, normal 4.735e-11
+  QD -> dynamic at t = 1.841e+10 s (5.835e+02 yr): max V (QD balance) = 1.000e-02 m/s > V_on; dynamic phase 3
+  back to QD at t = 18413895333.648079 s (TS step 228035, first dt 0.010000 s): max V dynamic 0.000817 m/s, QD balance 0.000919 m/s
+[QD-GREEN] check at stage 1430000 (t = 1.841390e+10 s): rel. difference to the solve path shear 5.141e-11, normal 2.425e-11
+[QD-GREEN] check at stage 1440000 (t = 1.841390e+10 s): rel. difference to the solve path shear 5.532e-11, normal 2.135e-11
+[QD-GREEN] check at stage 1450000 (t = 1.841393e+10 s): rel. difference to the solve path shear 5.517e-11, normal 3.172e-11
+[QD-GREEN] check at stage 1460000 (t = 1.841409e+10 s): rel. difference to the solve path shear 4.446e-11, normal 3.903e-11
+[QD-GREEN] check at stage 1470000 (t = 1.841477e+10 s): rel. difference to the solve path shear 4.697e-11, normal 3.947e-11
+[QD-GREEN] check at stage 1480000 (t = 1.841713e+10 s): rel. difference to the solve path shear 4.792e-11, normal 3.927e-11
+[QD-GREEN] check at stage 1490000 (t = 1.842380e+10 s): rel. difference to the solve path shear 3.811e-11, normal 3.386e-11
+[QD-GREEN] check at stage 1500000 (t = 1.844122e+10 s): rel. difference to the solve path shear 4.088e-11, normal 2.499e-11
+[QD-GREEN] check at stage 1510000 (t = 1.849055e+10 s): rel. difference to the solve path shear 4.364e-11, normal 1.566e-11
+[QD-GREEN] check at stage 1520000 (t = 1.864530e+10 s): rel. difference to the solve path shear 4.716e-11, normal 1.639e-11
+[QD-GREEN] check at stage 1530000 (t = 1.901966e+10 s): rel. difference to the solve path shear 9.913e-11, normal 1.735e-11
+[QD-GREEN] check at stage 1540000 (t = 1.947691e+10 s): rel. difference to the solve path shear 4.102e-11, normal 1.962e-11
+[QD-GREEN] check at stage 1550000 (t = 1.986254e+10 s): rel. difference to the solve path shear 4.522e-11, normal 2.206e-11
+[QD-GREEN] check at stage 1560000 (t = 2.016269e+10 s): rel. difference to the solve path shear 5.437e-11, normal 2.382e-11
+[QD-GREEN] check at stage 1570000 (t = 2.041748e+10 s): rel. difference to the solve path shear 5.731e-11, normal 2.576e-11
+[QD-GREEN] check at stage 1580000 (t = 2.064662e+10 s): rel. difference to the solve path shear 5.151e-11, normal 2.651e-11
+[QD-GREEN] check at stage 1590000 (t = 2.086470e+10 s): rel. difference to the solve path shear 6.826e-11, normal 3.071e-11
+[QD-GREEN] check at stage 1600000 (t = 2.107849e+10 s): rel. difference to the solve path shear 5.031e-11, normal 3.236e-11
+[QD-GREEN] check at stage 1610000 (t = 2.129264e+10 s): rel. difference to the solve path shear 3.721e-11, normal 3.094e-11
+[QD-GREEN] check at stage 1620000 (t = 2.150501e+10 s): rel. difference to the solve path shear 3.645e-11, normal 3.287e-11
+[QD-GREEN] check at stage 1630000 (t = 2.171580e+10 s): rel. difference to the solve path shear 3.634e-11, normal 3.928e-11
+[QD-GREEN] check at stage 1640000 (t = 2.192228e+10 s): rel. difference to the solve path shear 4.751e-11, normal 4.386e-11
+[QD-GREEN] check at stage 1650000 (t = 2.212777e+10 s): rel. difference to the solve path shear 6.642e-11, normal 4.087e-11
+[QD-GREEN] check at stage 1660000 (t = 2.232419e+10 s): rel. difference to the solve path shear 4.447e-11, normal 4.344e-11
+[QD-GREEN] check at stage 1670000 (t = 2.251949e+10 s): rel. difference to the solve path shear 5.115e-11, normal 4.466e-11
+[QD-GREEN] check at stage 1680000 (t = 2.271146e+10 s): rel. difference to the solve path shear 7.051e-11, normal 4.931e-11
+[QD-GREEN] check at stage 1690000 (t = 2.289654e+10 s): rel. difference to the solve path shear 6.747e-11, normal 4.481e-11
+[QD-GREEN] check at stage 1700000 (t = 2.307885e+10 s): rel. difference to the solve path shear 6.353e-11, normal 4.633e-11
+[QD-GREEN] check at stage 1710000 (t = 2.325944e+10 s): rel. difference to the solve path shear 1.000e-10, normal 6.957e-11
+[QD-GREEN] check at stage 1720000 (t = 2.343504e+10 s): rel. difference to the solve path shear 9.216e-11, normal 6.676e-11
+[QD-GREEN] check at stage 1730000 (t = 2.360851e+10 s): rel. difference to the solve path shear 7.359e-11, normal 6.969e-11
+[QD-GREEN] check at stage 1740000 (t = 2.377757e+10 s): rel. difference to the solve path shear 9.285e-11, normal 6.415e-11
+[QD-GREEN] check at stage 1750000 (t = 2.394512e+10 s): rel. difference to the solve path shear 8.863e-11, normal 6.368e-11
+[QD-GREEN] check at stage 1760000 (t = 2.411041e+10 s): rel. difference to the solve path shear 6.825e-11, normal 6.317e-11
+[QD-GREEN] check at stage 1770000 (t = 2.427264e+10 s): rel. difference to the solve path shear 5.427e-11, normal 3.489e-11
+[QD-GREEN] check at stage 1780000 (t = 2.443371e+10 s): rel. difference to the solve path shear 5.179e-11, normal 2.995e-11
+[QD-GREEN] check at stage 1790000 (t = 2.459085e+10 s): rel. difference to the solve path shear 5.248e-11, normal 4.793e-11
+[QD-GREEN] check at stage 1800000 (t = 2.474291e+10 s): rel. difference to the solve path shear 4.887e-11, normal 6.775e-11
+[QD-GREEN] check at stage 1810000 (t = 2.489799e+10 s): rel. difference to the solve path shear 5.103e-11, normal 7.882e-11
+[QD-GREEN] check at stage 1820000 (t = 2.505100e+10 s): rel. difference to the solve path shear 4.567e-11, normal 8.309e-11
+[QD-GREEN] check at stage 1830000 (t = 2.519591e+10 s): rel. difference to the solve path shear 8.192e-11, normal 6.832e-11
+[QD-GREEN] check at stage 1840000 (t = 2.534141e+10 s): rel. difference to the solve path shear 6.647e-11, normal 6.159e-11
+[QD-GREEN] check at stage 1850000 (t = 2.549050e+10 s): rel. difference to the solve path shear 6.580e-11, normal 7.239e-11
+[QD-GREEN] check at stage 1860000 (t = 2.563398e+10 s): rel. difference to the solve path shear 7.614e-11, normal 5.638e-11
+[QD-GREEN] check at stage 1870000 (t = 2.577177e+10 s): rel. difference to the solve path shear 7.751e-11, normal 5.602e-11
+[QD-GREEN] check at stage 1880000 (t = 2.590971e+10 s): rel. difference to the solve path shear 5.596e-11, normal 5.531e-11
+[QD-GREEN] check at stage 1890000 (t = 2.605106e+10 s): rel. difference to the solve path shear 7.481e-11, normal 6.068e-11
+[QD-GREEN] check at stage 1900000 (t = 2.619032e+10 s): rel. difference to the solve path shear 9.039e-11, normal 6.194e-11
+[QD-GREEN] check at stage 1910000 (t = 2.632157e+10 s): rel. difference to the solve path shear 8.705e-11, normal 6.737e-11
+[QD-GREEN] check at stage 1920000 (t = 2.644620e+10 s): rel. difference to the solve path shear 1.039e-10, normal 7.741e-11
+[QD-GREEN] check at stage 1930000 (t = 2.657775e+10 s): rel. difference to the solve path shear 1.215e-10, normal 8.524e-11
+[QD-GREEN] check at stage 1940000 (t = 2.671756e+10 s): rel. difference to the solve path shear 1.918e-10, normal 9.711e-11
+[QD-GREEN] check at stage 1950000 (t = 2.684808e+10 s): rel. difference to the solve path shear 1.561e-10, normal 8.762e-11
+[QD-GREEN] check at stage 1960000 (t = 2.694563e+10 s): rel. difference to the solve path shear 1.296e-10, normal 1.150e-10
+[QD-GREEN] check at stage 1970000 (t = 2.702186e+10 s): rel. difference to the solve path shear 8.861e-11, normal 1.000e-10
+[QD-GREEN] check at stage 1980000 (t = 2.710143e+10 s): rel. difference to the solve path shear 9.580e-11, normal 9.031e-11
+[QD-GREEN] check at stage 1990000 (t = 2.721715e+10 s): rel. difference to the solve path shear 9.615e-11, normal 1.327e-10
+[QD-GREEN] check at stage 2000000 (t = 2.733991e+10 s): rel. difference to the solve path shear 1.902e-10, normal 1.093e-10
+[QD-GREEN] check at stage 2010000 (t = 2.746650e+10 s): rel. difference to the solve path shear 1.559e-10, normal 1.285e-10
+[QD-GREEN] check at stage 2020000 (t = 2.757331e+10 s): rel. difference to the solve path shear 2.083e-10, normal 1.476e-10
+[QD-GREEN] check at stage 2030000 (t = 2.760567e+10 s): rel. difference to the solve path shear 3.334e-10, normal 1.684e-10
+[QD-GREEN] check at stage 2040000 (t = 2.761415e+10 s): rel. difference to the solve path shear 2.953e-10, normal 1.371e-10
+[QD-GREEN] check at stage 2050000 (t = 2.761653e+10 s): rel. difference to the solve path shear 2.675e-10, normal 1.449e-10
+[QD-GREEN] check at stage 2060000 (t = 2.761721e+10 s): rel. difference to the solve path shear 2.980e-10, normal 1.210e-10
+[QD-GREEN] check at stage 2070000 (t = 2.761740e+10 s): rel. difference to the solve path shear 2.658e-10, normal 1.168e-10
+[QD-GREEN] check at stage 2080000 (t = 2.761746e+10 s): rel. difference to the solve path shear 3.168e-10, normal 1.055e-10
+[QD-GREEN] check at stage 2090000 (t = 2.761748e+10 s): rel. difference to the solve path shear 2.257e-10, normal 1.113e-10
+[QD-GREEN] check at stage 2100000 (t = 2.761748e+10 s): rel. difference to the solve path shear 2.231e-10, normal 8.879e-11
+[QD-GREEN] check at stage 2110000 (t = 2.761748e+10 s): rel. difference to the solve path shear 1.615e-10, normal 7.951e-11
+[QD-GREEN] check at stage 2120000 (t = 2.761748e+10 s): rel. difference to the solve path shear 1.570e-10, normal 7.475e-11
+[QD-GREEN] check at stage 2130000 (t = 2.761748e+10 s): rel. difference to the solve path shear 1.330e-10, normal 6.773e-11
+[QD-GREEN] check at stage 2140000 (t = 2.761748e+10 s): rel. difference to the solve path shear 1.416e-10, normal 6.517e-11
+  QD -> dynamic at t = 2.762e+10 s (8.751e+02 yr): max V (QD balance) = 1.000e-02 m/s > V_on; dynamic phase 4
+  back to QD at t = 27617484731.921005 s (TS step 342269, first dt 0.010000 s): max V dynamic 0.000818 m/s, QD balance 0.000919 m/s
+[QD-GREEN] check at stage 2150000 (t = 2.761749e+10 s): rel. difference to the solve path shear 6.159e-11, normal 4.308e-11
+[QD-GREEN] check at stage 2160000 (t = 2.761750e+10 s): rel. difference to the solve path shear 7.552e-11, normal 4.211e-11
+[QD-GREEN] check at stage 2170000 (t = 2.761758e+10 s): rel. difference to the solve path shear 8.957e-11, normal 4.759e-11
+[QD-GREEN] check at stage 2180000 (t = 2.761794e+10 s): rel. difference to the solve path shear 7.418e-11, normal 6.076e-11
+[QD-GREEN] check at stage 2190000 (t = 2.761934e+10 s): rel. difference to the solve path shear 5.418e-11, normal 5.174e-11
+[QD-GREEN] check at stage 2200000 (t = 2.762363e+10 s): rel. difference to the solve path shear 5.718e-11, normal 5.429e-11
+[QD-GREEN] check at stage 2210000 (t = 2.763504e+10 s): rel. difference to the solve path shear 6.429e-11, normal 8.514e-11
+[QD-GREEN] check at stage 2220000 (t = 2.766558e+10 s): rel. difference to the solve path shear 4.330e-11, normal 2.614e-11
+[QD-GREEN] check at stage 2230000 (t = 2.775777e+10 s): rel. difference to the solve path shear 5.376e-11, normal 2.290e-11
+[QD-GREEN] check at stage 2240000 (t = 2.803160e+10 s): rel. difference to the solve path shear 5.504e-11, normal 2.590e-11
+[QD-GREEN] check at stage 2250000 (t = 2.848098e+10 s): rel. difference to the solve path shear 5.889e-11, normal 2.529e-11
+[QD-GREEN] check at stage 2260000 (t = 2.890138e+10 s): rel. difference to the solve path shear 6.921e-11, normal 3.120e-11
+[QD-GREEN] check at stage 2270000 (t = 2.923592e+10 s): rel. difference to the solve path shear 7.501e-11, normal 3.225e-11
+[QD-GREEN] check at stage 2280000 (t = 2.950716e+10 s): rel. difference to the solve path shear 6.012e-11, normal 3.746e-11
+[QD-GREEN] check at stage 2290000 (t = 2.974671e+10 s): rel. difference to the solve path shear 6.931e-11, normal 3.793e-11
+[QD-GREEN] check at stage 2300000 (t = 2.996797e+10 s): rel. difference to the solve path shear 6.424e-11, normal 4.182e-11
+[QD-GREEN] check at stage 2310000 (t = 3.018383e+10 s): rel. difference to the solve path shear 5.900e-11, normal 4.343e-11
+[QD-GREEN] check at stage 2320000 (t = 3.039400e+10 s): rel. difference to the solve path shear 6.384e-11, normal 4.203e-11
+[QD-GREEN] check at stage 2330000 (t = 3.060978e+10 s): rel. difference to the solve path shear 4.051e-11, normal 4.739e-11
+[QD-GREEN] check at stage 2340000 (t = 3.081918e+10 s): rel. difference to the solve path shear 4.440e-11, normal 5.259e-11
+[QD-GREEN] check at stage 2350000 (t = 3.102863e+10 s): rel. difference to the solve path shear 5.927e-11, normal 4.971e-11
+[QD-GREEN] check at stage 2360000 (t = 3.123442e+10 s): rel. difference to the solve path shear 6.131e-11, normal 5.175e-11
+[QD-GREEN] check at stage 2370000 (t = 3.143535e+10 s): rel. difference to the solve path shear 7.806e-11, normal 5.711e-11
+[QD-GREEN] check at stage 2380000 (t = 3.162964e+10 s): rel. difference to the solve path shear 5.300e-11, normal 6.257e-11
+[QD-GREEN] check at stage 2390000 (t = 3.182487e+10 s): rel. difference to the solve path shear 6.886e-11, normal 7.001e-11
+[QD-GREEN] check at stage 2400000 (t = 3.201227e+10 s): rel. difference to the solve path shear 9.543e-11, normal 5.813e-11
+[QD-GREEN] check at stage 2410000 (t = 3.219666e+10 s): rel. difference to the solve path shear 1.048e-10, normal 5.747e-11
+[QD-GREEN] check at stage 2420000 (t = 3.237708e+10 s): rel. difference to the solve path shear 1.046e-10, normal 7.702e-11
+[QD-GREEN] check at stage 2430000 (t = 3.255541e+10 s): rel. difference to the solve path shear 9.427e-11, normal 8.131e-11
+[QD-GREEN] check at stage 2440000 (t = 3.272893e+10 s): rel. difference to the solve path shear 1.170e-10, normal 8.765e-11
+[QD-GREEN] check at stage 2450000 (t = 3.290122e+10 s): rel. difference to the solve path shear 1.029e-10, normal 9.420e-11
+[QD-GREEN] check at stage 2460000 (t = 3.306853e+10 s): rel. difference to the solve path shear 1.032e-10, normal 8.214e-11
+[QD-GREEN] check at stage 2470000 (t = 3.323531e+10 s): rel. difference to the solve path shear 9.097e-11, normal 8.897e-11
+[QD-GREEN] check at stage 2480000 (t = 3.339869e+10 s): rel. difference to the solve path shear 6.780e-11, normal 8.238e-11
+[QD-GREEN] check at stage 2490000 (t = 3.355941e+10 s): rel. difference to the solve path shear 6.261e-11, normal 4.637e-11
+[QD-GREEN] check at stage 2500000 (t = 3.371998e+10 s): rel. difference to the solve path shear 5.370e-11, normal 4.784e-11
+[QD-GREEN] check at stage 2510000 (t = 3.387275e+10 s): rel. difference to the solve path shear 5.770e-11, normal 8.341e-11
+[QD-GREEN] check at stage 2520000 (t = 3.402635e+10 s): rel. difference to the solve path shear 5.060e-11, normal 8.856e-11
+[QD-GREEN] check at stage 2530000 (t = 3.418159e+10 s): rel. difference to the solve path shear 5.886e-11, normal 1.061e-10
+[QD-GREEN] check at stage 2540000 (t = 3.432984e+10 s): rel. difference to the solve path shear 6.006e-11, normal 1.087e-10
+[QD-GREEN] check at stage 2550000 (t = 3.447339e+10 s): rel. difference to the solve path shear 7.907e-11, normal 1.030e-10
+[QD-GREEN] check at stage 2560000 (t = 3.462158e+10 s): rel. difference to the solve path shear 7.567e-11, normal 1.157e-10
+[QD-GREEN] check at stage 2570000 (t = 3.476830e+10 s): rel. difference to the solve path shear 9.436e-11, normal 1.306e-10
+[QD-GREEN] check at stage 2580000 (t = 3.490795e+10 s): rel. difference to the solve path shear 8.896e-11, normal 6.613e-11
+[QD-GREEN] check at stage 2590000 (t = 3.504556e+10 s): rel. difference to the solve path shear 8.293e-11, normal 7.731e-11
+[QD-GREEN] check at stage 2600000 (t = 3.518561e+10 s): rel. difference to the solve path shear 8.165e-11, normal 7.978e-11
+[QD-GREEN] check at stage 2610000 (t = 3.532649e+10 s): rel. difference to the solve path shear 8.687e-11, normal 8.742e-11
+[QD-GREEN] check at stage 2620000 (t = 3.546210e+10 s): rel. difference to the solve path shear 7.751e-11, normal 8.371e-11
+[QD-GREEN] check at stage 2630000 (t = 3.558876e+10 s): rel. difference to the solve path shear 1.003e-10, normal 1.039e-10
+[QD-GREEN] check at stage 2640000 (t = 3.571523e+10 s): rel. difference to the solve path shear 1.296e-10, normal 1.112e-10
+[QD-GREEN] check at stage 2650000 (t = 3.585187e+10 s): rel. difference to the solve path shear 1.365e-10, normal 1.306e-10
+[QD-GREEN] check at stage 2660000 (t = 3.599094e+10 s): rel. difference to the solve path shear 2.218e-10, normal 1.196e-10
+[QD-GREEN] check at stage 2670000 (t = 3.610430e+10 s): rel. difference to the solve path shear 1.294e-10, normal 1.407e-10
+[QD-GREEN] check at stage 2680000 (t = 3.618819e+10 s): rel. difference to the solve path shear 1.247e-10, normal 1.528e-10
+[QD-GREEN] check at stage 2690000 (t = 3.626194e+10 s): rel. difference to the solve path shear 1.158e-10, normal 1.288e-10
+[QD-GREEN] check at stage 2700000 (t = 3.635754e+10 s): rel. difference to the solve path shear 1.449e-10, normal 1.250e-10
+[QD-GREEN] check at stage 2710000 (t = 3.648074e+10 s): rel. difference to the solve path shear 1.577e-10, normal 1.668e-10
+[QD-GREEN] check at stage 2720000 (t = 3.660588e+10 s): rel. difference to the solve path shear 1.923e-10, normal 1.809e-10
+[QD-GREEN] check at stage 2730000 (t = 3.673146e+10 s): rel. difference to the solve path shear 2.595e-10, normal 1.824e-10
+[QD-GREEN] check at stage 2740000 (t = 3.679776e+10 s): rel. difference to the solve path shear 3.417e-10, normal 1.977e-10
+[QD-GREEN] check at stage 2750000 (t = 3.681436e+10 s): rel. difference to the solve path shear 3.349e-10, normal 1.987e-10
+[QD-GREEN] check at stage 2760000 (t = 3.681893e+10 s): rel. difference to the solve path shear 2.641e-10, normal 1.704e-10
+[QD-GREEN] check at stage 2770000 (t = 3.682023e+10 s): rel. difference to the solve path shear 2.904e-10, normal 1.585e-10
+[QD-GREEN] check at stage 2780000 (t = 3.682060e+10 s): rel. difference to the solve path shear 2.829e-10, normal 1.572e-10
+[QD-GREEN] check at stage 2790000 (t = 3.682070e+10 s): rel. difference to the solve path shear 3.574e-10, normal 1.623e-10
+[QD-GREEN] check at stage 2800000 (t = 3.682074e+10 s): rel. difference to the solve path shear 3.462e-10, normal 1.306e-10
+[QD-GREEN] check at stage 2810000 (t = 3.682074e+10 s): rel. difference to the solve path shear 2.238e-10, normal 1.279e-10
+[QD-GREEN] check at stage 2820000 (t = 3.682075e+10 s): rel. difference to the solve path shear 2.248e-10, normal 1.110e-10
+[QD-GREEN] check at stage 2830000 (t = 3.682075e+10 s): rel. difference to the solve path shear 2.187e-10, normal 1.070e-10
+[QD-GREEN] check at stage 2840000 (t = 3.682075e+10 s): rel. difference to the solve path shear 1.937e-10, normal 1.090e-10
+[QD-GREEN] check at stage 2850000 (t = 3.682075e+10 s): rel. difference to the solve path shear 1.721e-10, normal 9.142e-11
+  QD -> dynamic at t = 3.682e+10 s (1.167e+03 yr): max V (QD balance) = 1.001e-02 m/s > V_on; dynamic phase 5
+  back to QD at t = 36820748882.750671 s (TS step 456566, first dt 0.010000 s): max V dynamic 0.000818 m/s, QD balance 0.000919 m/s
+[QD-GREEN] check at stage 2860000 (t = 3.682075e+10 s): rel. difference to the solve path shear 1.535e-10, normal 4.861e-11
+[QD-GREEN] check at stage 2870000 (t = 3.682075e+10 s): rel. difference to the solve path shear 1.019e-10, normal 5.157e-11
+[QD-GREEN] check at stage 2880000 (t = 3.682078e+10 s): rel. difference to the solve path shear 1.034e-10, normal 5.558e-11
+[QD-GREEN] check at stage 2890000 (t = 3.682095e+10 s): rel. difference to the solve path shear 8.539e-11, normal 7.485e-11
+[QD-GREEN] check at stage 2900000 (t = 3.682168e+10 s): rel. difference to the solve path shear 7.599e-11, normal 9.264e-11
+[QD-GREEN] check at stage 2910000 (t = 3.682417e+10 s): rel. difference to the solve path shear 6.511e-11, normal 6.593e-11
+[QD-GREEN] check at stage 2920000 (t = 3.683115e+10 s): rel. difference to the solve path shear 8.007e-11, normal 6.487e-11
+[QD-GREEN] check at stage 2930000 (t = 3.684939e+10 s): rel. difference to the solve path shear 7.582e-11, normal 4.682e-11
+[QD-GREEN] check at stage 2940000 (t = 3.690123e+10 s): rel. difference to the solve path shear 7.980e-11, normal 3.710e-11
+[QD-GREEN] check at stage 2950000 (t = 3.706480e+10 s): rel. difference to the solve path shear 7.533e-11, normal 2.980e-11
+[QD-GREEN] check at stage 2960000 (t = 3.744704e+10 s): rel. difference to the solve path shear 1.085e-10, normal 3.176e-11
+[QD-GREEN] check at stage 2970000 (t = 3.790227e+10 s): rel. difference to the solve path shear 1.069e-10, normal 4.012e-11
+[QD-GREEN] check at stage 2980000 (t = 3.827924e+10 s): rel. difference to the solve path shear 8.315e-11, normal 4.137e-11
+[QD-GREEN] check at stage 2990000 (t = 3.857805e+10 s): rel. difference to the solve path shear 7.675e-11, normal 4.771e-11
+[QD-GREEN] check at stage 3000000 (t = 3.883201e+10 s): rel. difference to the solve path shear 8.247e-11, normal 4.862e-11
+[QD-GREEN] check at stage 3010000 (t = 3.906092e+10 s): rel. difference to the solve path shear 8.715e-11, normal 5.215e-11
+[QD-GREEN] check at stage 3020000 (t = 3.927482e+10 s): rel. difference to the solve path shear 1.110e-10, normal 5.474e-11
+[QD-GREEN] check at stage 3030000 (t = 3.948755e+10 s): rel. difference to the solve path shear 8.607e-11, normal 5.317e-11
+[QD-GREEN] check at stage 3040000 (t = 3.970155e+10 s): rel. difference to the solve path shear 9.913e-11, normal 9.426e-11
+[QD-GREEN] check at stage 3050000 (t = 3.991401e+10 s): rel. difference to the solve path shear 9.465e-11, normal 6.059e-11
+[QD-GREEN] check at stage 3060000 (t = 4.012467e+10 s): rel. difference to the solve path shear 6.299e-11, normal 6.518e-11
+[QD-GREEN] check at stage 3070000 (t = 4.033115e+10 s): rel. difference to the solve path shear 7.336e-11, normal 6.695e-11
+[QD-GREEN] check at stage 3080000 (t = 4.053653e+10 s): rel. difference to the solve path shear 1.033e-10, normal 7.884e-11
+[QD-GREEN] check at stage 3090000 (t = 4.073302e+10 s): rel. difference to the solve path shear 1.110e-10, normal 7.555e-11
+[QD-GREEN] check at stage 3100000 (t = 4.092823e+10 s): rel. difference to the solve path shear 9.249e-11, normal 7.993e-11
+[QD-GREEN] check at stage 3110000 (t = 4.112047e+10 s): rel. difference to the solve path shear 9.005e-11, normal 8.071e-11
+[QD-GREEN] check at stage 3120000 (t = 4.130584e+10 s): rel. difference to the solve path shear 1.190e-10, normal 8.152e-11
+[QD-GREEN] check at stage 3130000 (t = 4.148804e+10 s): rel. difference to the solve path shear 1.662e-10, normal 8.461e-11
+[QD-GREEN] check at stage 3140000 (t = 4.166850e+10 s): rel. difference to the solve path shear 1.431e-10, normal 1.008e-10
+[QD-GREEN] check at stage 3150000 (t = 4.184428e+10 s): rel. difference to the solve path shear 1.607e-10, normal 1.093e-10
+[QD-GREEN] check at stage 3160000 (t = 4.201843e+10 s): rel. difference to the solve path shear 1.844e-10, normal 1.098e-10
+[QD-GREEN] check at stage 3170000 (t = 4.218721e+10 s): rel. difference to the solve path shear 1.550e-10, normal 1.118e-10
+[QD-GREEN] check at stage 3180000 (t = 4.235471e+10 s): rel. difference to the solve path shear 1.437e-10, normal 1.064e-10
+[QD-GREEN] check at stage 3190000 (t = 4.251977e+10 s): rel. difference to the solve path shear 8.864e-11, normal 1.063e-10
+[QD-GREEN] check at stage 3200000 (t = 4.268169e+10 s): rel. difference to the solve path shear 1.020e-10, normal 6.131e-11
+[QD-GREEN] check at stage 3210000 (t = 4.284300e+10 s): rel. difference to the solve path shear 1.011e-10, normal 5.394e-11
+[QD-GREEN] check at stage 3220000 (t = 4.299960e+10 s): rel. difference to the solve path shear 1.112e-10, normal 7.549e-11
+[QD-GREEN] check at stage 3230000 (t = 4.315138e+10 s): rel. difference to the solve path shear 1.389e-10, normal 1.125e-10
+[QD-GREEN] check at stage 3240000 (t = 4.330644e+10 s): rel. difference to the solve path shear 8.117e-11, normal 1.312e-10
+[QD-GREEN] check at stage 3250000 (t = 4.345928e+10 s): rel. difference to the solve path shear 1.231e-10, normal 1.363e-10
+[QD-GREEN] check at stage 3260000 (t = 4.360371e+10 s): rel. difference to the solve path shear 9.775e-11, normal 1.153e-10
+[QD-GREEN] check at stage 3270000 (t = 4.374946e+10 s): rel. difference to the solve path shear 1.425e-10, normal 1.296e-10
+[QD-GREEN] check at stage 3280000 (t = 4.389851e+10 s): rel. difference to the solve path shear 1.325e-10, normal 1.143e-10
+[QD-GREEN] check at stage 3290000 (t = 4.404136e+10 s): rel. difference to the solve path shear 1.545e-10, normal 9.406e-11
+[QD-GREEN] check at stage 3300000 (t = 4.417912e+10 s): rel. difference to the solve path shear 1.381e-10, normal 9.039e-11
+[QD-GREEN] check at stage 3310000 (t = 4.431706e+10 s): rel. difference to the solve path shear 1.310e-10, normal 1.398e-10
+[QD-GREEN] check at stage 3320000 (t = 4.445834e+10 s): rel. difference to the solve path shear 1.483e-10, normal 1.046e-10
+[QD-GREEN] check at stage 3330000 (t = 4.459707e+10 s): rel. difference to the solve path shear 1.655e-10, normal 9.747e-11
+[QD-GREEN] check at stage 3340000 (t = 4.472806e+10 s): rel. difference to the solve path shear 1.550e-10, normal 1.145e-10
+[QD-GREEN] check at stage 3350000 (t = 4.485273e+10 s): rel. difference to the solve path shear 2.404e-10, normal 1.224e-10
+[QD-GREEN] check at stage 3360000 (t = 4.498405e+10 s): rel. difference to the solve path shear 2.330e-10, normal 1.395e-10
+[QD-GREEN] check at stage 3370000 (t = 4.512392e+10 s): rel. difference to the solve path shear 3.402e-10, normal 1.893e-10
+[QD-GREEN] check at stage 3380000 (t = 4.525463e+10 s): rel. difference to the solve path shear 3.010e-10, normal 1.619e-10
+[QD-GREEN] check at stage 3390000 (t = 4.535194e+10 s): rel. difference to the solve path shear 2.236e-10, normal 2.015e-10
+[QD-GREEN] check at stage 3400000 (t = 4.542846e+10 s): rel. difference to the solve path shear 2.040e-10, normal 1.598e-10
+[QD-GREEN] check at stage 3410000 (t = 4.550764e+10 s): rel. difference to the solve path shear 1.646e-10, normal 1.524e-10
+[QD-GREEN] check at stage 3420000 (t = 4.562333e+10 s): rel. difference to the solve path shear 2.121e-10, normal 2.177e-10
+[QD-GREEN] check at stage 3430000 (t = 4.574494e+10 s): rel. difference to the solve path shear 3.546e-10, normal 2.147e-10
+[QD-GREEN] check at stage 3440000 (t = 4.587061e+10 s): rel. difference to the solve path shear 3.381e-10, normal 2.188e-10
+[QD-GREEN] check at stage 3450000 (t = 4.597903e+10 s): rel. difference to the solve path shear 4.257e-10, normal 2.874e-10
+[QD-GREEN] check at stage 3460000 (t = 4.601241e+10 s): rel. difference to the solve path shear 5.885e-10, normal 2.260e-10
+[QD-GREEN] check at stage 3470000 (t = 4.602106e+10 s): rel. difference to the solve path shear 4.601e-10, normal 2.028e-10
+[QD-GREEN] check at stage 3480000 (t = 4.602342e+10 s): rel. difference to the solve path shear 5.494e-10, normal 1.978e-10
+[QD-GREEN] check at stage 3490000 (t = 4.602407e+10 s): rel. difference to the solve path shear 4.813e-10, normal 1.944e-10
+[QD-GREEN] check at stage 3500000 (t = 4.602425e+10 s): rel. difference to the solve path shear 4.342e-10, normal 2.191e-10
+[QD-GREEN] check at stage 3510000 (t = 4.602430e+10 s): rel. difference to the solve path shear 4.043e-10, normal 1.781e-10
+[QD-GREEN] check at stage 3520000 (t = 4.602431e+10 s): rel. difference to the solve path shear 4.774e-10, normal 1.555e-10
+[QD-GREEN] check at stage 3530000 (t = 4.602432e+10 s): rel. difference to the solve path shear 3.822e-10, normal 1.451e-10
+[QD-GREEN] check at stage 3540000 (t = 4.602432e+10 s): rel. difference to the solve path shear 3.261e-10, normal 1.415e-10
+[QD-GREEN] check at stage 3550000 (t = 4.602432e+10 s): rel. difference to the solve path shear 3.103e-10, normal 1.368e-10
+[QD-GREEN] check at stage 3560000 (t = 4.602432e+10 s): rel. difference to the solve path shear 2.781e-10, normal 1.149e-10
+[QD-GREEN] check at stage 3570000 (t = 4.602432e+10 s): rel. difference to the solve path shear 3.136e-10, normal 1.313e-10
+  QD -> dynamic at t = 4.602e+10 s (1.458e+03 yr): max V (QD balance) = 1.000e-02 m/s > V_on; dynamic phase 6
+  back to QD at t = 46024320011.653313 s (TS step 570834, first dt 0.010000 s): max V dynamic 0.000818 m/s, QD balance 0.000919 m/s
+[QD-GREEN] check at stage 3580000 (t = 4.602432e+10 s): rel. difference to the solve path shear 1.229e-10, normal 6.306e-11
+[QD-GREEN] check at stage 3590000 (t = 4.602434e+10 s): rel. difference to the solve path shear 1.130e-10, normal 6.776e-11
+[QD-GREEN] check at stage 3600000 (t = 4.602443e+10 s): rel. difference to the solve path shear 1.311e-10, normal 7.969e-11
+[QD-GREEN] check at stage 3610000 (t = 4.602485e+10 s): rel. difference to the solve path shear 9.837e-11, normal 9.974e-11
+[QD-GREEN] check at stage 3620000 (t = 4.602642e+10 s): rel. difference to the solve path shear 1.203e-10, normal 8.568e-11
+[QD-GREEN] check at stage 3630000 (t = 4.603113e+10 s): rel. difference to the solve path shear 8.525e-11, normal 8.548e-11
+[QD-GREEN] check at stage 3640000 (t = 4.604363e+10 s): rel. difference to the solve path shear 1.074e-10, normal 7.379e-11
+[QD-GREEN] check at stage 3650000 (t = 4.607745e+10 s): rel. difference to the solve path shear 8.130e-11, normal 4.012e-11
+[QD-GREEN] check at stage 3660000 (t = 4.618060e+10 s): rel. difference to the solve path shear 1.111e-10, normal 3.289e-11
+[QD-GREEN] check at stage 3670000 (t = 4.647750e+10 s): rel. difference to the solve path shear 1.469e-10, normal 3.730e-11
+[QD-GREEN] check at stage 3680000 (t = 4.693264e+10 s): rel. difference to the solve path shear 1.182e-10, normal 4.173e-11
+[QD-GREEN] check at stage 3690000 (t = 4.734474e+10 s): rel. difference to the solve path shear 1.100e-10, normal 6.090e-11
+[QD-GREEN] check at stage 3700000 (t = 4.767169e+10 s): rel. difference to the solve path shear 1.071e-10, normal 5.115e-11
+[QD-GREEN] check at stage 3710000 (t = 4.793885e+10 s): rel. difference to the solve path shear 1.121e-10, normal 5.722e-11
+[QD-GREEN] check at stage 3720000 (t = 4.817567e+10 s): rel. difference to the solve path shear 9.508e-11, normal 6.013e-11
+[QD-GREEN] check at stage 3730000 (t = 4.839638e+10 s): rel. difference to the solve path shear 9.387e-11, normal 5.932e-11
+[QD-GREEN] check at stage 3740000 (t = 4.861176e+10 s): rel. difference to the solve path shear 1.372e-10, normal 6.672e-11
+[QD-GREEN] check at stage 3750000 (t = 4.882463e+10 s): rel. difference to the solve path shear 9.127e-11, normal 6.732e-11
+[QD-GREEN] check at stage 3760000 (t = 4.904036e+10 s): rel. difference to the solve path shear 1.001e-10, normal 7.485e-11
+[QD-GREEN] check at stage 3770000 (t = 4.925036e+10 s): rel. difference to the solve path shear 8.323e-11, normal 8.152e-11
+[QD-GREEN] check at stage 3780000 (t = 4.945909e+10 s): rel. difference to the solve path shear 1.271e-10, normal 8.133e-11
+[QD-GREEN] check at stage 3790000 (t = 4.966633e+10 s): rel. difference to the solve path shear 9.617e-11, normal 8.852e-11
+[QD-GREEN] stages 3792124, checks 379, largest rel. difference to the solve path: shear 5.885e-10, normal 2.874e-10
+--- bp5_fd_p2_1800yr_switch.txt
+# fd_cycle switch log, commit 3926e9c81c126214d9c12d4d9136d0ebec2f7d34
+# Columns: time(s), Vmax(m/s), from, to, reason
+0.000000000000E+00 3.000000000000E-02 QD dynamic start
+3.255795573472E+02 8.285527126616E-04 dynamic QD end_of_phase
+9.208946927323E+09 1.000065326911E-02 QD dynamic V_on
+9.208947257534E+09 8.219607140515E-04 dynamic QD end_of_phase
+1.841389500368E+10 1.000032002451E-02 QD dynamic V_on
+1.841389533365E+10 8.172730362733E-04 dynamic QD end_of_phase
+2.761748440188E+10 1.000025167998E-02 QD dynamic V_on
+2.761748473192E+10 8.183628972561E-04 dynamic QD end_of_phase
+3.682074855274E+10 1.000525869776E-02 QD dynamic V_on
+3.682074888275E+10 8.177972618067E-04 dynamic QD end_of_phase
+4.602431968164E+10 1.000447343615E-02 QD dynamic V_on
+4.602432001165E+10 8.179050561768E-04 dynamic QD end_of_phase
+--- bp5_fd_p2_1800yr_catalog.txt
+# fd_cycle event catalog (start: max V > 0.001 m/s; end: 10 s below it), commit 3926e9c81c126214d9c12d4d9136d0ebec2f7d34
+# Columns: event, t_start(s), t_end(s), peak_Vmax(m/s)
+1.000000000000E+00 0.000000000000E+00 3.155799156815E+02 4.176433637746E+00
+2.000000000000E+00 9.208946821532E+09 9.208947247535E+09 3.747779614239E+00
+3.000000000000E+00 1.841389489808E+10 1.841389532365E+10 3.877987241548E+00
+4.000000000000E+00 2.761748429615E+10 2.761748472192E+10 3.817528959741E+00
+5.000000000000E+00 3.682074844709E+10 3.682074887275E+10 3.835685662280E+00
+6.000000000000E+00 4.602431957599E+10 4.602432000165E+10 3.827886708995E+00
+--- bp5_fd_p2_1800yr_events.txt
+# fd_cycle events (start: max V > 0.001 m/s; end: 10 s below it; rupture area: DOFs with |V| >= 0.001 m/s), commit 3926e9c81c126214d9c12d4d9136d0ebec2f7d34
+# Columns: event, t_start(s), t_end(s), rupture_area(m^2), tau_avg_start(MPa), tau_avg_end(MPa), slip_avg(m)
+1.000000000000E+00 0.000000000000E+00 3.155799156815E+02 1.419698736529E+09 1.726374792170E+01 1.143750798140E+01 5.358464877589E+00
+2.000000000000E+00 9.208946821532E+09 9.208947247535E+09 1.408210259370E+09 1.724332110597E+01 1.144786325748E+01 5.317061725802E+00
+3.000000000000E+00 1.841389489808E+10 1.841389532365E+10 1.415048018363E+09 1.723806458131E+01 1.148345030744E+01 5.327519398416E+00
+4.000000000000E+00 2.761748429615E+10 2.761748472192E+10 1.412510288132E+09 1.723554944208E+01 1.147384579158E+01 5.318070418631E+00
+5.000000000000E+00 3.682074844709E+10 3.682074887275E+10 1.413074123155E+09 1.723666826544E+01 1.147501115404E+01 5.321407849375E+00
+6.000000000000E+00 4.602431957599E+10 4.602432000165E+10 1.412791236400E+09 1.723630360726E+01 1.147421920047E+01 5.320127128904E+00
+=== fd_cycle summary ===
+  commit: 3926e9c81c126214d9c12d4d9136d0ebec2f7d34
+  final time: 4.97e+10 s (1.58e+03 yr)
+  TS steps: 605879
+  step rejections: 25929
+  dynamic phases: 6
+  events: 6
+  snapshots: fault 19925, surface 19925
+  status: stopped at the wall limit (exit 8)
+WARNING! There are options you set that were not used!
+WARNING! could be spelling mistake, etc!
+-rw------- 1 zhaochun G-821164 71259274160 Oct 26 05:51 /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr_fault_snapshots.vtkhdf
+-rw------- 1 zhaochun G-821164 10769635976 Oct 26 05:51 /work/10024/zhaochun/vista/seas-mfem-fdcycle-runs/p2_1800_1094927/bp5_fd_p2_1800yr_surface_snapshots.vtkhdf
+stopped at the wall limit; the next link continues from its checkpoint

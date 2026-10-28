@@ -17,6 +17,8 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d-driver-tp        # phase D: the driver, TPV105-2D
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d-dislocation      # phase E: plane-strain dislocation
 #   make -f tests/2d_inplane/2d_inplane.mk test-prestress-bp3       # phases E, F: BP3 prestress (QD, FD), decks, outputs
+#   make -f tests/2d_inplane/2d_inplane.mk test-2d-absorbing        # BP3's absorbing walls ([cycle.absorbing], 2D)
+#   make -f tests/2d_inplane/2d_inplane.mk test-absorbing-all       # faces = "all" (every outer face absorbs)
 #   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
 # The 3D parity set (every phase must leave it bit for bit unchanged) is the
 # script tests/2d_inplane/parity_3d.sh (see its header).
@@ -396,11 +398,79 @@ test-2d-driver-tp: seas_nitsche_dyn_driver
 	   else printf '%s\n' "$$out" | tail -15; echo "  FAILED: refusal $$n: exit $$rc, \"$$msg\" not found"; exit 1; fi; \
 	 done; rm -rf $$d
 
+# BP3's absorbing walls on a 2-D mesh ([cycle.absorbing] = "outer" and
+# "bottom", cycle/absorbing_faces.hpp, hook H3; the 3-D test is
+# tests/cycle/test_cycle_absorbing.cpp): the BP3-FD dip 60 thrust deck on its
+# 1 km mesh at p = 1, on 1 and 2 ranks.
+TEST_2D_ABS_SRC = tests/2d_inplane/test_2d_absorbing.cpp
+TEST_2D_ABS_OBJ = $(TEST_2D_ABS_SRC:.cpp=.o)
+$(TEST_2D_ABS_OBJ): %.o: $(SRC)%.cpp $(CYCLE_HEADERS) $(CYCLE_STAMP) \
+                         $(CYCLE_SHARED_HEADERS) $(INPLANE_HEADERS) \
+                         $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
+
+seas_test_2d_absorbing: $(TEST_2D_ABS_OBJ) $(CYCLE_LINK_OBJS)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_2D_ABS_OBJ) $(CYCLE_LINK_OBJS) \
+	    $(CYCLE_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-2d-absorbing: seas_test_2d_absorbing
+	@for n in 1 2; do \
+	   $(MFEM_MPIEXEC) $(CYCLE_P2_MPIFLAGS) $(MFEM_MPIEXEC_NP) $$n ./seas_test_2d_absorbing || exit 1; \
+	done
+
+# [cycle.absorbing] faces = "all": every outer face absorbs, no free surface
+# (the UCERF 2-D box, loaded through its walls in QD; Chunhui Zhao,
+# 2026-10-27).  RetagOuterFaces on the TPV205-2D box, the BP3 1 km mesh and a
+# 3-D box, on 1 and 2 ranks; then the deck loader on BP3-FD d60 thrust copies:
+# "all" loads (on, walls, no free surface), and "all" with
+# free_surface_min_up and an unknown faces value are refused.
+TEST_ABS_ALL_SRC = tests/2d_inplane/test_absorbing_all.cpp
+TEST_ABS_ALL_OBJ = $(TEST_ABS_ALL_SRC:.cpp=.o)
+$(TEST_ABS_ALL_OBJ): %.o: $(SRC)%.cpp $(CYCLE_HEADERS) $(CYCLE_STAMP) \
+                         $(CYCLE_SHARED_HEADERS) $(INPLANE_HEADERS) \
+                         $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
+
+seas_test_absorbing_all: $(TEST_ABS_ALL_OBJ) $(CYCLE_LINK_OBJS)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_ABS_ALL_OBJ) $(CYCLE_LINK_OBJS) \
+	    $(CYCLE_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+ABS_ALL_DECK = config/fd_cycle/bp3_fd_d60_thrust.toml
+ABS_ALL_TMP = $(or $(TMPDIR),/tmp)/seas_test_absorbing_all
+ABS_ALL_REFUSALS = minup:[cycle.absorbing] faces = "all" keeps no free surface; remove free_surface_min_up|unknown:[cycle.absorbing].faces must be "off", "bottom", "outer" or "all"; got "every"
+test-absorbing-all: seas_test_absorbing_all
+	@for n in 1 2; do \
+	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_absorbing_all || exit 1; \
+	done
+	@rm -rf $(ABS_ALL_TMP); mkdir -p $(ABS_ALL_TMP); d=$(ABS_ALL_TMP); \
+	 sed -e 's/^faces = "outer"/faces = "all"/' $(ABS_ALL_DECK) > $$d/all.toml; \
+	 awk '{print} /^faces = "all"/ {print "free_surface_min_up = 0.5"}' $$d/all.toml > $$d/minup.toml; \
+	 sed -e 's/^faces = "outer"/faces = "every"/' $(ABS_ALL_DECK) > $$d/unknown.toml; \
+	 for f in all unknown; do cmp -s $(ABS_ALL_DECK) $$d/$$f.toml \
+	    && { echo "  FAILED: the $$f edit did not change the deck"; exit 1; }; done; \
+	 cmp -s $$d/all.toml $$d/minup.toml && { echo "  FAILED: the minup edit did not change the deck"; exit 1; }; \
+	 out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_absorbing_all --load-deck $$d/all.toml 2>&1); rc=$$?; \
+	 if [ $$rc -eq 0 ] && printf '%s' "$$out" | grep -qF 'faces = "all": on 1, walls 1, free surface 0'; then \
+	    echo "  PASSED: deck faces = \"all\" loads: on, walls, no free surface"; \
+	 else printf '%s\n' "$$out" | tail -15; echo "  FAILED: deck faces = \"all\""; exit 1; fi; \
+	 list='$(ABS_ALL_REFUSALS)'; set -f; IFS='|'; for r in $$list; do n=$${r%%:*}; msg=$${r#*:}; \
+	   out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_absorbing_all --load-deck $$d/$$n.toml 2>&1); rc=$$?; \
+	   if [ $$rc -ne 0 ] && printf '%s' "$$out" | grep -qF "$$msg"; then \
+	      echo "  PASSED: refusal $$n: exit $$rc, \"$$msg\""; \
+	   else printf '%s\n' "$$out" | tail -15; echo "  FAILED: refusal $$n: exit $$rc, \"$$msg\" not found"; exit 1; fi; \
+	 done; rm -rf $$d
+
 2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
                 test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
-                test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3
+                test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
+                test-2d-absorbing test-absorbing-all
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
         test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
+        test-2d-absorbing test-absorbing-all \
         2d-inplane-all

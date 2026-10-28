@@ -1,0 +1,25 @@
+# This is the file header:
+# problem=SEAS Benchmark BP5-FD
+# code=seas-mfem (seas_fd_cycle_driver)
+# version=3926e9c81c126214d9c12d4d9136d0ebec2f7d34
+# modeler=Chunhui Zhao
+# date=2026/10/26
+# element_size=1000 m
+# polynomial_degree=2
+# Column #1 = Event number
+# Column #2 = Event start time (s)
+# Column #3 = Event end time (s)
+# Column #4 = Rupture area (m^2)
+# Column #5 = Stress avg at start time (MPa)
+# Column #6 = Stress avg at end time (MPa)
+# Column #7 = Avg slip in rupture area (m)
+# The line below lists the names of the data fields
+event_no t_start t_end rup_area avg_stress_start avg_stress_end avg_slip
+# Here are the data
+1   0.0000000000000E+00   3.1557991568150E+02   1.419699E+09   1.726375E+01   1.143751E+01   5.358465E+00
+2   9.2089468215320E+09   9.2089472475350E+09   1.408210E+09   1.724332E+01   1.144786E+01   5.317062E+00
+3   1.8413894898080E+10   1.8413895323650E+10   1.415048E+09   1.723806E+01   1.148345E+01   5.327519E+00
+4   2.7617484296150E+10   2.7617484721920E+10   1.412510E+09   1.723555E+01   1.147385E+01   5.318070E+00
+5   3.6820748447090E+10   3.6820748872750E+10   1.413074E+09   1.723667E+01   1.147501E+01   5.321408E+00
+6   4.6024319575990E+10   4.6024320001650E+10   1.412791E+09   1.723630E+01   1.147422E+01   5.320127E+00
+7   5.5227731701580E+10   5.5227732127230E+10   1.412791E+09   1.723658E+01   1.147381E+01   5.320645E+00

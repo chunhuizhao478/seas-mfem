@@ -117,11 +117,7 @@ penalty_factor       = 1.0       # both regimes' K
 # The BP5-FD switch: dynamic once max V > V_on; a phase ends once max V has
 # stayed below V_off for T_dwell (the spec's event end), and a phase longer
 # than T_max stops the run.  No phase limit: the run switches back to QD and
-# continues to tfinal.  The dynamic regime's outer boundary is the QD one:
-# Dirichlet sides at x = +-w (w >= 400 km: reflections return to the fault
-# after at least 2 w / c_p = 130 s) and the free bottom y = -400 km; BP3-FD's
-# Sommerfeld condition (absorbing walls) comes with the fully-dynamic-cycle
-# merge, decided by the event-1 wall test (design rev 3, section 6.4).
+# continues to tfinal.
 [cycle.switch]
 V_on               = 1.0e-2
 V_off              = 1.0e-3
@@ -129,6 +125,19 @@ T_dwell            = 10.0
 T_min              = 0.0
 T_max              = 1200.0
 max_dynamic_phases = 0
+
+# BP3-FD's Sommerfeld condition: the dynamic regime's outer boundary absorbs
+# (fully-dynamic-cycle P5, trunk merge 570b6949, Chunhui Zhao 2026-10-27).
+# "outer" = the bottom y = -400 km and the two sides (parallel to the fault,
+# through x = +-w at the surface, w >= 400 km), the sides' static reaction
+# frozen at each switch (hook H3); the surface (n . up >= 0.5 with
+# [fault_geometry] up = [0, 1]) stays traction free.  The QD
+# regime keeps its Dirichlet sides and free bottom.  Reflections would return
+# to the fault after at least 2 w / c_p = 130 s; at event 1 of d60 thrust on
+# the 1 km mesh (a 20.5 s phase) the walls change the stations by at most
+# 2.2e-10 (tests/2d_inplane/test_2d_absorbing.cpp checks the faces).
+[cycle.absorbing]
+faces = "outer"
 
 # The QD stages run through the stage operators and the discrete Green's
 # function (QD speed items 1 and 3; 2D since phase F): T = G delta + t T_D,

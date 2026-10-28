@@ -952,3 +952,186 @@ PASSED lines, no FAILED).  The ten BP3 decks on their 1 km meshes, 1 rank,
 (30 files per QD deck, 31 per FD deck); on 2 ranks within 1.2e-10.
 
 Known behaviour changes in 3D: none.
+
+## Trunk merge 570b6949: the absorbing walls for 2D, before BP3-FD (G4)
+
+Chunhui Zhao, 2026-10-27: "merge the absorbing boundary condition for 2d,
+verify before it runs BP3-FD".  The walls are fully-dynamic-cycle's P5
+(`570b6949`, on `nitsche-dynamic-rupture` since the fast-forward of that
+day).  Shared code reaches this branch only through trunk merges (rule M1),
+so the whole trunk at `570b6949` is merged (merge base `3926e9c8`, the
+branch point): P5 (`[cycle.absorbing]`, `cycle/absorbing_faces.hpp`, hook
+H3, `tests/cycle/test_cycle_absorbing.cpp`), the BP5-FD p = 2 gold
+(`b37f68c5`), and the Nitsche speed-next and mesh setup work (`bc91ac91`):
+station rows without a per-step collective (`dynamic/station_copy_average.hpp`
+on a sub-communicator, buffered `StationRowFile`s, `--station-comm`,
+`--station-flush-every`), `--paraview-fault-deflate-level`, setup timers,
+rank 0 reading the mesh and sending each rank its part (`--mesh-setup rank0`,
+the default, `dynamic/mesh_parts.hpp`) and mesh part files
+(`--mesh-parts-out`, `--mesh-parts`).
+
+Six files conflicted; each keeps both sides:
+
+- `cycle/cycle_config.hpp`: `[cycle.loading]` (phase A4) and
+  `[cycle.absorbing]` (P5), their docs, members and allowed keys; the
+  absorbing doc gains its 2-D note (below).
+- `cycle/dyn_phase.hpp`: P5's mesh copy and re-tagging with the branch's
+  `frames` (the QD regime's frame field) handed to `NitscheWaveOperator`.
+- `domain/nitsche_wave_operator.hpp`: the branch's normal-stress hook
+  (`SetNormalStressModifier`, phase D) and H3 (`SetConstantLoad`,
+  `ConstantLoad`, `StiffnessMult`).
+- `document/fd_cycle_dev/HOOKS.md`: both rows.
+- `dynamic/fault_station_file.hpp`: the branch's extra columns (T and p of
+  thermal pressurization) written through the trunk's `StationRowFile`
+  (`Text()`, then `EndRow()`).
+- `drivers/nitsche_dyn_driver.cpp`: the trunk's three mesh paths (part
+  files, rank 0, every rank) with the branch's 2-D checks (triangles in the
+  (x, y) plane, the dimension sent from rank 0, C(p) by dimension, the
+  `[fault_geometry]` dimension check, `paraview_fault` refused in 2D); the
+  trunk's `StationCopyGeometry` with the branch's edge midpoint and length;
+  the thermal pressurization columns averaged by `StationCopyAverage`'s
+  extra values (below), which replace the branch's own copy of the average.
+
+The trunk files ported to 2-D meshes:
+
+| Shared file | Change | Without the new inputs |
+|---|---|---|
+| `cycle/absorbing_faces.hpp` | `RetagOuterFaces` takes a 2-D mesh in the (x, y) plane: segment faces, n and up in the plane (sums over `dim` components); an up with no in-plane part (the TPV205-2D frame's e_z) is refused when a free surface is kept (with `faces = "all"`, below, up is not read) | 3-D: the same arithmetic (the sum over three components starts from 0) |
+| `dynamic/mesh_parts.hpp` | `CheckMeshPart` takes triangles (3 vertices per element) as well as tetrahedra | tetrahedra: the same checks |
+| `dynamic/station_copy_average.hpp` | `nx` extra values per owned fault DOF (constructor; `Apply(t, dd, extra)`), averaged with the same weights and written back like the others, not in the envelope | `nx = 0`: the same rows, counts, sums and files |
+| `drivers/nitsche_dyn_driver.cpp` | part files (`--mesh-parts-out`, `--mesh-parts`) refused on a 2-D mesh; rank-0 setup used on 2-D meshes as on 3-D ones | 3-D: the trunk's paths |
+| `tests/verification/test_mesh_parts.cpp` | `--mesh` takes a triangle mesh in the (x, y) plane: vertex, centroid and face-neighbour coordinates over the space dimension, the H1, L2 and DG spaces of the mesh's dimension, the test function without z on a 2-D mesh | 3-D: the same checks and output |
+
+Tests (branch-owned): `tests/2d_inplane/test_2d_absorbing.cpp`
+(`make -f tests/2d_inplane/2d_inplane.mk test-2d-absorbing`, 1 and 2
+ranks) follows P5's `test_cycle_absorbing.cpp` check for check on the
+BP3-FD d60 thrust deck, its 1 km mesh, p = 1: one QD balance at t_s = 3e9 s
+handed to reflecting, "outer", "bottom" and "all" dynamic regimes.  BP3's box is a
+parallelogram (the sides parallel to the fault, `bp3/mesh/bp3.geo`), so a
+wall face is checked against the line from its surface corner to the bottom
+corner below it.  26 checks on 1 and on 2 ranks (21 before "all", below):
+20 bottom faces re-tagged
+absorbing, 25 side faces walls, 76 surface faces kept traction free, the
+creep segment kept Dirichlet; the frozen load's net force 4.5e-12 (1 rank)
+and 4.8e-12 (2 ranks) of its size; A^0 with the load equal to the
+reflecting one off the walls and 0 on them, both exactly; slip, slip rate
+and psi after 20 steps equal to the reflecting run's exactly; "bottom" A^0
+exactly, U to 1.6e-14.
+
+Rank-0 mesh setup on 2-D meshes: the merge keeps the trunk's default
+(`--mesh-setup rank0`) for 2-D meshes too.  Rank 0 lists the shared faces
+in another order than every-rank setup does (driver header, "Mesh setup"),
+which can change sums over them in the last bit; TPV105-2D shows that
+(below), TPV205-2D happens not to.  `--mesh-setup every-rank` gives the
+branch's results before the merge.
+
+Checks, in the cloud container: the merge's binaries against binaries built
+from exports of `9503fe25` (the branch before the merge) and of the trunk
+`570b6949`; "byte for byte" is apart from the commit stamp.
+
+- 2-D against the branch: the ten BP3 decks (QD and FD; dip 30, 60 and 90;
+  thrust and normal), 1 km meshes, 600 steps, are byte for byte on 1 rank
+  and within 8.2e-13 on 2 ranks (a QD solve on 2 ranks).  BP3-FD d60 thrust
+  to 140 yr on 1 rank (the first event at 130.1 yr, a 20.5 s dynamic phase)
+  is byte for byte with the walls off.  With `faces = "outer"` and
+  `"bottom"` its stations stay within 2.2e-10 of the reflecting run: in
+  20.5 s the waves travel about 70 km, and the walls are 400 km away.
+  The cycle driver rebuilt from the final tree (only line numbers moved)
+  gives the same files on all eleven runs.
+- TPV205-2D (12 s) and TPV105-2D (15 s), p = 2, 100 m, 4 ranks, against
+  their golds: TPV205-2D byte for byte with rank-0 setup; TPV105-2D byte
+  for byte with `--mesh-setup every-rank` and within 8.6e-11 with rank-0
+  setup (above).
+- 3-D parity (`tests/2d_inplane/parity_3d.sh`, 22 runs) against the trunk:
+  every 1-rank run, TPV205 and TPV104 on 2 ranks and the 2-rank unit tests
+  are byte for byte (160 files).  The cycle QD regime on 2 ranks differs by
+  4.7e-9, the dynamic regime on 2 ranks by 2.3e-9 and the BP5 quick check
+  on 8 ranks by 1.2e-7.  Both 2-rank cycle runs were then repeated three
+  times with each build: each build against itself, QD 1.1e-9 to 4.2e-9;
+  the merge against the trunk, QD 4.5e-10 to 3.0e-9; the dynamic regime
+  byte for byte in all nine pairs (phase E2: up to 7.7e-9 between two runs
+  of one binary).  The trunk's two BP5 quick checks differ by 6.7e-8 (C1:
+  1.05e-7); its stored golden fails in this container with both builds, as
+  at the branch point.
+- The trunk's tests with the merge's binaries give the trunk's check lines:
+  P2 frames (1, 2, 4 and 8 ranks, split and not; the merge's logs add the
+  fault-frame census), P3 on 1 rank, P5 (`test_cycle_absorbing`) on 1 rank,
+  the parameter parity, bench (1 and 2 ranks), station output and mesh
+  parts (1 to 4 ranks).  P2 on 2 ranks passes 40 of 40, four printed
+  residuals differing at round-off.  P4 passes 19 of 19 on 1 and 2 ranks,
+  with the trunk's values on 1 rank.  P3 and P5 on 2 ranks need more
+  than 12 GB with every build (`9503fe25`, the trunk, the merge), too close
+  to the container's 14.3 GB, so a memory guard stopped them (phase F
+  records P3 on 2 ranks passing when run alone).
+- `test_mesh_parts` on triangle meshes: 13 of 13 on the BP3 1 km mesh
+  (`--fault-attr 3`) and the TPV205-2D 100 m mesh (`--fault-attr 103`), 1 to
+  4 ranks, part files included; its 3-D output is unchanged (26 of 26, the
+  trunk's lines).
+- The final tree (with the decks and `"all"` below), rebuilt (0 warnings;
+  11 binaries changed, 1 new): the ten BP3 decks at 600 steps, BP3-FD d60
+  to 140 yr and the other four FD decks to their first event (walls on)
+  give the same files as before; `2d-inplane-all` passes (1513 PASSED
+  lines, no FAILED; `test_2d_absorbing` and `test_absorbing_all` pass on 1
+  and 2 ranks); the 3-D parity runs of the rebuilt cycle driver are byte
+  for byte on 1 rank and within 2.5e-9 on 2 ranks (MUMPS, above); the
+  trunk's cycle tests (P2 frames on 1 to 8 ranks, P2 on 2 ranks, P3, P4 and
+  P5 on 1 rank, parameter parity, bench, API pin) give the same check
+  lines, except three printed P2 2-rank residuals at round-off.
+- Speed, two rounds back to back with nothing else running (the slowest
+  rank's time per step, 0 to 1.5 s on 4 ranks): TPV205-2D 10.6 and 10.8 ms
+  with `9503fe25`, 11.4 and 11.0 ms with the merge (rank-0 setup), 12.1 and
+  11.2 ms with every-rank setup; TPV105-2D 19.5 and 17.9 ms, 18.8 and 17.8
+  ms, 18.5 and 17.9 ms.  BP3-FD d60 to 140 yr on 1 rank: 19.1 and 17.5 s
+  with `9503fe25`, 17.8 and 17.1 s with the merge.  Repeated runs vary by
+  up to 9 % in this container.
+
+The five BP3-FD decks (`config/fd_cycle/bp3_fd_*.toml`) turn the walls on,
+`[cycle.absorbing] faces = "outer"` (Chunhui Zhao, 2026-10-27: "but the
+BP3-FD still not using the absorbing bc during dynamic phase?"): BP3-FD's
+Sommerfeld condition on the bottom and both sides in the dynamic regime;
+the QD regime keeps its Dirichlet sides and free bottom.  Their 1 km copies
+were checked with the merge on 1 rank:
+
+- 600 steps (QD only): the same files as with the walls off, all five decks.
+- To the end of the first dynamic phase (`max_dynamic_phases = 1`), `"outer"`
+  against `"off"`, largest scaled station difference: d30 thrust (event at
+  130.0 yr, a 37.9 s phase) 3.3e-9, d30 normal (150.4 yr, 17.5 s) 1.6e-11,
+  d60 thrust (130.1 yr, 20.5 s) 2.2e-10, d60 normal (142.0 yr, 18.3 s)
+  3.5e-11, d90 (134.8 yr, 17.7 s) 1.9e-10.  Each run made one switch and
+  exited 0.  No wave from the fault reaches a wall within these phases.
+- Faces on the 1 km meshes (bottom absorbing, sides walls, surface kept
+  free): dip 30 36, 41 and 90; dip 60 20, 25 and 76; dip 90 20, 20 and 76.
+
+`[cycle.absorbing] faces = "all"` (Chunhui Zhao, 2026-10-27, for the UCERF
+2D in-plane box, where every boundary is far field: "I want this feature
+with separate unit test in this commit"): every exterior traction-free face
+absorbs, and the Dirichlet faces are walls as with `"outer"`, so no free
+surface is kept and no up vector is read.  Three shared files change:
+
+- `cycle/absorbing_faces.hpp`: `RetagOuterFaces` takes `keep_free_surface`
+  (default true, which is the trunk's behaviour).  With false, every
+  exterior `natural` face moves to `natural_to`, and `up` and `min_up` are
+  not read, so a map-view mesh (up = +-e_z) is not refused.
+- `cycle/cycle_config.hpp`: `"all"` is accepted; `Walls()` is true for
+  `"outer"` and `"all"`; the new `FreeSurface()` is false for `"all"`; the
+  loader refuses `free_surface_min_up` with `"all"`.
+- `cycle/dyn_phase.hpp`: passes `FreeSurface()` to `RetagOuterFaces`.
+
+`"off"`, `"bottom"` and `"outer"` behave as before.  Tests:
+
+- New `tests/2d_inplane/test_absorbing_all.cpp` (`make test-absorbing-all`,
+  part of `2d-inplane-all`): the config flags; the TPV205-2D 100 m mesh in
+  map view (its 136 outer faces all absorb, as walls or as traction-free
+  faces, the same with up = e_z and up = 0, the 300 fault faces keep
+  attribute 103); the BP3 d60 1 km mesh (`"all"` gives 96 absorbing faces,
+  25 walls and 0 free; the faces that differ from `"outer"` are exactly the
+  76 at y = 0; the creep segment keeps its 5 Dirichlet faces); a 3D
+  tetrahedral box (`"outer"` keeps the top free, `"all"` absorbs it); then
+  a deck with `"all"` loads, and decks with `free_surface_min_up` or an
+  unknown value are refused.  18 of 18 on 1 and on 2 ranks; the three deck
+  checks pass.
+- `tests/2d_inplane/test_2d_absorbing.cpp` adds `"all"` as a fourth regime
+  on the BP3-FD d60 thrust deck: 96 absorbing faces, 25 walls, 0 free; its
+  frozen wall load equals `"outer"`'s exactly; 26 of 26 on 1 and on 2
+  ranks.
+

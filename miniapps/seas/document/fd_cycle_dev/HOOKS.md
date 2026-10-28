@@ -16,8 +16,10 @@ and add its pin to `tests/cycle/test_cycle_api_pin.cpp`.
 ## Landed
 
 The branch point was `nitsche-dynamic-rupture` at `010b56e`. The branch has since
-merged it at `4c97e32` (merge `7baf0a4`, 20 Oct 2026) and at `b1f5446`, the QD
-speedup (22 Oct 2026); `cycle-owned-check` diffs against the latest merge base.
+merged it at `4c97e32` (merge `7baf0a4`, 20 Oct 2026), at `b1f5446`, the QD
+speedup (22 Oct 2026), and at `bc91ac91` (merge `e9a35a05`, 26 Oct 2026), to
+which `nitsche-dynamic-rupture` then fast-forwarded, so H1a, H1b and H2 are on
+the trunk; `cycle-owned-check` diffs against the latest merge base.
 
 | Hook | File and method | Commit | Pinned |
 |------|-----------------|--------|--------|
@@ -25,12 +27,12 @@ speedup (22 Oct 2026); `cycle-owned-check` diffs against the latest merge base.
 | H1b | `fault/fault_geometry.hpp`: `FaultGeometry::SetInitialFieldsPerDOF(tau0, V_init, sigma_n)`, appended after H1a (44 lines, additions only) | same commit | yes |
 | H2 | `domain/nitsche_wave_operator.hpp`: `NitscheWaveOperator::SetBackgroundTraction(S0)`, after `NucleationFactor` (12 lines, additions only): replaces the projected prestress by per-DOF global tractions. M9: a trial merge with `nitsche-benchmarks` (H-B1, `81759da`) is clean, and H2 sits outside the lines H-B1 changes | "Fully dynamic BP5 cycle P2: first dynamic event" | yes |
 | H-2D1 | `domain/nitsche_wave_operator.hpp`: `NitscheWaveOperator::SetNormalStressModifier(m)` and `NormalStressModifier()` after `SetBackgroundTraction`, the reduction in `CloseDOF` and one `Advance` per fault step in `AdvanceFault_` (57 lines, additions only), with the interface `fault/fault_normal_stress_modifier.hpp` (new): the law sees sigma_eff less the modifier's reduction (thermal pressurization, TPV105). Branch `2d-inplane` (2D in-plane design rev 3, section 5.9; `document/2d_inplane/SHARED_CHANGES.md`, phase D part 2); null by default, every bit unchanged | "2D in-plane D2: normal-stress hook, TPV105-2D deck" (branch `2d-inplane`) | no: the cycle does not call it |
+| H3 | `domain/nitsche_wave_operator.hpp`: `NitscheWaveOperator::SetConstantLoad(b)`, `ConstantLoad()` and `StiffnessMult(x, Kx)`, after `SetBackgroundTraction`; one line in `Acceleration_` (`F_ += b`) and two members (additions only): the frozen load of the absorbing side walls, `[cycle.absorbing] faces = "outer"` (plan 11.2). Global stepping only: `[cycle.lts]` with absorbing faces is refused | "Fully dynamic BP5 cycle P5: absorbing outer faces in the dynamic regime" | yes |
 
 ## Planned
 
 | Hook | What it adds | Lands with |
 |------|--------------|------------|
-| H3 | `NitscheWaveOperator::SetConstantLoad` (stage B absorbing side walls only) | P5, if stage B |
 | H4 | optional | |
 
 ## Trunk functions the p=2 run calls (no new hooks)
