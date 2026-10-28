@@ -311,3 +311,26 @@ coordinate = "x2"
 
 [cycle.checkpoint]
 every_qd_steps = 1000
+
+# Whole-field snapshots (cycle/snapshots.hpp; Chunhui Zhao, 2026-10-27:
+# "cancel this run, add snapshots, submit it on cluster"), one VTKHDF file
+# per kind for the whole run: a snapshot at the first QD step at or after
+# each multiple of dt_qd since t = 0 (10 yr of 365 days), at the first
+# dynamic step at or after each multiple of dt_dyn since the phase started
+# (0.1 s), and one at every switch and at the end.  On this 2-D mesh the
+# fault and the surface are polylines (line cells, z = 0).
+[cycle.snapshots.fault]
+dt_qd  = 3.1536e8
+dt_dyn = 0.1
+
+# The free surface: attribute 1 on the line y = 0 (attribute 1 also holds
+# the bottom, y = -400 km).
+[cycle.snapshots.surface]
+dt_qd        = 3.1536e8
+dt_dyn       = 0.1
+attrs        = [1]
+plane_normal = [0.0, 1.0]
+plane_offset = 0.0
+
+[cycle.snapshots.volume]
+enabled = false
