@@ -19,8 +19,10 @@
 //       0); psi0 = the closed form (1e-12); theta0 = 8000 s and 8e6 s (1e-9
 //       rel.); the law at (V_init, psi0, the DOF's a) plus eta V_init gives
 //       tau0 back (1e-12 rel.)
-//   B2  no mesh, a = "local" (the default): bit for bit the expression the
-//       function had before the switch (written out below), and Table 1's
+//   B2  no mesh, a = "local" (the default): the expression the function had
+//       before the switch (written out below), sigma0 bit for bit and tau0
+//       and psi0 within 4 eps relative (GCC's default FMA contraction may
+//       round the same statement differently in two copies), and Table 1's
 //       local column: tau0 = sigma_n [f0 + (a - b) ln(V_init / V0)] + eta
 //       V_init (31.727 MPa where a = 0.010) and psi0 = psi_bg everywhere
 //   B3  each BP3 deck (config/fd_cycle/bp3_qd_*.toml) on its 1 km mesh
@@ -103,6 +105,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -225,8 +228,18 @@ static void TestLocal()
    c.include_eta = true;
    c.V_background = kVp;
    const cycle::Prestress pre = cycle::BuildPrestress(par, c);
-   // The function before the switch, statement for statement.
+   // The function before the switch, statement for statement.  sigma0 is a
+   // copy, so bit for bit; tau0 and psi0 within 4 eps relative, not bit for bit:
+   // GCC contracts a * b + c to an FMA wherever it likes (-ffp-contract=fast,
+   // its default for C++), so the same statement in BuildPrestress and here
+   // may round differently.  On Vista (aarch64, GCC 13.2.0) the bit-for-bit
+   // check failed in build job 1105966; in the cloud (x86-64, GCC 13.3.0) it
+   // fails with -mfma and passes with -mfma -ffp-contract=off (Chunhui Zhao,
+   // 2026-10-28).  A changed expression is off by far more than that.
    const spatial::RateStatePerDOFParams &rs = par.rs;
+   const real_t tol = 4.0 * std::numeric_limits<real_t>::epsilon();
+   const auto near = [tol](real_t x, real_t ref)
+   { return x == ref || std::abs(x - ref) <= tol * std::abs(ref); };
    bool bits = true;
    for (int i = 0; i < 3; i++)
    {
@@ -241,11 +254,12 @@ static void TestLocal()
          c.include_eta
          ? sigma_n * ai * std::asinh((Vi_abs / (2.0 * V0)) * e) + rs.eta(i) * Vi_abs
          : sigma_n * ai * std::asinh((Vi_abs / (2.0 * V0)) * e);
-      bits = bits && pre.tau0(2 * i) == -tau * Vi[0] / Vi_abs
-             && pre.tau0(2 * i + 1) == -tau * Vi[1] / Vi_abs
-             && pre.sigma0(i) == sigma_n && pre.psi0(i) == psi0;
+      bits = bits && near(pre.tau0(2 * i), -tau * Vi[0] / Vi_abs)
+             && near(pre.tau0(2 * i + 1), -tau * Vi[1] / Vi_abs)
+             && pre.sigma0(i) == sigma_n && near(pre.psi0(i), psi0);
    }
-   TEST_ASSERT(bits, "B2 tau0, sigma0, psi0 bit for bit the pre-switch expression");
+   TEST_ASSERT(bits, "B2 the pre-switch expression: sigma0 bit for bit, tau0 and psi0 "
+               "within 4 eps relative");
    const real_t ln = std::log(kVp / kV0);
    const real_t tau_vw = kSigma * (kF0 + (kA0 - kB) * ln) + Eta() * kVp;
    const real_t psi_bg = kF0 + kB * std::log(kV0 / kVp);
