@@ -123,6 +123,7 @@
 #include "nitsche_material_sample.hpp"
 #include "nitsche_mass.hpp"
 #include "elasticity_operator.hpp"
+#include "fault_stress_projection.hpp"
 #include "fused_stiffness_pair.hpp"
 #include "dense_block_stiffness.hpp"
 #include "../integrator/dg_absorbing_bc_integrator.hpp"
@@ -1381,85 +1382,26 @@ private:
    }
 
    /// The prestress / nucleation traction through the SAME road as the
-   /// kernel's traction: sigma(x_q) n_q with n_q the face's unit normal
-   /// CalcOrtho / nl_q (the normal ComputeTractionAtQuadPoints uses), at the
-   /// same quadrature points, projected with ProjectTractionToFaultDOFs
-   /// (same rule, basis, nl_q weights and triad), then FromKernel ->
+   /// kernel's traction: ProjectStressToFaultKernel (fault_stress_projection.hpp,
+   /// shared with the cycle's tensor prestress) gives sigma(x_q) n_q, n_q the
+   /// face's unit normal CalcOrtho / nl_q, projected with
+   /// ProjectTractionToFaultDOFs as kernel components, then FromKernel ->
    /// global three-vectors on owned DOFs, i.e. sigma nhat.  (Projecting
    /// sigma nhat directly and then applying FromKernel would apply eps_f
    /// twice: the first P6 run caught exactly that as sigma_n_eff = -120 MPa.)
    void ProjectStress_(const std::function<void(const real_t[3], real_t[9])> &sig,
                        Vector &S_own) const
    {
-      const FaceQuadrature *fq = elast_->GetFaceQuadrature();
-      const DenseMatrix &e_q = fq->BasisAtQuadPoints();
-      const FaultBasis *fb = elast_->GetFaultBasis();
+      Vector K;
+      ProjectStressToFaultKernel(*elast_, sig, K);
       Vector S_loc(3 * nd_);
       S_loc = 0.0;
-      Vector nor(dim_), xq, Tq, nlq, out;
-      real_t x3[3];   // padded quadrature point (2D: z = 0)
-      for (int fi = 0; fi < nloc_faces_; fi++)
+      for (int k = 0; k < nd_; k++)
       {
-         FaceElementTransformations *Tr = FaultFaceTr_(fi);
-         const IntegrationRule &ir =
-            IntRules.Get(Tr->GetGeometryType(), 2 * order_ + 1);
-         const int nq = ir.GetNPoints();
-         MFEM_VERIFY(e_q.Width() == nq && e_q.Height() == nbf_,
-                     "NitscheWaveOperator: face basis at quadrature points is "
-                     << e_q.Height() << " x " << e_q.Width() << ", expected "
-                     << nbf_ << " x " << nq);
-         Tq.SetSize(dim_ * nq);
-         nlq.SetSize(nq);
-         for (int q = 0; q < nq; q++)
-         {
-            const IntegrationPoint &ip = ir.IntPoint(q);
-            Tr->SetAllIntPoints(&ip);
-            CalcOrtho(Tr->Jacobian(), nor);
-            const real_t nl = nor.Norml2();
-            nlq(q) = nl;
-            const real_t nq3[3] = {nor(0) / nl, nor(1) / nl,
-                                   dim_ == 3 ? nor(2) / nl : 0.0};
-            Tr->Transform(ip, xq);
-            for (int c = 0; c < 3; c++) { x3[c] = (c < xq.Size()) ? xq(c) : 0.0; }
-            real_t s[9];
-            sig(x3, s);
-            if (dim_ == 2)
-            {
-               // in-plane: the anti-plane traction sigma_{zx} n_x + sigma_{zy} n_y
-               // has no unknown to act on (header)
-               MFEM_VERIFY(s[2] == 0.0 && s[5] == 0.0 && s[6] == 0.0 && s[7] == 0.0,
-                           "NitscheWaveOperator: 2D mesh but the stress at fault point ("
-                           << x3[0] << ", " << x3[1] << ") has sigma_xz = " << s[2]
-                           << ", sigma_yz = " << s[5] << " (sigma_zx = " << s[6]
-                           << ", sigma_zy = " << s[7] << "); the in-plane model "
-                           "carries no anti-plane stress");
-            }
-            for (int a = 0; a < dim_; a++)
-            {
-               Tq(a * nq + q) = s[3 * a] * nq3[0] + s[3 * a + 1] * nq3[1]
-                                + s[3 * a + 2] * nq3[2];
-            }
-         }
-         const FaultBasisData &b = fb->GetBasis(fi);
-         real_t bv[3][3];
-         for (int c = 0; c < 3; c++)
-         {
-            bv[0][c] = b.normal[c];
-            bv[1][c] = b.tangent1[c];
-            bv[2][c] = b.tangent2[c];
-         }
-         DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
-            dim_, 3, Tq, nlq, ir, nbf_, e_q, bv, out,
-            b.qp_data.empty() ? nullptr : &b.qp_data);
-         for (int kk = 0; kk < nbf_; kk++)
-         {
-            const int k = fi * nbf_ + kk;
-            real_t nk[3], t1k[3], t2k[3];
-            KernelTriad_(k, nk, t1k, t2k);
-            // sigma_n = -(projected normal component), as ComputeTractionImpl.
-            fault_frame::FromKernel(out(nbf_ + kk), out(2 * nbf_ + kk), -out(kk),
-                                    eps_loc_[k], nk, t1k, t2k, &S_loc(3 * k));
-         }
+         real_t nk[3], t1k[3], t2k[3];
+         KernelTriad_(k, nk, t1k, t2k);
+         fault_frame::FromKernel(K(3 * k), K(3 * k + 1), K(3 * k + 2),
+                                 eps_loc_[k], nk, t1k, t2k, &S_loc(3 * k));
       }
       elast_->RestrictToOwnedFault(S_loc, S_own, 3);
    }

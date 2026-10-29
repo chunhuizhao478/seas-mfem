@@ -4,7 +4,8 @@
 # tests/2d_inplane/rotation_compare.py — 2D in-plane design rev 3, phase A:
 # the comparison of the BP5-mini rotation run (tests/2d_inplane/rotation_run.sh).
 #
-#   rotation_compare.py A B [--rotated] [--tol T] [--elem-dofs N] [--skip-checkpoint]
+#   rotation_compare.py A B [--rotated | --z-deg DEG] [--tol T] [--elem-dofs N]
+#                           [--skip-checkpoint] [--prefix P] [--dim 2]
 #
 # A and B are two cycle-driver output folders.  With --rotated, B is the run
 # rotated rigidly by R (rotate_case.py's R) and its global vectors are
@@ -14,10 +15,13 @@
 #   a vector's components together: (slip_strike, slip_dip), (V_strike,
 #   V_dip) (from the log10 columns), (tau_strike, tau_dip); the off-fault
 #   stations' (disp_1, disp_2, disp_3) and (vel_1, vel_2, vel_3) (along the
-#   deck's volume_axes, rotated with the deck); a profile's slip_2 and
+#   deck's volume_axes, rotated with the deck; in 2-D (disp_1, disp_2) and
+#   (vel_1, vel_2)); a profile's slip_2 and
 #   slip_3 (and stress_2 and stress_3) files together; the checkpoint's
 #   per-DOF (s_dip, s_strike), traction and slip-rate pairs, and its
 #   displacement (byNODES) as a global vector: B = R A
+#   the rupture files' output-plane coordinates (x2, x3) (on a fault line
+#   x3 is 0, in the turned run roundoff)
 #   every other column alone (time, log10(Vmax), log10(state), psi,
 #   t_rupture, moment rate, ...); the fault table's coordinates (x, y, z)
 #   as a global vector, B = R A
@@ -25,6 +29,14 @@
 # roundoff, about 1e-23 m against 1e-11 m) is thereby measured against the
 # vector's size, not its own roundoff.  Text columns (the switch log's
 # regimes and reasons) must be equal.
+#
+# --z-deg DEG (2-D runs, tests/2d_inplane/tensor_rotation_run.sh; Chunhui
+# Zhao, 2026-10-29): R is the rotation by DEG degrees about z
+# (rotate_case.py deck2d) instead of rotate_case.py's R, and the checkpoint's
+# displacement has 2 components (--dim 2, implied).  --prefix P: the files
+# P_*.txt (default "b", the BP5-mini decks).  With R != I the checkpoint's
+# fault_digest (a function of the owned DOFs' positions, which R moves) is
+# set aside.
 #
 # The fault table's rows are matched by position (B's rows whose R^T x is
 # within 1e-6 of the table's extent of A's x; of several rows at one
@@ -53,11 +65,13 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from rotate_case import AXIS, DEG, rotation  # noqa: E402
+from rotate_case import AXIS, DEG, rotation, rotation_z  # noqa: E402
 
 PAIRS = [("slip_strike", "slip_dip"), ("log10(V_strike)", "log10(V_dip)"),
-         ("tau_strike", "tau_dip")]
+         ("tau_strike", "tau_dip"), ("x2", "x3")]
 TRIPLES = [("disp_1", "disp_2", "disp_3"), ("vel_1", "vel_2", "vel_3"), ("x", "y", "z")]
+# 2-D off-fault stations: two components along the deck's volume_axes
+PAIRS_2D = [("disp_1", "disp_2"), ("vel_1", "vel_2")]
 GLOBAL = {("x", "y", "z")}   # global coordinates: rotate A's
 
 
@@ -124,10 +138,10 @@ def compare_table(fa, fb, R, extra_scale=None):
         else:
             numeric.append((ca, cb))
     done, results = set(), []
-    for grp in PAIRS + TRIPLES:
+    for grp in TRIPLES + PAIRS + PAIRS_2D:
         if all(g in na for g in grp):
             idx = [na.index(g) for g in grp]
-            if any(numeric[j] is None for j in idx):
+            if any(numeric[j] is None or j in done for j in idx):
                 continue
             Rg = R if grp in GLOBAL else None
             d = group_diff([numeric[j][0] for j in idx], [numeric[j][1] for j in idx], Rg,
@@ -179,18 +193,18 @@ def match_rows(ra, rb, ix, R):
     return ra, [rb[i] for i in order]
 
 
-def displacement_diff(a, b, R, nd):
+def displacement_diff(a, b, R, nd, dim=3):
     """byNODES displacement: per element of nd DOFs, A's DOFs (rotated) matched
     to B's DOFs of the same element by the permutation with the smallest
     largest distance (all nd! for nd <= 6, otherwise nearest-first); (scaled
     difference, number of elements whose DOFs come in another order, i.e.
     whose identity matching is off by more than 1e-6 of the field's size)."""
     import itertools
-    n = len(a) // 3
-    if nd <= 0 or n % nd:
+    n = len(a) // dim
+    if nd <= 0 or n % nd or len(a) % dim:
         return math.inf, -1
-    va = [[sum(R[r][k] * (a[k * n + i]) for k in range(3)) for r in range(3)] for i in range(n)]
-    vb = [[b[i], b[n + i], b[2 * n + i]] for i in range(n)]
+    va = [[sum(R[r][k] * (a[k * n + i]) for k in range(dim)) for r in range(dim)] for i in range(n)]
+    vb = [[b[k * n + i] for k in range(dim)] for i in range(n)]
     scale = max(math.sqrt(sum(v * v for v in x)) for x in va)
     if scale == 0.0:
         return (0.0, 0) if all(v == 0.0 for x in vb for v in x) else (math.inf, 0)
@@ -215,13 +229,15 @@ def displacement_diff(a, b, R, nd):
     return worst / scale, permuted
 
 
-def profile_scale(folder, name):
+def profile_scale(folder, name, prefix="b"):
     """The largest |value| of a profile's _2 and _3 files together (data rows,
     value columns)."""
-    m = re.match(r"(b_profile_\w+_(slip|stress))_[23]\.txt$", name)
+    m = re.match(re.escape(prefix) + r"(_profile_\w+_(slip|stress))_[23]\.txt$", name)
+    if m is None:
+        return None
     s = 0.0
     for k in ("2", "3"):
-        f = os.path.join(folder, f"{m.group(1)}_{k}.txt")
+        f = os.path.join(folder, f"{prefix}{m.group(1)}_{k}.txt")
         names, rows = columns(f)
         for r in rows[1:]:   # the first row: the points' coordinates
             s = max(s, max(abs(float(v)) for v in r[2:]))
@@ -244,7 +260,7 @@ def read_checkpoint(path):
     return blocks, scalars
 
 
-def compare_checkpoint(fa, fb, R, nd):
+def compare_checkpoint(fa, fb, R, nd, dim=3):
     ba, sa = read_checkpoint(fa)
     bb, sb = read_checkpoint(fb)
     res = []
@@ -258,7 +274,7 @@ def compare_checkpoint(fa, fb, R, nd):
             res.append(("state slip", group_diff([a[0::3], a[1::3]], [b[0::3], b[1::3]])))
             res.append(("state psi", group_diff([a[2::3]], [b[2::3]])))
         elif k == "displacement":   # byNODES: x block, y block, z block
-            d, perm = displacement_diff(a, b, R, nd)
+            d, perm = displacement_diff(a, b, R, nd, dim)
             res.append((f"displacement, {perm} element(s) in another DOF order", d))
         elif k in ("traction", "slip_rate"):   # (dip, strike) per DOF
             res.append((k, group_diff([a[0::2], a[1::2]], [b[0::2], b[1::2]])))
@@ -272,6 +288,9 @@ def compare_checkpoint(fa, fb, R, nd):
         # the commit, and the byte sizes of the other output files (their
         # headers print the station coordinates, which the rotation changes)
         if x[0] == "commit" or x[0].endswith(".txt"):
+            continue
+        if x[0] == "fault_digest" and any(R[i][j] != (1.0 if i == j else 0.0)
+                                          for i in range(3) for j in range(3)):
             continue
         for u, v in zip(x[1:], y[1:]):
             nu, nv = num(u), num(v)
@@ -288,7 +307,7 @@ def compare_checkpoint(fa, fb, R, nd):
 def main(argv):
     args, opts, i = [], {}, 1
     while i < len(argv):
-        if argv[i] in ("--tol", "--elem-dofs"):
+        if argv[i] in ("--tol", "--elem-dofs", "--z-deg", "--prefix", "--dim"):
             opts[argv[i]] = argv[i + 1]
             i += 2
         elif argv[i].startswith("--"):
@@ -300,12 +319,16 @@ def main(argv):
     rotated = "--rotated" in opts
     tol = float(opts.get("--tol", 1e-6))
     nd = int(opts.get("--elem-dofs", 0))
-    if len(args) != 2:
-        sys.exit("usage: rotation_compare.py A B [--rotated] [--tol T] [--elem-dofs N] "
-                 "[--skip-checkpoint]")
+    prefix = opts.get("--prefix", "b")
+    dim = int(opts.get("--dim", 2 if "--z-deg" in opts else 3))
+    if len(args) != 2 or (rotated and "--z-deg" in opts):
+        sys.exit("usage: rotation_compare.py A B [--rotated | --z-deg DEG] [--tol T] "
+                 "[--elem-dofs N] [--skip-checkpoint] [--prefix P] [--dim 2]")
     A, B = args
     R = rotation(AXIS, DEG) if rotated else [[1.0, 0, 0], [0, 1.0, 0], [0, 0, 1.0]]
-    names = sorted(f for f in os.listdir(A) if f.startswith("b_") and f.endswith(".txt"))
+    if "--z-deg" in opts:
+        R = rotation_z(float(opts["--z-deg"]))
+    names = sorted(f for f in os.listdir(A) if f.startswith(prefix + "_") and f.endswith(".txt"))
     worst_all, bad = 0.0, 0
     for name in names:
         fa, fb = os.path.join(A, name), os.path.join(B, name)
@@ -313,13 +336,13 @@ def main(argv):
             print(f"   MISSING  {name}")
             bad += 1
             continue
-        if name.startswith("b_checkpoint"):
+        if name.startswith(prefix + "_checkpoint"):
             if "--skip-checkpoint" in opts:
                 continue
-            w, what = compare_checkpoint(fa, fb, R, nd)
+            w, what = compare_checkpoint(fa, fb, R, nd, dim)
             text_ok = True
         else:
-            es = profile_scale(A, name) if name.startswith("b_profile_") else None
+            es = profile_scale(A, name, prefix) if name.startswith(prefix + "_profile_") else None
             w, what, text_ok = compare_table(fa, fb, R, es)
         flag = "ok  " if (w <= tol and text_ok) else "FAIL"
         if flag == "FAIL":

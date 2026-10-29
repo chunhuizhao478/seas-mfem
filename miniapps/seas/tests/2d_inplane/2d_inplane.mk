@@ -20,9 +20,12 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d-absorbing        # BP3's absorbing walls ([cycle.absorbing], 2D)
 #   make -f tests/2d_inplane/2d_inplane.mk test-absorbing-all       # faces = "all" (every outer face absorbs)
 #   make -f tests/2d_inplane/2d_inplane.mk test-snapshots-volume    # [cycle.snapshots.volume] (2-D and 3-D)
+#   make -f tests/2d_inplane/2d_inplane.mk test-tensor-prestress    # [stress] constant_tensor in the cycle
 #   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
 # The 3D parity set (every phase must leave it bit for bit unchanged) is the
-# script tests/2d_inplane/parity_3d.sh (see its header).
+# script tests/2d_inplane/parity_3d.sh (see its header).  The tensor
+# prestress's rotation run (the map-view deck and mesh turned by 30 degrees,
+# the QD regime and the first event) is tests/2d_inplane/tensor_rotation_run.sh.
 
 include cycle/cycle.mk
 
@@ -521,13 +524,43 @@ test-snapshots-volume: seas_test_snapshots_volume
 	   else printf '%s\n' "$$out" | tail -15; echo "  FAILED: deck refusal $$n: exit $$rc, \"$$msg\" not found"; exit 1; fi; \
 	 done; rm -rf $$d
 
+# The cycle's tensor prestress ([stress] kind = "constant_tensor",
+# cycle/prestress.hpp BuildTensorPrestress, the dynamic operator's projection
+# domain/fault_stress_projection.hpp; Chunhui Zhao, 2026-10-29): T1-T6 on the
+# rotated map-view line (2-D) and the rotated plane (3-D) at p = 1 and 2, on
+# 1 and 2 ranks; then each refusal must exit non-zero with its message.
+TEST_TENSOR_SRC = tests/2d_inplane/test_tensor_prestress.cpp
+TEST_TENSOR_OBJ = $(TEST_TENSOR_SRC:.cpp=.o)
+$(TEST_TENSOR_OBJ): %.o: $(SRC)%.cpp $(CYCLE_HEADERS) $(CYCLE_STAMP) \
+                         $(CYCLE_SHARED_HEADERS) $(INPLANE_HEADERS) \
+                         $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
+
+seas_test_tensor_prestress: $(TEST_TENSOR_OBJ) $(CYCLE_LINK_OBJS)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_TENSOR_OBJ) $(CYCLE_LINK_OBJS) \
+	    $(CYCLE_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+TENSOR_REFUSALS = 1:the fault must be in compression|2:the tensor drives no slip there|3:[cycle.prestress].a = "amax" with [stress] kind = "constant_tensor"|4:[friction.rate_state].sigma_n_default with [stress] kind = "constant_tensor"|5:[[stress_region]] with [stress] kind = "constant_tensor"|6:the in-plane model carries no anti-plane stress|7:no state balances it at V_init
+test-tensor-prestress: seas_test_tensor_prestress
+	@for n in 1 2; do \
+	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_tensor_prestress || exit 1; \
+	done
+	@list='$(TENSOR_REFUSALS)'; set -f; IFS='|'; for r in $$list; do n=$${r%%:*}; msg=$${r#*:}; \
+	   out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_tensor_prestress --refuse $$n 2>&1); rc=$$?; \
+	   if [ $$rc -ne 0 ] && printf '%s' "$$out" | grep -qF "$$msg"; then \
+	      echo "  PASSED: refusal $$n: exit $$rc, \"$$msg\""; \
+	   else printf '%s\n' "$$out" | tail -15; echo "  FAILED: refusal $$n: exit $$rc, \"$$msg\" not found"; exit 1; fi; \
+	done
+
 2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
                 test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
                 test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
-                test-2d-absorbing test-absorbing-all test-snapshots-volume
+                test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
         test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
-        test-2d-absorbing test-absorbing-all test-snapshots-volume \
+        test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
         2d-inplane-all

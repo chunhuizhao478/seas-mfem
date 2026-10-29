@@ -45,6 +45,26 @@
 // writes it into the state), since its own inversion subtracts its eta |V|.
 // The "local" arithmetic is unchanged to the character, and so is "amax"
 // with include_eta = true.
+//
+// BuildTensorPrestress ([stress] kind = "constant_tensor", Chunhui Zhao,
+// 2026-10-29): the prestress is the traction of a global Cauchy tensor S on
+// each owned fault DOF, in the kernel's components K = (tau_1, tau_2,
+// sigma_n) that ProjectStressToFaultKernel gives (domain/
+// fault_stress_projection.hpp, the dynamic operator's own projection):
+//   tau0   = (tau_1, tau_2)                      kernel frame, as given
+//   sigma0 = sigma_n                             compression positive, > 0
+//   |V|    = |V_init| of [cycle.fields]          the magnitude only
+//   V_init = -|V| tau0 / |tau0|                  the slip tau0 drives (the
+//                                                kernel's anti-parallel sign)
+//   psi0   = a ln[ (2 V0 / |V|) sinh( (|tau0| - eta |V|) / (a sigma0) ) ]
+//                                                the balance at |V|; eta |V|
+//                                                only if include_eta
+// psi0 is the kernel's inversion (DieterichRuinaFriction::InitialStatePsi),
+// which the kernel runs itself with ic = "gold" on the same per-DOF values,
+// and which QDPhase writes into the state with ic = "scec_fd".  The DOF's
+// rs.sigma_n_eff and V_init are overwritten with sigma0 and the direction
+// above.  Refused: sigma0 <= 0 (tension), |tau0| = 0 (no slip direction),
+// |tau0| <= eta |V| with include_eta (no state balances it), a = "amax".
 
 #ifndef MFEM_SEAS_CYCLE_PRESTRESS_HPP
 #define MFEM_SEAS_CYCLE_PRESTRESS_HPP
@@ -157,6 +177,60 @@ inline Prestress BuildPrestress(const FaultParams &par, const PrestressConfig &i
       p.tau0(2 * i + 1) = -tau * Vi[1] / Vi_abs;
       p.sigma0(i) = sigma_n;
       p.psi0(i) = psi0;
+   }
+   return p;
+}
+
+/// [stress] kind = "constant_tensor" (see the file comment).  @a K: 3 values
+/// per owned fault DOF in the table's order (tau_1, tau_2, sigma_n).  Writes
+/// par.V_init and par.rs.sigma_n_eff.
+inline Prestress BuildTensorPrestress(FaultParams &par, const Vector &K,
+                                      const PrestressConfig &ic, const FaultDOFTable &table)
+{
+   MFEM_VERIFY(!ic.AMax(), "BuildTensorPrestress: a = \"amax\" (the tensor gives tau0)");
+   spatial::RateStatePerDOFParams &rs = par.rs;
+   const int N = rs.a.Size();
+   MFEM_VERIFY(K.Size() == 3 * N && par.V_init.Size() == 2 * N && rs.sigma_n_eff.Size() == N &&
+               rs.eta.Size() == N && rs.f_0.Size() == N && rs.b.Size() == N &&
+               rs.V_0.Size() == N && table.Size() == N,
+               "BuildTensorPrestress: inconsistent sizes (" << K.Size() << " projected values "
+               "for " << N << " owned fault DOFs)");
+   Prestress p;
+   p.tau0.SetSize(2 * N);
+   p.sigma0.SetSize(N);
+   p.psi0.SetSize(N);
+   for (int i = 0; i < N; i++)
+   {
+      const real_t *x = table.coords.GetData() + 3 * i;
+      const real_t t1 = K(3 * i), t2 = K(3 * i + 1), sigma_n = K(3 * i + 2);
+      MFEM_VERIFY(sigma_n > 0.0, "[stress] constant_tensor: sigma_n = " << sigma_n
+                  << " Pa at the fault DOF (" << x[0] << ", " << x[1] << ", " << x[2]
+                  << "); the fault must be in compression");
+      // |tau| as the kernel forms it (fault/rate_state_fault.hpp, Init).
+      const real_t tau = std::sqrt(t1 * t1 + t2 * t2);
+      const real_t Vi[2] = {par.V_init(2 * i), par.V_init(2 * i + 1)};
+      const real_t Vi_abs = std::sqrt(Vi[0] * Vi[0] + Vi[1] * Vi[1]);
+      MFEM_VERIFY(Vi_abs > 0.0, "BuildTensorPrestress: |V_init| = 0 at DOF " << i);
+      const real_t eta = ic.include_eta ? rs.eta(i) : 0.0;
+      MFEM_VERIFY(tau > eta * Vi_abs, "[stress] constant_tensor: |tau0| = " << tau
+                  << " Pa at the fault DOF (" << x[0] << ", " << x[1] << ", " << x[2] << ")"
+                  << (ic.include_eta ? " is not above eta |V_init| = " : " is ")
+                  << (ic.include_eta ? eta * Vi_abs : 0.0)
+                  << (ic.include_eta ? " Pa: no state balances it at V_init"
+                                     : ": the tensor drives no slip there"));
+      DieterichRuinaFriction::Constants fc;
+      fc.V0 = rs.V_0(i);
+      fc.f0 = rs.f_0(i);
+      fc.b = rs.b(i);
+      const DieterichRuinaFriction law(fc);
+      p.tau0(2 * i) = t1;
+      p.tau0(2 * i + 1) = t2;
+      p.sigma0(i) = sigma_n;
+      p.psi0(i) = law.InitialStatePsi(tau, Vi_abs, sigma_n, eta, rs.a(i));
+      // anti-parallel to tau0; an exact zero component stays +0.0
+      par.V_init(2 * i) = (t1 == 0.0) ? 0.0 : -Vi_abs * t1 / tau;
+      par.V_init(2 * i + 1) = (t2 == 0.0) ? 0.0 : -Vi_abs * t2 / tau;
+      rs.sigma_n_eff(i) = sigma_n;
    }
    return p;
 }

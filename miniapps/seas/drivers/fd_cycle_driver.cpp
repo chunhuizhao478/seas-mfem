@@ -26,6 +26,8 @@
 //   par   = BuildFaultParams(qd.Table(), [friction.rate_state], [cycle.fields])
 //   pre   = BuildPrestress(par, ic set, [cycle.prestress].eta_V_init, .a)
 //           (a = "amax": a_max = GlobalMaxA(par), one allreduce)
+//           [stress] kind = "constant_tensor": BuildTensorPrestress(par,
+//           qd.ProjectTensor(tensor), ...) instead (cycle/prestress.hpp)
 //   qd.Setup(par, pre)                               # H1a, H1b, kernel, IC
 //   out   = FdCycleOutput(cfg.output, qd.LocateStations())
 //   restart: Checkpoint read, files truncated to the checkpoint, TS step set
@@ -104,6 +106,7 @@
 #include "../cycle/bench_output.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -832,7 +835,7 @@ int main(int argc, char *argv[])
       // sigma_n_default is already effective: no pore pressure here (Load
       // refuses a non-zero [pore_pressure]).
       const spatial::PorePressureSpec no_pp;
-      const cycle::FaultParams par = cycle::BuildFaultParams(
+      cycle::FaultParams par = cycle::BuildFaultParams(
          qd.Table(), *s.rate_state, cfg.fields, material, pmesh, no_pp);
       // [cycle.prestress].a = "amax" (BP3): a_max over every rank's DOFs.
       cycle::PrestressConfig pcfg = cfg.prestress;
@@ -841,7 +844,46 @@ int main(int argc, char *argv[])
          pcfg.a_max = cycle::GlobalMaxA(par, mpi.GetComm());
          if (root) { std::cout << "  prestress: a = \"amax\", a_max = " << pcfg.a_max << "\n"; }
       }
-      const cycle::Prestress pre = cycle::BuildPrestress(par, pcfg);
+      cycle::Prestress pre;
+      if (cfg.TensorPrestress())
+      {
+         // [stress] kind = "constant_tensor": the tensor's traction on each
+         // fault DOF, the dynamic operator's projection (shared function).
+         Vector K;
+         qd.ProjectTensor(cfg.stress_tensor, K);
+         pre = cycle::BuildTensorPrestress(par, K, pcfg, qd.Table());
+         real_t r[6] = {std::numeric_limits<real_t>::max(), 0.0,
+                        std::numeric_limits<real_t>::max(), 0.0,
+                        std::numeric_limits<real_t>::max(), 0.0};
+         for (int i = 0; i < pre.sigma0.Size(); i++)
+         {
+            const real_t sn = pre.sigma0(i);
+            const real_t tau = std::sqrt(pre.tau0(2 * i) * pre.tau0(2 * i) +
+                                         pre.tau0(2 * i + 1) * pre.tau0(2 * i + 1));
+            const real_t v[3] = {sn, tau, tau / sn};
+            for (int k = 0; k < 3; k++)
+            {
+               r[2 * k] = std::min(r[2 * k], v[k]);
+               r[2 * k + 1] = std::max(r[2 * k + 1], v[k]);
+            }
+         }
+         for (int k = 0; k < 3; k++)
+         {
+            r[2 * k] = -mpi.GlobalMax(-r[2 * k]);
+            r[2 * k + 1] = mpi.GlobalMax(r[2 * k + 1]);
+         }
+         if (root)
+         {
+            const std::array<real_t, 9> &S = cfg.stress_tensor;
+            std::cout << "  prestress: [stress] constant_tensor sigma_xx yy zz xy yz xz = "
+                      << S[0] << " " << S[4] << " " << S[8] << " " << S[1] << " " << S[5]
+                      << " " << S[2] << " Pa (tension positive)\n"
+                      << "    sigma_n [" << r[0] / 1e6 << ", " << r[1] / 1e6 << "] MPa, |tau0| ["
+                      << r[2] / 1e6 << ", " << r[3] / 1e6 << "] MPa, |tau0| / sigma_n ["
+                      << r[4] << ", " << r[5] << "]; V_init along -tau0 with the deck's |V_init|\n";
+         }
+      }
+      else { pre = cycle::BuildPrestress(par, pcfg); }
       qd.Setup(par, pre);
 
       // psi0 of the kernel against BuildPrestress's (a check value).

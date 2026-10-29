@@ -15,10 +15,22 @@
 //   [pore_pressure];  [friction.rate_state] (the resolver's block);
 //   [boundary] fault_attr, natural_attrs;  [time] tfinal, dt_initial;
 //   [output] output_dir;  [stress] sigma_n_pa.
-// [stress] must be kind = "fault_local_prestress" with tau_strike_pa =
-// tau_dip_pa = 0 and no patches: the shear prestress is the steady state that
-// BuildPrestress computes, and a non-zero deck value would be ignored.  Its
-// sigma_n_pa must equal [friction.rate_state].sigma_n_default.
+// [stress] is one of:
+//   kind = "fault_local_prestress" with tau_strike_pa = tau_dip_pa = 0 and no
+//     patches: the shear prestress is the steady state that BuildPrestress
+//     computes, and a non-zero deck value would be ignored.  Its sigma_n_pa
+//     must equal [friction.rate_state].sigma_n_default.
+//   kind = "constant_tensor" (Chunhui Zhao, 2026-10-29): the global Cauchy
+//     tensor sigma_xx_pa ... sigma_xz_pa (all six, tension positive), the
+//     Nitsche driver's keys.  Its traction on every fault DOF, by the dynamic
+//     operator's own projection (domain/fault_stress_projection.hpp), is the
+//     prestress of both regimes: sigma0 and tau0 per DOF, |V_init| from
+//     [cycle.fields] with the direction of -tau0 (the slip it drives), psi0
+//     the balance at |V_init| (cycle/prestress.hpp, BuildTensorPrestress).
+//     [friction.rate_state] must not set sigma_n_default (the tensor gives
+//     sigma_n), [cycle.prestress].a must be "local" (a_max shapes the steady
+//     state tau0, which the tensor replaces), and [[stress_region]] is
+//     refused (the cycle reads one tensor).
 //
 // [cycle] keys (defaults in brackets):
 //   ic                   "gold" | "scec_fd"                         [required]
@@ -220,6 +232,7 @@
 
 #include <array>
 #include <cmath>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -467,16 +480,22 @@ struct CycleConfig
    // Shortcuts into `shared`, checked by Load.
    real_t t_final = 0.0;
    real_t dt_init = 0.0;
-   real_t sigma_n = 0.0;
+   real_t sigma_n = 0.0;   ///< NaN with the tensor: no scalar sigma_n
    int fault_attr = 3;
+   /// [stress] kind = "constant_tensor": the global Cauchy tensor, row major,
+   /// tension positive [Pa] (see the file comment).
+   bool tensor_prestress = false;
+   std::array<real_t, 9> stress_tensor = {{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
 
    bool IsGold() const { return ic == "gold"; }
+   bool TensorPrestress() const { return tensor_prestress; }
    /// The IC set as checkpoints record it: "scec_fd+eta_V_init" when
    /// [cycle.prestress].eta_V_init adds eta |V_init| to the scec_fd tau0, so
    /// a restart refuses a deck with the other prestress.
    std::string IcLabel() const
    {
-      const std::string base = prestress.AMax() ? ic + "+a_max" : ic;
+      std::string base = prestress.AMax() ? ic + "+a_max" : ic;
+      if (tensor_prestress) { base += "+tensor"; }
       return (prestress.include_eta && !IsGold()) ? base + "+eta_V_init" : base;
    }
 
@@ -705,18 +724,34 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
    MFEM_VERIFY(!s.velocity.use_sidecar && s.material.kind == spatial::MaterialKind::Constant,
                "fd_cycle: P1 supports the constant material only "
                "([velocity].use_sidecar = false, [material] kind constant)");
-   MFEM_VERIFY(s.stress.kind == spatial::StressSourceKind::FaultLocalPrestress,
+   MFEM_VERIFY(s.stress.kind == spatial::StressSourceKind::FaultLocalPrestress ||
+               s.stress.kind == spatial::StressSourceKind::ConstantTensor,
                "fd_cycle: [stress].kind must be \"fault_local_prestress\" (the cycle "
-               "takes sigma_n from it; the shear prestress is BuildPrestress's steady state)");
-   MFEM_VERIFY(s.stress.tau_strike_pa == 0.0 && s.stress.tau_dip_pa == 0.0 &&
-               s.stress.fault_local_patches.empty(),
-               "fd_cycle: [stress].tau_strike_pa and tau_dip_pa must be 0 and no "
-               "[[stress.patch]] given: the shear prestress is the steady state at "
-               "V_init (BuildPrestress), so a deck value would be ignored");
-   c.sigma_n = s.stress.sigma_n_pa;
-   MFEM_VERIFY(c.sigma_n == s.rate_state->sigma_n_default,
-               "fd_cycle: [stress].sigma_n_pa (" << c.sigma_n << ") must equal "
-               "[friction.rate_state].sigma_n_default (" << s.rate_state->sigma_n_default << ")");
+               "takes sigma_n from it; the shear prestress is BuildPrestress's steady state) "
+               "or \"constant_tensor\" (sigma_n and tau0 projected from the tensor)");
+   if (s.stress.kind == spatial::StressSourceKind::ConstantTensor)
+   {
+      // The loader required all six components; the Nitsche driver's layout.
+      const spatial::StressSpec &t = s.stress;
+      c.tensor_prestress = true;
+      c.stress_tensor = {{t.sigma_xx_pa, t.sigma_xy_pa, t.sigma_xz_pa,
+                          t.sigma_xy_pa, t.sigma_yy_pa, t.sigma_yz_pa,
+                          t.sigma_xz_pa, t.sigma_yz_pa, t.sigma_zz_pa}};
+      // No scalar sigma_n: the QD kernel reads the per-DOF values (QDPhase).
+      c.sigma_n = std::numeric_limits<real_t>::quiet_NaN();
+   }
+   else
+   {
+      MFEM_VERIFY(s.stress.tau_strike_pa == 0.0 && s.stress.tau_dip_pa == 0.0 &&
+                  s.stress.fault_local_patches.empty(),
+                  "fd_cycle: [stress].tau_strike_pa and tau_dip_pa must be 0 and no "
+                  "[[stress.patch]] given: the shear prestress is the steady state at "
+                  "V_init (BuildPrestress), so a deck value would be ignored");
+      c.sigma_n = s.stress.sigma_n_pa;
+      MFEM_VERIFY(c.sigma_n == s.rate_state->sigma_n_default,
+                  "fd_cycle: [stress].sigma_n_pa (" << c.sigma_n << ") must equal "
+                  "[friction.rate_state].sigma_n_default (" << s.rate_state->sigma_n_default << ")");
+   }
    MFEM_VERIFY(s.stress.pore_pressure.P_p_pa == 0.0 &&
                s.stress.pore_pressure.P_p_grad_pa_per_m == 0.0,
                "fd_cycle: [pore_pressure] must be zero: [friction.rate_state]."
@@ -745,6 +780,16 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
    const toml::value root = toml::parse(deck);
    MFEM_VERIFY(root.contains("cycle"), "fd_cycle: the deck has no [cycle] section");
    const toml::value &cy = root.at("cycle");
+   if (c.tensor_prestress)
+   {
+      MFEM_VERIFY(!root.contains("stress_region"),
+                  "fd_cycle: [[stress_region]] with [stress] kind = \"constant_tensor\": the "
+                  "cycle reads the one tensor of [stress]");
+      MFEM_VERIFY(!(root.contains("friction") && root.at("friction").contains("rate_state") &&
+                    root.at("friction").at("rate_state").contains("sigma_n_default")),
+                  "fd_cycle: [friction.rate_state].sigma_n_default with [stress] kind = "
+                  "\"constant_tensor\": the tensor gives sigma_n at every fault DOF");
+   }
    OnlyKeys(cy, "cycle", {"ic", "switching", "qd_radiation_damping", "mesh_scale",
                           "plate_rate", "penalty_factor", "qd", "switch", "probe",
                           "prestress", "fields", "output", "checkpoint", "snapshots",
@@ -867,6 +912,9 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       MFEM_VERIFY(c.prestress.a == "local" || c.prestress.AMax(),
                   "[cycle.prestress].a must be \"local\" or \"amax\"; got \""
                   << c.prestress.a << "\"");
+      MFEM_VERIFY(!c.tensor_prestress || !c.prestress.AMax(),
+                  "[cycle.prestress].a = \"amax\" with [stress] kind = \"constant_tensor\": "
+                  "a_max shapes the steady-state tau0, which the tensor replaces");
    }
 
    MFEM_VERIFY(cy.contains("fields"), "[cycle.fields] is required");

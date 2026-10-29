@@ -60,6 +60,16 @@
 // Setup refuses per-DOF values that are not globally uniform and equal to
 // the seed.  a, Dc and eta are per DOF.
 //
+// [stress] kind = "constant_tensor" (Chunhui Zhao, 2026-10-29):
+// ProjectTensor gives the tensor's traction on the owned fault DOFs with the
+// dynamic operator's own projection (domain/fault_stress_projection.hpp) for
+// BuildTensorPrestress; Setup then takes sigma0 per DOF (no uniform
+// sigma_n), switches the kernel to its per-DOF mode (SetSAFSMode: tau_pre and
+// sigma_n read per DOF from FaultGeometry, which H1b filled), and, with ic =
+// "scec_fd", writes BuildTensorPrestress's psi0 into the state as for a =
+// "amax" (with "gold" the kernel inverts the same per-DOF balance itself).
+// SigmaN adds the elastic normal traction to the DOF's own sigma0.
+//
 // Restart: a checkpoint written at step k, and a run restarted from it, both
 // re-evaluate the first RK stage of step k + 1 (TSRestartStep) instead of
 // reusing the FSAL stage, so the restarted run repeats the original run's
@@ -86,6 +96,7 @@
 
 #include "../solver/seas_operator.hpp"
 #include "../domain/elasticity_operator.hpp"
+#include "../domain/fault_stress_projection.hpp"
 #include "../fault/fault_geometry.hpp"
 #include "../fault/rate_state_fault.hpp"
 #include "../friction/dieterich_ruina.hpp"
@@ -98,6 +109,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
 #include <limits>
@@ -167,6 +179,19 @@ public:
 
    /// The owned fault DOFs in the operator's owned order.
    const FaultDOFTable &Table() const { return table_; }
+   /// [stress] kind = "constant_tensor": the tensor's traction on the owned
+   /// fault DOFs as kernel components (tau_1, tau_2, sigma_n), 3 per DOF in
+   /// Table() order, by the dynamic operator's projection (file comment).
+   /// Collective.
+   void ProjectTensor(const std::array<real_t, 9> &S, Vector &K_own)
+   {
+      Vector K;
+      ProjectStressToFaultKernel(*dom_, [S](const real_t[3], real_t s[9])
+      { for (int i = 0; i < 9; i++) { s[i] = S[i]; } }, K);
+      dom_->RestrictToOwnedFault(K, K_own, 3);
+      MFEM_VERIFY(K_own.Size() == 3 * table_.Size(), "QDPhase::ProjectTensor: "
+                  << K_own.Size() << " values for " << table_.Size() << " owned fault DOFs");
+   }
    int NumGlobalFaultDOFs() const { return geom_->NumGlobalFaultDOFs(); }
    const BP5Params &Seed() const { return seed_; }
    DomainOp &Domain() { return *dom_; }
@@ -179,13 +204,18 @@ public:
       const int N = table_.Size();
       MFEM_VERIFY(par.rs.a.Size() == N && pre.tau0.Size() == 2 * N,
                   "QDPhase::Setup: parameters are not on this rank's owned fault DOFs");
-      // The kernel's scalars (see the file comment).
-      AssertUniform_(par.rs.sigma_n_eff, seed_.sigma_n, "sigma_n");
+      // The kernel's scalars (see the file comment); the tensor's sigma_n
+      // is per DOF.
+      const bool tensor = cfg_.TensorPrestress();
+      if (!tensor) { AssertUniform_(par.rs.sigma_n_eff, seed_.sigma_n, "sigma_n"); }
       AssertUniform_(par.rs.b, seed_.b, "b");
       AssertUniform_(par.rs.f_0, seed_.f0, "f_0");
       AssertUniform_(par.rs.V_0, seed_.V0, "V_0");
-      AssertUniform_(pre.sigma0, seed_.sigma_n, "sigma0");
+      if (!tensor) { AssertUniform_(pre.sigma0, seed_.sigma_n, "sigma0"); }
       eta_ = GlobalUniform_(par.rs.eta, "eta");
+      MFEM_VERIFY(pre.sigma0.Size() == N, "QDPhase::Setup: " << pre.sigma0.Size()
+                  << " sigma0 values for " << N << " owned fault DOFs");
+      sigma0_ = pre.sigma0;
 
       Vector init_vel_dir(2);
       init_vel_dir(0) = 0.0;   // dip
@@ -203,6 +233,8 @@ public:
       fault_ = std::make_unique<FaultOp>(geom_.get(), friction_.get(), aging_.get(),
                                          seed_, &mpi_);
       fault_->SetScecPsiInit(!cfg_.IsGold());
+      // The tensor: tau_pre and sigma_n per DOF, from H1b's copies.
+      if (tensor) { fault_->SetSAFSMode(true, &geom_->GetTauPre(), &geom_->sigma_n_per_dof()); }
 
       op_ = std::make_unique<PBP5SEASOp>(dom_.get(), fault_.get(), &mpi_);
       op_->SetElasticSigmaN(true);
@@ -241,7 +273,7 @@ public:
       // gold inversion subtracts eta |V_init|, so neither is BP3-FD's eq. 23.
       // The state takes BuildPrestress's psi0, and one evaluation at t = 0
       // leaves the slip rate and the traction consistent with it.
-      if (cfg_.prestress.AMax() && !cfg_.IsGold())
+      if ((cfg_.prestress.AMax() || tensor) && !cfg_.IsGold())
       {
          for (int i = 0; i < N; i++)
          {
@@ -340,7 +372,7 @@ public:
       const int N = fault_->NumNodes();
       const Vector *nt = op_->GetFrictionNormalTraction();
       sn.SetSize(N);
-      for (int i = 0; i < N; i++) { sn(i) = nt ? seed_.sigma_n + (*nt)(i) : seed_.sigma_n; }
+      for (int i = 0; i < N; i++) { sn(i) = nt ? sigma0_(i) + (*nt)(i) : sigma0_(i); }
    }
    /// The kernel's traction of the last evaluation (2 N, kernel frame) and
    /// the elastic normal traction (N, compression positive; empty unless
@@ -804,6 +836,7 @@ private:
    std::unique_ptr<FaultOp> fault_;
    std::unique_ptr<PBP5SEASOp> op_;
    Vector state_;
+   Vector sigma0_;   ///< sigma0 per owned fault DOF (Setup), for SigmaN
    real_t eta_ = 0.0;
    bool matrix_ = false;
    bool loading_checked_ = false;

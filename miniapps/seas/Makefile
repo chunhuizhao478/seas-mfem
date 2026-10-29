@@ -875,6 +875,7 @@ DOMAIN_HEADERS = common/seas_types.hpp \
                  domain/qd_stage_operators.hpp \
                  domain/qd_green_operator.hpp \
                  domain/qd_hmatrix_operator.hpp \
+                 domain/fault_stress_projection.hpp \
                  domain/matrix_stats.hpp \
                  domain/elasticity_operator_fault_ops.inl \
                  domain/fused_stiffness_pair.hpp \
