@@ -149,6 +149,8 @@ public:
       // the cycle's one fault orientation system (phase A): the operator
       // builds the FaultFrameField; the dynamic regime reads it.  Loading:
       // [cycle.loading] (cycle/loading.hpp; default the BP5 function).
+      // The prescribed-slip faces must lie in the loading's band (loading.hpp).
+      CheckCreepInBand(pmesh, {5}, cfg.loading);
       FaultFrameSource frames;
       frames.config = std::make_shared<const FaultFrameConfig>(CycleFrameConfig(cfg));
       dom_ = std::make_unique<DomainOp>(pmesh, s.mesh.order, lambda, mu, cfg.plate_rate,

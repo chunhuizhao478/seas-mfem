@@ -39,12 +39,15 @@
 // 6 coordinates), and a read matches every owned DOF to a file row by its
 // key: one file serves any number of ranks.
 //
-// 2D (design rev 3, phase F): the strike rows and the strike columns of G
-// are zero (no strike slip, no strike traction in plane strain).  After the
-// build, PackPlanar() verifies that they are exactly zero and keeps the dip
-// columns of the dip and normal rows only, a third of the dense rows; the
-// stage product then reads a third of the memory and gives the same
-// numbers, bit for bit (see Apply).
+// 2D (design rev 3, phase F): the rows and the columns of the out-of-plane
+// slot of G are zero (no slip, no traction out of the plane in plane
+// strain).  The in-plane slot is the dip slot on a vertical section (BP3, up
+// in the plane) and the strike slot in map view (TPV205-2D, up = +-e_z;
+// FaultFrameField::InPlaneSlot).  After the build, PackPlanar(slot)
+// verifies that the out-of-plane rows and columns are exactly zero and keeps
+// the in-plane columns of the in-plane and normal rows only, a third of the
+// dense rows; the stage product then reads a third of the memory and gives
+// the same numbers, bit for bit (see Apply).
 
 #ifndef MFEM_SEAS_QD_GREEN_OPERATOR_HPP
 #define MFEM_SEAS_QD_GREEN_OPERATOR_HPP
@@ -162,6 +165,8 @@ public:
    int NumLocalRows() const { return nb_ * ncomp_; }
    /// True after PackPlanar() (2D).
    bool Planar() const { return planar_; }
+   /// The in-plane slot PackPlanar kept (0 dip, 1 strike); 0 before.
+   int PlanarSlot() const { return slot_; }
    /// Bytes of G on this rank.
    double LocalBytes() const
    {
@@ -293,16 +298,21 @@ public:
       return all_ok == 1;
    }
 
-   /// 2D (phase F): keep only the dip columns (even global slip index) of
-   /// the dip and normal rows (c = 0, 2), after verifying that every strike
-   /// row (c = 1), every strike column and T_D's strike rows are exactly
-   /// zero.  G_ becomes nb·(ncomp - 1) rows × N_f, row-major.  Call once,
-   /// after the build, on dense rows.  Collective.
-   void PackPlanar()
+   /// 2D (phase F): keep only the columns of the in-plane slot `slot` (0
+   /// dip, 1 strike: global slip index 2k + slot) of the in-plane and
+   /// normal rows (c = slot, 2), after verifying that every row of the other
+   /// slot (c = 1 - slot), every column of the other slot and T_D's rows of
+   /// the other slot are exactly zero.  G_ becomes nb·(ncomp - 1) rows ×
+   /// N_f, row-major.  Call once, after the build, on dense rows.
+   /// Collective.
+   void PackPlanar(int slot)
    {
       MFEM_VERIFY(!h_ && !planar_ &&
                   G_.size() == static_cast<size_t>(nb_) * ncomp_ * ncols_,
                   "QD Green: PackPlanar needs the full dense rows");
+      MFEM_VERIFY(slot == 0 || slot == 1, "QD Green: PackPlanar slot " << slot
+                  << " (0 dip, 1 strike)");
+      const int out = 1 - slot;   // the out-of-plane slot
       const size_t n = static_cast<size_t>(ncols_);
       const size_t nf = static_cast<size_t>(nf_);
       real_t loc = 0.0;
@@ -312,36 +322,38 @@ public:
          {
             const real_t *a = G_.data() + (static_cast<size_t>(b) * ncomp_ +
                                            c) * n;
-            for (size_t j = (c == 1 ? 0 : 1); j < n; j += (c == 1 ? 1 : 2))
+            for (size_t j = (c == out ? 0 : out); j < n; j += (c == out ? 1 : 2))
             {
                loc = std::max(loc, std::abs(a[j]));
             }
          }
          loc = std::max(loc, std::abs(TD_[static_cast<size_t>(b) * ncomp_ +
-                                          1]));
+                                          out]));
       }
       real_t glob = 0.0;
       MPI_Allreduce(&loc, &glob, 1, MPITypeMap<real_t>::mpi_type, MPI_MAX,
                     comm_);
-      MFEM_VERIFY(glob == 0.0, "QD Green (2D): a strike row or column of G, "
-                  "or a strike row of T_D, is nonzero (largest " << glob
-                  << ")");
+      MFEM_VERIFY(glob == 0.0, "QD Green (2D): a " << (out == 0 ? "dip" : "strike")
+                  << " (out-of-plane) row or column of G, or a "
+                  << (out == 0 ? "dip" : "strike") << " row of T_D, is nonzero "
+                  "(largest " << glob << ")");
       const int nc = ncomp_ - 1;
       std::vector<real_t> P(static_cast<size_t>(nb_) * nc * nf);
       for (int b = 0; b < nb_; b++)
       {
          for (int cc = 0; cc < nc; cc++)
          {
-            const int c = cc == 0 ? 0 : 2;
+            const int c = cc == 0 ? slot : 2;
             const real_t *a = G_.data() + (static_cast<size_t>(b) * ncomp_ +
                                            c) * n;
             real_t *q = P.data() + (static_cast<size_t>(b) * nc + cc) * nf;
-            for (size_t k = 0; k < nf; k++) { q[k] = a[2 * k]; }
+            for (size_t k = 0; k < nf; k++) { q[k] = a[2 * k + slot]; }
          }
       }
       G_.swap(P);
       std::vector<real_t>().swap(P);
       planar_ = true;
+      slot_ = slot;
    }
 
    /// [T; T_n] = G·δ + t·T_D on owned fault DOFs.  @a slip_owned: 2·nown;
@@ -380,23 +392,23 @@ public:
          }
          if (planar_)
          {
-            // 2D: the dip columns of the dip and normal rows.  Two partial
-            // sums, even and odd dip index: the full rows' four sums are
-            // these two plus two sums of exact zeros, so the result is the
-            // same bit for bit.
+            // 2D: the in-plane columns of the in-plane and normal rows.
+            // Two partial sums, even and odd in-plane index: the full rows'
+            // four sums are these two plus two sums of exact zeros, so the
+            // result is the same bit for bit.
             const size_t nf = static_cast<size_t>(nf_);
             const int nc = ncomp_ - 1;
-            dip_.resize(nf);
-            for (size_t k = 0; k < nf; k++) { dip_[k] = d[2 * k]; }
-            const real_t *e = dip_.data();
+            inplane_.resize(nf);
+            for (size_t k = 0; k < nf; k++) { inplane_[k] = d[2 * k + slot_]; }
+            const real_t *e = inplane_.data();
             for (int b = 0; b < nb_; b++)
             {
-               const size_t row1 = static_cast<size_t>(b) * ncomp_ + 1;
-               y_[row1] = 0.0 + t * TD_[row1];
+               const size_t row_out = static_cast<size_t>(b) * ncomp_ + 1 - slot_;
+               y_[row_out] = 0.0 + t * TD_[row_out];
                for (int cc = 0; cc < nc; cc++)
                {
                   const size_t row = static_cast<size_t>(b) * ncomp_ +
-                                     (cc == 0 ? 0 : 2);
+                                     (cc == 0 ? slot_ : 2);
                   const real_t *a = G_.data() +
                                     (static_cast<size_t>(b) * nc + cc) * nf;
                   real_t s0 = 0.0, s1 = 0.0;
@@ -958,8 +970,9 @@ private:
    std::vector<real_t> keys_;   ///< 6 per owned fault DOF (SetKeys)
    std::unique_ptr<QDHMatrix> h_;   ///< item 4: compressed G, or null
    bool planar_ = false;   ///< 2D: G_ holds nb_·(ncomp_ - 1) rows × nf_
+   int slot_ = 0;          ///< 2D: the in-plane slot PackPlanar kept (0 dip, 1 strike)
    mutable Vector delta_all_;
-   mutable std::vector<real_t> y_, send_, recv_, dip_;
+   mutable std::vector<real_t> y_, send_, recv_, inplane_;
 };
 
 } // namespace seas

@@ -34,8 +34,13 @@
 //       value at (x, y) has 2 entries, equal bit for bit to the first two
 //       of the value at (x, y, 0), at points beyond, on and inside the band,
 //       at t = 0, 1 s and 1500 yr
+//   L8  the prescribed-slip faces against the band (CountCreepBeyondBand,
+//       Chunhui Zhao, 2026-10-29): on the test box (flat, dip 60, general),
+//       BP5's mesh (kind "bp5") and BP3's 1 km mesh at dip 60 (2-D) every
+//       prescribed-slip face lies in the band; with the plane moved 2 km
+//       along m every one lies beyond it, largest |d| 2 km
 //
-// Modes: (default) L1-L7;  --refuse N (N = 1..6) writes a deck that
+// Modes: (default) L1-L8;  --refuse N (N = 1..7) writes a deck that
 // CycleConfig::Load must refuse and loads it (the makefile checks the exit
 // status and the message):
 //   1 kind "bp5" with another key        "takes no other key"
@@ -44,6 +49,8 @@
 //   4 plane_normal in the fault plane    "lies in the fault plane"
 //   5 default "bp5", ref_normal (0,1,0)  "needs [fault_geometry].ref_normal"
 //   6 kind "slab"                        "must be \"bp5\" or \"plate\""
+//   7 BP3's creep segment 2 km off the plane (CheckCreepInBand, not a deck)
+//                                        "beyond the band"
 //
 //   make -f tests/2d_inplane/2d_inplane.mk test-plate-loading
 //
@@ -51,6 +58,7 @@
 
 #include "mfem.hpp"
 #include "../../cycle/loading.hpp"
+#include "../../cycle/scaled_mesh.hpp"
 #include "../../domain/elasticity_operator.hpp"
 #include "../../fault/fault_frame_field.hpp"
 #include "frame_box.hpp"
@@ -431,8 +439,77 @@ static void TestPoint2D()
                << " differ)");
 }
 
+// ---------------------------------------------------------------- L8
+// The plate loading with BP3's vectors at dip 60 (as L7) and a plane moved
+// by `shift` along m.
+static cycle::LoadingConfig BP3Plate(real_t shift)
+{
+   cycle::LoadingConfig L;
+   L.kind = "plate";
+   L.plane_normal = {{0.8660254037844386, 0.5, 0.0}};
+   L.slip_dir = {{-0.5, 0.8660254037844386, 0.0}};
+   L.plane_point = {{shift * L.plane_normal[0], shift * L.plane_normal[1], 0.0}};
+   L.band = 1000.0;
+   L.band_sign = -1.0;
+   return L;
+}
+
+static void TestCreepBand(MPI_Comm comm)
+{
+   if (g_rank == 0) { std::cout << "\n=== L8: the prescribed-slip faces lie in the band ===\n"; }
+   // the test box: fault patch and coplanar prescribed-slip band on the plane
+   for (const Rot &R : {Rot(), Rot::Axis(1, 0, 0, 30.0), Rot::Axis(1, 2, 3, 40.0)})
+   {
+      std::unique_ptr<Mesh> m(FrameBox(0, R));
+      ParMesh pm(comm, *m);
+      real_t m0[3] = {0, 1, 0}, mv[3];
+      R.Apply(m0, mv);
+      cycle::LoadingConfig L;
+      L.kind = "plate";
+      for (int d = 0; d < 3; d++) { L.plane_normal[d] = mv[d]; }
+      L.band = 1000.0;
+      const cycle::CreepBandCensus in = cycle::CountCreepBeyondBand(pm, {5, 6}, L);
+      for (int d = 0; d < 3; d++) { L.plane_point[d] = 2000.0 * mv[d]; }
+      const cycle::CreepBandCensus out = cycle::CountCreepBeyondBand(pm, {5, 6}, L);
+      TEST_ASSERT(in.faces > 0 && in.beyond == 0 && out.beyond == out.faces
+                  && std::abs(out.max_d - 2000.0) < 1e-6,
+                  "L8 box: " << in.faces << " prescribed-slip faces, " << in.beyond
+                  << " beyond the band; plane moved 2 km: " << out.beyond << " beyond, largest |d| "
+                  << out.max_d << " m");
+   }
+   // BP5's mesh with the "bp5" kind (y = 0, b = 1 km)
+   {
+      std::unique_ptr<Mesh> m = cycle::LoadScaledMesh(kBP5Mesh, 1000.0);
+      ParMesh pm(comm, *m);
+      const cycle::CreepBandCensus c = cycle::CountCreepBeyondBand(pm, {5}, cycle::LoadingConfig());
+      TEST_ASSERT(c.faces > 0 && c.beyond == 0, "L8 BP5 mesh, kind \"bp5\": " << c.faces
+                  << " creep-plane faces, " << c.beyond << " beyond the band");
+   }
+   // BP3's 1 km mesh at dip 60 (2-D): the creep segment below the fault
+   {
+      std::unique_ptr<Mesh> m = cycle::LoadScaledMesh("bp3/mesh/bp3_d60_1km.msh", 1000.0);
+      ParMesh pm(comm, *m);
+      const cycle::CreepBandCensus in = cycle::CountCreepBeyondBand(pm, {5}, BP3Plate(0.0));
+      const cycle::CreepBandCensus out = cycle::CountCreepBeyondBand(pm, {5}, BP3Plate(2000.0));
+      TEST_ASSERT(in.faces > 0 && in.beyond == 0 && out.beyond == out.faces
+                  && std::abs(out.max_d - 2000.0) < 1e-6,
+                  "L8 BP3 d60 1 km (2-D): " << in.faces << " creep segments, " << in.beyond
+                  << " beyond the band; plane moved 2 km: " << out.beyond << " beyond, largest |d| "
+                  << out.max_d << " m");
+   }
+}
+
 static int Refuse(int n)
 {
+   if (n == 7)
+   {
+      // BP3's creep segment 2 km off the loading plane: CheckCreepInBand
+      std::unique_ptr<Mesh> m = cycle::LoadScaledMesh("bp3/mesh/bp3_d60_1km.msh", 1000.0);
+      ParMesh pm(MPI_COMM_WORLD, *m);
+      cycle::CheckCreepInBand(pm, {5}, BP3Plate(2000.0));   // must abort
+      if (g_rank == 0) { std::cout << "--refuse 7: the mesh was accepted\n"; }
+      return 0;
+   }
    std::string text;
    switch (n)
    {
@@ -455,7 +532,7 @@ static int Refuse(int n)
          break;
       }
       case 6: text = WithLoading("kind = \"slab\"\n"); break;
-      default: MFEM_ABORT("--refuse N: N = 1..6");
+      default: MFEM_ABORT("--refuse N: N = 1..7");
    }
    const std::string p = WriteDeck("refuse" + std::to_string(n), text);
    if (g_rank == 0) { std::cout << "--refuse " << n << ": loading " << p << "\n"; }
@@ -486,6 +563,7 @@ int main(int argc, char *argv[])
    TestOperatorSign(comm);
    TestDeck();
    TestPoint2D();
+   TestCreepBand(comm);
    if (g_rank == 0)
    {
       std::cout << "\ntest_plate_loading: " << (num_tests - num_failed) << " / " << num_tests

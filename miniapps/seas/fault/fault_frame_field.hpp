@@ -197,6 +197,15 @@ public:
    const real_t *Up() const { return cfg_.up; }
    /// Mesh dimension (2 or 3).
    int Dimension() const { return dim_; }
+   /// 2D: the kernel slot that carries the in-plane slip (derivation 10.2):
+   /// 0 (dip) when up lies in the mesh plane (BP3: a vertical section), 1
+   /// (strike) when up = +-e_z (TPV205-2D: map view).  The other slot is an
+   /// exact zero (Check2D_ refuses any other up).
+   int InPlaneSlot() const
+   {
+      MFEM_VERIFY(dim_ == 2, "FaultFrameField::InPlaneSlot: a 2-D mesh only");
+      return (cfg_.up[2] != 0.0) ? 1 : 0;
+   }
 
    // ---- fault faces, operator order fi (interior faces first, then shared) ----
    const FaultOrientation &FaultCensus() const { return *fault_; }

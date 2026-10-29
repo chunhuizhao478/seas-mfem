@@ -72,8 +72,8 @@ seas_test_plate_loading: $(TEST_PLATE_LOADING_OBJ) $(CYCLE_LINK_OBJS)
 	    $(CYCLE_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
-# L1-L6 on 1 and 2 ranks; then each refusal must exit non-zero with its message.
-PLATE_REFUSALS = 1:takes no other key|2:must be unit vectors|3:slip_dir must lie in the plane|4:lies in the fault plane|5:needs [fault_geometry].ref_normal|6:must be "bp5" or "plate"
+# L1-L8 on 1 and 2 ranks; then each refusal must exit non-zero with its message.
+PLATE_REFUSALS = 1:takes no other key|2:must be unit vectors|3:slip_dir must lie in the plane|4:lies in the fault plane|5:needs [fault_geometry].ref_normal|6:must be "bp5" or "plate"|7:have a vertex beyond the band
 test-plate-loading: seas_test_plate_loading
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_plate_loading
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_plate_loading

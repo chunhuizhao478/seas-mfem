@@ -44,6 +44,13 @@
 //       stage operators (SolveStage) and G (GreenStage) agree to 1e-10 of
 //       their size, with and without a strike slot in the slip (which
 //       embeds to no displacement jump in 2D).
+//   Q2  Q1 in map view (up = [0, 0, 1], the slip in the strike slot), on a
+//       square with the fault on y = 0 for |x| < L/2: with free tips (the
+//       UCERF layout) and with prescribed slip on the rest of y = 0 (the BP5
+//       layout), p = 1, 2; G is packed on the strike slot, the three paths
+//       agree to 1e-10 with and without a dip slot in the slip, and the dip
+//       traction is exactly 0 on every path.  (S1 also checks
+//       FaultFrameField::InPlaneSlot: 0 for up = [0, 1], 1 for [0, 0, 1].)
 //
 //   seas_test_2d_fault_layout             (1, 2 or 4 ranks)
 //   seas_test_2d_fault_layout --refuse N  one refusal, must exit non-zero:
@@ -53,7 +60,7 @@
 //     position; the stage operators and the dense G open in phase F), 6 up
 //     parallel to n in the QD basis, 7 BR2 in 2D.
 //
-// Scope (Chunhui Zhao, 2026-10-25).
+// Scope (Chunhui Zhao, 2026-10-25; Q2 map view 2026-10-29).
 
 #include "mfem.hpp"
 #include "../../domain/elasticity_operator.hpp"
@@ -477,6 +484,7 @@ static void TestSlots(Mesh &serial, MPI_Comm comm)
       }
       et = RMax(et, comm);
       TEST_ASSERT(et <= 1e-15, "S1 " << lab << ": kernel triad = sigma_f (n, d, s) (" << et << ")");
+      TEST_ASSERT(F->InPlaneSlot() == c, "S1 " << lab << ": InPlaneSlot() = " << F->InPlaneSlot());
    }
 }
 
@@ -952,6 +960,137 @@ static void TestQDOperators2D(MPI_Comm comm)
    }
 }
 
+// ------------------------------------------------------------------- Q2
+// Map view (up = [0, 0, 1], the in-plane slip in the strike slot), the
+// square [-L, L]^2 in n x n cells (split along the diagonal (i, j)-(i+1, j+1))
+// with the fault on y = 0 for |x| < L/2 (attr 3).  creep = false: two free
+// tips, the rest of y = 0 continuous (the UCERF layout); creep = true: the
+// rest of y = 0 a prescribed-slip segment (attr 5, the BP5 layout).  All four
+// sides attr 5.
+static Mesh *MapBox(bool creep)
+{
+   const int n = 8;
+   const real_t L = 20e3;
+   Mesh *m = new Mesh(2, (n + 1) * (n + 1), 2 * n * n, 0, 2);
+   for (int j = 0; j <= n; j++)
+      for (int i = 0; i <= n; i++) { m->AddVertex(-L + 2.0 * L * i / n, -L + 2.0 * L * j / n); }
+   auto v = [&](int i, int j) { return i + (n + 1) * j; };
+   for (int j = 0; j < n; j++)
+      for (int i = 0; i < n; i++)
+      {
+         m->AddTriangle(v(i, j), v(i + 1, j), v(i + 1, j + 1), 1);
+         m->AddTriangle(v(i, j), v(i + 1, j + 1), v(i, j + 1), 1);
+      }
+   for (int k = 0; k < n; k++)
+   {
+      m->AddBdrSegment(v(k, 0), v(k + 1, 0), 5);
+      m->AddBdrSegment(v(k, n), v(k + 1, n), 5);
+      m->AddBdrSegment(v(0, k), v(0, k + 1), 5);
+      m->AddBdrSegment(v(n, k), v(n, k + 1), 5);
+      const real_t xm = -L + 2.0 * L * (k + 0.5) / n;
+      if (std::abs(xm) < 0.5 * L) { m->AddBdrSegment(v(k, n / 2), v(k + 1, n / 2), 3); }
+      else if (creep) { m->AddBdrSegment(v(k, n / 2), v(k + 1, n / 2), 5); }
+   }
+   m->FinalizeTopology();
+   m->Finalize(false, true);
+   m->SetAttributes();
+   return m;
+}
+
+// The plate loading of cycle/loading.hpp in map view: the plane y = 0
+// (m = (0, 1)), s = (1, 0), band 1 m: u = +-(Vp t / 2) s off the plane,
+// Vp t s on it (the creep segment).
+static void PlateLoadingMap(const Vector &x, real_t t, Vector &u)
+{
+   const real_t Vp = 1e-9, d = x(1);
+   const real_t Vh = (d > 1.0) ? 0.5 * Vp * t : (d < -1.0) ? -0.5 * Vp * t : Vp * t;
+   u.SetSize(2);
+   u(0) = Vh;
+   u(1) = 0.0;
+}
+
+static void TestQDOperatorsMap(MPI_Comm comm)
+{
+   const real_t ref[3] = {0, -1, 0}, upA[3] = {0, 0, 1};
+   const real_t t = 100.0 * 365.25 * 86400.0;
+   for (bool creep : {false, true})
+      for (int p : {1, 2})
+      {
+         const std::string lay = creep ? "creep to the sides" : "free tips";
+         if (g_rank == 0)
+         {
+            std::cout << "\n=== Q2 map view (strike slot), " << lay << ", p = " << p << " ===\n";
+         }
+         std::unique_ptr<Mesh> s(MapBox(creep));
+         ParMesh pm(comm, *s);
+         LinearElastic *model = new LinearElastic(kLambda, kMu);   // leaked: test lifetime
+         DomainConfig dc;
+         dc.fault_frames = Source(ref, upA);
+         BoundaryConfig bc = MakeBC(2, {5});
+         bc.default_dirichlet_func = PlateLoadingMap;
+         Op op(pm, p, *model, 0.0, kWf, 2.0 * kLs, bc, DGMethod::IP, SolverType::MUMPS, dc);
+         op.BuildQDStageOperators(true);
+         op.BuildQDGreen(QDGreenConfig{});   // dense; its own check against SolveStage (1e-8)
+         const QDGreenOperator *G = op.GetQDGreen();
+         TEST_ASSERT(op.FrameField()->InPlaneSlot() == 1 && G != nullptr && G->Planar()
+                     && G->PlanarSlot() == 1, "Q2 " << lay << ", p = " << p << ": G is built "
+                     "and packed on the strike slot");
+         const int nown = op.GetNumOwnedFaultDOFs(), nc = op.NumSlipComponents();
+         for (bool dip : {false, true})
+         {
+            // strike slip of order 1 m on every DOF (the face loops skip a
+            // face whose slip is below 1e-15 m everywhere)
+            Vector slip(nc * nown);
+            for (int i = 0; i < nown; i++)
+            {
+               slip(nc * i) = dip ? 0.3 * std::cos(0.11 * i + g_rank) : 0.0;
+               slip(nc * i + 1) = 1.0 + 0.5 * std::sin(0.37 * i + 0.1 + g_rank);
+            }
+            Vector local, lt, lnt, T1, Tn1, T2, Tn2, T3, Tn3;
+            ParGridFunction u1(&op.GetFESpace()), u2(&op.GetFESpace());
+            op.ExpandOwnedToLocalFault(slip, local, nc);
+            op.Solve(t, local, u1);
+            op.ComputeTraction(u1, local, lt, &lnt);
+            op.RestrictToOwnedFault(lt, T1, nc);
+            op.RestrictToOwnedFault(lnt, Tn1);
+            op.SolveStage(t, slip, u2, T2, &Tn2);
+            op.GreenStage(t, slip, T3, &Tn3);
+            auto rel = [&](const Vector &a, const Vector &b)
+            {
+               real_t d = 0.0, m = 0.0;
+               for (int i = 0; i < a.Size(); i++)
+               {
+                  d = std::max(d, std::abs(a(i) - b(i)));
+                  m = std::max(m, std::abs(b(i)));
+               }
+               d = RMax(d, comm);
+               m = RMax(m, comm);
+               return m > 0.0 ? d / m : d;
+            };
+            real_t td = 0.0, tsm = 0.0;   // dip traction (exactly zero), strike's size
+            for (int i = 0; i < nown; i++)
+            {
+               td = std::max({td, std::abs(T1(nc * i)), std::abs(T2(nc * i)),
+                              std::abs(T3(nc * i))});
+               tsm = std::max(tsm, std::abs(T1(nc * i + 1)));
+            }
+            td = RMax(td, comm);
+            tsm = RMax(tsm, comm);
+            const std::string tag = "Q2 " + lay + ", p = " + std::to_string(p)
+                                    + (dip ? ", dip slot set" : ", strike slip only");
+            const real_t r_ms = rel(T2, T1), r_ns = rel(Tn2, Tn1);
+            const real_t r_gs = rel(T3, T1), r_gn = rel(Tn3, Tn1);
+            TEST_ASSERT(tsm > 1e5, tag << ": the strike traction is not trivial (" << tsm
+                        << " Pa)");
+            TEST_ASSERT(r_ms <= 1e-10 && r_ns <= 1e-10, tag << ": stage operators = face "
+                        "loops (shear " << r_ms << ", normal " << r_ns << ")");
+            TEST_ASSERT(r_gs <= 1e-10 && r_gn <= 1e-10, tag << ": G = face loops (shear "
+                        << r_gs << ", normal " << r_gn << ")");
+            TEST_ASSERT(td == 0.0, tag << ": dip traction exactly 0 on every path");
+         }
+      }
+}
+
 // --------------------------------------------------------------- refusals
 static int Refuse(int n, MPI_Comm comm)
 {
@@ -1055,6 +1194,7 @@ int main(int argc, char *argv[])
       TestLayout(*s, comm, np);
    }
    TestQDOperators2D(comm);
+   TestQDOperatorsMap(comm);
    for (const MeshFile &m : MeshFiles()) { TestMeshFile(m, comm); }
    {
       // D2: the layout on the BP3 mesh (dip 60, 25 m), with METIS's

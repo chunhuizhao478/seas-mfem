@@ -26,8 +26,10 @@
 //   g(t)     this rank's Dirichlet points x dim components (the mesh
 //            dimension); dim*p + c + offset
 // On a 2D in-plane mesh (design rev 3, phase F) the probes are the 2D face
-// loops' own: the strike slot embeds to no displacement jump, so its B and
-// C_delta columns are zero, and the loading has 2 components per point.
+// loops' own: the out-of-plane slot (strike on a vertical section, dip in
+// map view; FaultFrameField::InPlaneSlot) embeds to no displacement jump, so
+// its B and C_delta columns are zero, and the loading has 2 components per
+// point.
 // g = global owned index of a fault DOF.  Every local copy of a fault DOF
 // (shared faces have one on each side) learns its owner's g by expanding a
 // vector holding g + 1 on the owned DOFs with ExpandOwnedToLocalFault, so the
@@ -662,6 +664,12 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
                                                    fault_first);
       const HYPRE_BigInt nslip_glob = 2 * nf_glob;
       const HYPRE_BigInt slip_first = 2 * fault_first;
+      // 2D: the in-plane slot (0 dip on a vertical section, 1 strike in map
+      // view); the other slot's columns and rows are zero.
+      MFEM_VERIFY(dim_ == 3 || frame_field_, "--qd-green (2D): no fault frame field");
+      const int slot = (dim_ == 2) ? frame_field_->InPlaneSlot() : 0;
+      const char *slot_name = (slot == 0) ? "dip" : "strike";
+      const char *out_name = (slot == 0) ? "strike" : "dip";
       const double t_start = MPI_Wtime();
 
       // The loading must have one time shape, g(t) = t·ĝ: g(0) = 0 and
@@ -782,9 +790,10 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
          {
             const int m = static_cast<int>(
                std::min<HYPRE_BigInt>(m_max, nslip_glob - j0));
-            // 2D (design rev 3, phase F): the strike slot embeds to no
-            // displacement jump, so a strike column (odd global index) of B
-            // is zero and its solve is skipped (X = 0): half the solves.
+            // 2D (design rev 3, phase F): the out-of-plane slot embeds to no
+            // displacement jump, so its columns of B (global index 2k + 1 -
+            // slot) are zero and their solves are skipped (X = 0): half the
+            // solves.
             Array<const Vector *> Rp;
             Array<Vector *> Xp;
             for (int i = 0; i < m; i++)
@@ -794,11 +803,12 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
                if (jl >= 0 && jl < 2 * nown) { E[i](static_cast<int>(jl)) = 1.0; }
                ops.B->Mult(E[i], R[i]);
                X[i] = 0.0;
-               if (dim_ == 2 && (j0 + i) % 2 == 1)
+               if (dim_ == 2 && (j0 + i) % 2 == 1 - slot)
                {
                   MFEM_VERIFY(R[i].Normlinf() == 0.0, "--qd-green (2D): slip "
-                              "column " << j0 + i << " (strike) has a nonzero "
-                              "right-hand side " << R[i].Normlinf());
+                              "column " << j0 + i << " (" << out_name << ", out of "
+                              "the plane) has a nonzero right-hand side "
+                              << R[i].Normlinf());
                   continue;
                }
                Rp.Append(&R[i]);
@@ -862,9 +872,10 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
          hsummary = green->HMatrix()->Summary("read from " +
                                               config.hcache_path);
       }
-      // 2D: keep the dip columns of the dip and normal rows (the strike
-      // rows and columns are verified zero), a third of the dense rows.
-      if (dim_ == 2) { green->PackPlanar(); }
+      // 2D: keep the in-plane columns of the in-plane and normal rows (the
+      // out-of-plane rows and columns are verified zero), a third of the
+      // dense rows.
+      if (dim_ == 2) { green->PackPlanar(slot); }
       const double t_ready = MPI_Wtime() - t_start;
       qd_green_ = std::move(green);
 
@@ -916,8 +927,8 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
            << bmax / 1073741824.0 << " GiB largest rank";
          if (qd_green_->Planar())
          {
-            o << "; 2D: kept the dip columns of the "
-              << (with_normal ? "dip and normal" : "dip") << " rows, "
+            o << "; 2D: kept the " << slot_name << " columns of the "
+              << slot_name << (with_normal ? " and normal" : "") << " rows, "
               << (qd_green_->NComp() - 1) * nf_glob << " x " << nf_glob;
          }
          o << "\n";
