@@ -1,22 +1,31 @@
 // Copyright (c) 2010-2026, Lawrence Livermore National Security, LLC.
 //
 // snapshots.hpp — fully dynamic BP5 cycle: whole-field snapshots of the
-// fault and of the free surface ([cycle.snapshots], cycle_config.hpp), one
-// file per kind for the whole run:
+// fault, of the free surface and of the volume ([cycle.snapshots],
+// cycle_config.hpp), one file per kind for the whole run:
 //   <dir>/<prefix>_fault_snapshots.vtkhdf     on every owned fault DOF:
 //       slip_strike, slip_dip [m], slip_rate_strike, slip_rate_dip [m/s],
 //       state (theta) [s], normal_stress (sigma_n_eff, compression
 //       positive) [MPa], shear_stress_strike, shear_stress_dip [MPa]
 //   <dir>/<prefix>_surface_snapshots.vtkhdf   on the free surface:
 //       displacement, velocity (global XYZ) [m, m/s]
+//   <dir>/<prefix>_volume_snapshots.vtkhdf    on the elements (all, or those
+//       whose centroid lies in [box_min, box_max]): displacement, velocity
+//       (global XYZ) [m, m/s] (Chunhui Zhao, 2026-10-28: "we should add the
+//       volume vtkdhf option, which saves the velocity and displacement
+//       data in the 2D domain, this is particularly important for later
+//       UCERF 2D fault regional runs")
 // The fault values are the station files' at each DOF, term by term
 // (fd_cycle_output.hpp): slip and V in kernel components, shear stress
 // -(tau_a + tau_b + eta V) / 1e6, theta, from the regime's FillStationFields.
 // The surface values are the displacement field evaluated at the points of
 // each selected boundary face (its vertices at p = 1; p > 1: the face
-// refined p times).  The velocity is U' in the dynamic regime and the exact
-// quasi-static du/dt in the QD regime (QDPhase::Velocity).  The QD fields
-// arrive through a VolumeFieldsFn that runs only when a surface snapshot is
+// refined p times), the volume values at the points of each selected element
+// (its vertices at p = 1; p > 1: the element refined p times), each element
+// with its own points, as the displacement space is discontinuous.  The
+// velocity is U' in the dynamic regime and the exact quasi-static du/dt in
+// the QD regime (QDPhase::Velocity).  The QD fields arrive through a
+// VolumeFieldsFn that runs (once) only when a surface or volume snapshot is
 // written, so the Green's-function stages (no displacement per stage) need
 // no solve at the other steps.
 //
@@ -27,9 +36,12 @@
 // design rev 3, phase F) the fault and the surface are polylines: one line
 // cell per fault face at p = 1 (its two DOFs) and per refined segment of a
 // surface face, points in XYZ with z = 0 and the surface vectors with a zero
-// z component, so the files keep the 3-D layout.  Points are per face (the
-// fault fields are discontinuous), in rank order then owned order, so a
-// restart needs the same rank count (the checkpoint needs it too).  Besides
+// z component, so the files keep the 3-D layout.  The volume grid holds
+// triangles on a 2-D mesh (z = 0, zero z components) and tetrahedra on a
+// 3-D one, p^d of them per element (the element refined p times).  Points
+// are per face or per element (the fields are discontinuous), in rank order
+// then owned order, so a restart needs the same rank count (the checkpoint
+// needs it too).  Besides
 // /VTKHDF, the group /fd_cycle holds per snapshot: regime (0 QD, 1
 // dynamic), phase (dynamic phases entered so far), reason (SnapReason) and
 // step (QD TS step or dynamic step in its phase), and the file's
@@ -485,21 +497,35 @@ public:
                "quasi-static du/dt",
                "displacement m, velocity m/s, time s");
       }
+      if (cfg_.volume.enabled)
+      {
+         BuildVolume_(pmesh);
+         vol_.path = base + "_volume_snapshots.vtkhdf";
+         vol_.cfg = cfg_.volume;
+         vol_.fields = {{"displacement", 3}, {"velocity", 3}};
+         Open_(vol_, "volume", restart, commit,
+               "fd_cycle volume snapshots: displacement [m] and velocity [m/s] in global "
+               "XYZ at the points of each selected element (its vertices at p = 1, the "
+               "element refined p times at p > 1), each element with its own points (the "
+               "displacement space is discontinuous); QD velocity: quasi-static du/dt",
+               "displacement m, velocity m/s, time s");
+      }
    }
 
    bool Any() const { return cfg_.Any(); }
 
    /// After each monitored QD step at (t, step) with the QD fields, and at the
    /// start of a run that starts dynamic (reason Start).  `volume`: the QD
-   /// displacement and velocity of that state, asked for (on every rank)
-   /// only when a surface snapshot is written.  reason != Cadence writes
-   /// regardless of the marks.  Collective.
+   /// displacement and velocity of that state, asked for (on every rank, once)
+   /// only when a surface or volume snapshot is written.  reason != Cadence
+   /// writes regardless of the marks.  Collective.
    void QD(real_t t, long long step, int phase, SnapReason reason, const FieldsFn &fill,
            const VolumeFieldsFn &volume)
    {
       if (!Any()) { return; }
       const long long mark_f = Mark_(t, cfg_.fault.dt_qd);
       const long long mark_s = Mark_(t, cfg_.surface.dt_qd);
+      const long long mark_v = Mark_(t, cfg_.volume.dt_qd);
       const bool forced = (reason != SnapReason::Cadence);
       if (cfg_.fault.enabled && t > fault_.st.last_t &&
           (forced || mark_f > fault_.st.qd_mark))
@@ -508,19 +534,28 @@ public:
          fault_.st.qd_mark = std::max(fault_.st.qd_mark, mark_f);
       }
       else if (cfg_.fault.enabled && forced) { Relabel_(fault_, t, reason); }
-      if (cfg_.surface.enabled && t > surf_.st.last_t &&
-          (forced || mark_s > surf_.st.qd_mark))
+      const bool due_s = cfg_.surface.enabled && t > surf_.st.last_t &&
+                         (forced || mark_s > surf_.st.qd_mark);
+      const bool due_v = cfg_.volume.enabled && t > vol_.st.last_t &&
+                         (forced || mark_v > vol_.st.qd_mark);
+      const Vector *u = nullptr, *v = nullptr;
+      if (due_s || due_v)
       {
-         const Vector *u = nullptr, *v = nullptr;
          volume(u, v);
          MFEM_VERIFY(u && v, "snapshots: the QD regime gave no displacement or velocity");
-         Vector usurf, vsurf;
-         SampleSurface_(*u, usurf);
-         SampleSurface_(*v, vsurf);
-         WriteSurface_(t, 0, phase, reason, step, usurf, vsurf);
+      }
+      if (due_s)
+      {
+         WriteVectors_(surf_, surf_pts_, t, 0, phase, reason, step, *u, *v);
          surf_.st.qd_mark = std::max(surf_.st.qd_mark, mark_s);
       }
       else if (cfg_.surface.enabled && forced) { Relabel_(surf_, t, reason); }
+      if (due_v)
+      {
+         WriteVectors_(vol_, vol_pts_, t, 0, phase, reason, step, *u, *v);
+         vol_.st.qd_mark = std::max(vol_.st.qd_mark, mark_v);
+      }
+      else if (cfg_.volume.enabled && forced) { Relabel_(vol_, t, reason); }
    }
 
    /// A dynamic phase starts (its start time already has a snapshot).
@@ -528,6 +563,7 @@ public:
    {
       dyn_mark_f_ = 0;
       dyn_mark_s_ = 0;
+      dyn_mark_v_ = 0;
    }
 
    /// After each dynamic step: t, the phase time tau, the dynamic fields,
@@ -538,6 +574,7 @@ public:
       if (!Any()) { return; }
       const long long mf = Mark_(tau, cfg_.fault.dt_dyn);
       const long long ms = Mark_(tau, cfg_.surface.dt_dyn);
+      const long long mv = Mark_(tau, cfg_.volume.dt_dyn);
       const SnapReason r = end ? SnapReason::EndOfDynamic : SnapReason::Cadence;
       if (cfg_.fault.enabled && t > fault_.st.last_t && (end || mf > dyn_mark_f_))
       {
@@ -547,13 +584,16 @@ public:
       else if (cfg_.fault.enabled && end) { Relabel_(fault_, t, r); }
       if (cfg_.surface.enabled && t > surf_.st.last_t && (end || ms > dyn_mark_s_))
       {
-         Vector us, vs;
-         SampleSurface_(U, us);
-         SampleSurface_(Ud, vs);
-         WriteSurface_(t, 1, phase, r, step, us, vs);
+         WriteVectors_(surf_, surf_pts_, t, 1, phase, r, step, U, Ud);
          dyn_mark_s_ = std::max(dyn_mark_s_, ms);
       }
       else if (cfg_.surface.enabled && end) { Relabel_(surf_, t, r); }
+      if (cfg_.volume.enabled && t > vol_.st.last_t && (end || mv > dyn_mark_v_))
+      {
+         WriteVectors_(vol_, vol_pts_, t, 1, phase, r, step, U, Ud);
+         dyn_mark_v_ = std::max(dyn_mark_v_, mv);
+      }
+      else if (cfg_.volume.enabled && end) { Relabel_(vol_, t, r); }
    }
 
    /// For the checkpoint (the same on every rank).
@@ -562,17 +602,30 @@ public:
       std::vector<SnapshotFileState> s;
       if (cfg_.fault.enabled) { s.push_back(fault_.st); }
       if (cfg_.surface.enabled) { s.push_back(surf_.st); }
+      if (cfg_.volume.enabled) { s.push_back(vol_.st); }
       return s;
    }
 
    long long FaultSteps() const { return fault_.st.steps; }
    long long SurfaceSteps() const { return surf_.st.steps; }
+   long long VolumeSteps() const { return vol_.st.steps; }
    long long FaultPoints() const { return fault_.npts; }
    long long SurfacePoints() const { return surf_.npts; }
+   long long VolumePoints() const { return vol_.npts; }
+   long long VolumeCells() const { return vol_.ncells; }
    const std::string &FaultPath() const { return fault_.path; }
    const std::string &SurfacePath() const { return surf_.path; }
+   const std::string &VolumePath() const { return vol_.path; }
 
 private:
+   /// Where the surface or volume points sit: a local element and its
+   /// reference point.
+   struct Points
+   {
+      std::vector<int> elem;
+      std::vector<IntegrationPoint> ip;
+   };
+
    struct Kind
    {
       std::string path;
@@ -585,6 +638,7 @@ private:
       std::vector<long long> conn, offsets;
       std::vector<unsigned char> types;
       long long npts = 0;
+      long long ncells = 0;   ///< the grid's cells (surface and volume)
       // Gather layout (values per rank).
       std::vector<int> counts, displs;
       int nloc = 0;
@@ -793,17 +847,80 @@ private:
             T->SetAllIntPoints(&fip);
             T->Transform(fip, x);
             for (int d = 0; d < 3; d++) { xyz.push_back(d < dim_ ? x(d) : 0.0); }
-            elem_.push_back(T->Elem1No);
-            eip_.push_back(T->GetElement1IntPoint());
+            surf_pts_.elem.push_back(T->Elem1No);
+            surf_pts_.ip.push_back(T->GetElement1IntPoint());
          }
          for (int i = 0; i < rg->RefGeoms.Size(); i++) { conn.push_back(first + rg->RefGeoms[i]); }
          nloc_cells += rg->RefGeoms.Size() / per;
       }
       GatherPoints_(surf_, xyz);
+      GatherCells_(surf_, conn, nloc_cells, per, per == 3 ? 5 : 3,   // VTK_TRIANGLE, VTK_LINE
+                   "no boundary face with an attribute in [cycle.snapshots.surface].attrs "
+                   "lies on the plane");
+   }
+
+   /// The selected elements: all, or those whose centroid lies in the box
+   /// (cycle_config.hpp).  Each element refined `order_` times (p = 1: its
+   /// vertices), with its own points; triangle cells on a 2-D mesh (points
+   /// with z = 0), tetrahedra on a 3-D one.
+   void BuildVolume_(ParMesh &pmesh)
+   {
+      MFEM_VERIFY(fes_.GetVDim() == dim_ && (dim_ == 2 || dim_ == 3),
+                  "snapshots: the volume needs a 2-D or 3-D mesh and a vector "
+                  "displacement space of its dimension (vdim " << fes_.GetVDim()
+                  << ", mesh " << dim_ << "-D)");
+      const Geometry::Type geom = (dim_ == 3) ? Geometry::TETRAHEDRON : Geometry::TRIANGLE;
+      const int per = dim_ + 1;   // points per cell: triangle 3, tetrahedron 4
+      const std::array<real_t, 3> &lo = cfg_.volume_box_min, &hi = cfg_.volume_box_max;
+      RefinedGeometry *rg = GlobGeometryRefiner.Refine(geom, order_, 1);
+      const IntegrationPoint &center = Geometries.GetCenter(geom);
+      std::vector<double> xyz;
+      std::vector<long long> conn;
+      long long nloc_cells = 0;
+      Vector x(dim_);
+      for (int e = 0; e < pmesh.GetNE(); e++)
+      {
+         MFEM_VERIFY(pmesh.GetElementBaseGeometry(e) == geom,
+                     "snapshots: the volume handles " << ((dim_ == 3) ? "tetrahedra" :
+                     "triangles") << " only on a " << dim_ << "-D mesh (element " << e
+                     << " is " << Geometry::Name[pmesh.GetElementBaseGeometry(e)] << ")");
+         ElementTransformation *T = pmesh.GetElementTransformation(e);
+         if (cfg_.volume_box)
+         {
+            T->SetIntPoint(&center);
+            T->Transform(center, x);
+            bool in = true;
+            for (int d = 0; d < dim_ && in; d++) { in = (x(d) >= lo[d] && x(d) <= hi[d]); }
+            if (!in) { continue; }
+         }
+         const long long first = static_cast<long long>(xyz.size() / 3);
+         for (int i = 0; i < rg->RefPts.GetNPoints(); i++)
+         {
+            const IntegrationPoint &ip = rg->RefPts.IntPoint(i);
+            T->SetIntPoint(&ip);
+            T->Transform(ip, x);
+            for (int d = 0; d < 3; d++) { xyz.push_back(d < dim_ ? x(d) : 0.0); }
+            vol_pts_.elem.push_back(e);
+            vol_pts_.ip.push_back(ip);
+         }
+         for (int i = 0; i < rg->RefGeoms.Size(); i++) { conn.push_back(first + rg->RefGeoms[i]); }
+         nloc_cells += rg->RefGeoms.Size() / per;
+      }
+      GatherPoints_(vol_, xyz);
+      GatherCells_(vol_, conn, nloc_cells, per, per == 4 ? 10 : 5,   // VTK_TETRA, VTK_TRIANGLE
+                   "no element centroid lies in [cycle.snapshots.volume] box_min .. box_max");
+   }
+
+   /// The cells of `k` from each rank's connectivity (local point numbers,
+   /// `per` per cell): gathered on the root, shifted by the rank's first point,
+   /// all of VTK type `type`.  Refuses an empty grid with `none`.
+   void GatherCells_(Kind &k, const std::vector<long long> &conn, long long nloc_cells, int per,
+                     unsigned char type, const char *none)
+   {
       long long total_cells = 0;
       MPI_Allreduce(&nloc_cells, &total_cells, 1, MPI_LONG_LONG, MPI_SUM, comm_);
-      MFEM_VERIFY(total_cells > 0, "snapshots: no boundary face with an attribute in "
-                  "[cycle.snapshots.surface].attrs lies on the plane");
+      MFEM_VERIFY(total_cells > 0, "snapshots: " << none);
+      k.ncells = total_cells;
       // Connectivity: gather each rank's, shifted by its first point.
       int nc = static_cast<int>(conn.size());
       std::vector<int> cc(size_), cd(size_, 0);
@@ -811,33 +928,33 @@ private:
       if (rank_ == 0)
       {
          for (int r = 1; r < size_; r++) { cd[r] = cd[r - 1] + cc[r - 1]; }
-         surf_.conn.resize(static_cast<size_t>(cd[size_ - 1] + cc[size_ - 1]));
+         k.conn.resize(static_cast<size_t>(cd[size_ - 1] + cc[size_ - 1]));
       }
-      MPI_Gatherv(conn.data(), nc, MPI_LONG_LONG, surf_.conn.data(), cc.data(), cd.data(),
+      MPI_Gatherv(conn.data(), nc, MPI_LONG_LONG, k.conn.data(), cc.data(), cd.data(),
                   MPI_LONG_LONG, 0, comm_);
       if (rank_ != 0) { return; }
       for (int r = 0; r < size_; r++)
       {
-         for (int i = cd[r]; i < cd[r] + cc[r]; i++) { surf_.conn[static_cast<size_t>(i)] += surf_.displs[r]; }
+         for (int i = cd[r]; i < cd[r] + cc[r]; i++) { k.conn[static_cast<size_t>(i)] += k.displs[r]; }
       }
-      const long long ncell = static_cast<long long>(surf_.conn.size() / per);
-      surf_.offsets.resize(static_cast<size_t>(ncell + 1));
-      for (long long c = 0; c <= ncell; c++) { surf_.offsets[static_cast<size_t>(c)] = per * c; }
-      surf_.types.assign(static_cast<size_t>(ncell), per == 3 ? 5 : 3);   // VTK_TRIANGLE, VTK_LINE
+      const long long ncell = static_cast<long long>(k.conn.size() / per);
+      k.offsets.resize(static_cast<size_t>(ncell + 1));
+      for (long long c = 0; c <= ncell; c++) { k.offsets[static_cast<size_t>(c)] = per * c; }
+      k.types.assign(static_cast<size_t>(ncell), type);
    }
 
-   /// The displacement-space vector `w` at the surface points (3 per point;
+   /// The displacement-space vector `w` at the points `at` (3 per point;
    /// z = 0 on a 2-D mesh).
-   void SampleSurface_(const Vector &w, Vector &out)
+   void Sample_(const Points &at, const Vector &w, Vector &out) const
    {
       MFEM_VERIFY(w.Size() == fes_.GetVSize(), "snapshots: displacement vector size "
                   << w.Size() << " != " << fes_.GetVSize() << " (the QD regime's DG space)");
       ParGridFunction gf(const_cast<ParFiniteElementSpace *>(&fes_), const_cast<real_t *>(w.GetData()));
-      out.SetSize(3 * static_cast<int>(elem_.size()));
+      out.SetSize(3 * static_cast<int>(at.elem.size()));
       Vector val(dim_);
-      for (size_t i = 0; i < elem_.size(); i++)
+      for (size_t i = 0; i < at.elem.size(); i++)
       {
-         gf.GetVectorValue(elem_[i], eip_[i], val);
+         gf.GetVectorValue(at.elem[i], at.ip[i], val);
          for (int d = 0; d < 3; d++) { out(3 * static_cast<int>(i) + d) = d < dim_ ? val(d) : 0.0; }
       }
    }
@@ -869,10 +986,15 @@ private:
       Append_(fault_, t, regime, phase, reason, step, all);
    }
 
-   void WriteSurface_(real_t t, int regime, int phase, SnapReason reason, long long step,
-                      const Vector &u, const Vector &v)
+   /// A surface or volume snapshot: the displacement-space vectors `uw` and
+   /// `vw` (displacement and velocity) at the points `at` of kind `k`.
+   void WriteVectors_(Kind &k, const Points &at, real_t t, int regime, int phase,
+                      SnapReason reason, long long step, const Vector &uw, const Vector &vw)
    {
-      const int n = surf_.nloc;
+      Vector u, v;
+      Sample_(at, uw, u);
+      Sample_(at, vw, v);
+      const int n = k.nloc;
       std::vector<double> loc(static_cast<size_t>(6 * n));
       for (int j = 0; j < n; j++)
       {
@@ -883,8 +1005,8 @@ private:
          }
       }
       std::vector<std::vector<double>> all;
-      GatherFields_(surf_, loc, {3, 3}, all);
-      Append_(surf_, t, regime, phase, reason, step, all);
+      GatherFields_(k, loc, {3, 3}, all);
+      Append_(k, t, regime, phase, reason, step, all);
    }
 
    /// A switch or an end at the time of the last snapshot: that snapshot
@@ -915,11 +1037,10 @@ private:
    int order_ = 1;
    int dim_ = 3;   ///< mesh dimension
    int rank_ = 0, size_ = 1;
-   Kind fault_, surf_;
-   // Surface points: local element and its reference point.
-   std::vector<int> elem_;
-   std::vector<IntegrationPoint> eip_;
-   long long dyn_mark_f_ = 0, dyn_mark_s_ = 0;
+   Kind fault_, surf_, vol_;
+   // The surface and volume points: local element and its reference point.
+   Points surf_pts_, vol_pts_;
+   long long dyn_mark_f_ = 0, dyn_mark_s_ = 0, dyn_mark_v_ = 0;
 };
 
 } // namespace cycle

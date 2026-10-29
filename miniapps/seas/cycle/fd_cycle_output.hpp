@@ -321,7 +321,7 @@ struct EventUpdate
 /// What a checkpoint keeps of one snapshot file (cycle/snapshots.hpp).
 struct SnapshotFileState
 {
-   std::string kind;        ///< "fault" or "surface"
+   std::string kind;        ///< "fault", "surface" or "volume"
    long long steps = 0;     ///< snapshots in the file
    long long qd_mark = -1;  ///< last QD mark written
    real_t last_t = -1e30;   ///< time of the last snapshot

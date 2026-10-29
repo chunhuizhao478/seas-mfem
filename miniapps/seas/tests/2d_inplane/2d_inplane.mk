@@ -19,6 +19,7 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-prestress-bp3       # phases E, F: BP3 prestress (QD, FD), decks, outputs
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d-absorbing        # BP3's absorbing walls ([cycle.absorbing], 2D)
 #   make -f tests/2d_inplane/2d_inplane.mk test-absorbing-all       # faces = "all" (every outer face absorbs)
+#   make -f tests/2d_inplane/2d_inplane.mk test-snapshots-volume    # [cycle.snapshots.volume] (2-D and 3-D)
 #   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
 # The 3D parity set (every phase must leave it bit for bit unchanged) is the
 # script tests/2d_inplane/parity_3d.sh (see its header).
@@ -464,13 +465,69 @@ test-absorbing-all: seas_test_absorbing_all
 	   else printf '%s\n' "$$out" | tail -15; echo "  FAILED: refusal $$n: exit $$rc, \"$$msg\" not found"; exit 1; fi; \
 	 done; rm -rf $$d
 
+# The volume snapshots ([cycle.snapshots.volume], cycle/snapshots.hpp; Chunhui
+# Zhao, 2026-10-28: "we should add the volume vtkdhf option").  The writer on a
+# triangle and a tetrahedron box at p = 1 and 2 (layout, values, schedule,
+# restart, the box) on 1 and 2 ranks; the writer's refusals (a box with no
+# element centroid, a quadrilateral mesh); then the deck loader on a BP3-FD
+# d60 thrust copy with the volume on and a box, and its refusals.
+TEST_SNAP_VOL_SRC = tests/2d_inplane/test_snapshots_volume.cpp
+TEST_SNAP_VOL_OBJ = $(TEST_SNAP_VOL_SRC:.cpp=.o)
+$(TEST_SNAP_VOL_OBJ): %.o: $(SRC)%.cpp $(CYCLE_HEADERS) $(CYCLE_STAMP) \
+                          $(CYCLE_SHARED_HEADERS) $(INPLANE_HEADERS) \
+                          $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
+
+seas_test_snapshots_volume: $(TEST_SNAP_VOL_OBJ) $(CYCLE_LINK_OBJS)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_SNAP_VOL_OBJ) $(CYCLE_LINK_OBJS) \
+	    $(CYCLE_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+SNAP_VOL_DECK = config/fd_cycle/bp3_fd_d60_thrust.toml
+SNAP_VOL_TMP = $(or $(TMPDIR),/tmp)/seas_test_snapshots_volume_decks
+SNAP_VOL_REFUSALS = empty-box:no element centroid lies in [cycle.snapshots.volume] box_min .. box_max|quads:the volume handles triangles only on a 2-D mesh (element 0 is Square)
+SNAP_VOL_DECK_REFUSALS = onlymin:[cycle.snapshots.volume] box_min and box_max go together|order:[cycle.snapshots.volume] box_min must not exceed box_max (entry 1)
+test-snapshots-volume: seas_test_snapshots_volume
+	@for n in 1 2; do \
+	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_snapshots_volume || exit 1; \
+	done
+	@list='$(SNAP_VOL_REFUSALS)'; set -f; IFS='|'; for r in $$list; do n=$${r%%:*}; msg=$${r#*:}; \
+	   out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_snapshots_volume --$$n 2>&1); rc=$$?; \
+	   if [ $$rc -ne 0 ] && printf '%s' "$$out" | grep -qF "$$msg"; then \
+	      echo "  PASSED: refusal $$n: exit $$rc, \"$$msg\""; \
+	   else printf '%s\n' "$$out" | tail -15; echo "  FAILED: refusal $$n: exit $$rc, \"$$msg\" not found"; exit 1; fi; \
+	 done
+	@rm -rf $(SNAP_VOL_TMP); mkdir -p $(SNAP_VOL_TMP); d=$(SNAP_VOL_TMP); \
+	 [ "$$(tail -2 $(SNAP_VOL_DECK) | tr '\n' '|')" = '[cycle.snapshots.volume]|enabled = false|' ] \
+	    || { echo "  FAILED: $(SNAP_VOL_DECK) does not end with the volume table off"; exit 1; }; \
+	 head -n -1 $(SNAP_VOL_DECK) > $$d/base.toml; \
+	 { cat $$d/base.toml; printf 'dt_qd   = 3.1536e8\ndt_dyn  = 1.0\nbox_min = [-20000.0, -30000.0]\nbox_max = [20000.0, 0.0]\n'; } > $$d/on.toml; \
+	 { cat $$d/base.toml; printf 'box_min = [-20000.0, -30000.0]\n'; } > $$d/onlymin.toml; \
+	 { cat $$d/base.toml; printf 'box_min = [-20000.0, 10.0]\nbox_max = [20000.0, 0.0]\n'; } > $$d/order.toml; \
+	 out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_snapshots_volume --load-deck $$d/on.toml 2>&1); rc=$$?; \
+	 want='[cycle.snapshots.volume] enabled 1, dt_qd 3.1536e+08, dt_dyn 1, box 1 [-20000, -30000, 0] .. [20000, 0, 0]'; \
+	 if [ $$rc -eq 0 ] && printf '%s' "$$out" | grep -qF "$$want"; then \
+	    echo "  PASSED: deck with the volume on and a box loads: $$want"; \
+	 else printf '%s\n' "$$out" | tail -15; echo "  FAILED: deck with the volume on"; exit 1; fi; \
+	 out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_snapshots_volume --load-deck $(SNAP_VOL_DECK) 2>&1); rc=$$?; \
+	 if [ $$rc -eq 0 ] && printf '%s' "$$out" | grep -qF '[cycle.snapshots.volume] enabled 0,'; then \
+	    echo "  PASSED: $(SNAP_VOL_DECK) (enabled = false) loads with the volume off"; \
+	 else printf '%s\n' "$$out" | tail -15; echo "  FAILED: $(SNAP_VOL_DECK)"; exit 1; fi; \
+	 list='$(SNAP_VOL_DECK_REFUSALS)'; set -f; IFS='|'; for r in $$list; do n=$${r%%:*}; msg=$${r#*:}; \
+	   out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_snapshots_volume --load-deck $$d/$$n.toml 2>&1); rc=$$?; \
+	   if [ $$rc -ne 0 ] && printf '%s' "$$out" | grep -qF "$$msg"; then \
+	      echo "  PASSED: deck refusal $$n: exit $$rc, \"$$msg\""; \
+	   else printf '%s\n' "$$out" | tail -15; echo "  FAILED: deck refusal $$n: exit $$rc, \"$$msg\" not found"; exit 1; fi; \
+	 done; rm -rf $$d
+
 2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
                 test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
                 test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
-                test-2d-absorbing test-absorbing-all
+                test-2d-absorbing test-absorbing-all test-snapshots-volume
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
         test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
-        test-2d-absorbing test-absorbing-all \
+        test-2d-absorbing test-absorbing-all test-snapshots-volume \
         2d-inplane-all

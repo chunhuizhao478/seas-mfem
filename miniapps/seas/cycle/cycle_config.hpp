@@ -112,7 +112,17 @@
 //                   is taken when its attribute is listed and all its
 //                   vertices lie on the plane (attribute 1 also holds the
 //                   bottom of the BP5 mesh).
-//   [cycle.snapshots.volume]  only enabled = false (not implemented)
+//   [cycle.snapshots.volume]  displacement and velocity over the domain
+//                   (Chunhui Zhao, 2026-10-28: "we should add the volume
+//                   vtkdhf option, which saves the velocity and displacement
+//                   data in the 2D domain"), dt_qd and dt_dyn as above, on
+//                   every element (triangles on a 2-D mesh, tetrahedra on a
+//                   3-D one) or, with box_min and box_max ([x, y] on a 2-D
+//                   mesh, [x, y, z] on a 3-D one, in m), on the elements whose
+//                   centroid lies in that box.  A snapshot holds 48 bytes per
+//                   point (two 3-vectors in float64) and 3 (4 on tetrahedra)
+//                   points per element at p = 1: size the cadence and the box
+//                   with the line the driver prints at the start.
 //   [cycle.benchmark]  the SCEC BP5 outputs beyond the on-fault stations
 //                   (BP5 description section 4; cycle/bench_output.hpp),
 //                   present means on unless enabled = false.  Plane
@@ -266,16 +276,22 @@ struct SnapshotKindConfig
    real_t dt_dyn = 0.1;                            ///< [s], marks from the phase start
 };
 
-/// [cycle.snapshots]: the fault and the free surface (volume: not implemented).
+/// [cycle.snapshots]: the fault, the free surface and the volume.
 struct SnapshotConfig
 {
    SnapshotKindConfig fault;
    SnapshotKindConfig surface;
+   SnapshotKindConfig volume;
    std::vector<int> surface_attrs = {1};
    std::array<real_t, 3> surface_normal = {{0.0, 0.0, 1.0}};   ///< unit
    real_t surface_offset = 0.0;   ///< the plane n . x = offset [m]
    real_t surface_tol = 1.0e-3;   ///< [m]
-   bool Any() const { return fault.enabled || surface.enabled; }
+   /// The volume's elements: all, or those whose centroid lies in the box
+   /// [box_min, box_max] (bounds included) [m].
+   bool volume_box = false;
+   std::array<real_t, 3> volume_box_min = {{0.0, 0.0, 0.0}};
+   std::array<real_t, 3> volume_box_max = {{0.0, 0.0, 0.0}};
+   bool Any() const { return fault.enabled || surface.enabled || volume.enabled; }
 };
 
 /// [cycle.qd.green]: the Green's-function stage (seas_bp5_full --qd-green-*).
@@ -942,11 +958,23 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       }
       if (sn.contains("volume"))
       {
+         const std::string sec = "cycle.snapshots.volume";
          const toml::value &v = sn.at("volume");
-         OnlyKeys(v, "cycle.snapshots.volume", {"enabled"});
-         MFEM_VERIFY(v.contains("enabled") && !Bool(v, "cycle.snapshots.volume", "enabled", true),
-                     "[cycle.snapshots.volume] is not implemented: only enabled = false "
-                     "is accepted");
+         sc.volume = SnapshotKind(v, sec, {"box_min", "box_max"});
+         MFEM_VERIFY(v.contains("box_min") == v.contains("box_max"),
+                     "[" << sec << "] box_min and box_max go together");
+         sc.volume_box = v.contains("box_min");
+         if (sc.volume_box)
+         {
+            sc.volume_box_min = Vec3(c.deck_vectors, v, sec, "box_min", sc.volume_box_min, true);
+            sc.volume_box_max = Vec3(c.deck_vectors, v, sec, "box_max", sc.volume_box_max, true);
+            for (int d = 0; d < 3; d++)
+            {
+               MFEM_VERIFY(sc.volume_box_min[d] <= sc.volume_box_max[d],
+                           "[" << sec << "] box_min must not exceed box_max (entry " << d
+                           << ")");
+            }
+         }
       }
    }
 

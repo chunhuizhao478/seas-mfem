@@ -775,8 +775,19 @@ int main(int argc, char *argv[])
                 << "; surface "
                 << (sc.surface.enabled ? "dt_qd " + std::to_string(sc.surface.dt_qd) +
                                          " s, dt_dyn " + std::to_string(sc.surface.dt_dyn) + " s"
-                                       : std::string("off"))
-                << "\n";
+                                       : std::string("off"));
+      if (sc.volume.enabled)
+      {
+         std::cout << "; volume dt_qd " << std::to_string(sc.volume.dt_qd) << " s, dt_dyn "
+                   << std::to_string(sc.volume.dt_dyn) << " s";
+         if (sc.volume_box)
+         {
+            std::cout << ", box [" << sc.volume_box_min[0] << ", " << sc.volume_box_min[1] << ", "
+                      << sc.volume_box_min[2] << "] .. [" << sc.volume_box_max[0] << ", "
+                      << sc.volume_box_max[1] << ", " << sc.volume_box_max[2] << "] m";
+         }
+      }
+      std::cout << "\n";
    }
 
    if (root) { std::filesystem::create_directories(cfg.output.dir); }
@@ -941,6 +952,15 @@ int main(int argc, char *argv[])
          {
             std::cout << "  surface snapshots: " << snaps.SurfacePath() << " ("
                       << snaps.SurfacePoints() << " points, " << snaps.SurfaceSteps()
+                      << " snapshots so far)\n";
+         }
+         if (cfg.snapshots.volume.enabled)
+         {
+            // Two 3-vectors in float64 per point.
+            std::cout << "  volume snapshots: " << snaps.VolumePath() << " ("
+                      << snaps.VolumePoints() << " points, " << snaps.VolumeCells()
+                      << " cells, " << 48.0 * static_cast<double>(snaps.VolumePoints()) / 1e6
+                      << " MB per snapshot, " << snaps.VolumeSteps()
                       << " snapshots so far)\n";
          }
       }
@@ -1173,7 +1193,10 @@ int main(int argc, char *argv[])
                       << "  dynamic phases: " << ctl.Phases() << "\n"
                       << "  events: " << out->NumEvents() << "\n"
                       << "  snapshots: fault " << snaps.FaultSteps() << ", surface "
-                      << snaps.SurfaceSteps() << "\n"
+                      << snaps.SurfaceSteps()
+                      << (cfg.snapshots.volume.enabled
+                          ? ", volume " + std::to_string(snaps.VolumeSteps()) : std::string())
+                      << "\n"
                       << "  status: " << (diverged  ? "DIVERGED"
                                           : qd_done ? "done"
                                                     : stopped + " (exit " +

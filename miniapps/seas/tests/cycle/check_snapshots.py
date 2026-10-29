@@ -18,7 +18,14 @@
 #      t_final) the last snapshot is "end";
 #   5. with --against DIR2: the same snapshots in DIR2's files (count,
 #      /fd_cycle, times), and each field's largest difference relative to
-#      its largest magnitude, at most --tol (default 0: identical).
+#      its largest magnitude, at most --tol (default 0: identical);
+#   6. the volume file: with box_min/box_max, every element's centroid lies
+#      in the box; against the surface file (both on): each surface face's
+#      points are points of one volume element (its element: places within
+#      1e-9 of the largest coordinate), and at every time both files have,
+#      they hold the same displacement and velocity there, to 1e-12 of the
+#      field's largest magnitude; with a box, the faces whose element is not
+#      in the box are skipped.
 # Prints the snapshot table.  Exit 1 if a check fails.
 #
 #   python3 tests/cycle/check_snapshots.py --dir RUN --prefix snap --deck DECK.toml
@@ -273,6 +280,91 @@ def compare_files(p1, p2, fields, tol):
     return bad
 
 
+def read_grid(path):
+    with h5py.File(path, "r") as f:
+        v = f["VTKHDF"]
+        X, conn, off = v["Points"][:], v["Connectivity"][:], v["Offsets"][:]
+    per = np.diff(off)
+    if not np.all(per == per[0]):
+        raise SystemExit(f"FAIL: {path}: cells of different sizes")
+    return X, conn.reshape(-1, per[0])
+
+
+def element_of_points(X, cells):
+    # Each element of the volume file has its own points, so its elements are
+    # the groups of points that its cells join.
+    lab = np.arange(len(X))
+    while True:
+        m = lab[cells].min(axis=1)
+        new = lab.copy()
+        np.minimum.at(new, cells, m[:, None])
+        if np.array_equal(new, lab):
+            return np.unique(lab, return_inverse=True)[1]
+        lab = new
+
+
+def check_volume_box(vpath, vcfg):
+    lo = np.array(vcfg["box_min"] + [0.0] * (3 - len(vcfg["box_min"])), dtype=float)
+    hi = np.array(vcfg["box_max"] + [0.0] * (3 - len(vcfg["box_max"])), dtype=float)
+    X, cells = read_grid(vpath)
+    grp = element_of_points(X, cells)
+    # On a straight-sided element the mean of its points (the refined
+    # lattice) is its centroid.
+    cnt = np.bincount(grp)
+    c = np.stack([np.bincount(grp, weights=X[:, d]) for d in range(3)], axis=1) / cnt[:, None]
+    tol = 1e-9 * max(1.0, float(np.max(np.abs(X))))
+    out = int(np.sum(np.any((c < lo - tol) | (c > hi + tol), axis=1)))
+    ok = out == 0 and len(c) > 0
+    print(f"{vpath}: {len(c)} elements ({len(cells)} cells), box {lo.tolist()} .. {hi.tolist()} m: "
+          f"{out} element centroids outside {'OK' if ok else 'BAD'}")
+    return 0 if ok else 1
+
+
+def check_volume_vs_surface(vpath, spath, boxed):
+    Xv, vcells = read_grid(vpath)
+    Xs, scells = read_grid(spath)
+    grp = element_of_points(Xv, vcells)
+    tol = 1e-9 * max(1.0, float(np.max(np.abs(Xs))))
+    at = [np.nonzero(np.max(np.abs(Xv - Xs[i]), axis=1) <= tol)[0] for i in range(len(Xs))]
+    pairs = []          # (surface point, volume point of its face's element)
+    skipped = 0
+    for face in scells:
+        common = set.intersection(*(set(grp[at[i]].tolist()) for i in face))
+        if len(common) != 1:
+            if len(common) == 0 and boxed:
+                skipped += 1
+                continue
+            return fail(f"{vpath}: a surface face (points {face.tolist()}) lies in "
+                        f"{len(common)} volume elements, not 1")
+        e = common.pop()
+        for i in face:
+            j = [j for j in at[i] if grp[j] == e]
+            pairs.append((i, j[0]))
+    si = np.array([p[0] for p in pairs], dtype=int)
+    vj = np.array([p[1] for p in pairs], dtype=int)
+    bad = 0
+    with h5py.File(vpath, "r") as fv, h5py.File(spath, "r") as fs:
+        tv, ts = fv["VTKHDF"]["Steps"]["Values"][:], fs["VTKHDF"]["Steps"]["Values"][:]
+        nv, ns = len(Xv), len(Xs)
+        common = [(kv, ks) for ks, t in enumerate(ts) for kv in np.nonzero(tv == t)[0]]
+        worst = 0.0
+        for name in ("displacement", "velocity"):
+            Dv, Ds = fv["VTKHDF"]["PointData"][name], fs["VTKHDF"]["PointData"][name]
+            big = max(float(np.max(np.abs(Ds[:]))), 1e-300)
+            for kv, ks in common:
+                a = Dv[kv * nv:(kv + 1) * nv][vj]
+                b = Ds[ks * ns:(ks + 1) * ns][si]
+                worst = max(worst, float(np.max(np.abs(a - b))) / big if len(si) else 0.0)
+        ok = worst <= 1e-12 and len(common) > 0 and len(si) > 0
+        if not ok:
+            bad += 1
+        print(f"{vpath} vs {spath}: {len(common)} common times, {len(scells) - skipped} of "
+              f"{len(scells)} surface faces in a volume element ({skipped} outside the box), "
+              f"max difference {worst:.2e} of the field's largest magnitude "
+              f"{'OK' if ok else 'BAD'}")
+    return bad
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", required=True)
@@ -291,7 +383,8 @@ def main():
     kinds = [("fault", [("slip_strike", 1), ("slip_dip", 1), ("slip_rate_strike", 1),
                         ("slip_rate_dip", 1), ("state", 1), ("normal_stress", 1),
                         ("shear_stress_strike", 1), ("shear_stress_dip", 1)]),
-             ("surface", [("displacement", 3), ("velocity", 3)])]
+             ("surface", [("displacement", 3), ("velocity", 3)]),
+             ("volume", [("displacement", 3), ("velocity", 3)])]
     for kind, fields in kinds:
         if kind not in snaps or not snaps[kind].get("enabled", True):
             continue
@@ -307,6 +400,14 @@ def main():
         if a.against:
             bad += compare_files(path, f"{a.against}/{a.prefix}_{kind}_snapshots.vtkhdf",
                                  fields, a.tol)
+    on = lambda k: k in snaps and snaps[k].get("enabled", True)
+    vpath = f"{a.dir}/{a.prefix}_volume_snapshots.vtkhdf"
+    boxed = on("volume") and "box_min" in snaps["volume"]
+    if boxed:
+        bad += check_volume_box(vpath, snaps["volume"])
+    if on("volume") and on("surface"):
+        bad += check_volume_vs_surface(vpath, f"{a.dir}/{a.prefix}_surface_snapshots.vtkhdf",
+                                       boxed)
     print("ALL OK" if bad == 0 else f"{bad} FAILURE(S)")
     return 1 if bad else 0
 
