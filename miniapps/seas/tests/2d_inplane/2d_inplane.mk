@@ -24,6 +24,7 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-handback-table      # [cycle.output].handback_table
 #   make -f tests/2d_inplane/2d_inplane.mk test-sigma-floor         # [cycle].sigma_n_floor_pa
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d5-width           # [cycle.finite_width] (2.5D)
+#   make -f tests/2d_inplane/2d_inplane.mk test-2d5-dyn-driver      # [finite_width] of the Nitsche driver
 #   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
 # The 3D parity set (every phase must leave it bit for bit unchanged) is the
 # script tests/2d_inplane/parity_3d.sh (see its header).  The tensor
@@ -672,14 +673,22 @@ test-2d5-width: seas_test_2d5_width seas_fd_cycle_driver
 	done
 	MPIEXEC="$(MFEM_MPIEXEC)" MPIEXEC_NP="$(MFEM_MPIEXEC_NP)" tests/2d_inplane/finite_width_decks.sh
 
+# The Nitsche driver's [finite_width] table (the 2.5D note's Level 2 test,
+# elongated2p5d/; Chunhui Zhao, 2026-10-30): the deck refusals, three
+# accepted tables (c and beta in the log), and the term changing the
+# stations (tests/2d_inplane/nitsche_finite_width_decks.sh, the TPV205-2D
+# deck; the 3-D refusal runs when MESHES holds tpv2053d_1000m.msh).
+test-2d5-dyn-driver: seas_nitsche_dyn_driver
+	MPIEXEC="$(MFEM_MPIEXEC)" MPIEXEC_NP="$(MFEM_MPIEXEC_NP)" tests/2d_inplane/nitsche_finite_width_decks.sh
+
 2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
                 test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
                 test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
                 test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
-                test-handback-table test-sigma-floor test-2d5-width
+                test-handback-table test-sigma-floor test-2d5-width test-2d5-dyn-driver
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
         test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
         test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
-        test-handback-table test-sigma-floor test-2d5-width 2d-inplane-all
+        test-handback-table test-sigma-floor test-2d5-width test-2d5-dyn-driver 2d-inplane-all

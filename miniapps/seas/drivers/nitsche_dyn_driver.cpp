@@ -192,6 +192,20 @@
 // normal stress"), and two columns follow the state column: T (K) and p (Pa)
 // on the fault, averaged over the DG copies like the others; the fault CSV
 // dump gains T and p too.  Absent = every bit as before.
+//
+// 2.5D finite width (Chunhui Zhao, 2026-10-30; the Level 2 test of
+// /mnt/project-files/2d-inplane/nonplanar-literature/inplane-2p5d-derivation-rev8.pdf,
+// 2.5D against 3D on an elongated rupture): an optional [finite_width]
+// table with W_m (m) and calibration = "wa2020" (default; c = (1 - nu) pi
+// / 2) or "lehner" (c = 4 / pi), or c as a number, adds -beta u, beta = 4 c^2
+// mu / W^2, to the momentum balance (ElasticityDomainOperator::
+// SetFiniteWidth with u_pl = 0: one rupture from the prestressed state at
+// rest, during which the substrate does not move; cycle/finite_width.hpp is
+// the cycle's version with a moving substrate).  The step is cut by 1 /
+// sqrt(1 + beta dt^2 / (4 rho)) (the note's rule C6); Kelvin-Voigt damps K
+// alone (C3).  2-D meshes only; refused with LTS and with [diagnostics]
+// energy_balance (the energy terms carry no beta, C5).  Absent = every bit
+// as before.
 
 #include "mfem.hpp"
 #include "../domain/nitsche_wave_operator.hpp"
@@ -1566,7 +1580,61 @@ int main(int argc, char *argv[])
    MFEM_VERIFY(op.Orientation().GetReport().junction_edges == 0,
                "[fault_geometry] junction_policy = \"refuse\": the fault has "
                << op.Orientation().GetReport().junction_edges << " junction edges");
-   const real_t dt_cfl = ComputeMaxDt(op.Sample(), pmesh, p, cfl * Ceig);
+   // 2.5D finite width (header): beta / mu and the step's cut, before the
+   // first step (the dense and fused paths read K once)
+   real_t fw_dt_factor = 1.0;
+   if (const toml::value *t_fw = DeckTable(root, "finite_width"))
+   {
+      MFEM_VERIFY(t_fw->is_table(), "[finite_width] must be a table");
+      for (const auto &kv : t_fw->as_table())
+      {
+         MFEM_VERIFY(kv.first == "W_m" || kv.first == "calibration" || kv.first == "c",
+                     "[finite_width]: unknown key '" << kv.first << "' (W_m, calibration, c)");
+      }
+      MFEM_VERIFY(dim == 2, "[finite_width]: the 2.5D term is for 2-D map-view meshes; "
+                  "this mesh is " << dim << "-D");
+      MFEM_VERIFY(!lts_on, "[finite_width] with LTS: the LTS run integrates its own "
+                  "element matrices, without beta; use global stepping");
+      MFEM_VERIFY(!energy_on, "[finite_width] with [diagnostics] energy_balance: the "
+                  "energy terms carry no beta (the 2.5D note's rule C5)");
+      const real_t W = TomlReal(t_fw, "W_m", 0.0);
+      MFEM_VERIFY(std::isfinite(W) && W > 0.0, "[finite_width].W_m = " << W
+                  << " must be > 0 m");
+      MFEM_VERIFY(!(t_fw->contains("calibration") && t_fw->contains("c")), "[finite_width] "
+                  "takes calibration (a name) or c (a number), not both");
+      const real_t lam = cfg.material_fallback.lambda, mu = cfg.material_fallback.mu;
+      const real_t nu = lam / (2.0 * (lam + mu));
+      // the cycle's calibrations, buried faults only (cycle/cycle_config.hpp)
+      std::string cal = t_fw->contains("c") ? std::string("deck")
+                        : TomlStr(t_fw, "calibration", "wa2020");
+      real_t c = 0.0;
+      if (cal == "deck") { c = TomlReal(t_fw, "c", 0.0); }
+      else if (cal == "wa2020") { c = (1.0 - nu) * M_PI / 2.0; }
+      else if (cal == "lehner") { c = 4.0 / M_PI; }
+      else
+      {
+         MFEM_ABORT("[finite_width].calibration = \"" << cal << "\"; use \"wa2020\" (c = "
+                    "(1 - nu) pi / 2, buried) or \"lehner\" (c = 4 / pi, buried), or give c");
+      }
+      MFEM_VERIFY(std::isfinite(c) && c > 0.0, "[finite_width].c = " << c << " must be > 0");
+      const real_t beta_over_mu = 4.0 * c * c / (W * W);
+      Vector zero(op.Elasticity().GetFESpace().GetVSize());
+      zero = 0.0;
+      op.SetFiniteWidth(beta_over_mu, zero, nullptr);
+      const real_t beta = beta_over_mu * mu, rho = cfg.material_fallback.rho;
+      const real_t dt0 = ComputeMaxDt(op.Sample(), pmesh, p, cfl * Ceig);
+      fw_dt_factor = 1.0 / std::sqrt(1.0 + 0.25 * (beta / rho) * dt0 * dt0);
+      if (g_rank == 0)
+      {
+         std::cout << "  2.5D finite width ([finite_width]): W = " << W << " m, c = " << c
+                   << " (" << cal << "), beta = " << beta << " Pa/m^2 (isotropic, u_pl = 0), "
+                   << "decay length " << W / (2.0 * c) << " m, wave cutoff "
+                   << std::sqrt(beta / rho) / (2.0 * M_PI) << " Hz; the CFL step times (1 - "
+                   << std::scientific << std::setprecision(3) << 1.0 - fw_dt_factor
+                   << std::defaultfloat << std::setprecision(6) << ")\n";
+      }
+   }
+   const real_t dt_cfl = fw_dt_factor * ComputeMaxDt(op.Sample(), pmesh, p, cfl * Ceig);
    const real_t dt_gts = std::min(dt_cfl, cfg.time.dt_max);
    // the step of the fault (and of the outputs): the global step, or with LTS
    // the fault cluster's step dt0 2^c_F

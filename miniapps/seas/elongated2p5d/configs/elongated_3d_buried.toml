@@ -1,0 +1,152 @@
+# =====================================================================
+#  The 2.5D note's Level 2 test, the 3-D reference: a buried elongated
+#  vertical strike-slip rupture, L = 120 km by W = 15 km (L / W = 8), run
+#  through the Nitsche dynamic-rupture driver (seas_nitsche_dyn_driver).
+#
+#  The note: /mnt/project-files/2d-inplane/nonplanar-literature/
+#  inplane-2p5d-derivation-rev8.pdf, Section 7.2.  The map-view decks are
+#  elongated_2d_*.toml; the comparison is
+#  elongated2p5d/scripts/compare_2p5d_3d.py (README.md).
+#
+#  This deck is tpv205/configs/tpv205_nitsche.toml with:
+#   - the mesh elongated2p5d/mesh/elongated_3d_400m.msh: the fault y = 0,
+#     x in [-60, 60] km, z in [-7.5, 7.5] km, in a full space (no free
+#     surface: the note's buried case) cut to a 180 x 80 x 80 km box, all
+#     six sides absorbing (tag 105), no natural_attrs; the fault's edges
+#     are its strength barrier (the material is continuous outside it);
+#   - the TPV205 background (sigma_yy = -120 MPa, sigma_xy = 70 MPa) and
+#     the nucleation patch alone, |x|, |z| <= 1.5 km at 81.6 MPa, centred
+#     on the fault (its edges are mesh edges); no +-7.5 km patches;
+#   - p = 2, 40 s, as the map-view decks;
+#   - stations every 2.5 km along strike at 15 depths, z = -7 ... 7 km
+#     (elongated_3d_stations.csv), for the depth averages, and the fault
+#     CSV dumps of the job's --dump-every for the slip over the whole fault.
+#
+#  The same commit runs the map-view decks.  Its 3-D path is the one the
+#  branch keeps bit for bit (tests/2d_inplane/parity_3d.sh: the Nitsche
+#  driver's TPV205 and TPV104 runs).
+#  Vista jobs: elongated2p5d/jobs/vista_l2_build.sbatch, then
+#  elongated_3d_vista.sbatch (Chunhui Zhao's go for each job first).
+#
+#  Mesh (not committed: 128 MB; the Vista build job vista_l2_build.sbatch
+#  makes it with TACC gmsh and records its sha256):
+#    gmsh -3 elongated2p5d/mesh/elongated_3d.geo -format msh22 \
+#         -setnumber lc_fault 400 -o elongated2p5d/mesh/elongated_3d_400m.msh
+#
+#  Scope: Chunhui Zhao, 2026-10-30.
+# =====================================================================
+
+[meta]
+schema_version = 1
+law            = "slip_weakening"
+description    = "2.5D Level 2: buried elongated strike-slip rupture, L = 120 km by W = 15 km, in 3-D (the reference)."
+
+[problem]
+tag = "elongated_3d_buried"   # output file prefix
+
+# Material: homogeneous, rho = 2670, cs = 3464, cp = 6000 (as TPV205).
+[material_constant_fallback]
+lambda = 32043759360.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+[mesh]
+path  = "elongated2p5d/mesh/elongated_3d_400m.msh"
+order = 2
+
+[velocity]
+use_sidecar = false
+
+# Background prestress, global Cauchy tensor in the code frame (X along
+# strike, Y fault normal, Z up), TENSION POSITIVE: with nhat = (0, -1, 0)
+# the along-strike shear is +70 MPa and sigma_n = 120 MPa, as TPV205.
+[stress]
+kind        = "constant_tensor"
+sigma_xx_pa = 0.0
+sigma_yy_pa = -120.0e6
+sigma_zz_pa = 0.0
+sigma_xy_pa = 70.0e6
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+[[stress_region]]           # nucleation patch, |x|, |z| <= 1.5 km (y open)
+x_min_m     = -1500.0
+x_max_m     =  1500.0
+z_min_m     = -1500.0
+z_max_m     =  1500.0
+sigma_xx_pa = 0.0
+sigma_yy_pa = -120.0e6
+sigma_zz_pa = 0.0
+sigma_xy_pa = 81.6e6
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+[numerics]
+cfl            = 0.5        # fraction of C(p) (P3)
+penalty_factor = 1.0        # IP penalty scale (Nitsche driver only)
+# Kelvin-Voigt damping (Day et al. 2005 A8): beta_e = kv_eta (1/3) (h_e/p) / c_s,e, h_e = 6V/A
+kv_eta    = 0.1
+kv_scale  = "node"
+kv_length = "inscribed"
+
+[time]
+tfinal     = "40s"
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.05s"
+
+[output]
+output_dir             = "output_elongated_3d_buried"
+restart_prefix         = "cp"
+# No fault ParaView output (the Vista build of this branch has MFEM without
+# HDF5); the job's --dump-every writes the fault fields as CSV instead.
+paraview_enabled       = false
+paraview_fault         = "off"
+paraview_free_surface  = "off"
+
+# On-fault stations, snapped to the nearest fault node in 3-D (p = 2 on the
+# 400 m mesh: nodes about 200 m apart, so at most ~150 m away; 400 m also
+# lets the 1000 m smoke mesh through).
+[output.stations]
+file             = "elongated2p5d/stations/elongated_3d_stations.csv"
+snap_tolerance_m = 400.0
+
+# Linear slip weakening: mu = mu_s - (mu_s - mu_d) min(|slip|/d_c, 1).
+[friction.slip_weakening]
+mu_s_default     = 0.677
+mu_d_default     = 0.525
+d_c_default      = 0.40
+cohesion_default = 0.0
+
+[boundary]
+fault_attr      = 103
+natural_attrs   = []
+absorbing_attrs = [105]
+
+[fault_geometry]
+ref_normal        = [0.0, -1.0, 0.0]
+up                = [0.0,  0.0, 1.0]
+kind              = "vertical_strike_slip"
+orientation       = "propagated"
+pin_by            = "reference"
+tangent           = "pointwise"
+junction_policy   = "refuse"
+pin_min_margin    = 0.1
+
+[hypocenter]
+x_m                 = 0.0
+y_m                 = 0.0
+z_m                 = 0.0
+nucleation_radius_m = 1500.0
+
+[diagnostics]
+energy_balance = false
+
+[friction.prakash_clifton]
+v_star = 1.0      # m/s
+length = 0.01     # m

@@ -1,0 +1,157 @@
+# =====================================================================
+#  The 2.5D note's Level 2 test, map-view side: an elongated vertical
+#  strike-slip rupture with the 2.5D finite-width term, run through the
+#  Nitsche dynamic-rupture driver (seas_nitsche_dyn_driver).
+#
+#  The note: /mnt/project-files/2d-inplane/nonplanar-literature/
+#  inplane-2p5d-derivation-rev8.pdf, Section 7.2 ("2.5D vs 3D on an
+#  elongated strike-slip rupture": L / W = 6-10, W = 15 km, linear slip
+#  weakening, TPV205-like stresses on a homogeneous background, buried, both
+#  buried values of c).  The 3-D reference is elongated_3d_buried.toml; the
+#  comparison is elongated2p5d/scripts/compare_2p5d_3d.py (README.md).
+#
+#  This deck is tpv205/configs/tpv205_2d_nitsche.toml with:
+#   - the mesh elongated2p5d/mesh/elongated_2d_200m.msh: the fault y = 0,
+#     x in [-60, 60] km (L = 120 km, L / W = 8), in a 210 x 120 km box,
+#     all four sides absorbing (tag 105), no free surface;
+#   - a homogeneous background (sigma_yy = -120 MPa, sigma_xy = 70 MPa) and
+#     the nucleation patch alone, |x| <= 1.5 km at 81.6 MPa (above the
+#     static yield 0.677 x 120 = 81.24 MPa, so it nucleates at t = 0); no
+#     +-7.5 km patches;
+#   - [finite_width]: W = 15 km and c = pi / 2 = 1.571 (Weng & Ampuero's
+#     buried gamma = 1 / pi; for information), beta = 4 c^2 mu / W^2 =
+#     1405 Pa/m^2, decay length W / (2 c) = 4.77 km; u_pl = 0 (one rupture
+#     from rest, the substrate still); Kelvin-Voigt damps K alone, the CFL
+#     step is cut by 1 / sqrt(1 + beta dt^2 / (4 rho)) (rules C3, C6);
+#   - p = 2, 40 s (the rupture reaches the fault ends near 20 s; the
+#     plane-strain control's stopping phases need the rest);
+#   - stations every 2.5 km along strike (elongated_2d_stations.csv).
+#
+#  Variants (identical but for [finite_width], [problem] tag and the
+#  output directory): elongated_2d_2p5d_lehner.toml (c = 4 / pi),
+#  elongated_2d_2p5d_liang.toml (c = pi / 2: Weng & Ampuero 2019's buried
+#  gamma = 1 / pi, without (1 - nu), as Liang et al. 2022 quote it; for
+#  information) and
+#  elongated_2d_plane_strain.toml (no [finite_width]: the control).
+#
+#  Mesh (committed, sha256 5d74930b...; made from miniapps/seas, pythonenv):
+#    gmsh -2 elongated2p5d/mesh/elongated_2d.geo -format msh22 \
+#         -setnumber lc_fault 200 -o elongated2p5d/mesh/elongated_2d_200m.msh
+#
+#  Scope: Chunhui Zhao, 2026-10-30.
+# =====================================================================
+
+[meta]
+schema_version = 1
+law            = "slip_weakening"
+description    = "2.5D Level 2: elongated strike-slip rupture (L = 120 km), map view with the 2.5D term (W = 15 km, c = pi / 2, buried gamma = 1 / pi)."
+
+[problem]
+tag = "elongated_2d_liang"    # output file prefix
+
+# Material: homogeneous, rho = 2670, cs = 3464, cp = 6000 (as TPV205).
+[material_constant_fallback]
+lambda = 32043759360.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+[mesh]
+path  = "elongated2p5d/mesh/elongated_2d_200m.msh"
+order = 2
+
+[velocity]
+use_sidecar = false
+
+# Background prestress, global Cauchy tensor (x along strike, y fault
+# normal), TENSION POSITIVE: with nhat = (0, -1) the along-strike shear is
+# +70 MPa and sigma_n = 120 MPa, as TPV205.
+[stress]
+kind        = "constant_tensor"
+sigma_xx_pa = 0.0
+sigma_yy_pa = -120.0e6
+sigma_zz_pa = 0.0
+sigma_xy_pa = 70.0e6
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+[[stress_region]]           # nucleation patch, |x| <= 1.5 km (x only; y open)
+x_min_m     = -1500.0
+x_max_m     =  1500.0
+sigma_xx_pa = 0.0
+sigma_yy_pa = -120.0e6
+sigma_zz_pa = 0.0
+sigma_xy_pa = 81.6e6
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+# 2.5D finite width (the driver's header): rho u'' = div sigma - beta u.
+[finite_width]
+W_m         = 15.0e3
+c           = 1.5707963267948966   # pi / 2
+
+[numerics]
+cfl            = 0.5        # fraction of C(p), the 2-D column on triangles
+penalty_factor = 1.0
+# Kelvin-Voigt damping (Day et al. 2005 A8): beta_e = kv_eta (1/3) (h_e/p) / c_s,e, h_e = 4A/P in 2-D
+kv_eta    = 0.1
+kv_scale  = "node"
+kv_length = "inscribed"
+
+[time]
+tfinal     = "40s"
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.05s"
+
+[output]
+output_dir             = "output_elongated_2d_liang"
+restart_prefix         = "cp"
+paraview_enabled       = false
+paraview_fault         = "off"
+paraview_free_surface  = "off"
+
+# On-fault stations, snapped to the nearest fault node (p = 2 on the 200 m
+# mesh: nodes about 100 m apart).
+[output.stations]
+file             = "elongated2p5d/stations/elongated_2d_stations.csv"
+snap_tolerance_m = 100.0
+
+# Linear slip weakening: mu = mu_s - (mu_s - mu_d) min(|slip|/d_c, 1).
+[friction.slip_weakening]
+mu_s_default     = 0.677
+mu_d_default     = 0.525
+d_c_default      = 0.40
+cohesion_default = 0.0
+
+[boundary]
+fault_attr      = 103
+natural_attrs   = []
+absorbing_attrs = [105]
+
+[fault_geometry]
+ref_normal        = [0.0, -1.0]
+up                = [0.0,  0.0, 1.0]
+kind              = "vertical_strike_slip"
+orientation       = "propagated"
+pin_by            = "reference"
+tangent           = "pointwise"
+junction_policy   = "refuse"
+pin_min_margin    = 0.1
+
+[hypocenter]
+x_m                 = 0.0
+y_m                 = 0.0
+z_m                 = 0.0
+nucleation_radius_m = 1500.0
+
+[diagnostics]
+energy_balance = false
+
+[friction.prakash_clifton]
+v_star = 1.0      # m/s
+length = 0.01     # m
