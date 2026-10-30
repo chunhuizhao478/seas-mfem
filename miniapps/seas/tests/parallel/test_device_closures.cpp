@@ -42,7 +42,9 @@
 // Checks, per law and set:
 //   1. |V_device - V_host| <= tol |V_host| per component and point (NaN
 //      where the host gives NaN);
-//   2. |r_device - r_host| <= tol (|r_host| + a scale of the law's terms);
+//   2. |r_device - r_host| <= tol (|r_host| + s + T), T the size of the
+//      two terms whose difference is r at that point (StateRateTerms) and s
+//      a fixed floor per law;
 //   3. no RSStatus bit after which the host stops the run.
 // On the CPU (and the debug device) the kernels repeat the host arithmetic
 // and every difference must be exactly 0; on a GPU exp, log, pow, asinh and
@@ -127,6 +129,37 @@ bool Close(real_t a, real_t b, real_t tol, real_t scale)
 /// state rate at |V| = 0 is 0 * inf on the host too).
 bool Same(real_t a, real_t b) { return a == b || (std::isnan(a) && std::isnan(b)); }
 
+/// The size of the two terms whose difference is the state rate at (V, psi):
+/// (b V0 / Dc)(exp((f0 - psi) / b) + V / V0) for the aging law and
+/// (V / Dc)(|psi| + |psi_ss(V)|) for the slip law and strong rate
+/// weakening; 0 for slip weakening (or a term that is not finite).  Near
+/// steady state the rate is far smaller than its terms, so a last-bit
+/// difference of exp or log on a GPU is bounded by the terms, not the rate.
+real_t StateRateTerms(const DeviceClosure &c, const real_t *q, real_t V, real_t psi)
+{
+   real_t t = 0.0;
+   switch (c.law)
+   {
+      case DeviceClosureLaw::Aging:
+         t = (c.rs.aging_b * c.rs.aging_V0 / q[kDCDc])
+             * (std::exp((c.rs.aging_f0 - psi) / c.rs.aging_b) + V / c.rs.aging_V0);
+         break;
+      case DeviceClosureLaw::Slip:
+      {
+         V = (V < 1e-50) ? 1e-50 : V;
+         t = (V / q[kDCDc]) * (std::abs(psi) + std::abs(c.f0 + c.b * std::log(c.V0 / V)));
+         break;
+      }
+      case DeviceClosureLaw::SRW:
+         t = (V / q[kDCDc])
+             * (std::abs(psi)
+                + std::abs(DCPsiSSSRW(V, q[kDCV_w], q[kDCa], c.b, c.V0, c.f0, c.muW)));
+         break;
+      default: break;
+   }
+   return std::isfinite(t) ? t : 0.0;
+}
+
 void RunLaw(const std::string &name, const IFaultClosure &host, const Inputs &in, real_t tol,
             bool use_dev, real_t rate_scale)
 {
@@ -171,9 +204,16 @@ void RunLaw(const std::string &name, const IFaultClosure &host, const Inputs &in
          if (vs > 0.0) { errV = std::max(errV, std::abs(hV[2 * i + c] - Vh[c]) / vs); }
       }
       if (!std::isfinite(rh1) || !std::isfinite(rh2)) { nonfinite++; }
-      if (!Close(h1[i], rh1, tol, rate_scale)) { bad1++; }
-      if (!Close(h2[i], rh2, tol, rate_scale)) { bad2++; }
-      err1 = std::max(err1, std::abs(h1[i] - rh1) / (std::abs(rh1) + rate_scale));
+      const real_t sc1 = rate_scale
+                         + StateRateTerms(cl, qi, std::sqrt(Vh[0] * Vh[0] + Vh[1] * Vh[1]),
+                                          psi[i]);
+      const real_t sc2 = rate_scale + StateRateTerms(cl, qi, V2[i], psi2[i]);
+      if (!Close(h1[i], rh1, tol, sc1)) { bad1++; }
+      if (!Close(h2[i], rh2, tol, sc2)) { bad2++; }
+      if (std::isfinite(h1[i]) && std::isfinite(rh1))
+      {
+         err1 = std::max(err1, std::abs(h1[i] - rh1) / (std::abs(rh1) + sc1));
+      }
       if (Same(hV[2 * i], Vh[0]) && Same(hV[2 * i + 1], Vh[1]) && Same(h1[i], rh1)
           && Same(h2[i], rh2)) { same++; }
    }
