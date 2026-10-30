@@ -235,6 +235,7 @@ public:
       fault_->SetScecPsiInit(!cfg_.IsGold());
       // The tensor: tau_pre and sigma_n per DOF, from H1b's copies.
       if (tensor) { fault_->SetSAFSMode(true, &geom_->GetTauPre(), &geom_->sigma_n_per_dof()); }
+      fault_->SetSigmaNFloor(cfg_.sigma_n_floor);   // [cycle].sigma_n_floor_pa (0 = off)
 
       op_ = std::make_unique<PBP5SEASOp>(dom_.get(), fault_.get(), &mpi_);
       op_->SetElasticSigmaN(true);
@@ -299,6 +300,41 @@ public:
       }
    }
    FaultOp &Fault() { return *fault_; }
+
+   /// The opt-in sigma_n' floor ([cycle].sigma_n_floor_pa) since the last
+   /// ResetFloorCount, over all ranks: the most RHS evaluations with a floored
+   /// DOF on one rank, the most DOFs floored in one evaluation on one rank, and
+   /// the lowest true sigma_n' below the floor with its position (min_sigma =
+   /// inf: the floor never acted).  Collective.
+   struct FloorInfo
+   {
+      long calls = 0;
+      int max_nodes = 0;
+      double min_sigma = std::numeric_limits<double>::infinity();
+      double x[3] = {0.0, 0.0, 0.0};
+   };
+   FloorInfo FloorCount() const
+   {
+      const auto &f = fault_->GetFloorStats();
+      FloorInfo r;
+      long c = f.calls;
+      int m = f.max_nodes;
+      MPI_Allreduce(&c, &r.calls, 1, MPI_LONG, MPI_MAX, mpi_.GetComm());
+      MPI_Allreduce(&m, &r.max_nodes, 1, MPI_INT, MPI_MAX, mpi_.GetComm());
+      struct { double v; int rank; } in{static_cast<double>(f.min_sigma), mpi_.Rank()}, out;
+      MPI_Allreduce(&in, &out, 1, MPI_DOUBLE_INT, MPI_MINLOC, mpi_.GetComm());
+      r.min_sigma = out.v;
+      if (std::isfinite(out.v))
+      {
+         if (mpi_.Rank() == out.rank)
+         {
+            for (int k = 0; k < 3; k++) { r.x[k] = table_.coords(3 * f.min_node + k); }
+         }
+         MPI_Bcast(r.x, 3, MPI_DOUBLE, out.rank, mpi_.GetComm());
+      }
+      return r;
+   }
+   void ResetFloorCount() { fault_->ResetFloorStats(); }
    PBP5SEASOp &Operator() { return *op_; }
    real_t MaxV() const { return op_->GetMaxSlipRate(); }
    real_t Eta() const { return eta_; }

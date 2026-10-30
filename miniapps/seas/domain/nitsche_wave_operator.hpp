@@ -115,6 +115,15 @@
 // traction |X_tan + gamma V| the law balanced and |V^{n+1}| per owned DOF.
 // The recorded sigma_eff (LastSigmaEff, the step record) stays the bulk's.
 // Null (the default) leaves every bit unchanged.
+//
+// Opt-in normal-stress floor (NitscheFaultSetup::sigma_floor; Chunhui Zhao,
+// 2026-10-30: the UCERF 2-D map-view run, sigma_n' < 0 at trace bends):
+// sigma_floor > 0 gives the law max(sigma_law, sigma_floor) in box 9, after
+// Prakash-Clifton and the normal-stress hook, and replaces both sigma_min
+// range checks (a non-finite sigma_eff still aborts).  The recorded sigma_eff
+// and sigma* stay the true ones; FloorHits() and FlooredDOFs() say where the
+// floor acted.
+// 0 (the default) leaves every bit unchanged.
 
 #ifndef MFEM_SEAS_NITSCHE_WAVE_OPERATOR_HPP
 #define MFEM_SEAS_NITSCHE_WAVE_OPERATOR_HPP
@@ -170,6 +179,9 @@ struct NitscheFaultSetup
    /// Permitted range sigma_n_eff >= sigma_min ([pore_pressure]
    /// min_sigma_n_pa, default 0; spatial/code/spatial_friction.cpp:957-960).
    real_t sigma_min = 0.0;
+   /// > 0: the law sees max(sigma, sigma_floor) and the sigma_min checks are
+   /// off (the file comment); 0 = off.  Needs sigma_min = 0.
+   real_t sigma_floor = 0.0;
 };
 
 /// Per-step fault diagnostics (global over ranks).
@@ -530,6 +542,18 @@ public:
    }
    const IFaultClosure &Closure() const { return *closure_; }
    real_t SigmaMin() const { return sigma_min_; }
+   real_t SigmaFloor() const { return sigma_floor_; }
+   /// Where the floor (NitscheFaultSetup::sigma_floor) acted on this rank
+   /// since the last ResetFloorCount: DOF-steps the law saw the floor, and
+   /// distinct owned DOFs.
+   long FloorHits() const { return floor_hits_; }
+   int FlooredDOFs() const
+   { return static_cast<int>(std::count(floored_.begin(), floored_.end(), char(1))); }
+   void ResetFloorCount()
+   {
+      floor_hits_ = 0;
+      std::fill(floored_.begin(), floored_.end(), char(0));
+   }
    /// Global number of shared (cross-rank) fault faces, each counted once.
    int NumSharedFaultFacesGlobal() const { return n_shared_global_; }
    /// Fault-face penalty mean and relative spread, in local face order.
@@ -601,7 +625,13 @@ public:
       const real_t *n = &frame_own_(9 * j), *dv = &frame_own_(9 * j + 3),
                     *sv = &frame_own_(9 * j + 6);
       fault_frame::ToLocal(TS, 0.0, n, dv, sv, X[0], X[1], sigma_eff);
-      if (!(sigma_eff >= sigma_min_))
+      if (sigma_floor_ > 0.0)
+      {
+         MFEM_VERIFY(std::isfinite(sigma_eff), "NitscheWaveOperator: sigma_n_eff is not "
+                     "finite on rank " << Mpi::WorldRank() << ", owned fault DOF " << j
+                     << ", step " << steps_ << ": " << sigma_eff);
+      }
+      else if (!(sigma_eff >= sigma_min_))
       {
          MFEM_ABORT("NitscheWaveOperator: sigma_n_eff left its range on rank "
                     << Mpi::WorldRank() << ", owned fault DOF " << j
@@ -624,7 +654,7 @@ public:
          // normal-stress hook (SetNormalStressModifier), e.g. p(0) - p_ini
          const real_t red = nsm_->NormalStressReduction(j);
          sig_law -= red;
-         if (!(sig_law >= sigma_min_))
+         if (sigma_floor_ == 0.0 && !(sig_law >= sigma_min_))
          {
             MFEM_ABORT("NitscheWaveOperator: the normal stress the law sees left its "
                        "range on rank " << Mpi::WorldRank() << ", owned fault DOF " << j
@@ -633,6 +663,13 @@ public:
                        << ": " << sig_law + red << " less the modifier's " << red << " = "
                        << sig_law << " < sigma_min = " << sigma_min_);
          }
+      }
+      if (sigma_floor_ > 0.0 && !(sig_law >= sigma_floor_))
+      {
+         // the opt-in floor (file comment); count once per DOF and step
+         sig_law = sigma_floor_;
+         floor_hits_++;
+         floored_[j] = 1;
       }
       real_t Vl[2];
       const real_t gamma = ClosureGamma(j);
@@ -1417,9 +1454,16 @@ private:
                   "its temporal factor");
       closure_ = fs.closure;
       sigma_min_ = fs.sigma_min;
+      MFEM_VERIFY(std::isfinite(fs.sigma_floor) && fs.sigma_floor >= 0.0,
+                  "NitscheFaultSetup: sigma_floor = " << fs.sigma_floor << " (must be >= 0)");
+      MFEM_VERIFY(fs.sigma_floor == 0.0 || fs.sigma_min == 0.0,
+                  "NitscheFaultSetup: sigma_floor " << fs.sigma_floor << " with sigma_min "
+                  << fs.sigma_min << ": the floor replaces the range check; set one of them");
+      sigma_floor_ = fs.sigma_floor;
       nuc_temporal_ = fs.nucleation_temporal;
       nd_ = elast_->GetNumFaultDOFs();
       no_ = elast_->GetNumOwnedFaultDOFs();
+      floored_.assign(no_, char(0));
       nbf_ = elast_->GetNbfPerFace();
       const Array<int> &fint = elast_->GetFaultInteriorFaces();
       const Array<int> &fsh = elast_->GetFaultSharedFaces();
@@ -1592,6 +1636,9 @@ private:
    bool has_fault_ = false;
    const IFaultClosure *closure_ = nullptr;
    real_t sigma_min_ = 0.0;
+   real_t sigma_floor_ = 0.0;            ///< NitscheFaultSetup::sigma_floor
+   mutable long floor_hits_ = 0;         ///< DOF-steps at the floor
+   mutable std::vector<char> floored_;   ///< per owned DOF: the floor acted
    std::function<real_t(real_t)> nuc_temporal_;
    std::shared_ptr<const FaultFrameField> frames_;   ///< census + N-09 frames (phase A)
    int nd_ = 0, no_ = 0, nbf_ = 1, nloc_faces_ = 0, n_shared_global_ = 0;

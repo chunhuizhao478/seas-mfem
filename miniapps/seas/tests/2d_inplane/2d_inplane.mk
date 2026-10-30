@@ -22,6 +22,7 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-snapshots-volume    # [cycle.snapshots.volume] (2-D and 3-D)
 #   make -f tests/2d_inplane/2d_inplane.mk test-tensor-prestress    # [stress] constant_tensor in the cycle
 #   make -f tests/2d_inplane/2d_inplane.mk test-handback-table      # [cycle.output].handback_table
+#   make -f tests/2d_inplane/2d_inplane.mk test-sigma-floor         # [cycle].sigma_n_floor_pa
 #   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
 # The 3D parity set (every phase must leave it bit for bit unchanged) is the
 # script tests/2d_inplane/parity_3d.sh (see its header).  The tensor
@@ -586,14 +587,68 @@ test-handback-table: seas_fd_cycle_driver
 	 else printf '%s\n' "$$out" | tail -15; echo "  FAILED: refusal: exit $$rc"; exit 1; fi; \
 	 rm -rf $(HANDBACK_TMP)
 
+# The opt-in sigma_n' floor ([cycle].sigma_n_floor_pa; Chunhui Zhao,
+# 2026-10-30): K1 (the QD kernels) and D1 (the dynamic operator's CloseDOF,
+# p = 1, 2), then each refusal must exit non-zero with its message; then the
+# driver on the BP3-FD d60 deck (1 km mesh): each deck refusal, and a floor
+# of 1 MPa accepted and reported (3 QD steps).
+TEST_SIGMA_FLOOR_SRC = tests/2d_inplane/test_sigma_floor.cpp
+TEST_SIGMA_FLOOR_OBJ = $(TEST_SIGMA_FLOOR_SRC:.cpp=.o)
+$(TEST_SIGMA_FLOOR_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(INPLANE_HEADERS) $(NITSCHE_2D_HEADERS) \
+                              friction/device_rate_state.hpp $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_sigma_floor: $(TEST_SIGMA_FLOOR_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_SIGMA_FLOOR_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+SIGMA_FLOOR_REFUSALS = 1:NitscheFaultSetup: sigma_floor = -1|2:the floor replaces the range check|3:sigma_n_eff is not finite|4:sigma_n_eff left its range
+SIGMA_FLOOR_DECK = config/fd_cycle/bp3_fd_d60_thrust.toml
+SIGMA_FLOOR_TMP = $(or $(TMPDIR),/tmp)/seas_test_sigma_floor
+SIGMA_FLOOR_DECKS = zero:0.0:0.0:must be > 0 Pa|min:1.0e6:1.0e5:the floor replaces the dynamic regime|high:60.0e6:0.0:is above the prestress sigma_n
+test-sigma-floor: seas_test_sigma_floor seas_fd_cycle_driver
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_sigma_floor
+	@list='$(SIGMA_FLOOR_REFUSALS)'; set -f; IFS='|'; for r in $$list; do n=$${r%%:*}; msg=$${r#*:}; \
+	   out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_sigma_floor --refuse $$n 2>&1); rc=$$?; \
+	   if [ $$rc -ne 0 ] && printf '%s' "$$out" | grep -qF "$$msg"; then \
+	      echo "  PASSED: refusal $$n: exit $$rc, \"$$msg\""; \
+	   else printf '%s\n' "$$out" | tail -15; echo "  FAILED: refusal $$n: exit $$rc, \"$$msg\" not found"; exit 1; fi; \
+	done
+	@rm -rf $(SIGMA_FLOOR_TMP); mkdir -p $(SIGMA_FLOOR_TMP); \
+	 deck() { sed -e 's|^path  = "bp3/mesh/bp3_d60_25m.msh"$$|path  = "bp3/mesh/bp3_d60_1km.msh"|' \
+	              -e "s|^min_sigma_n_pa    = 0.0$$|min_sigma_n_pa    = $$3|" \
+	              -e "/^penalty_factor  /a sigma_n_floor_pa     = $$2" $(SIGMA_FLOOR_DECK) > $$1; \
+	          grep -q '^path  = "bp3/mesh/bp3_d60_1km.msh"$$' $$1 && grep -q "^sigma_n_floor_pa     = $$2$$" $$1 \
+	          && grep -q "^min_sigma_n_pa    = $$3$$" $$1 || { echo "  FAILED: the deck lines moved"; exit 1; }; }; \
+	 n=0; list='$(SIGMA_FLOOR_DECKS)'; set -f; IFS='|'; for r in $$list; do IFS=':'; set -- $$r; IFS='|'; \
+	    deck $(SIGMA_FLOOR_TMP)/$$1.toml $$2 $$3; n=$$((n + 1)); \
+	    out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_fd_cycle_driver -d $(SIGMA_FLOOR_TMP)/$$1.toml \
+	       -o $(SIGMA_FLOOR_TMP)/$$1_out 2>&1); rc=$$?; \
+	    if [ $$rc -ne 0 ] && printf '%s' "$$out" | grep -qF "$$4"; then \
+	       echo "  PASSED: seas_fd_cycle_driver, floor $$2, min_sigma_n_pa $$3: exit $$rc, \"$$4\""; \
+	    else printf '%s\n' "$$out" | tail -15; echo "  FAILED: seas_fd_cycle_driver $$1: exit $$rc"; exit 1; fi; \
+	 done; IFS=' '; \
+	 [ $$n -eq 3 ] || { echo "  FAILED: $$n of the 3 deck refusals ran"; exit 1; }; \
+	 deck $(SIGMA_FLOOR_TMP)/ok.toml 1.0e6 0.0; \
+	 out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_fd_cycle_driver -d $(SIGMA_FLOOR_TMP)/ok.toml \
+	    -o $(SIGMA_FLOOR_TMP)/ok_out --max-steps 3 2>&1); rc=$$?; \
+	 if [ $$rc -eq 0 ] && printf '%s' "$$out" | grep -qF "sigma_n' floor: 1 MPa in the friction law of both regimes" \
+	    && printf '%s' "$$out" | grep -qF "sigma_n' floor in the QD regime since the last switch: never acted"; then \
+	    echo "  PASSED: seas_fd_cycle_driver, floor 1 MPa: accepted, reported, never acted in 3 QD steps"; \
+	 else printf '%s\n' "$$out" | tail -15; echo "  FAILED: seas_fd_cycle_driver ok: exit $$rc"; exit 1; fi; \
+	 rm -rf $(SIGMA_FLOOR_TMP)
+
 2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
                 test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
                 test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
                 test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
-                test-handback-table
+                test-handback-table test-sigma-floor
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
         test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
         test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
-        test-handback-table 2d-inplane-all
+        test-handback-table test-sigma-floor 2d-inplane-all

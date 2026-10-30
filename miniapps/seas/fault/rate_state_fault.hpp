@@ -262,6 +262,35 @@ public:
       }
    }
 
+   /// Opt-in normal-stress floor (Chunhui Zhao, 2026-10-30: the UCERF 2-D
+   /// map-view run, sigma_n' < 0 at trace bends).  floor > 0: the BP5 vector
+   /// path's law sees max(sigma_n_eff, floor) at every node (ComputeRHS,
+   /// RecomputeSlipRate, their kernels and host reruns); the input checks,
+   /// the [FRIC-GUARD] lines and every output keep the true sigma_n_eff.
+   /// 0 (the default) is off: every bit unchanged.
+   void SetSigmaNFloor(real_t floor)
+   {
+      MFEM_VERIFY(SlipComponents == 2 || floor == 0.0,
+                  "SetSigmaNFloor: the BP5 vector path only");
+      MFEM_VERIFY(std::isfinite(floor) && floor >= 0.0,
+                  "SetSigmaNFloor: floor = " << floor << " Pa (must be >= 0)");
+      sigma_floor_ = floor;
+   }
+   real_t SigmaNFloor() const { return sigma_floor_; }
+
+   /// Where the floor acted on this rank since the last ResetFloorStats:
+   /// ComputeRHS calls with a floored node, the most nodes floored in one
+   /// call, and the lowest true sigma_n_eff below the floor with its node.
+   struct FloorStats
+   {
+      long calls = 0;
+      int max_nodes = 0;
+      real_t min_sigma = std::numeric_limits<real_t>::infinity();
+      int min_node = -1;
+   };
+   const FloorStats &GetFloorStats() const { return floor_stats_; }
+   void ResetFloorStats() const { floor_stats_ = FloorStats(); }
+
    /// Whether SAFS mode is currently active.
    bool IsSAFSMode() const { return safs_mode_; }
 
@@ -552,7 +581,8 @@ public:
                        FaultInputs_(traction, state, normal_traction),
                        Dc_values_, rate, slip_rate_, rs_workspace_);
          V_max_ = res.first;
-         if (res.second != 0)
+         if (res.second & kRSSigmaNFloored) { CountFloored_(normal_traction); }
+         if ((res.second & ~kRSSigmaNFloored) != 0)
          {
             ReportRHSStatus_(res.second, traction, state, normal_traction);
          }
@@ -897,7 +927,7 @@ public:
             RSFaultSlipRate(num_nodes_, use_dev, DeviceParams_().V0,
                             FaultInputs_(traction, state, normal_traction),
                             V_out, rs_workspace_);
-         if (status != 0)
+         if ((status & ~kRSSigmaNFloored) != 0)
          {
             // A kernel cannot print: the host loop reruns on the same
             // inputs, into scratch, for today's [FRIC-RESID] and
@@ -1192,7 +1222,33 @@ private:
       in.sigma_n = sigma_n_bp5_;
       in.a = &a_values_;
       in.eta = &eta_values_;
+      in.sigma_floor = sigma_floor_;
       return in;
+   }
+
+   /// SetSigmaNFloor: a ComputeRHS kernel flagged kRSSigmaNFloored; count
+   /// the nodes below the floor and keep the lowest true sigma_n_eff.
+   void CountFloored_(const Vector *normal_traction) const
+   {
+      if (normal_traction) { normal_traction->HostRead(); }
+      HostReadParams_();
+      int n = 0;
+      for (int i = 0; i < num_nodes_; i++)
+      {
+         const real_t sigma_n_pre = SigmaNAt_(i);
+         const real_t s = normal_traction ? sigma_n_pre + (*normal_traction)(i) : sigma_n_pre;
+         if (s < sigma_floor_)
+         {
+            n++;
+            if (s < floor_stats_.min_sigma)
+            {
+               floor_stats_.min_sigma = s;
+               floor_stats_.min_node = i;
+            }
+         }
+      }
+      floor_stats_.calls++;
+      floor_stats_.max_nodes = std::max(floor_stats_.max_nodes, n);
    }
 
    /// GPU plan G4: before a host loop, the host copies of the per-node
@@ -1293,6 +1349,9 @@ private:
                }
             }
 
+            // SetSigmaNFloor: the law sees the floor, as in the kernel
+            if (sigma_floor_ > 0.0 && sigma_n_eff < sigma_floor_) { sigma_n_eff = sigma_floor_; }
+
             int dbg_rank = mpi_ctx_ ? mpi_ctx_->Rank() : 0;
             real_t dbg_x = geom_ ? geom_->GetCoordsX2()(i) : 0.0;
             real_t dbg_z = geom_ ? geom_->GetCoordsX3()(i) : 0.0;
@@ -1358,6 +1417,8 @@ private:
             {
                sigma_n_eff = sigma_n_pre + (*normal_traction)(i);
             }
+            // SetSigmaNFloor: the law sees the floor, as in the kernel
+            if (sigma_floor_ > 0.0 && sigma_n_eff < sigma_floor_) { sigma_n_eff = sigma_floor_; }
 
             real_t V_vec[2];
             dr_friction_->SolveSlipRateVectorPsi(
@@ -1366,6 +1427,10 @@ private:
             V_out(2*i+1) = V_vec[1];
       }
    }
+
+   /// SetSigmaNFloor (0 = off) and where it acted.
+   real_t sigma_floor_ = 0.0;
+   mutable FloorStats floor_stats_;
 
    /// GPU plan G4: the aging law in psi form behind evolution_, or null.
    /// The BP5 fault kernels evaluate this law only.

@@ -187,6 +187,7 @@ public:
          for (int i = 0; i < 3; i++) { fs.up[i] = fc.up[i]; }
       }
       fs.sigma_min = dc.sigma_min;
+      fs.sigma_floor = cfg.sigma_n_floor;   // [cycle].sigma_n_floor_pa (0 = off)
       // The prestress arrives through H2 after setup; the projection sees 0.
       fs.prestress = [](const real_t[3], real_t sig[9])
       { for (int i = 0; i < 9; i++) { sig[i] = 0.0; } };
@@ -305,6 +306,7 @@ public:
                   << W_->GetTime() << ", not 0 (the loads would read t_s + clock)");
       W_->SetFaultState(d, V, psi);
       if (W_->HasPrakashClifton()) { W_->SetPrakashCliftonState(sigma_n); }
+      W_->ResetFloorCount();
       if (tags_.dirichlet > 0)
       {
          // Plan 11.2: the walls' static reaction at t_s, frozen for the phase
@@ -549,6 +551,17 @@ public:
       s.min_sigma_pc = r.min_sigma_pc;
       s.max_sigma_pc = r.max_sigma_pc;
       return s;
+   }
+
+   /// The opt-in sigma_n' floor ([cycle].sigma_n_floor_pa) since Enter, over
+   /// all ranks: the DOF-steps at which the law saw the floor and the distinct
+   /// DOFs.  Collective.
+   void FloorCount(long &hits, long &dofs) const
+   {
+      long r[2] = {W_->FloorHits(), static_cast<long>(W_->FlooredDOFs())};
+      MPI_Allreduce(MPI_IN_PLACE, r, 2, MPI_LONG, MPI_SUM, pmesh_.GetComm());
+      hits = r[0];
+      dofs = r[1];
    }
 
    /// Owned fault DOFs: positions (3 N), |V| (N), slip as kernel pairs (2 N),

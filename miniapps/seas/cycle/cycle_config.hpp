@@ -46,6 +46,16 @@
 //   plate_rate           Vp of the far-field and creep loading     [required]
 //   penalty_factor       IP penalty scale of BOTH regimes' K (one value,
 //                        so the two stiffness matrices agree, plan 6.1) [1.0]
+//   sigma_n_floor_pa     opt-in floor of the normal stress the friction law
+//                        sees, in BOTH regimes [absent = off] (Chunhui Zhao,
+//                        2026-10-30: the UCERF 2-D map-view run, sigma_n' < 0
+//                        at trace bends).  > 0 Pa: the law uses max(sigma_n',
+//                        floor); outputs keep the true sigma_n'; the dynamic
+//                        regime's range check on [pore_pressure]
+//                        min_sigma_n_pa is off (min_sigma_n_pa must be 0), and
+//                        the prestress sigma_n' must be >= the floor at every
+//                        fault DOF (the driver refuses otherwise).  A
+//                        regularization, not fault opening.
 //   [cycle.qd]      solver ("mumps" | "mumps_blr"), blr_tol,
 //                   petsc_options (PETSc TS options file; it must pick an RK
 //                   tableau with the FSAL property, see qd_phase.hpp),
@@ -467,6 +477,7 @@ struct CycleConfig
    real_t mesh_scale = 1.0;
    real_t plate_rate = 0.0;   ///< Vp [m/s] of the Dirichlet loading
    real_t penalty_factor = 1.0;   ///< IP penalty scale of both regimes
+   real_t sigma_n_floor = 0.0;    ///< [cycle].sigma_n_floor_pa [Pa]; 0 = off
 
    QDConfig qd;
    SwitchConfig switch_cfg;
@@ -797,7 +808,8 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
                   "\"constant_tensor\": the tensor gives sigma_n at every fault DOF");
    }
    OnlyKeys(cy, "cycle", {"ic", "switching", "qd_radiation_damping", "mesh_scale",
-                          "plate_rate", "penalty_factor", "qd", "switch", "probe",
+                          "plate_rate", "penalty_factor", "sigma_n_floor_pa", "qd", "switch",
+                          "probe",
                           "prestress", "fields", "output", "checkpoint", "snapshots",
                           "benchmark", "lts", "loading", "absorbing"});
    c.ic = Str(cy, "cycle", "ic", "", true);
@@ -820,6 +832,13 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
    MFEM_VERIFY(c.plate_rate > 0.0, "[cycle].plate_rate must be > 0");
    c.penalty_factor = Real(cy, "cycle", "penalty_factor", c.penalty_factor);
    MFEM_VERIFY(c.penalty_factor > 0.0, "[cycle].penalty_factor must be > 0");
+   if (cy.contains("sigma_n_floor_pa"))
+   {
+      c.sigma_n_floor = Real(cy, "cycle", "sigma_n_floor_pa", 0.0);
+      MFEM_VERIFY(std::isfinite(c.sigma_n_floor) && c.sigma_n_floor > 0.0,
+                  "[cycle].sigma_n_floor_pa = " << c.sigma_n_floor << " must be > 0 Pa "
+                  "(leave it out for no floor)");
+   }
 
    if (cy.contains("qd"))
    {
@@ -1274,6 +1293,10 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
          }
       }
       d.sigma_min = s.stress.pore_pressure.min_sigma_n_pa;
+      MFEM_VERIFY(c.sigma_n_floor == 0.0 || d.sigma_min == 0.0,
+                  "[cycle].sigma_n_floor_pa with [pore_pressure].min_sigma_n_pa = "
+                  << d.sigma_min << ": the floor replaces the dynamic regime's range check "
+                  "on min_sigma_n_pa; set min_sigma_n_pa = 0");
    }
    // ---- [cycle.loading] (after [fault_geometry]: m defaults to ref_normal) ----
    if (cy.contains("loading"))

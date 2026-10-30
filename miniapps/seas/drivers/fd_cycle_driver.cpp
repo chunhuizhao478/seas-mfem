@@ -310,6 +310,29 @@ void WriteHandbackTable(const MPIContext &mpi, const cycle::CycleConfig &cfg,
    std::cout << s.str() << std::flush;
 }
 
+/// [cycle].sigma_n_floor_pa: where the floor acted in the QD regime since the
+/// last call, printed on root; the count starts again.  Collective.
+void PrintQDFloor(const MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::QDPhase &qd,
+                  const std::string &when)
+{
+   if (cfg.sigma_n_floor <= 0.0) { return; }
+   const cycle::QDPhase::FloorInfo f = qd.FloorCount();
+   qd.ResetFloorCount();
+   if (!mpi.IsRoot()) { return; }
+   // its own stream: std::cout's precision stays as the lines after it expect
+   std::ostringstream s;
+   s << std::setprecision(6) << "  sigma_n' floor in the QD regime " << when << ": ";
+   if (f.calls == 0) { s << "never acted\n"; }
+   else
+   {
+      s << "acted in " << f.calls << " RHS evaluations (the most on one rank), up to "
+        << f.max_nodes << " DOFs at once on one rank; lowest true sigma_n' "
+        << f.min_sigma / 1e6 << " MPa at (" << f.x[0] / 1e3 << ", " << f.x[1] / 1e3
+        << ", " << f.x[2] / 1e3 << ") km\n";
+   }
+   std::cout << s.str();
+}
+
 /// The dynamic regime's settings, once per run (main builds one DynPhase and
 /// every dynamic phase re-enters it).
 void PrintDynamicSetup(const MPIContext &mpi, const cycle::CycleConfig &cfg,
@@ -494,6 +517,7 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
       u = &dyn.U();
       v = &dyn.Ud();
    };
+   PrintQDFloor(mpi, cfg, qd, "before dynamic phase " + std::to_string(phase));
    if (root)
    {
       if (t == 0.0)
@@ -575,6 +599,8 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
       const double loop_s = MPI_Wtime() - wall0;
       const real_t step_avg = dyn.Steps() > 0 ? step_s / dyn.Steps() : 0.0;
       const real_t step_max = mpi.GlobalMax(step_avg);
+      long floor_hits = 0, floor_dofs = 0;
+      if (cfg.sigma_n_floor > 0.0) { dyn.FloorCount(floor_hits, floor_dofs); }
       if (root)
       {
          std::cout << std::setprecision(6) << "\n=== fd_cycle dynamic phase " << phase
@@ -596,6 +622,11 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
          {
             std::cout << "; sigma_PC range: [" << worst.min_sigma_pc / 1e6 << ", "
                       << worst.max_sigma_pc / 1e6 << "] MPa";
+         }
+         if (cfg.sigma_n_floor > 0.0)
+         {
+            std::cout << "\n  sigma_n' floor " << cfg.sigma_n_floor / 1e6 << " MPa: the law saw it "
+                      << "at " << floor_hits << " DOF-steps on " << floor_dofs << " DOFs";
          }
          std::cout << "\n  time per dynamic step: " << step_avg << " s (rank 0), " << step_max
                    << " s (slowest rank), on " << mpi.Size() << " ranks; loop with output "
@@ -996,6 +1027,23 @@ int main(int argc, char *argv[])
          }
       }
       else { pre = cycle::BuildPrestress(par, pcfg); }
+      if (cfg.sigma_n_floor > 0.0)
+      {
+         // [cycle].sigma_n_floor_pa must not act at t = 0, where psi0 comes
+         // from the true sigma_n'
+         real_t smin = std::numeric_limits<real_t>::max();
+         for (int i = 0; i < pre.sigma0.Size(); i++) { smin = std::min(smin, pre.sigma0(i)); }
+         smin = -mpi.GlobalMax(-smin);
+         MFEM_VERIFY(smin >= cfg.sigma_n_floor, "[cycle].sigma_n_floor_pa = "
+                     << cfg.sigma_n_floor << " Pa is above the prestress sigma_n' (lowest "
+                     << smin << " Pa): the floor would act at t = 0");
+         if (root)
+         {
+            std::cout << "  sigma_n' floor: " << cfg.sigma_n_floor / 1e6 << " MPa in the "
+                      << "friction law of both regimes ([cycle].sigma_n_floor_pa); the "
+                      << "prestress sigma_n' is >= " << smin / 1e6 << " MPa\n";
+         }
+      }
       qd.Setup(par, pre);
 
       // psi0 of the kernel against BuildPrestress's (a check value).
@@ -1331,6 +1379,7 @@ int main(int argc, char *argv[])
          out->Flush();
          if (bench) { bench->Flush(); }
          qd.Operator().PrintQDGreenCheckSummary(std::cout);
+         PrintQDFloor(mpi, cfg, qd, "since the last switch");
          if (root)
          {
             // rc 7 (the guard) and 3 (a non-finite balance) stop at the switch back.
