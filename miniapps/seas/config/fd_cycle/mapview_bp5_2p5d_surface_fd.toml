@@ -1,0 +1,319 @@
+# mapview_bp5_2p5d_surface_fd.toml — the 2.5D note's Level 3 test, the
+# surface-breaking bracket: mapview_bp5_2p5d_fd.toml with the 2.5D width and
+# factor of a fault that reaches the free surface, as the gold's ruptures do
+# (seas_fd_cycle_driver).  Chunhui Zhao, 2026-10-30 ("do [1] and [2]
+# together": the trust checks of
+# /mnt/project-files/2d-inplane/nonplanar-literature/
+# inplane-2p5d-derivation-rev8.pdf, Section 7.3: "a map-view 2.5D version of
+# SEAS BP5 ... with loading through the substrate at the BP5 plate rate";
+# compare recurrence, slip per event, moment, rupture extent and the
+# interseismic stressing rate, within about 10-20%).
+#
+# Reference: the fully-dynamic-cycle gold
+# bp5/benchmark_data/golden_fd_vista_576r_p2_1000m (commit 3926e9c8, p = 2,
+# 1800 yr, 7 events, recurrence 291.6 yr, catalog avg slip 5.32 m; at the
+# fault centre, depth 10 km: stress drop 14.0 MPa, interseismic stressing
+# rate 49 kPa/yr, event slip 9.1 m).
+#
+# Run from miniapps/seas (a long run: from a pushed commit):
+#   mpirun -np N ./seas_fd_cycle_driver --deck config/fd_cycle/mapview_bp5_2p5d_surface_fd.toml
+#
+# Layout (mapview_bp5/mesh/mapview_bp5.geo): the BP5 fault plane seen from
+# above, a straight fault y = 0 across the whole box x in [-100, 100] km,
+# y in [-60, 60] km; rate and state for |x| <= 50 km (BP5's l_f = 100 km),
+# beyond it the plane slips at the plate rate (BP5's prescribed slip
+# outside the rate-and-state region) out to the sides, so no fault tip sits
+# in the medium.  [fault_geometry] as mapview_rs_fd.toml: n = (0, -1),
+# up = [0, 0, 1], the slip in the kernel's strike slot, right lateral.
+#
+# Friction along strike: BP5's values in the velocity-weakening depths
+# (4-16 km), i.e. the depth average over the core: a = 0.004 for
+# |x| <= 30 km rising linearly to 0.04 at 32 km (BP5 eq. 14), 0.04 to the
+# creep at 50 km; b, Dc, sigma_n, V_0, f_0 BP5's; Dc = 0.13 m and
+# V_init = 0.03 m/s in the nucleation patch x in [-30, -18] km (BP5's patch
+# spans the core's whole depth), so the first event starts at t = 0 as in
+# the gold.  500 m elements at p = 1: the process zone
+# mu Dc / (b sigma_n) = 6.0 km is 12 elements.
+#
+# 2.5D ([cycle.finite_width]): the gold's ruptures reach the free surface
+# (7.5 m of slip there at the centre, 9.1 m at 6-10 km depth), and its
+# shallow velocity-strengthening layer stays nearly locked between events
+# (1.6 m of the 9.2 m plate motion at the surface).  This bracket takes the
+# fault as surface breaking and locked from the surface to the base of the
+# velocity-weakening core: W = 16 km, with c the "wa2020" value of the
+# mirror image (a surface-breaking fault of width W slips as a buried one of
+# width 2 W, so c = (1 - nu) pi / 2 / 2 = (1 - nu) pi / 4 = 0.589; given as a
+# number, the code's calibration names being the buried ones): beta =
+# 4 c^2 mu / W^2 = 174 Pa/m^2, static decay length W / (2 c) = 13.6 km;
+# substrate "loading_plane", which loads the locked fault at
+# c mu Vp / W = 37 kPa/yr against the gold's 49 kPa/yr at the centre and
+# the buried bracket's 99 kPa/yr (mapview_bp5_2p5d_fd.toml: W = 12 km, the
+# note's "about 60 x 12 km", "wa2020").
+#
+# The 2.5D stiffness check (the UCERF 2.5D lesson): the smallest 2.5D
+# stiffness c mu / W = 1.18 MPa/m is below k_c = sigma_n (b - a) / Dc =
+# 4.64 MPa/m, so the core can nucleate.  L_RA = (pi / 2) mu / (1 - nu) Dc b /
+# (sigma_n (b - a)^2) = 16.7 km, L_RA / W = 1.04 (Liang et al. 2022 see
+# partial ruptures as this ratio grows past about 1).
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "Map-view SEAS BP5 with the 2.5D term (W = 16 km, surface-breaking c = (1 - nu) pi / 4, substrate at the plate rate), switched QD and dynamic regimes."
+
+# BP5: rho = 2670 kg/m^3, cs = 3.464 km/s, nu = 0.25 (lambda = mu).
+[material_constant_fallback]
+lambda = 32038120320.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+# 500 m on the rate-and-state segment, in m.  Tags: 3 the rate-and-state
+# segment, 5 the creep segments and the four sides; no tag 1.
+[mesh]
+path  = "mapview_bp5/mesh/mapview_bp5_500m.msh"
+order = 1
+
+[velocity]
+use_sidecar = false
+
+# The shear prestress is BuildPrestress's; only sigma_n is read.
+[stress]
+kind          = "fault_local_prestress"
+tau_strike_pa = 0.0
+tau_dip_pa    = 0.0
+sigma_n_pa    = 25.0e6
+
+# The dynamic regime's numerics, those of the BP3-FD and BP5-FD decks:
+# dt = cfl C(p) h_min / (p^2 c_p), cut by 1 / sqrt(1 + beta dt^2 / (4 rho))
+# for the 2.5D term; Kelvin-Voigt in every element on K alone,
+# beta_e = kv_eta (1/3) (h_e / p) / c_s with h_e = 4 A / P.
+[numerics]
+cfl       = 0.5
+kv_eta    = 0.1
+kv_scale  = "node"
+kv_length = "inscribed"
+
+# 1800 yr (Julian), as the gold.
+[time]
+tfinal     = 5.680368e10
+dt_initial = 0.01
+
+[output]
+output_dir = "."
+
+[boundary]
+fault_attr    = 3
+natural_attrs = [1]
+
+[fault_geometry]
+ref_normal      = [0.0, -1.0]
+up              = [0.0, 0.0, 1.0]
+kind            = "vertical_strike_slip"
+orientation     = "propagated"
+pin_by          = "reference"
+tangent         = "pointwise"
+junction_policy = "refuse"
+pin_min_margin  = 0.1
+
+# BP5's scalars; a, Dc and V_init come from [cycle.fields].
+[friction.rate_state]
+a_default       = 0.004
+b_default       = 0.03
+Dc_default      = 0.14
+V_0_default     = 1.0e-6
+f_0_default     = 0.6
+V_init_default  = 1.0e-9
+sigma_n_default = 25.0e6
+state_evolution = "aging_law"
+eta             = "auto"         # 0.5 sqrt(mu rho) = mu / (2 cs); QD regime only
+
+# BP5's initial condition (the gold's): psi0 = f0 + b ln(V0 / V_p),
+# tau0 = sigma_n a asinh(V_init / (2 V0) exp(psi0 / a)) + eta V_init.
+[cycle]
+ic                   = "scec_fd"
+switching            = true
+qd_radiation_damping = true
+mesh_scale           = 1.0
+plate_rate           = 1.0e-9
+penalty_factor       = 1.0       # both regimes' K
+
+# 2.5D: W = 16 km, c = (1 - nu) pi / 4 (nu = 0.25; surface breaking, the
+# mirror image of "wa2020"), the substrate moving with the plates on the two
+# sides of [cycle.loading]'s plane.
+[cycle.finite_width]
+W_m       = 16.0e3
+c         = 0.5890486225480862
+substrate = "loading_plane"
+
+# The BP5-FD switch.
+[cycle.switch]
+V_on               = 1.0e-2
+V_off              = 1.0e-3
+T_dwell            = 10.0
+T_min              = 0.0
+T_max              = 1200.0
+max_dynamic_phases = 0
+
+# Every outer face absorbs in the dynamic regime: the four sides are
+# Dirichlet faces, so they become walls with the static reaction frozen at
+# each switch (hook H3) plus the absorber.  The creep segments are interior
+# faces and keep their prescribed jump.
+[cycle.absorbing]
+faces = "all"
+
+# The gold's time stepping (rk 5dp at atol 1e-8); the stages through the
+# stage operators and the dense discrete Green's function.
+[cycle.qd]
+solver        = "mumps"
+petsc_options = "tests/verification/petsc_ts_rk5dp_atol1e-8.cfg"
+ts_atol       = 1.0e-8
+ts_rtol       = 1.0e-50
+operators     = "matrix"
+
+# Dense G: N_f = 201 at p = 1.  Every 10000 stages the solve path runs too
+# and the largest difference is reported at the end.
+[cycle.qd.green]
+check_every = 10000
+
+[cycle.prestress]
+V_background = 1.0e-9            # psi0 = f0 + b ln(V0 / V_p)
+eta_V_init   = true              # tau0 += eta |V_init|: the patch starts at V_i
+
+# The plate motion: the half y > 0 moves by +(V_p t / 2) x, the other by the
+# opposite; the creep segments (on y = 0, inside the band) slip V_p t.  Band
+# 1 m: the creep vertices lie on y = 0, and the sides' face points, all off
+# y = 0, keep the far-field value +-(V_p t / 2) x.
+[cycle.loading]
+kind         = "plate"
+plane_point  = [0.0, 0.0]
+plane_normal = [0.0, 1.0]
+slip_dir     = [1.0, 0.0]
+band         = 1.0
+
+[cycle.fields]
+V_init_dip = 0.0
+
+# a: a0 = 0.004 for |x| <= 30 km, rising linearly to 0.04 at 32 km (BP5
+# eq. 14 along strike).
+[cycle.fields.a]
+center  = [0.0, 0.0]
+axis1   = [1.0, 0.0]
+half1   = 30.0e3
+taper   = 2.0e3
+inside  = 0.004
+outside = 0.04
+
+# Dc: 0.13 m in the nucleation patch x in [-30, -18] km, 0.14 m elsewhere;
+# edges included within 1 mm (as the gold).
+[cycle.fields.Dc]
+center  = [-24.0e3, 0.0]
+axis1   = [1.0, 0.0]
+half1   = 6.0e3
+taper   = 0.0
+eps     = 1.0e-3
+inside  = 0.13
+outside = 0.14
+
+# V_init: 0.03 m/s in the nucleation patch (BP5's V_i), V_p elsewhere.
+[cycle.fields.V_init]
+center  = [-24.0e3, 0.0]
+axis1   = [1.0, 0.0]
+half1   = 6.0e3
+taper   = 0.0
+eps     = 1.0e-3
+inside  = 0.03
+outside = 1.0e-9
+
+# The gold's cadence: 0.1 s rows while max V > 1e-3 m/s, else 0.1 yr.
+# Plane coordinates on the fault: x2 = x (along strike), x3 = y.
+[cycle.output]
+prefix          = "mapview_bp5_2p5d_surface"
+fast_V          = 1.0e-3
+dt_fast         = 0.1
+dt_slow         = 3155760.0
+event_V         = 1.0e-3
+event_dwell     = 10.0
+plane_origin    = [0.0, 0.0]
+plane_axis1     = [1.0, 0.0]
+plane_axis2     = [0.0, 1.0]
+station_sigma_n = true
+
+# On-fault stations at the gold's along-strike positions (its dp+10 and
+# dp+00 stations), plus the velocity-strengthening ends at +-45 km.
+[[cycle.output.station]]
+name = "fltst_strk-45"
+x    = [-45000.0, 0.0]
+[[cycle.output.station]]
+name = "fltst_strk-36"
+x    = [-36000.0, 0.0]
+[[cycle.output.station]]
+name = "fltst_strk-24"
+x    = [-24000.0, 0.0]
+[[cycle.output.station]]
+name = "fltst_strk-16"
+x    = [-16000.0, 0.0]
+[[cycle.output.station]]
+name = "fltst_strk+00"
+x    = [0.0, 0.0]
+[[cycle.output.station]]
+name = "fltst_strk+16"
+x    = [16000.0, 0.0]
+[[cycle.output.station]]
+name = "fltst_strk+36"
+x    = [36000.0, 0.0]
+[[cycle.output.station]]
+name = "fltst_strk+45"
+x    = [45000.0, 0.0]
+
+# The gold's domain A along strike (|x2| <= 34 km) for the source file and
+# the catalog; off-fault stations at the gold's blkst distances (fn = 8, 16,
+# 32, 48 km at the centre, 8 km at +-16 km); the along-strike profile over
+# the whole rate-and-state segment, 1 km apart.
+[cycle.benchmark]
+region_x2       = [-34.0e3, 34.0e3]
+region_x3       = [-1.0, 1.0]
+rupture_V       = 1.0e-3
+profile_dt_slow = 1.5778800e8
+profile_dt_fast = 1.0
+profile_sigma_n = true
+volume_axes     = [[1.0, 0.0], [0.0, 1.0]]
+
+[[cycle.benchmark.volume_station]]
+name = "blkst_strk-16fn+08"
+x    = [-16000.0, 8000.0]
+[[cycle.benchmark.volume_station]]
+name = "blkst_strk+00fn+08"
+x    = [0.0, 8000.0]
+[[cycle.benchmark.volume_station]]
+name = "blkst_strk+16fn+08"
+x    = [16000.0, 8000.0]
+[[cycle.benchmark.volume_station]]
+name = "blkst_strk+00fn+16"
+x    = [0.0, 16000.0]
+[[cycle.benchmark.volume_station]]
+name = "blkst_strk+00fn+32"
+x    = [0.0, 32000.0]
+[[cycle.benchmark.volume_station]]
+name = "blkst_strk+00fn+48"
+x    = [0.0, 48000.0]
+
+[[cycle.benchmark.profile]]
+name       = "strike"
+from       = [-50.0e3, 0.0]
+to         = [50.0e3, 0.0]
+points     = 101
+coordinate = "x2"
+
+[cycle.checkpoint]
+every_qd_steps = 1000
+
+# The fault every 10 yr and every 0.5 s of a dynamic phase; no volume
+# snapshots.
+[cycle.snapshots.fault]
+dt_qd  = 3.15576e8
+dt_dyn = 0.5
