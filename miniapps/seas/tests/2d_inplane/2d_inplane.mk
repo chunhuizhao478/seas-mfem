@@ -23,6 +23,7 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-tensor-prestress    # [stress] constant_tensor in the cycle
 #   make -f tests/2d_inplane/2d_inplane.mk test-handback-table      # [cycle.output].handback_table
 #   make -f tests/2d_inplane/2d_inplane.mk test-sigma-floor         # [cycle].sigma_n_floor_pa
+#   make -f tests/2d_inplane/2d_inplane.mk test-2d5-width           # [cycle.finite_width] (2.5D)
 #   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
 # The 3D parity set (every phase must leave it bit for bit unchanged) is the
 # script tests/2d_inplane/parity_3d.sh (see its header).  The tensor
@@ -641,14 +642,44 @@ test-sigma-floor: seas_test_sigma_floor seas_fd_cycle_driver
 	 else printf '%s\n' "$$out" | tail -15; echo "  FAILED: seas_fd_cycle_driver ok: exit $$rc"; exit 1; fi; \
 	 rm -rf $(SIGMA_FLOOR_TMP)
 
+# The opt-in 2.5D finite width ([cycle.finite_width], cycle/finite_width.hpp;
+# Chunhui Zhao, 2026-10-30): U1-U5 and U7 of the derivation note's Level 1 on 1 rank
+# and U1, U2, U4, U5, U7 on 2 ranks; each API refusal must exit non-zero with its
+# message; then the deck refusals and two accepted tables through the driver
+# (tests/2d_inplane/finite_width_decks.sh, the map-view deck).
+TEST_2D5_SRC = tests/2d_inplane/test_2d5_width.cpp
+TEST_2D5_OBJ = $(TEST_2D5_SRC:.cpp=.o)
+$(TEST_2D5_OBJ): %.o: $(SRC)%.cpp $(CYCLE_HEADERS) $(CYCLE_STAMP) \
+                      $(CYCLE_SHARED_HEADERS) $(INPLANE_HEADERS) $(NITSCHE_2D_HEADERS) \
+                      cycle/finite_width.hpp $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
+
+seas_test_2d5_width: $(TEST_2D5_OBJ) $(CYCLE_LINK_OBJS)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_2D5_OBJ) $(CYCLE_LINK_OBJS) \
+	    $(CYCLE_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+FW_REFUSALS = 1:SetFiniteWidth: beta / mu =|2:SetFiniteWidth: U_pl1 has|3:the 2.5D term is for 2-D map-view meshes|4:SetFiniteWidth after the dense or fused stiffness read K|5:substrate shape (QDPhase::SubstrateShape) with
+test-2d5-width: seas_test_2d5_width seas_fd_cycle_driver
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_2d5_width
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_2d5_width --only U1,U2,U4,U5,U7,U8
+	@list='$(FW_REFUSALS)'; set -f; IFS='|'; for r in $$list; do n=$${r%%:*}; msg=$${r#*:}; \
+	   out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_2d5_width --refuse $$n 2>&1); rc=$$?; \
+	   if [ $$rc -ne 0 ] && printf '%s' "$$out" | grep -qF "$$msg"; then \
+	      echo "  PASSED: refusal $$n: exit $$rc, \"$$msg\""; \
+	   else printf '%s\n' "$$out" | tail -15; echo "  FAILED: refusal $$n: exit $$rc, \"$$msg\" not found"; exit 1; fi; \
+	done
+	MPIEXEC="$(MFEM_MPIEXEC)" MPIEXEC_NP="$(MFEM_MPIEXEC_NP)" tests/2d_inplane/finite_width_decks.sh
+
 2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
                 test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
                 test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
                 test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
-                test-handback-table test-sigma-floor
+                test-handback-table test-sigma-floor test-2d5-width
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
         test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
         test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
-        test-handback-table test-sigma-floor 2d-inplane-all
+        test-handback-table test-sigma-floor test-2d5-width 2d-inplane-all

@@ -69,6 +69,11 @@
 // Their motion during a phase, Vp T / 2 (2e-7 m in 330 s), is neglected.
 // An absorbing bottom changes neither K nor the load.
 //
+// [cycle.finite_width] (cycle/finite_width.hpp; Chunhui Zhao, 2026-10-30):
+// W.SetFiniteWidth with the QD regime's U_pl1 before the first step, so K
+// carries M_beta and F the substrate load at t0 + tau; the Kelvin-Voigt
+// copy damps K alone; dt_cfl is cut by 1 / sqrt(1 + beta dt^2 / (4 rho)).
+//
 // Station fields in the dynamic regime use the kernel components of the
 // end-of-step traction X* + gamma V (the friction strength along -V, as the
 // Nitsche driver's stations; gamma includes sigma_F^eta with Kelvin-Voigt)
@@ -147,11 +152,14 @@ public:
    /// layout of MapLts with [cycle.lts] rate2 (null or off: global stepping).
    /// `frames`: the QD regime's fault orientation (QDPhase::Domain().
    /// FrameField()); null: the Nitsche operator builds the same field
-   /// itself from CycleFrameConfig (tests).
+   /// itself from CycleFrameConfig (tests).  `substrate`: with
+   /// [cycle.finite_width], the QD regime's U_pl1 (QDPhase::SubstrateShape;
+   /// one u_pl in both regimes), read at t0 + tau.
    DynPhase(ParMesh &pmesh, const CycleConfig &cfg, const FaultDOFTable &table,
             const FaultParams &par, const Prestress &pre, real_t dt_scale = 1.0,
             const LtsLayout *lts = nullptr,
-            std::shared_ptr<const FaultFrameField> frames = nullptr)
+            std::shared_ptr<const FaultFrameField> frames = nullptr,
+            const Vector *substrate = nullptr)
       : pmesh_(pmesh), cfg_(cfg), t0_(std::make_shared<real_t>(0.0))
    {
       const spatial::SpatialFrictionConfig &s = cfg.shared;
@@ -246,6 +254,17 @@ public:
                      "in the two operators (the bridge needs the same owned order)");
       }
 
+      if (cfg.finite_width.On())
+      {
+         // [cycle.finite_width] (cycle/finite_width.hpp): K + M_beta and the
+         // substrate load at t0 + tau; Kelvin-Voigt below damps K alone
+         MFEM_VERIFY(substrate != nullptr && substrate->Size() == W_->Height(),
+                     "DynPhase: [cycle.finite_width] needs the QD regime's substrate shape "
+                     "(QDPhase::SubstrateShape) with " << W_->Height() << " entries");
+         MFEM_VERIFY(!(lts != nullptr && lts->on), "DynPhase: [cycle.finite_width] with "
+                     "local time stepping");
+         W_->SetFiniteWidth(cfg.finite_width.BetaOverMu(), *substrate, t0_);
+      }
       BuildFrames_();
       if (tags_.dirichlet > 0) { CollectWallDofs_(); }
       Vector S0;
@@ -254,6 +273,14 @@ public:
 
       ceig_ = NitscheStableConstant(pmesh.Dimension(), p);
       dt_cfl_ = ComputeMaxDt(W_->Sample(), pmesh, p, dc.cfl * ceig_);
+      if (cfg.finite_width.On())
+      {
+         // Rule C6: omega_max^2 + beta / rho, with dt_cfl taken as 2 / omega_max
+         const auto &mf = s.material_fallback;
+         const real_t br = cfg.finite_width.BetaOverMu() * mf.mu / mf.rho;
+         fw_dt_factor_ = 1.0 / std::sqrt(1.0 + 0.25 * br * dt_cfl_ * dt_cfl_);
+         dt_cfl_ *= fw_dt_factor_;
+      }
       const bool lts_on = (lts != nullptr && lts->on);
       MFEM_VERIFY(lts_on == cfg.lts.On(), "DynPhase: [cycle.lts] is " << cfg.lts.mode
                   << " but the layout says " << (lts_on ? "rate2" : "off"));
@@ -522,6 +549,8 @@ public:
 
    real_t Tau() const { return tau_; }
    real_t T0() const { return *t0_; }
+   /// [cycle.finite_width]: the factor the CFL step was cut by (1 when off).
+   real_t FiniteWidthDtFactor() const { return fw_dt_factor_; }
    real_t Time() const { return *t0_ + tau_; }
    real_t Dt() const { return dt_; }
    real_t DtCFL() const { return dt_cfl_; }
@@ -745,6 +774,7 @@ private:
    ParMesh &pmesh_;
    const CycleConfig &cfg_;
    std::shared_ptr<real_t> t0_;   ///< held by the wall-load wrapper too
+   real_t fw_dt_factor_ = 1.0;    ///< [cycle.finite_width]: the CFL step's cut (C6)
    std::unique_ptr<MaterialField> material_;
    BoundaryConfig bc_;
    std::unique_ptr<ParMesh> dmesh_;   ///< [cycle.absorbing]: W's mesh (outlives W)

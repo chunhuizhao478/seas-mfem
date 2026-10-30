@@ -374,6 +374,19 @@ public:
    int Dimension() const { return dim_; }
    int GetOrder() const { return order_; }
    ElasticityDomainOperator<ParMesh> &Elasticity() { return *elast_; }
+   /// 2.5D finite width (Chunhui Zhao, 2026-10-30): ElasticityDomainOperator::
+   /// SetFiniteWidth on the elastic operator only, so K x and F carry
+   /// M_beta and its substrate load; the Kelvin-Voigt copy damps K alone
+   /// (the derivation note's rule C3).  Before the first step (the dense
+   /// and fused paths read K once); not with local time stepping, whose run
+   /// integrates its own element matrices (solver/nitsche_lts_run.hpp).
+   void SetFiniteWidth(real_t beta_over_mu, const Vector &U_pl1,
+                       std::shared_ptr<const real_t> t_offset)
+   {
+      MFEM_VERIFY(dense_state_ == 0 && fused_state_ == 0, "NitscheWaveOperator::"
+                  "SetFiniteWidth after the dense or fused stiffness read K");
+      elast_->SetFiniteWidth(beta_over_mu, U_pl1, std::move(t_offset));
+   }
    const NitscheMass &Mass() const { return *mass_; }
    /// (M + dt/2 C)^{-1}; null without absorbing faces or before SetTimeStep.
    const NitscheMass *DampedMass() const { return mass_damped_.get(); }

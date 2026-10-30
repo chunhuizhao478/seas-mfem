@@ -345,8 +345,15 @@ void PrintDynamicSetup(const MPIContext &mpi, const cycle::CycleConfig &cfg,
    std::cout << std::setprecision(6)
              << "\n  dynamic regime (Nitsche, explicit central difference):\n"
              << "    dt = " << dyn.Dt() << " s (cfl " << dc.cfl << " x C(" << p << ") "
-             << dyn.StableConstant() << "), set up in " << setup_s << " s\n"
-             << "    Kelvin-Voigt: ";
+             << dyn.StableConstant() << "), set up in " << setup_s << " s\n";
+   if (cfg.finite_width.On())
+   {
+      std::cout << "    2.5D finite width: K + M_beta, substrate load at t0 + tau; the CFL "
+                << "step times (1 - " << std::scientific << std::setprecision(3)
+                << 1.0 - dyn.FiniteWidthDtFactor() << std::defaultfloat << std::setprecision(6)
+                << ") for beta / rho; Kelvin-Voigt on K alone\n";
+   }
+   std::cout << "    Kelvin-Voigt: ";
    if (dyn.HasKelvinVoigt())
    {
       std::cout << "eta_bar " << dc.kv_eta << ", scale " << dc.kv_scale << " (h_e "
@@ -972,6 +979,11 @@ int main(int argc, char *argv[])
 
       // ---- QD regime ----
       cycle::QDPhase qd(pmesh, mpi, cfg);
+      if (root && cfg.finite_width.On())
+      {
+         std::cout << "  2.5D finite width ([cycle.finite_width]): "
+                   << cycle::FiniteWidthReport(cfg) << "\n";
+      }
       const spatial::SpatialFrictionConfig &s = cfg.shared;
       const MaterialField material = MaterialField::MakeConstant(
          s.material_fallback.lambda, s.material_fallback.mu, s.material_fallback.rho);
@@ -1199,7 +1211,8 @@ int main(int argc, char *argv[])
          // QD regime's fault orientation (one system for both).
          dyn = std::make_unique<cycle::DynPhase>(pmesh, cfg, qd.Table(), par, pre, 1.0,
                                                  lts.on ? &lts : nullptr,
-                                                 qd.Domain().FrameField());
+                                                 qd.Domain().FrameField(),
+                                                 qd.SubstrateShape());
          PrintDynamicSetup(mpi, cfg, *dyn, MPI_Wtime() - w);
       }
       auto dynamic_phase = [&](real_t ts, real_t Vs)

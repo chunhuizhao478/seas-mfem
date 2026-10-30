@@ -89,6 +89,7 @@
 #include "cycle_config.hpp"
 #include "cycle_frames.hpp"
 #include "loading.hpp"
+#include "finite_width.hpp"
 #include "fault_fields.hpp"
 #include "prestress.hpp"
 #include "fd_cycle_output.hpp"
@@ -171,6 +172,8 @@ public:
                                         MakeCycleLoading(cfg));
       if (st == SolverType::MUMPS_BLR) { dom_->SetBLRTol(cfg.qd.blr_tol); }
       if (cfg.penalty_factor != 1.0) { dom_->SetPenaltyFactor(cfg.penalty_factor); }
+      // [cycle.finite_width]: the 2.5D term, before the first K is used
+      if (cfg.finite_width.On()) { SetupFiniteWidth_(); }
 
       geom_ = std::make_unique<FaultGeometry<ParMesh>>(*dom_, seed_, &mpi_,
                                                        /*compute_bp5_params=*/false);
@@ -179,6 +182,11 @@ public:
 
    /// The owned fault DOFs in the operator's owned order.
    const FaultDOFTable &Table() const { return table_; }
+   /// [cycle.finite_width]: U_pl1, the substrate displacement at t = 1 on
+   /// the operator's vdofs (cycle/finite_width.hpp), for DynPhase (one
+   /// u_pl in both regimes); null when the term is off.
+   const Vector *SubstrateShape() const
+   { return cfg_.finite_width.On() ? &U_pl1_ : nullptr; }
    /// [stress] kind = "constant_tensor": the tensor's traction on the owned
    /// fault DOFs as kernel components (tau_1, tau_2, sigma_n), 3 per DOF in
    /// Table() order, by the dynamic operator's projection (file comment).
@@ -774,6 +782,34 @@ private:
       }
    }
 
+   /// [cycle.finite_width] (cycle/finite_width.hpp): U_pl1 by the deck's
+   /// substrate, then ElasticityDomainOperator::SetFiniteWidth (QD time is
+   /// physical time: no offset).  "locked_reference" solves K u = b(t = 1)
+   /// with zero slip and beta = 0 first; SetFiniteWidth drops that K and
+   /// its factorization.  Collective.
+   void SetupFiniteWidth_()
+   {
+      const FiniteWidthConfig &F = cfg_.finite_width;
+      MFEM_VERIFY(pmesh_.Dimension() == 2, "[cycle.finite_width] needs a 2-D map-view "
+                  "mesh; this one is " << pmesh_.Dimension() << "-D");
+      ParFiniteElementSpace &fes = dom_->GetFESpace();
+      if (F.substrate == "loading_plane")
+      {
+         InterpolateSubstrate(fes, MakePlateSubstrate(cfg_.loading, cfg_.plate_rate), U_pl1_);
+      }
+      else
+      {
+         MFEM_VERIFY(F.substrate == "locked_reference", "QDPhase: substrate \""
+                     << F.substrate << "\"");
+         Vector zero(2 * dom_->GetNumFaultDOFs());
+         zero = 0.0;
+         ParGridFunction u(&fes);
+         dom_->Solve(1.0, zero, u);
+         U_pl1_ = u;
+      }
+      dom_->SetFiniteWidth(F.BetaOverMu(), U_pl1_, nullptr);
+   }
+
    /// Velocity's premise: the Dirichlet loading is g(t) = t g_hat
    /// (the --qd-green build's check, here on the assembled right-hand side).
    void CheckLinearLoading_()
@@ -865,6 +901,7 @@ private:
    const CycleConfig &cfg_;
    BP5Params seed_;
    std::unique_ptr<DomainOp> dom_;
+   Vector U_pl1_;   ///< [cycle.finite_width] substrate shape (SubstrateShape)
    std::unique_ptr<FaultGeometry<ParMesh>> geom_;
    FaultDOFTable table_;
    std::unique_ptr<DieterichRuinaFriction> friction_;

@@ -213,6 +213,10 @@
 //                   On a 2-D mesh n and up are taken in the (x, y) plane,
 //                   so up needs an in-plane part (BP3: [0, 1]; 2D in-plane
 //                   design rev 3, tests/2d_inplane/test_2d_absorbing.cpp)
+//   [cycle.finite_width] the 2.5D finite-width model of a map-view deck
+//                   [absent = off] (Chunhui Zhao, 2026-10-30): W_m,
+//                   calibration ["wa2020"] or c, substrate; see
+//                   cycle/finite_width.hpp
 //
 // The dynamic regime reads the keys the Nitsche driver reads, from the same
 // shared sections (drivers/nitsche_dyn_driver.cpp:616-648, 708-736,
@@ -440,6 +444,22 @@ struct LoadingConfig
    bool Plate() const { return kind == "plate"; }
 };
 
+/// [cycle.finite_width] (Chunhui Zhao, 2026-10-30): the 2.5D finite-width
+/// model, rho u'' = div sigma - beta (u - u_pl), beta = 4 c^2 mu / W^2
+/// (cycle/finite_width.hpp).  Off unless the table is in the deck.
+struct FiniteWidthConfig
+{
+   real_t W = 0.0;              ///< W_m, the seismogenic width [m]; 0 = off
+   std::string calibration;     ///< c by name ("wa2020", "lehner"); "" when the deck gives c
+   real_t c = 0.0;              ///< the long-fault stiffness factor, set by Load
+   std::string substrate;       ///< "loading_plane" | "locked_reference"
+   bool On() const { return W > 0.0; }
+   /// beta / mu = 4 c^2 / W^2 [1/m^2]
+   real_t BetaOverMu() const { return 4.0 * c * c / (W * W); }
+   /// l = sqrt(mu / beta) = W / (2 c) [m]
+   real_t DecayLength() const { return W / (2.0 * c); }
+};
+
 /// The dynamic regime's numerics (see the file comment for the keys).
 struct DynamicConfig
 {
@@ -491,6 +511,7 @@ struct CycleConfig
    LtsConfig lts;
    LoadingConfig loading;         ///< [cycle.loading] (default: the BP5 function)
    AbsorbingConfig absorbing;
+   FiniteWidthConfig finite_width;   ///< [cycle.finite_width] (default: off)
    int checkpoint_every = 0;
    std::vector<DeckVector> deck_vectors;   ///< every vector key Load read
 
@@ -811,7 +832,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
                           "plate_rate", "penalty_factor", "sigma_n_floor_pa", "qd", "switch",
                           "probe",
                           "prestress", "fields", "output", "checkpoint", "snapshots",
-                          "benchmark", "lts", "loading", "absorbing"});
+                          "benchmark", "lts", "loading", "absorbing", "finite_width"});
    c.ic = Str(cy, "cycle", "ic", "", true);
    MFEM_VERIFY(c.ic == "gold" || c.ic == "scec_fd",
                "[cycle].ic must be \"gold\" or \"scec_fd\"; got \"" << c.ic << "\"");
@@ -1348,6 +1369,55 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
                   "[cycle.loading] kind = \"bp5\" (the default) is the BP5 function of "
                   "the plane y = 0 and needs [fault_geometry].ref_normal = (0, -1, 0); got ("
                   << r[0] << ", " << r[1] << ", " << r[2] << "): use kind = \"plate\"");
+   }
+
+   // ---- [cycle.finite_width] (after [fault_geometry]: map view needs up) ----
+   if (cy.contains("finite_width"))
+   {
+      const std::string sec = "cycle.finite_width";
+      const toml::value &fw = cy.at("finite_width");
+      OnlyKeys(fw, sec, {"W_m", "calibration", "c", "substrate"});
+      FiniteWidthConfig &F = c.finite_width;
+      F.W = Real(fw, sec, "W_m", 0.0, true);
+      MFEM_VERIFY(std::isfinite(F.W) && F.W > 0.0, "[" << sec << "].W_m = " << F.W
+                  << " must be > 0 m");
+      // Buried faults only for now (Chunhui Zhao, 2026-10-30: "we will for 2d in
+      // plane, only focus on buried fault for now")
+      MFEM_VERIFY(!(fw.contains("calibration") && fw.contains("c")), "[" << sec << "] takes "
+                  "calibration (a name) or c (a number), not both");
+      const real_t lam = s.material_fallback.lambda, mu = s.material_fallback.mu;
+      const real_t nu = lam / (2.0 * (lam + mu));
+      if (fw.contains("c"))
+      {
+         F.c = Real(fw, sec, "c", 0.0, true);
+         MFEM_VERIFY(std::isfinite(F.c) && F.c > 0.0, "[" << sec << "].c = " << F.c
+                     << " must be > 0");
+      }
+      else
+      {
+         F.calibration = Str(fw, sec, "calibration", "wa2020");
+         if (F.calibration == "wa2020") { F.c = (1.0 - nu) * M_PI / 2.0; }
+         else if (F.calibration == "lehner") { F.c = 4.0 / M_PI; }
+         else
+         {
+            MFEM_ABORT("[" << sec << "].calibration = \"" << F.calibration << "\"; use "
+                       "\"wa2020\" (c = (1 - nu) pi / 2, buried) or \"lehner\" (c = 4 / pi, "
+                       "buried), or give c");
+         }
+      }
+      F.substrate = Str(fw, sec, "substrate", "", true);
+      MFEM_VERIFY(F.substrate == "loading_plane" || F.substrate == "locked_reference",
+                  "[" << sec << "].substrate = \"" << F.substrate << "\"; use "
+                  "\"loading_plane\" or \"locked_reference\"");
+      const std::array<real_t, 3> &up = c.dyn.up;
+      MFEM_VERIFY(std::abs(up[0]) < 1e-12 && std::abs(up[1]) < 1e-12 &&
+                  std::abs(std::abs(up[2]) - 1.0) < 1e-12,
+                  "[" << sec << "]: the 2.5D term is for map-view decks ([fault_geometry] up "
+                  "= [0, 0, +-1] on a 2-D mesh); up = (" << up[0] << ", " << up[1] << ", "
+                  << up[2] << ")");
+      MFEM_VERIFY(!c.lts.On(), "[" << sec << "] with [cycle.lts] mode = \"rate2\": the LTS "
+                  "run integrates its own element matrices, without beta; use global "
+                  "stepping");
    }
 
    if (c.lts.On())

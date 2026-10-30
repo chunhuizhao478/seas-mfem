@@ -326,6 +326,66 @@ public:
       stiffness_assembled_ = false;
    }
 
+   /// 2.5D finite-width model (Chunhui Zhao, 2026-10-30; derivation
+   /// /mnt/project-files/2d-inplane/nonplanar-literature/
+   /// inplane-2p5d-derivation-rev8.pdf, eqs. 1, 12, 13): the volume term
+   /// beta (u - u_pl) of rho u'' = div sigma - beta (u - u_pl), with
+   /// beta(x) = beta_over_mu mu(x) [Pa/m^2].  K becomes K + M_beta (a
+   /// VectorMassIntegrator in AssembleStiffness, so the QD solve, G, the
+   /// dynamic step and the hand-back read one M_beta: the note's rule C1),
+   /// and the loading gains f_pl = (t_off + t) M_beta U_pl1, U_pl1 the
+   /// substrate displacement at t = 1 on this operator's vdofs (u_pl(x, t)
+   /// = t u_pl(x, 1)), in AssembleDirichletLoading, QDStageRHS and the
+   /// Green's function's T_D.  t_offset: the physical time of the
+   /// operator's t = 0 (the dynamic regime's t0, read at every call); null
+   /// = 0.  No face or flux term changes (the note's Section 6).  2-D
+   /// meshes, IP; before BuildQDGreen; a K assembled before (and its
+   /// factorization) is dropped.  Without this call nothing changes (C4).
+   void SetFiniteWidth(real_t beta_over_mu, const Vector &U_pl1,
+                       std::shared_ptr<const real_t> t_offset)
+   {
+      MFEM_VERIFY(std::isfinite(beta_over_mu) && beta_over_mu > 0.0,
+                  "SetFiniteWidth: beta / mu = " << beta_over_mu << " must be > 0");
+      MFEM_VERIFY(dim_ == 2, "SetFiniteWidth: the 2.5D term is for 2-D map-view "
+                  "meshes; this mesh is " << dim_ << "-D");
+      MFEM_VERIFY(method_ == DGMethod::IP, "SetFiniteWidth: IP only");
+#ifdef MFEM_USE_MPI
+      MFEM_VERIFY(!qd_green_, "SetFiniteWidth after BuildQDGreen: G was built without "
+                  "M_beta");
+#endif
+      MFEM_VERIFY(U_pl1.Size() == fes_->GetVSize(), "SetFiniteWidth: U_pl1 has "
+                  << U_pl1.Size() << " entries, the space " << fes_->GetVSize());
+      solver_.reset();
+      ReleaseStiffness();
+      beta_over_mu_ = beta_over_mu;
+      beta_coef_ = std::make_unique<ProductCoefficient>(beta_over_mu_, *mu_ptr_);
+      // f_hat = M_beta U_pl1 with the integrator K gets; M_beta is block
+      // diagonal (no face term), so the local product is exact.
+      BilinFormType mb(fes_.get());
+      auto *mi = new VectorMassIntegrator(*beta_coef_);
+      mi->SetVDim(dim_);
+      mb.AddDomainIntegrator(mi);
+      mb.Assemble(0);
+      mb.Finalize();
+      substrate_load_.SetSize(U_pl1.Size());
+      mb.SpMat().Mult(U_pl1, substrate_load_);
+      substrate_t_off_ = std::move(t_offset);
+   }
+   bool HasFiniteWidth() const { return beta_over_mu_ > 0.0; }
+   real_t FiniteWidthBetaOverMu() const { return beta_over_mu_; }
+   /// M_beta U_pl1 (vdofs): the substrate load at physical time 1.
+   const Vector &SubstrateLoad() const { return substrate_load_; }
+   /// rhs += (t_off + time) M_beta U_pl1 (nothing without SetFiniteWidth).
+   void AddSubstrateLoad(Vector &rhs, real_t time) const
+   {
+      if (beta_over_mu_ == 0.0) { return; }
+      MFEM_VERIFY(rhs.Size() == substrate_load_.Size(), "AddSubstrateLoad: size "
+                  << rhs.Size() << " != " << substrate_load_.Size());
+      const real_t t_off = substrate_t_off_ ? *substrate_t_off_ : 0.0;
+      if (t_off != 0.0) { rhs.Add(t_off, substrate_load_); }
+      rhs.Add(time, substrate_load_);
+   }
+
    /// Assemble only the Dirichlet loading RHS contribution into the DG
    /// displacement space. Debug utility for first-step RHS comparison.
    void AssembleDirichletOnlyRHS(Vector &rhs, real_t time) const;
@@ -718,6 +778,12 @@ private:
    mutable std::unique_ptr<BilinFormType> cached_a_;
    mutable OperatorHandle cached_Ah_;
    mutable std::unique_ptr<Solver> cached_prec_;
+
+   // 2.5D finite-width model (SetFiniteWidth; 0 = off)
+   real_t beta_over_mu_ = 0.0;
+   std::unique_ptr<Coefficient> beta_coef_;
+   Vector substrate_load_;
+   std::shared_ptr<const real_t> substrate_t_off_;
 
    // Solver
    mutable std::unique_ptr<Solver> solver_;

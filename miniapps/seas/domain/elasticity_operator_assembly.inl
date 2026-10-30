@@ -36,6 +36,14 @@
       // Volume term: ∫_Ω σ(u):ε(v) dV
       cached_a_->AddDomainIntegrator(
          new ElasticityIntegrator(*lambda_ptr_, *mu_ptr_));
+      // 2.5D finite width (SetFiniteWidth): + ∫_Ω β u·v dV, the M_beta of
+      // the substrate load
+      if (beta_over_mu_ > 0.0)
+      {
+         auto *mi = new VectorMassIntegrator(*beta_coef_);
+         mi->SetVDim(dim_);
+         cached_a_->AddDomainIntegrator(mi);
+      }
 
       if (method_ == DGMethod::BR2)
       {
@@ -1911,4 +1919,6 @@
          }
 #endif
       }
+      // 2.5D finite width: the substrate load (t_off + time) M_beta U_pl1
+      AddSubstrateLoad(rhs, time);
    }

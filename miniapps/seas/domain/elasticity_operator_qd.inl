@@ -505,6 +505,7 @@ void ElasticityDomainOperator<MeshType>::QDStageRHS(
       ScopedStageTimer timer(stage_timers_, StageTimers::DirichletRHS);
       EvaluateQDDirichletValues(time);
       ops.D->Mult(1.0, ops.g, 1.0, b);
+      AddSubstrateLoad(b, time);   // 2.5D finite width (SetFiniteWidth)
    }
 }
 
@@ -830,6 +831,7 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
          Vector zero(2 * nown), b(ops.B->Height()), x(ops.B->Height());
          zero = 0.0;
          ops.D->Mult(g_hat, b);
+         if (beta_over_mu_ > 0.0) { b += substrate_load_; }   // 2.5D: f_pl = t M_beta U_pl1
          x = 0.0;
          solver_->Mult(b, x);
          Vector TDs, TDn;
