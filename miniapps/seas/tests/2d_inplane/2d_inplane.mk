@@ -620,8 +620,8 @@ test-sigma-floor: seas_test_sigma_floor seas_fd_cycle_driver
 	done
 	@rm -rf $(SIGMA_FLOOR_TMP); mkdir -p $(SIGMA_FLOOR_TMP); \
 	 deck() { sed -e 's|^path  = "bp3/mesh/bp3_d60_25m.msh"$$|path  = "bp3/mesh/bp3_d60_1km.msh"|' \
-	              -e "s|^min_sigma_n_pa    = 0.0$$|min_sigma_n_pa    = $$3|" \
-	              -e "/^penalty_factor  /a sigma_n_floor_pa     = $$2" $(SIGMA_FLOOR_DECK) > $$1; \
+	              -e "s|^min_sigma_n_pa    = 0.0$$|min_sigma_n_pa    = $$3|" $(SIGMA_FLOOR_DECK) \
+	          | awk -v f="sigma_n_floor_pa     = $$2" '{ print } /^penalty_factor  / { print f }' > $$1; \
 	          grep -q '^path  = "bp3/mesh/bp3_d60_1km.msh"$$' $$1 && grep -q "^sigma_n_floor_pa     = $$2$$" $$1 \
 	          && grep -q "^min_sigma_n_pa    = $$3$$" $$1 || { echo "  FAILED: the deck lines moved"; exit 1; }; }; \
 	 n=0; list='$(SIGMA_FLOOR_DECKS)'; set -f; IFS='|'; for r in $$list; do IFS=':'; set -- $$r; IFS='|'; \
