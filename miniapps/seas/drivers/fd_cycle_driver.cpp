@@ -204,6 +204,112 @@ void ProbeSwitch(const MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::QD
             << xmax[1] << " " << xmax[2] << "\n" << std::flush;
 }
 
+/// [cycle.output].handback_table: the jump of plan 6.3 at one switch back,
+/// on every fault DOF.  fd: the dynamic regime's station fields at its
+/// switch; qd: just re-entered at the same slip, psi and t (Reenter's solve
+/// is its last evaluation).  The root writes <prefix>_handback_phase<N>.txt
+/// (rank 0's owned DOFs first, then rank 1's, ...) and prints where the
+/// shear traction, sigma_n' and V of the two regimes differ most.  tau is
+/// the station files' -(tau_a + tau_b + eta V) of each regime.  Collective.
+void WriteHandbackTable(const MPIContext &mpi, const cycle::CycleConfig &cfg,
+                        cycle::QDPhase &qd, const cycle::StationFields &fd, const Vector &X,
+                        int phase, real_t t, const std::string &commit)
+{
+   cycle::StationFields fq;
+   qd.FillStationFields(fq);
+   const int N = fd.V_strike.Size();
+   MFEM_VERIFY(fq.V_strike.Size() == N && X.Size() == 3 * N,
+               "handback table: " << N << " dynamic DOFs, " << fq.V_strike.Size()
+               << " QD DOFs and " << X.Size() / 3 << " positions on rank " << mpi.Rank());
+   auto tau = [](const cycle::StationFields &f, int j, bool strike)
+   {
+      return strike ? -(f.tau_a_strike(j) + f.tau_b_strike(j) + f.eta * f.V_strike(j))
+                    : -(f.tau_a_dip(j) + f.tau_b_dip(j) + f.eta * f.V_dip(j));
+   };
+   const int nc = 15;
+   std::vector<double> rows(static_cast<size_t>(nc) * N);
+   for (int j = 0; j < N; j++)
+   {
+      double *r = &rows[static_cast<size_t>(nc) * j];
+      r[0] = X(3 * j);
+      r[1] = X(3 * j + 1);
+      r[2] = X(3 * j + 2);
+      r[3] = fd.slip_strike(j);
+      r[4] = fd.slip_dip(j);
+      r[5] = fd.V_strike(j);
+      r[6] = fq.V_strike(j);
+      r[7] = fd.V_dip(j);
+      r[8] = fq.V_dip(j);
+      r[9] = tau(fd, j, true) / 1e6;
+      r[10] = tau(fq, j, true) / 1e6;
+      r[11] = tau(fd, j, false) / 1e6;
+      r[12] = tau(fq, j, false) / 1e6;
+      r[13] = fd.sigma_n(j) / 1e6;
+      r[14] = fq.sigma_n(j) / 1e6;
+   }
+   const int np = mpi.Size(), n_loc = nc * N;
+   std::vector<int> counts(np), displs(np);
+   MPI_Gather(&n_loc, 1, MPI_INT, counts.data(), 1, MPI_INT, 0, mpi.GetComm());
+   std::vector<double> all;
+   if (mpi.IsRoot())
+   {
+      int s = 0;
+      for (int r = 0; r < np; r++)
+      {
+         displs[r] = s;
+         s += counts[r];
+      }
+      all.resize(s);
+   }
+   MPI_Gatherv(rows.data(), n_loc, MPI_DOUBLE, all.data(), counts.data(), displs.data(),
+               MPI_DOUBLE, 0, mpi.GetComm());
+   if (!mpi.IsRoot()) { return; }
+
+   const std::string path = cfg.output.dir + "/" + cfg.output.prefix + "_handback_phase" +
+                            std::to_string(phase) + ".txt";
+   std::ofstream f(path);
+   MFEM_VERIFY(f, "handback table: cannot open " << path);
+   f << "# fd_cycle hand-back table, dynamic phase " << phase << " -> QD at t = "
+     << std::setprecision(17) << t << " s, commit " << commit << "\n# Both regimes from "
+     "the same slip, psi and t (plan 6.3): the dynamic regime's fields at its switch, the QD "
+     "balance's after the switch back (one QD solve).  tau = -(tau_a + tau_b + eta V) of "
+     "each regime (the station files' shear stress), sigma_n' compression positive.  Rows: "
+     "the owned fault DOFs of rank 0, then rank 1, ...\n# Columns: x(m), y(m), z(m), "
+     "slip_strike(m), slip_dip(m), V_strike_dyn(m/s), V_strike_qd(m/s), V_dip_dyn(m/s), "
+     "V_dip_qd(m/s), tau_strike_dyn(MPa), tau_strike_qd(MPa), tau_dip_dyn(MPa), "
+     "tau_dip_qd(MPa), sigma_n_dyn(MPa), sigma_n_qd(MPa)\n"
+     << std::scientific << std::uppercase << std::setprecision(12);
+   const size_t n = all.size() / nc;
+   size_t jt = 0, js = 0, jv = 0;
+   double dt_max = -1.0, ds_max = -1.0, v_max = -1.0;
+   for (size_t j = 0; j < n; j++)
+   {
+      const double *r = &all[nc * j];
+      for (int k = 0; k < nc; k++) { f << r[k] << (k + 1 < nc ? " " : "\n"); }
+      const double dtau = std::hypot(r[10] - r[9], r[12] - r[11]);
+      const double dsig = std::abs(r[14] - r[13]);
+      const double vq = std::hypot(r[6], r[8]);
+      if (dtau > dt_max) { dt_max = dtau; jt = j; }
+      if (dsig > ds_max) { ds_max = dsig; js = j; }
+      if (vq > v_max) { v_max = vq; jv = j; }
+   }
+   f.close();
+   auto at = [&](size_t j)
+   {
+      std::ostringstream s;
+      s << std::fixed << std::setprecision(2) << "(" << all[nc * j] / 1e3 << ", "
+        << all[nc * j + 1] / 1e3 << ", " << all[nc * j + 2] / 1e3 << ") km";
+      return s.str();
+   };
+   std::ostringstream s;
+   s << std::scientific << std::setprecision(6) << "  hand-back table " << path << " (" << n
+     << " DOFs): largest |tau_qd - tau_dyn| " << dt_max << " MPa at " << at(jt)
+     << "; largest |sigma_n_qd - sigma_n_dyn| " << ds_max << " MPa at " << at(js)
+     << "; largest V_qd " << v_max << " m/s at " << at(jv) << ", V_dyn there "
+     << std::hypot(all[nc * jv + 5], all[nc * jv + 7]) << " m/s\n";
+   std::cout << s.str() << std::flush;
+}
+
 /// The dynamic regime's settings, once per run (main builds one DynPhase and
 /// every dynamic phase re-enters it).
 void PrintDynamicSetup(const MPIContext &mpi, const cycle::CycleConfig &cfg,
@@ -418,6 +524,7 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
    // The deck pair's switch state (plan 6.3 hands over slip and psi only).
    Vector snap_sk, snap_psi;
    real_t snap_Vmax = 0.0;
+   cycle::StationFields snap_fd;   // [cycle.output].handback_table
 
    // End of the phase for the files: the last station row, the switch log,
    // the fault table and the summary.  Runs once, at the deck pair's end
@@ -552,6 +659,7 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
          verdict = cycle::DynVerdict::EndOfPhase;
          finish_phase(forced ? "end_phase_after" : "end_of_phase", to_qd);
          cycle::bridge::ToQD(dyn.Frames(), dyn.Slip(), dyn.Psi(), snap_sk, snap_psi);
+         if (cfg.output.handback_table && to_qd) { dyn.FillStationFields(snap_fd); }
          snap_Vmax = Vmax;
          end.t = t;
          end.back_to_qd = to_qd;
@@ -623,6 +731,10 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
                 << " s (TS step " << step0 << ", first dt " << cfg.dt_init
                 << " s): max V dynamic " << snap_Vmax << " m/s, QD balance " << Vqd
                 << " m/s\n" << std::flush;
+   }
+   if (cfg.output.handback_table)
+   {
+      WriteHandbackTable(mpi, cfg, qd, snap_fd, dyn.FaultPositions(), phase, end.t, commit);
    }
    if (!std::isfinite(Vqd))
    {

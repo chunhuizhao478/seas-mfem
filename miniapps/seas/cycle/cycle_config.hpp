@@ -106,8 +106,11 @@
 //   [cycle.output]  prefix, fast_V, dt_fast, dt_slow, event_V,
 //                   event_dwell, plane_origin, plane_axis1, plane_axis2,
 //                   station_sigma_n (a ninth station column, the normal
-//                   stress; BP3) [false], and [[cycle.output.station]]
-//                   name, x (global XYZ)
+//                   stress; BP3) [false], handback_table (at every switch
+//                   back, a file with one row per fault DOF: the dynamic
+//                   regime's and the QD balance's slip rate, shear traction
+//                   and sigma_n' from the same slip, psi and t) [false], and
+//                   [[cycle.output.station]] name, x (global XYZ)
 //   [cycle.checkpoint] every_qd_steps (0 = no checkpoint; else also one at
 //                   the end of a run, as seas_bp5_full) [0]
 //   [cycle.snapshots.fault], [cycle.snapshots.surface]  whole-field
@@ -278,6 +281,9 @@ struct OutputConfig
    /// A ninth station column: sigma_n_eff, compression positive [MPa]
    /// (BP3's normal stress; BP5's files keep their eight columns).
    bool station_sigma_n = false;
+   /// At every switch back: <prefix>_handback_phase<N>.txt, one row per
+   /// fault DOF with both regimes' V, tau and sigma_n' (plan 6.3's jump).
+   bool handback_table = false;
    std::vector<StationSpec> stations;
 };
 
@@ -935,7 +941,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       const toml::value &o = cy.at("output");
       OnlyKeys(o, sec, {"prefix", "fast_V", "dt_fast", "dt_slow", "event_V", "event_dwell",
                         "plane_origin", "plane_axis1", "plane_axis2", "station_sigma_n",
-                        "station"});
+                        "handback_table", "station"});
       OutputConfig &oc = c.output;
       oc.prefix = Str(o, sec, "prefix", "", true);
       oc.fast_V = Real(o, sec, "fast_V", oc.fast_V);
@@ -947,6 +953,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       oc.plane_axis1 = Vec3(c.deck_vectors, o, sec, "plane_axis1", oc.plane_axis1);
       oc.plane_axis2 = Vec3(c.deck_vectors, o, sec, "plane_axis2", oc.plane_axis2);
       oc.station_sigma_n = Bool(o, sec, "station_sigma_n", oc.station_sigma_n);
+      oc.handback_table = Bool(o, sec, "handback_table", oc.handback_table);
       MFEM_VERIFY(oc.dt_fast > 0.0 && oc.dt_slow > 0.0 && oc.fast_V > 0.0 &&
                   oc.event_V > 0.0 && oc.event_dwell >= 0.0,
                   "[cycle.output] fast_V, dt_fast, dt_slow, event_V must be > 0, "

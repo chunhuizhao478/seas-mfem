@@ -21,6 +21,7 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-absorbing-all       # faces = "all" (every outer face absorbs)
 #   make -f tests/2d_inplane/2d_inplane.mk test-snapshots-volume    # [cycle.snapshots.volume] (2-D and 3-D)
 #   make -f tests/2d_inplane/2d_inplane.mk test-tensor-prestress    # [stress] constant_tensor in the cycle
+#   make -f tests/2d_inplane/2d_inplane.mk test-handback-table      # [cycle.output].handback_table
 #   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
 # The 3D parity set (every phase must leave it bit for bit unchanged) is the
 # script tests/2d_inplane/parity_3d.sh (see its header).  The tensor
@@ -554,13 +555,45 @@ test-tensor-prestress: seas_test_tensor_prestress
 	   else printf '%s\n' "$$out" | tail -15; echo "  FAILED: refusal $$n: exit $$rc, \"$$msg\" not found"; exit 1; fi; \
 	done
 
+# [cycle.output].handback_table (the UCERF 2-D run stopped at the switch back,
+# Chunhui Zhao 2026-10-30): the map-view tensor deck with its event started at
+# t = 0 and the phase ended after HANDBACK_STEPS steps, on 1 rank with and
+# without the table and on 2 ranks with it.  tests/2d_inplane/
+# handback_table_check.py writes the decks and checks the files (see its
+# header); then the deck refusal.  After 200 steps the QD balance is above
+# V_on, so each run stops at the guard (exit 7) with the table written.
+HANDBACK_TMP = $(or $(TMPDIR),/tmp)/seas_test_handback_table
+HANDBACK_STEPS = 200
+HANDBACK_DECK = config/fd_cycle/mapview_rs_tensor_fd.toml
+HANDBACK_MSG = [cycle.output].handback_table must be true or false
+test-handback-table: seas_fd_cycle_driver
+	@rm -rf $(HANDBACK_TMP); mkdir -p $(HANDBACK_TMP); \
+	 python3 tests/2d_inplane/handback_table_check.py decks $(HANDBACK_DECK) $(HANDBACK_TMP) || exit 1; \
+	 for c in on:on:1 on2:on:2 off:off:1; do d=$${c%%:*}; r=$${c#*:}; deck=$${r%%:*}; np=$${r#*:}; \
+	    $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_fd_cycle_driver -d $(HANDBACK_TMP)/$$deck.toml \
+	       -o $(HANDBACK_TMP)/$$d --end-phase-after $(HANDBACK_STEPS) > $(HANDBACK_TMP)/$$d.log 2>&1; rc=$$?; \
+	    if [ $$rc -eq 0 ] || [ $$rc -eq 7 ]; then \
+	       echo "  PASSED: seas_fd_cycle_driver $$deck.toml on $$np rank(s): exit $$rc"; \
+	    else tail -15 $(HANDBACK_TMP)/$$d.log; \
+	       echo "  FAILED: seas_fd_cycle_driver $$deck.toml on $$np rank(s): exit $$rc"; exit 1; fi; \
+	 done; \
+	 python3 tests/2d_inplane/handback_table_check.py check $(HANDBACK_TMP) mapview_rs_tensor_fd \
+	    || exit 1; \
+	 out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_fd_cycle_driver -d $(HANDBACK_TMP)/bad.toml \
+	    -o $(HANDBACK_TMP)/bad 2>&1); rc=$$?; \
+	 if [ $$rc -ne 0 ] && printf '%s' "$$out" | grep -qF "$(HANDBACK_MSG)"; then \
+	    echo "  PASSED: refusal: exit $$rc, \"$(HANDBACK_MSG)\""; \
+	 else printf '%s\n' "$$out" | tail -15; echo "  FAILED: refusal: exit $$rc"; exit 1; fi; \
+	 rm -rf $(HANDBACK_TMP)
+
 2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
                 test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
                 test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
-                test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress
+                test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
+                test-handback-table
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
         test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
         test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
-        2d-inplane-all
+        test-handback-table 2d-inplane-all
