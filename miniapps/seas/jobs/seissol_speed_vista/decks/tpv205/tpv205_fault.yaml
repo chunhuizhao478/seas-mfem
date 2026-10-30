@@ -1,0 +1,65 @@
+!Switch
+# =====================================================================
+# SCEC TPV205 fault (SeisSol FL = 16), parity deck for the MFEM Nitsche run
+# miniapps/seas/tpv205/configs/tpv205_nitsche.toml.  Checked by
+# ../../check_parity.py --problem tpv205 (Lua body below evaluated there).
+#
+# Frame = the mesh frame of tpv205/mesh/tpv2053d_200m.geo: x along strike,
+# y fault normal, z up (free surface z = 0, depth z < 0); fault on y = 0.
+# Cartesian stress, TENSION POSITIVE, as the MFEM [stress] constant_tensor.
+#
+#   background   s_yy = -120 MPa, s_xy = +70 MPa     (toml [stress])
+#   patches      s_xy replaced inside three closed boxes, |x - xc| <= 1.5 km
+#                and -9 km <= z <= -6 km, later box wins (toml
+#                [[stress_region]] 1..3, in order): xc = 0: 81.6 MPa,
+#                xc = -7.5 km: 78.0 MPa, xc = +7.5 km: 62.0 MPa.  The patch
+#                edges are mesh edges, so each fault Gauss point is
+#                strictly inside or outside, as each MFEM quadrature point.
+#   nucleation   none: the 81.6 MPa patch exceeds 0.677 x 120 = 81.24 MPa
+#                and nucleates at t = 0+ (MFEM deck has no [nucleation]);
+#                nuc_* are required by SeisSol with nucleationcount = 1
+#                (BaseDRInitializer.cpp:244-248, 374-441) and are set to 0.
+#   friction     mu_s 0.677, mu_d 0.525, d_c 0.40 m, cohesion 0
+#                (toml [friction.slip_weakening] *_default); uniform, no
+#                barrier (the mesh fault is the 30 x 15 km rupture area).
+#                SeisSol's cohesion enters as strength = -cohesion - mu*sn
+#                (LinearSlipWeakening.h:158-160); 0 either way.
+#                No forced_rupture_time (MFEM has none).
+# =====================================================================
+[s_xx, s_yy, s_zz, s_yz, s_xz, nuc_xx, nuc_yy, nuc_zz, nuc_xy, nuc_yz, nuc_xz]: !ConstantMap
+  map:
+    s_xx: 0.0
+    s_yy: -120.0e6
+    s_zz: 0.0
+    s_yz: 0.0
+    s_xz: 0.0
+    nuc_xx: 0.0
+    nuc_yy: 0.0
+    nuc_zz: 0.0
+    nuc_xy: 0.0
+    nuc_yz: 0.0
+    nuc_xz: 0.0
+[s_xy]: !LuaMap
+  returns: [s_xy]
+  function: |
+    function f (x)
+      s_xy = 70.0e6
+      if x["x"] >= -1500.0 and x["x"] <= 1500.0 and x["z"] >= -9000.0 and x["z"] <= -6000.0 then
+        s_xy = 81.6e6
+      end
+      if x["x"] >= -9000.0 and x["x"] <= -6000.0 and x["z"] >= -9000.0 and x["z"] <= -6000.0 then
+        s_xy = 78.0e6
+      end
+      if x["x"] >= 6000.0 and x["x"] <= 9000.0 and x["z"] >= -9000.0 and x["z"] <= -6000.0 then
+        s_xy = 62.0e6
+      end
+      return {
+        s_xy = s_xy
+      }
+    end
+[mu_s, mu_d, d_c, cohesion]: !ConstantMap
+  map:
+    mu_s: 0.677
+    mu_d: 0.525
+    d_c: 0.40
+    cohesion: 0.0

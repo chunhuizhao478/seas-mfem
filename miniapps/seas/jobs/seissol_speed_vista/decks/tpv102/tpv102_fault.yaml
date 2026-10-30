@@ -1,0 +1,73 @@
+!Switch
+# =====================================================================
+# SCEC TPV102 fault (SeisSol FL = 3, aging law), parity deck for the MFEM
+# Nitsche run miniapps/seas/tpv102/configs/tpv102_nitsche_pc_p2_kv0p1.toml
+# (= the deck of the p2 Nitsche gold, job 7995488).  Checked by
+# ../../check_parity.py --problem tpv102 (Lua body below evaluated there).
+#
+# Frame = mesh frame of tpv104/mesh/tpv104_200m.geo: x along strike,
+# y fault normal, z up; fault on y = 0, |x| <= 18 km, 0 >= z >= -18 km.
+# Cartesian stress, TENSION POSITIVE, as the MFEM [stress] constant_tensor.
+#
+#   background  s_yy = -120 MPa, s_xy = +75 MPa              (toml [stress])
+#   rs_a        a = outer + (inner - outer) B(x) B(z), the SCEC boxcar of
+#               spatial/code/spatial_friction.hpp:336-342, x: centre 0, half
+#               15 km, transition 3 km; z: centre -7.5 km, half 7.5 km,
+#               transition 3 km (toml boxcar_taper rule); a 0.008 -> 0.016.
+#   rs_sl0      0.02 m                                      (toml Dc_default)
+#   nuc_xy      25 MPa F(r), F = exp(r^2/(r^2 - R^2)) for r < R, else 0,
+#               R = 3 km, r = in-plane distance from (0, 0, -7.5 km)
+#               (spatial_nucleation.cpp:258-265, nitsche_dyn_driver.cpp:
+#               1673-1681); smoothStep with t_0 = 1 s (parameters.par).
+#   rs_f0, rs_b, rs_sr0, RS_iniSlipRate: parameters.par.
+# =====================================================================
+[s_xx, s_yy, s_zz, s_xy, s_yz, s_xz, nuc_xx, nuc_yy, nuc_zz, nuc_yz, nuc_xz]: !ConstantMap
+  map:
+    s_xx: 0.0
+    s_yy: -120.0e6
+    s_zz: 0.0
+    s_xy: 75.0e6
+    s_yz: 0.0
+    s_xz: 0.0
+    nuc_xx: 0.0
+    nuc_yy: 0.0
+    nuc_zz: 0.0
+    nuc_yz: 0.0
+    nuc_xz: 0.0
+[rs_a, nuc_xy]: !LuaMap
+  returns: [rs_a, nuc_xy]
+  function: |
+    function f (x)
+      ax = math.abs(x["x"] - 0.0)
+      if ax <= 15000.0 then
+        bx = 1.0
+      elseif ax >= 15000.0 + 3000.0 then
+        bx = 0.0
+      else
+        bx = 0.5 * (1.0 + math.tanh(3000.0 / (ax - 15000.0 - 3000.0) + 3000.0 / (ax - 15000.0)))
+      end
+      az = math.abs(x["z"] - (-7500.0))
+      if az <= 7500.0 then
+        bz = 1.0
+      elseif az >= 7500.0 + 3000.0 then
+        bz = 0.0
+      else
+        bz = 0.5 * (1.0 + math.tanh(3000.0 / (az - 7500.0 - 3000.0) + 3000.0 / (az - 7500.0)))
+      end
+      fb = bx * bz
+      es = x["x"] - 0.0
+      ed = -(x["z"] - (-7500.0))
+      r = math.sqrt(ed * ed + es * es)
+      if r < 3000.0 then
+        fr = math.exp(r * r / (r * r - 3000.0 * 3000.0))
+      else
+        fr = 0.0
+      end
+      return {
+        rs_a = 0.016 + (0.008 - 0.016) * fb,
+        nuc_xy = 25.0e6 * fr
+      }
+    end
+[rs_sl0]: !ConstantMap
+  map:
+    rs_sl0: 0.02

@@ -1,0 +1,95 @@
+! =====================================================================
+! SCEC TPV205 (TPV5), linear slip weakening -- SeisSol leg of the Vista
+! speed test against the MFEM Nitsche driver on the SAME Gmsh mesh.
+!
+! Physics source of truth: miniapps/seas/tpv205/configs/tpv205_nitsche.toml
+! (the deck of the MFEM Nitsche runs).  Every physics value here and in
+! tpv205_fault.yaml / tpv205_material.yaml is checked against that deck by
+!   python3 ../../check_parity.py --problem tpv205 --repo <repo root>
+! Keys verified against SeisSol a8e7f04f (file:line in ../../NOTES.md).
+!
+! ORDER is compile-time in SeisSol: this one body serves every order; the
+! binary picks it.  Mesh: tpv2053d_200m.puml.h5 = pumgen of a copy of the
+! MFEM .msh retagged by retag_msh2.py (101->1, 103->3, 105->5): at this SeisSol
+! commit the default face map makes every tag >= 65 dynamic rupture
+! (Initializer/FaceMap.cpp:98-117), so the raw 101/105 tags would be read
+! as fault; see NOTES.md "Open".
+!
+! Matches the MFEM deck:  FL 16 (linear slip weakening, tpv205_nitsche.toml
+! [meta] law), friction, prestress patches and material in the yaml files;
+! no time-dependent nucleation (the 81.6 MPa patch is static, as the MFEM
+! deck); EndTime 12 s = [time] tfinal.  NOT matched (NOTES.md "Open"):
+! Kelvin-Voigt kv_eta = 0.1 and Prakash-Clifton v* = 1, L = 0.01 (MFEM only).
+! =====================================================================
+
+&equations
+MaterialFileName = 'tpv205_material.yaml'
+Plasticity = 0
+numflux = 'godunov'
+/
+
+&IniCondition
+/
+
+&DynamicRupture
+FL = 16                          ! linear slip weakening (Misc.h:36)
+ModelFileName = 'tpv205_fault.yaml'
+! no forced rupture / no nucleation stress: t_0 left at its default 0
+! (DRParameters.cpp:91); nuc_* = 0 in the yaml (MFEM: no [nucleation]).
+XRef = 0.0                       ! reference point on the y<0 (MFEM plus) side
+YRef = -1.0e5
+ZRef = 0.0
+refPointMethod = 0               ! 0 = point (DRParameters.cpp:37-38)
+SlipRateOutputType = 1           ! default; slip rate from tractions (DRParameters.cpp:67-70)
+OutputPointType = 3              ! 3 = on-fault pickpoints only, no elementwise (DRParameters.h:22-27)
+/
+
+&Elementwise
+/
+
+&Pickpoint
+PPFileName = 'tpv205_faultreceivers.dat'
+printtimeinterval = 1            ! every fault time step (MFEM writes every fault step)
+!            SR  Ttr un MuSt Ttot Slip Vr ASl PSR RT DS TP   (DataTypes.h:113-127)
+OutputMask = 1   0   0  1    1    1    0  1   0   0  0  0
+/
+
+&SourceType
+/
+
+&SpongeLayer
+/
+
+&MeshNml
+MeshFile = 'tpv2053d_200m.puml.h5'
+meshgenerator = 'PUML'
+/
+
+&Discretization
+CFL = 0.5                        ! SeisSol production value
+ClusteredLTS = 2                 ! rate-2 LTS, SeisSol production
+/
+
+&Output
+OutputFile = 'output/tpv205'
+Format = 10                      ! no wavefield (OutputParameters.h:27)
+WaveFieldOutput = 0
+iOutputMask = 0 0 0 0 0 0 1 1 1  ! readOrFail even with no wavefield (OutputParameters.cpp:222-223)
+SurfaceOutput = 0
+EnergyOutput = 0
+EnergyTerminalOutput = 0
+ReceiverOutput = 0               ! OFF: MFEM has no TPV205 off-fault stations, and an empty receiver file is untested
+pickdt = 0.005                   ! (MFEM has no TPV205 off-fault stations: tpv205_setup.hpp:195-210)
+RFileName = 'tpv205_receivers.dat'
+Checkpoint = 0
+/
+
+&AbortCriteria
+EndTime = 12.0
+/
+
+&Analysis
+/
+
+&Debugging
+/

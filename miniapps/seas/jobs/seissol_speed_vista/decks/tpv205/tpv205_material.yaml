@@ -1,0 +1,11 @@
+!ConstantMap
+# SCEC TPV205 homogeneous elastic half-space (no plasticity, no attenuation).
+# Values copied from the MFEM deck miniapps/seas/tpv205/configs/tpv205_nitsche.toml
+# [material_constant_fallback] (rho = 2670, cs = 3464, cp = 6000:
+# mu = rho cs^2, lambda = rho (cp^2 - 2 cs^2)).  Checked by
+# ../../check_parity.py --problem tpv205.  Parameter names: SeisSol
+# Initializer/ParameterDB.cpp:332-334 (rho, mu, lambda).
+map:
+  rho:    2670.0
+  mu:     32038120320.0
+  lambda: 32043759360.0
