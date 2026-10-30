@@ -1,0 +1,689 @@
+# ucerf2d_saf_sjf_2p5d_dc026_fd.toml — ucerf2d_saf_sjf_2p5d_fd.toml with Dc =
+# 0.26 m instead of 0.47 m and the 1 MPa sigma_n' floor back on.  The 2.5D
+# run at a4a56fcf (8 ranks, Mac, 10-30) had no event: the faults crept
+# about 2 m to 14,500 yr and the QD solve died where sigma_n' reached 0 at
+# (177, -348) km.  With the term every slip patch keeps a stiffness of at
+# least c mu / W = 2.52 MPa/m (W = 15 km, wa2020), and rate and state needs
+# less than sigma_n' (b - a) / Dc for an instability: 2.8 MPa/m at 50 MPa
+# with Dc = 0.47 m, and below 2.52 MPa/m wherever sigma_n' < 45.4 MPa.
+#
+# Dc = 0.26 m is BP5's Dc scaled by the faults' LOWEST sigma_n' (0.14 x
+# 45.4 / 25 = 0.254, rounded up), where 0.47 m was set by the highest (L_b
+# >= 6.07 km at 82.6 MPa): sigma_n' (b - a) / Dc >= 4.54 MPa/m everywhere
+# (BP5: 4.64), so every stretch is at least as unstable as BP5's against
+# the 2.52 MPa/m of the term.  The cost is resolution: L_b = mu Dc / (b
+# sigma_n') = 3.4-6.1 km (6.8-12 cells of 500 m at p = 1) instead of
+# 6.1-11 km.  The floor stays because the sharp-bend decks showed the term
+# does not change the kink's sigma_n' per metre of slip; it only bounds the
+# slip per event (W dtau / (c mu), a few m, against run8's 67 m mean).
+#
+# Differences to ucerf2d_saf_sjf_2p5d_fd.toml: Dc (the default and the
+# [cycle.fields.Dc] field), [cycle] sigma_n_floor_pa = 1 MPa (run8's), the
+# output prefix.  Chunhui Zhao's card of 10-30 picks this deck or not.
+#
+# Run from miniapps/seas:
+#   mpirun -np 8 ./seas_fd_cycle_driver --deck config/fd_cycle/ucerf2d_saf_sjf_2p5d_dc026_fd.toml
+#
+# The 2.5D deck's notes follow.
+#
+# ucerf2d_saf_sjf_2p5d_fd.toml — ucerf2d_saf_sjf_fd.toml with the 2.5D
+# finite-width term ([cycle.finite_width], cycle/finite_width.hpp) and
+# WITHOUT the sigma_n' floor: does the finite seismogenic width keep sigma_n'
+# positive at the San Andreas bends and pass the hand-back where run7
+# (plane strain, no floor) stopped at sigma_n' < 0 and run8 (floor 1 MPa)
+# stopped at its first switch back?  Chunhui Zhao, 2026-10-30: "does 2.5D
+# model solve the issues we have ... test this directly locally using
+# designed bended fault and UCERF fault"; the floor off (derivation note
+# /mnt/project-files/2d-inplane/nonplanar-literature/inplane-2p5d-derivation-rev8.pdf,
+# Section 7.4); substrate "locked_reference" (the card of 10-30 16:58Z): while
+# the faults are locked the loading is run8's, and the term acts on slip
+# alone (valid for the first events only).
+#
+# Differences to ucerf2d_saf_sjf_fd.toml: no [cycle] sigma_n_floor_pa, the
+# [cycle.finite_width] table (W = 15 km, wa2020: c = 1.178, beta = 790.5
+# Pa/m^2, decay length 6.37 km), the output prefix, and tfinal (a backstop
+# of 1e12 s: the first event may move; max_dynamic_phases = 2 stops the run).
+# Everything else is run8's, so the hand-back tables and the bend-vertex
+# sigma_n' compare one to one.
+#
+# Run from miniapps/seas, at a commit with [cycle.finite_width]:
+#   mpirun -np 8 ./seas_fd_cycle_driver --deck config/fd_cycle/ucerf2d_saf_sjf_2p5d_fd.toml
+#
+# The plane-strain deck's notes follow.
+#
+# ucerf2d_saf_sjf_fd.toml — seas_fd_cycle_driver on the UCERF3 FM3.1 San Andreas
+# and San Jacinto faults, a horizontal slice at 10 km depth, plane strain in
+# map view, p = 1, quasi-dynamic and dynamic regimes switched on max V.  The
+# first TEST deck of the UCERF 2D model (report
+# /mnt/project-files/ucerf-2d/ucerf-faults-2d-rev14.pdf).
+# Chunhui Zhao, 2026-10-29: "let's not add this for now" (the 20 km
+# velocity-strengthening tip zones), "what else we need to do before we
+# prepare a test run".
+#
+# Runs (cloud, 4 ranks): run7 (e7c8e5ff, 10-30) stopped 27 s into event 1,
+# sigma_n' < 0 at a 1.5 deg bend of saf1; run8 (+ [cycle] sigma_n_floor_pa =
+# 1 MPa) finished the dynamic phase (313.5 s, 90,930 steps, 1 h 47 min in
+# all) and stopped at its first switch back: max V dynamic 7.8e-5 m/s, QD
+# balance 0.253 m/s (plan 6.3's guard, exit 7).  This deck is run8's with
+# the paths in the repo, [cycle.output] handback_table = true and
+# [cycle.probe], for the rerun on the Mac (Chunhui Zhao, 2026-10-30: the card
+# "Floor commit, then UCERF table").
+#
+# Run from miniapps/seas, at 2d-inplane with [cycle] sigma_n_floor_pa or
+# later:
+#   mpirun -np 4 ./seas_fd_cycle_driver --deck config/fd_cycle/ucerf2d_saf_sjf_fd.toml
+#
+# Starts from config/fd_cycle/mapview_rs_tensor_fd.toml (the map-view tensor
+# deck); differences: the mesh, the tensor, Dc, a uniform (no tip zones),
+# the loading plane, the output plane and stations, the run length.
+#
+# Coordinates: azimuthal equidistant about 37.25 N 119.25 W, x east, y
+# north, in m.  s = (-0.8389, 0.5442) is N57W, the line through the two San
+# Andreas tips (Parkfield -117.9, -137.9 km).  The mesh
+# is the map view deck's frame turned so its +x is s and its +y the SW side
+# (-e2): ref_normal = e2 (the NE side's normal pointing away from the SW
+# side), plane_normal = -e2, slip_dir = s, so the SW half moves +V_p t s / 2
+# (NW) and the NE half -V_p t s / 2, right lateral, as in BP5.
+#
+# Faults: 5 disconnected chains, 18 sections, 823 km, 10 free tips:
+#   saf1 Parkfield to San Bernardino S (421 km), saf2 San Gorgonio
+#   Pass-Garnet Hill (56 km), saf3 Coachella (69 km),
+#   sjf1 San Bernardino to Clark (173 km), sjf2 Coyote Creek to
+#   Superstition Mtn (103 km).
+#
+# CHECKS listed before the first (cloud) run:
+#   - map-view QD with several disconnected faults and free tips (never run)
+#   - the orientation pin: each chain's mean normal against ref_normal must
+#     be >= pin_min_margin (0.1); measured on the traces |mean n . e2| =
+#     0.95 to 0.99 for the five chains, so the pin is safe
+#   - San Gorgonio Pass: 13 km of left-lateral resolved shear; V_init follows
+#     -tau0 there (left lateral), the code takes it
+#   - the time to build G (N_f = 3,354 columns on 3.57 M DOFs)
+#   - [cycle.benchmark] with the plane coordinates below on curved faults
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "UCERF3 FM3.1 San Andreas + San Jacinto at 10 km, map view, switched QD and dynamic regimes (test deck)."
+
+# rho = 2670 kg/m^3, cs = 3.464 km/s, nu = 0.25 (lambda = mu), cp = 6 km/s.
+[material_constant_fallback]
+lambda = 32038120320.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+# Effective stresses go into [stress]; no pore pressure here.
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+# Fault traces rounded at every corner with R = 10 km arcs (49 corners,
+# at most 0.36 km off UCERF; Chunhui Zhao 2026-10-29 "yes let's build this
+# mesh" after the QD abort at a 10.5 deg corner of sjf1).  500 m within
+# 10 km of the faults, h = 500 m + 0.1 (d - 10 km) to 5 km;
+# tilted 1393 x 893 km box, walls 415 km from every fault point (D415);
+# 326,130 triangles, 1,644 fault edges, at most 0.44 km off UCERF after
+# rounding (ucerf2d/mesh/*_f10.json).  Tags: 3 faults, 5 the two long walls,
+# 1 the two ends.
+[mesh]
+path  = "ucerf2d/mesh/ucerf2d_saf_sjf_500m_tilted_D415km_f10.msh"
+order = 1
+
+[velocity]
+use_sidecar = false
+
+# Test stress (report section 4): SHmax N7E, effective principal stresses
+# from the gamma = 0.8, R0 = 0.8 recipe with the deviatoric part x1.3
+# (Chunhui Zhao 2026-10-29, the card "Raise shear: deviatoric x1.3": the
+# best-oriented sections start at tau0/sigma_n' 0.55-0.65, first event about
+# 10 kyr): S1 = 82.85, S2 = 52.33 (vertical), S3 = 21.82 MPa;
+# tension positive.
+[stress]
+kind        = "constant_tensor"
+sigma_xx_pa = -22723874.717053052
+sigma_yy_pa = -81940125.28294693
+sigma_zz_pa = -52331999.99999999
+sigma_xy_pa = -7382134.744727842
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+[numerics]
+cfl       = 0.5
+kv_eta    = 0.1
+kv_scale  = "node"
+kv_length = "inscribed"
+
+# Run length: 20 events (Chunhui Zhao, 2026-10-29: "I think 20 events at a
+# start would be sufficient"), stopped by max_dynamic_phases below; tfinal
+# = 500,000 yr of 365 days is only a backstop (first events after about
+# 32,000 to 88,000 yr, then about 18,000 yr apart at 0.56 kPa/yr).
+[time]
+tfinal     = 1.0e12       # backstop; run8 used 4.30e11 (run7 switched at 3.984e11 s)
+dt_initial = 0.01
+
+[output]
+output_dir = "."
+
+[boundary]
+fault_attr    = 3
+natural_attrs = [1]
+
+[fault_geometry]
+ref_normal      = [0.5442133518280823, 0.8389468562978492]
+up              = [0.0, 0.0, 1.0]
+kind            = "vertical_strike_slip"
+orientation     = "propagated"
+pin_by          = "reference"
+tangent         = "pointwise"
+junction_policy = "refuse"
+pin_min_margin  = 0.1
+
+# BP5's scalars; a = 0.004 everywhere (no tip zones for now), Dc = 0.47 m
+# uniform (keeps mu Dc / (b sigma_n') >= 6.07 km at sigma_n' up to 82.6 MPa),
+# sigma_n' from the tensor.
+[friction.rate_state]
+a_default       = 0.004
+b_default       = 0.03
+Dc_default      = 0.26
+V_0_default     = 1.0e-6
+f_0_default     = 0.6
+V_init_default  = 1.0e-9
+state_evolution = "aging_law"
+eta             = "auto"
+
+[cycle]
+ic                   = "scec_fd"
+switching            = true
+qd_radiation_damping = true
+mesh_scale           = 1.0
+plate_rate           = 1.0e-9
+penalty_factor       = 1.0
+# opt-in sigma_n' floor of the friction law in both regimes (run8's 1 MPa)
+sigma_n_floor_pa     = 1.0e6
+
+# The 2.5D term: buried calibration (Chunhui Zhao, 2026-10-30: "we will for
+# 2d in plane, only focus on buried fault for now"), W = 15 km.  Kelvin-Voigt
+# damps K alone, not beta (the note's rule C3; the code's only choice, also
+# in the run log).
+[cycle.finite_width]
+W_m         = 15.0e3
+calibration = "wa2020"
+substrate   = "locked_reference"
+
+# The BP5-FD switch; stop after 20 dynamic phases (for the cloud check,
+# lower it to 1).
+[cycle.switch]
+V_on               = 1.0e-2
+V_off              = 1.0e-3
+T_dwell            = 10.0
+T_min              = 0.0
+T_max              = 1200.0
+max_dynamic_phases = 2
+
+# The switch probe of plan P3 (Chunhui Zhao, 2026-10-30: "let's continue
+# investigation until a possible reason and fix is identified and tested"):
+# at run8's switch back a wave of 0.29 m/s (about 2.7 MPa of S-wave stress)
+# was still crossing the NW end of saf1.  The first dynamic phase runs on
+# until each T_dwell below would have switched back, and the QD balance is
+# solved there (_switch_probe.txt and the log); the run itself still
+# switches back with [cycle.switch]'s pair, at run8's state, and writes the
+# hand-back table there.
+[cycle.probe]
+V_off   = [1.0e-3]
+T_dwell = [10.0, 30.0, 60.0, 120.0, 240.0]
+
+# All four faces absorb in the dynamic regime; the long walls keep their
+# frozen load (H3).
+[cycle.absorbing]
+faces = "all"
+
+[cycle.qd]
+solver        = "mumps"
+# petsc_ts_rk45_tandem.cfg with dt_max 10 yr instead of 0.1 yr (Chunhui
+# Zhao 2026-10-29, the card "Raise the QD step cap to 10 yr"): the faults
+# start locked and load at about 0.6 kPa/yr, so 0.1 yr meant about 360k
+# steps to the first event; RK5(4) stays error controlled.
+petsc_options = "ucerf2d/petsc_ts_rk45_ucerf.cfg"
+ts_atol       = 1.0e-7
+ts_rtol       = 1.0e-50
+operators     = "matrix"
+
+# Dense G on the strike slot: N_f = 3,354 at p = 1; built at every start
+# and restart (no cache in 2D), 14.4 min on 4 ranks.
+[cycle.qd.green]
+check_every = 10000
+block       = 8              # cloud check 10-29: block 64 ran out of memory at 13.2 GB (4 ranks); 8 peaks at 12.4 GB
+
+[cycle.prestress]
+V_background = 1.0e-9
+eta_V_init   = false
+
+# BP5 wall motion, no creep: the plane through the Parkfield tip along s
+# splits the walls; every wall node is >= 432 km from it.  Band 0: no
+# prescribed-slip segment (the faults end in the medium).
+[cycle.loading]
+kind         = "plate"
+plane_point  = [-117927.50429603623, -137890.50995349901]
+plane_normal = [-0.5442133518280823, -0.8389468562978492]
+slip_dir     = [-0.8389468562978492, 0.5442133518280823]
+band         = 0.0
+
+[cycle.fields]
+V_init_dip = 0.0
+
+# a = 0.004 everywhere (uniform: half1 = 0, inside = outside).
+[cycle.fields.a]
+center  = [0.0, 0.0]
+axis1   = [1.0, 0.0]
+half1   = 0.0
+inside  = 0.004
+outside = 0.004
+
+[cycle.fields.Dc]
+center  = [0.0, 0.0]
+axis1   = [1.0, 0.0]
+half1   = 0.0
+inside  = 0.26
+outside = 0.26
+
+[cycle.fields.V_init]
+center  = [0.0, 0.0]
+axis1   = [1.0, 0.0]
+half1   = 0.0
+inside  = 1.0e-9
+outside = 1.0e-9
+
+# Plane coordinates: x2 along e1 (SE, from the Parkfield tip), x3 along e2
+# (NE).  Rows every 10 yr while slow, every 0.1 s while max V > 1e-3 m/s.
+[cycle.output]
+prefix          = "ucerf2d_saf_sjf_2p5d_dc026_fd"
+# both regimes per fault DOF at every switch back (the jump that stopped run8)
+handback_table  = true
+fast_V          = 1.0e-3
+dt_fast         = 0.1
+dt_slow         = 3.1536e8
+event_V         = 1.0e-3
+event_dwell     = 10.0
+plane_origin    = [-117927.50429603623, -137890.50995349901]
+plane_axis1     = [0.8389468562978492, -0.5442133518280823]
+plane_axis2     = [0.5442133518280823, 0.8389468562978492]
+station_sigma_n = true
+
+# On-fault stations: 2 km in from each tip and every 10 km along each chain
+# from its north end, 89 in all; name = chain + km along it.
+[[cycle.output.station]]
+name = "saf3_002.0km"
+x    = [279182.0, -381993.2]
+[[cycle.output.station]]
+name = "saf3_010.0km"
+x    = [285067.7, -387411.6]
+[[cycle.output.station]]
+name = "saf3_020.0km"
+x    = [292424.7, -394184.6]
+[[cycle.output.station]]
+name = "saf3_030.0km"
+x    = [299781.8, -400957.7]
+[[cycle.output.station]]
+name = "saf3_040.0km"
+x    = [307138.8, -407730.7]
+[[cycle.output.station]]
+name = "saf3_050.0km"
+x    = [314495.9, -414503.7]
+[[cycle.output.station]]
+name = "saf3_060.0km"
+x    = [321852.9, -421276.7]
+[[cycle.output.station]]
+name = "saf3_067.5km"
+x    = [327344.1, -426332.0]
+[[cycle.output.station]]
+name = "saf1_002.0km"
+x    = [-116657.1, -139435.2]
+[[cycle.output.station]]
+name = "saf1_010.0km"
+x    = [-111575.4, -145613.9]
+[[cycle.output.station]]
+name = "saf1_020.0km"
+x    = [-105223.3, -153337.3]
+[[cycle.output.station]]
+name = "saf1_030.0km"
+x    = [-98871.2, -161060.7]
+[[cycle.output.station]]
+name = "saf1_040.0km"
+x    = [-92595.7, -168845.4]
+[[cycle.output.station]]
+name = "saf1_050.0km"
+x    = [-86460.4, -176742.1]
+[[cycle.output.station]]
+name = "saf1_060.0km"
+x    = [-80325.1, -184638.8]
+[[cycle.output.station]]
+name = "saf1_070.0km"
+x    = [-74184.3, -192531.2]
+[[cycle.output.station]]
+name = "saf1_080.0km"
+x    = [-68027.1, -200410.9]
+[[cycle.output.station]]
+name = "saf1_090.0km"
+x    = [-61712.2, -208162.7]
+[[cycle.output.station]]
+name = "saf1_100.0km"
+x    = [-55272.8, -215813.4]
+[[cycle.output.station]]
+name = "saf1_110.0km"
+x    = [-48853.1, -223480.7]
+[[cycle.output.station]]
+name = "saf1_120.0km"
+x    = [-42433.4, -231148.0]
+[[cycle.output.station]]
+name = "saf1_130.0km"
+x    = [-35263.9, -238109.3]
+[[cycle.output.station]]
+name = "saf1_140.0km"
+x    = [-27966.7, -244946.5]
+[[cycle.output.station]]
+name = "saf1_150.0km"
+x    = [-20313.0, -251382.5]
+[[cycle.output.station]]
+name = "saf1_160.0km"
+x    = [-12510.2, -257634.1]
+[[cycle.output.station]]
+name = "saf1_170.0km"
+x    = [-3736.3, -262266.5]
+[[cycle.output.station]]
+name = "saf1_180.0km"
+x    = [5607.3, -265781.6]
+[[cycle.output.station]]
+name = "saf1_190.0km"
+x    = [15341.7, -268070.9]
+[[cycle.output.station]]
+name = "saf1_200.0km"
+x    = [25129.1, -270107.6]
+[[cycle.output.station]]
+name = "saf1_210.0km"
+x    = [34892.5, -272201.3]
+[[cycle.output.station]]
+name = "saf1_220.0km"
+x    = [44372.0, -275385.7]
+[[cycle.output.station]]
+name = "saf1_230.0km"
+x    = [53825.6, -278645.8]
+[[cycle.output.station]]
+name = "saf1_240.0km"
+x    = [63279.3, -281906.1]
+[[cycle.output.station]]
+name = "saf1_250.0km"
+x    = [72575.3, -285570.1]
+[[cycle.output.station]]
+name = "saf1_260.0km"
+x    = [81727.9, -289598.9]
+[[cycle.output.station]]
+name = "saf1_270.0km"
+x    = [90880.4, -293627.8]
+[[cycle.output.station]]
+name = "saf1_280.0km"
+x    = [100032.9, -297656.6]
+[[cycle.output.station]]
+name = "saf1_290.0km"
+x    = [109115.2, -301837.6]
+[[cycle.output.station]]
+name = "saf1_300.0km"
+x    = [118113.9, -306199.1]
+[[cycle.output.station]]
+name = "saf1_310.0km"
+x    = [127112.6, -310560.7]
+[[cycle.output.station]]
+name = "saf1_320.0km"
+x    = [136111.3, -314922.2]
+[[cycle.output.station]]
+name = "saf1_330.0km"
+x    = [145087.1, -319330.7]
+[[cycle.output.station]]
+name = "saf1_340.0km"
+x    = [154059.3, -323746.6]
+[[cycle.output.station]]
+name = "saf1_350.0km"
+x    = [162909.1, -328400.5]
+[[cycle.output.station]]
+name = "saf1_360.0km"
+x    = [171256.1, -333883.1]
+[[cycle.output.station]]
+name = "saf1_370.0km"
+x    = [179815.2, -339054.1]
+[[cycle.output.station]]
+name = "saf1_380.0km"
+x    = [188710.6, -343599.0]
+[[cycle.output.station]]
+name = "saf1_390.0km"
+x    = [197923.7, -347487.2]
+[[cycle.output.station]]
+name = "saf1_400.0km"
+x    = [207181.7, -351266.4]
+[[cycle.output.station]]
+name = "saf1_410.0km"
+x    = [216383.0, -355160.8]
+[[cycle.output.station]]
+name = "saf1_419.2km"
+x    = [222901.0, -361634.3]
+[[cycle.output.station]]
+name = "saf2_002.0km"
+x    = [229534.9, -358998.1]
+[[cycle.output.station]]
+name = "saf2_010.0km"
+x    = [237445.4, -358819.1]
+[[cycle.output.station]]
+name = "saf2_020.0km"
+x    = [246841.9, -362060.4]
+[[cycle.output.station]]
+name = "saf2_030.0km"
+x    = [256204.8, -365552.4]
+[[cycle.output.station]]
+name = "saf2_040.0km"
+x    = [265632.9, -368475.8]
+[[cycle.output.station]]
+name = "saf2_050.0km"
+x    = [274803.0, -372306.0]
+[[cycle.output.station]]
+name = "saf2_053.4km"
+x    = [277860.9, -373812.4]
+[[cycle.output.station]]
+name = "sjf1_002.0km"
+x    = [162460.9, -331883.6]
+[[cycle.output.station]]
+name = "sjf1_010.0km"
+x    = [168876.2, -336663.2]
+[[cycle.output.station]]
+name = "sjf1_020.0km"
+x    = [174946.6, -344480.1]
+[[cycle.output.station]]
+name = "sjf1_030.0km"
+x    = [180973.7, -352414.0]
+[[cycle.output.station]]
+name = "sjf1_040.0km"
+x    = [187972.4, -359530.7]
+[[cycle.output.station]]
+name = "sjf1_050.0km"
+x    = [195439.4, -366182.3]
+[[cycle.output.station]]
+name = "sjf1_060.0km"
+x    = [202564.1, -373181.1]
+[[cycle.output.station]]
+name = "sjf1_070.0km"
+x    = [209283.6, -380587.0]
+[[cycle.output.station]]
+name = "sjf1_080.0km"
+x    = [216052.1, -387945.2]
+[[cycle.output.station]]
+name = "sjf1_090.0km"
+x    = [224322.0, -393559.0]
+[[cycle.output.station]]
+name = "sjf1_100.0km"
+x    = [232465.1, -399363.4]
+[[cycle.output.station]]
+name = "sjf1_110.0km"
+x    = [240608.1, -405167.7]
+[[cycle.output.station]]
+name = "sjf1_120.0km"
+x    = [248751.2, -410972.1]
+[[cycle.output.station]]
+name = "sjf1_130.0km"
+x    = [256978.2, -416656.3]
+[[cycle.output.station]]
+name = "sjf1_140.0km"
+x    = [265255.4, -422265.7]
+[[cycle.output.station]]
+name = "sjf1_150.0km"
+x    = [274482.6, -426075.7]
+[[cycle.output.station]]
+name = "sjf1_160.0km"
+x    = [282054.2, -432595.0]
+[[cycle.output.station]]
+name = "sjf1_170.0km"
+x    = [290655.4, -437660.7]
+[[cycle.output.station]]
+name = "sjf1_171.1km"
+x    = [291536.0, -438267.8]
+[[cycle.output.station]]
+name = "sjf2_002.0km"
+x    = [252845.1, -418160.8]
+[[cycle.output.station]]
+name = "sjf2_010.0km"
+x    = [259147.3, -423079.0]
+[[cycle.output.station]]
+name = "sjf2_020.0km"
+x    = [266409.5, -429953.7]
+[[cycle.output.station]]
+name = "sjf2_030.0km"
+x    = [273671.7, -436828.3]
+[[cycle.output.station]]
+name = "sjf2_040.0km"
+x    = [281248.4, -443346.9]
+[[cycle.output.station]]
+name = "sjf2_050.0km"
+x    = [288921.3, -449683.2]
+[[cycle.output.station]]
+name = "sjf2_060.0km"
+x    = [296487.8, -456134.8]
+[[cycle.output.station]]
+name = "sjf2_070.0km"
+x    = [302553.5, -464017.4]
+[[cycle.output.station]]
+name = "sjf2_080.0km"
+x    = [311384.6, -468654.4]
+[[cycle.output.station]]
+name = "sjf2_090.0km"
+x    = [320300.4, -473183.0]
+[[cycle.output.station]]
+name = "sjf2_100.0km"
+x    = [329112.8, -477908.9]
+[[cycle.output.station]]
+name = "sjf2_101.2km"
+x    = [330170.9, -478481.5]
+
+# Off-fault stations (u and v along east and north): 2, 10 and 30 km either
+# side of saf1 at 100, 200 and 300 km, normal to s; and six cities (no
+# basin structure in the model).  Domain A of the source time series: all
+# faults, in plane coordinates, with 20 km margins.  No profile (the faults
+# are not straight).
+[cycle.benchmark]
+region_x2       = [-19000.0, 582000.0]
+region_x3       = [-66000.0, 38000.0]
+rupture_V       = 1.0e-3
+profile_dt_slow = 3.1536e9
+profile_dt_fast = 1.0
+profile_sigma_n = true
+volume_axes     = [[1.0, 0.0], [0.0, 1.0]]
+[[cycle.benchmark.volume_station]]
+name = "saf1_100.0km_ne02"
+x    = [-54184.4, -214135.5]
+[[cycle.benchmark.volume_station]]
+name = "saf1_100.0km_sw02"
+x    = [-56361.2, -217491.3]
+[[cycle.benchmark.volume_station]]
+name = "saf1_100.0km_ne10"
+x    = [-49830.7, -207424.0]
+[[cycle.benchmark.volume_station]]
+name = "saf1_100.0km_sw10"
+x    = [-60714.9, -224202.9]
+[[cycle.benchmark.volume_station]]
+name = "saf1_100.0km_ne30"
+x    = [-38946.4, -190645.0]
+[[cycle.benchmark.volume_station]]
+name = "saf1_100.0km_sw30"
+x    = [-71599.2, -240981.8]
+[[cycle.benchmark.volume_station]]
+name = "saf1_200.0km_ne02"
+x    = [26217.5, -268429.7]
+[[cycle.benchmark.volume_station]]
+name = "saf1_200.0km_sw02"
+x    = [24040.7, -271785.5]
+[[cycle.benchmark.volume_station]]
+name = "saf1_200.0km_ne10"
+x    = [30571.2, -261718.2]
+[[cycle.benchmark.volume_station]]
+name = "saf1_200.0km_sw10"
+x    = [19686.9, -278497.1]
+[[cycle.benchmark.volume_station]]
+name = "saf1_200.0km_ne30"
+x    = [41455.5, -244939.2]
+[[cycle.benchmark.volume_station]]
+name = "saf1_200.0km_sw30"
+x    = [8802.7, -295276.0]
+[[cycle.benchmark.volume_station]]
+name = "saf1_300.0km_ne02"
+x    = [119202.3, -304521.2]
+[[cycle.benchmark.volume_station]]
+name = "saf1_300.0km_sw02"
+x    = [117025.5, -307877.0]
+[[cycle.benchmark.volume_station]]
+name = "saf1_300.0km_ne10"
+x    = [123556.0, -297809.7]
+[[cycle.benchmark.volume_station]]
+name = "saf1_300.0km_sw10"
+x    = [112671.8, -314588.6]
+[[cycle.benchmark.volume_station]]
+name = "saf1_300.0km_ne30"
+x    = [134440.3, -281030.7]
+[[cycle.benchmark.volume_station]]
+name = "saf1_300.0km_sw30"
+x    = [101787.5, -331367.5]
+[[cycle.benchmark.volume_station]]
+name = "los_angeles"
+x    = [92755.0, -355098.2]
+[[cycle.benchmark.volume_station]]
+name = "san_bernardino"
+x    = [180548.4, -347516.4]
+[[cycle.benchmark.volume_station]]
+name = "palm_springs"
+x    = [249946.2, -376775.2]
+[[cycle.benchmark.volume_station]]
+name = "bakersfield"
+x    = [20975.3, -208654.3]
+[[cycle.benchmark.volume_station]]
+name = "lancaster"
+x    = [100223.4, -284446.1]
+[[cycle.benchmark.volume_station]]
+name = "san_diego"
+x    = [195617.5, -502107.4]
+
+[cycle.checkpoint]
+every_qd_steps = 1000
+
+# The fault every 100 yr and every 0.5 s in a dynamic phase.
+[cycle.snapshots.fault]
+dt_qd  = 3.1536e9
+dt_dyn = 0.5
+
+# Map view: the whole 2D domain is the horizontal plane, so the "surface"
+# output is the volume snapshot (displacement and velocity, east and north,
+# float64, 3 points per triangle).  Box = the faults' extent plus 100 km:
+# 243,684 triangles, about 35 MB per snapshot; every 2 s in a dynamic phase
+# (Nyquist 0.25 Hz; about 4.4 GB for a 250 s phase) and every 10,000 yr in
+# the QD regime (Chunhui Zhao, 2026-10-29: "this is too much, we need to
+# reduce the size", "the sampling frequency", "let's do 2s").  About 90 GB
+# for 20 events with everything else.
+[cycle.snapshots.volume]
+dt_qd   = 3.1536e11
+dt_dyn  = 2.0
+box_min = [-217000.0, -578000.0]
+box_max = [430000.0, -39000.0]
