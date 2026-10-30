@@ -630,10 +630,14 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
    {
       MFEM_VERIFY(qd_ops_, "--qd-green needs the QD stage operators: call "
                   "BuildQDStageOperators() first (--qd-operators matrix)");
-      MFEM_VERIFY(!Device::Allows(Backend::DEVICE_MASK),
-                  "--qd-green runs on the CPU only (no --device)");
-      MFEM_VERIFY(config.compress == 0.0 ||
-                  !Device::Allows(Backend::DEVICE_MASK),
+      // GPU plan G3c: on a device, G is read from the cache file a CPU
+      // run wrote, then kept on the device.
+      const bool on_device = Device::Allows(Backend::DEVICE_MASK);
+      MFEM_VERIFY(!on_device || !config.cache_path.empty(),
+                  "--qd-green with --device reads G from --qd-green-cache, "
+                  "written by a CPU run (same model, no --device); building "
+                  "G on the device is not implemented");
+      MFEM_VERIFY(config.compress == 0.0 || !on_device,
                   "--qd-green-compress runs on the CPU only (no --device)");
       MFEM_VERIFY(config.block >= 1, "--qd-green-block must be >= 1, got "
                   << config.block);
@@ -668,6 +672,8 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
          g_hat = ops.g;
          EvaluateQDDirichletValues(2.0);
          real_t dev = 0.0, gmax = g_hat.Normlinf();
+         g_hat.HostRead();
+         ops.g.HostRead();
          for (int i = 0; i < g_hat.Size(); i++)
          {
             dev = std::max(dev, std::abs(ops.g(i) - 2.0 * g_hat(i)));
@@ -760,6 +766,10 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
       {
          loaded = green->ReadFile(config.cache_path, info);
       }
+      MFEM_VERIFY(loaded || !on_device, "--qd-green with --device: no cache "
+                  "file '" << config.cache_path << "'.  Write it first with "
+                  "a CPU run of the same model (no --device, same "
+                  "--qd-green-cache), then rerun on the device.");
       double t_solve = 0.0, t_cols = 0.0;
       if (!loaded && !h_loaded)
       {
@@ -848,6 +858,17 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
       }
       const double t_ready = MPI_Wtime() - t_start;
       qd_green_ = std::move(green);
+      double t_upload = 0.0, dev_bytes = 0.0;
+      if (on_device)
+      {
+         MPI_Barrier(comm);
+         const double free0 = detail::FreeDeviceBytes();
+         const double t0 = MPI_Wtime();
+         qd_green_->UseDevice(config.gpu_mpi);
+         if (Device::Allows(Backend::CUDA_MASK)) { MFEM_DEVICE_SYNC; }
+         t_upload = MPI_Wtime() - t0;
+         dev_bytes = free0 - detail::FreeDeviceBytes();
+      }
 
       // Check against the solve path: slip of order 1 m varying along the
       // fault and t = 100 yr, so both G·δ and t·T_D matter.
@@ -864,6 +885,8 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
       auto rel = [&](const Vector &a, const Vector &b)
       {
          real_t loc[2] = {0.0, 0.0}, glob[2];
+         a.HostRead();
+         b.HostRead();
          for (int i = 0; i < a.Size(); i++)
          {
             loc[0] = std::max(loc[0], std::abs(a(i) - b(i)));
@@ -884,8 +907,11 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
       double bytes = qd_green_->LocalBytes(), bmax = 0.0, btot = 0.0;
       MPI_Reduce(&bytes, &bmax, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
       MPI_Reduce(&bytes, &btot, 1, MPI_DOUBLE, MPI_SUM, 0, comm);
-      double tm[4] = {t_built, t_solve, t_cols, t_ready}, tmax[4];
-      MPI_Reduce(tm, tmax, 4, MPI_DOUBLE, MPI_MAX, 0, comm);
+      double tm[5] = {t_built, t_solve, t_cols, t_ready, t_upload},
+             tmax[5];
+      MPI_Reduce(tm, tmax, 5, MPI_DOUBLE, MPI_MAX, 0, comm);
+      double dbmax = 0.0;
+      MPI_Reduce(&dev_bytes, &dbmax, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
       if (rank == 0)
       {
          std::ostringstream o;
@@ -922,6 +948,17 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
             o << hsummary << "[QD-GREEN] compressed G ready "
               << std::fixed << std::setprecision(1) << tmax[3]
               << " s after the start of the build\n";
+         }
+         if (on_device)
+         {
+            o << "[QD-GREEN] on the device (" << qd_green_->ProductName()
+              << "): moved in " << std::fixed << std::setprecision(1)
+              << tmax[4] << " s, device memory used " << std::setprecision(2)
+              << dbmax / 1073741824.0 << " GiB on the largest rank"
+              << (nranks > 1 ? (config.gpu_mpi ? "; MPI on device buffers"
+                                               : "; MPI staged through the host")
+                             : "")
+              << "\n";
          }
          o << "[QD-GREEN] check against the solve path (t = 100 yr, test "
            << "slip): max rel. difference shear " << std::scientific

@@ -1,0 +1,161 @@
+job: 69011 h_full_cycle on c105-035.horizon.tacc.utexas.edu, 2026-10-25T01:36:13Z
+nodes: 1, tasks: 1, partition: debug
+source: 3f4053845fdf87ad833326fffecb339f3405fb96 (gpu-qd-bp5), dirty files: 0
+binary: 2026-10-24T20:36:11 57590200 sha256 9b54b311f2195794
+modules: ucx/1.22.0 xalt/3.2.4 TACC gcc/15.3.0 cuda/13.1 ucc/1.9.0 openmpi/5.0.11 nvpl/26.9 cmake/4.4.0 
+threads: OMP=1 NVPL_BLAS=1
+--- build provenance ---
+# build_horizon.sh MODE=cuda stage 'fetch' on login1.horizon.tacc.utexas.edu at 2026-10-22T03:40:56Z
+source: 4e4e52ccc9f87b753349a5eeedb99aeb0b104c4e (gpu-qd-bp5), dirty files: 0
+modules: ucc/1.9.0 ucx/1.22.0 xalt/3.2.4 TACC gcc/15.3.0 cuda/13.3 openmpi/5.0.11 nvpl/26.9 cmake/4.4.0 
+mpicc: gcc (GCC) 15.3.0
+mpif90: GNU Fortran (GCC) 15.3.0
+mpi: Open MPI: 5.0.11
+blas/lapack: -L/home1/apps/nvidia/Linux_aarch64/26.9/math_libs/nvpl/lib -lnvpl_lapack_lp64_seq -lnvpl_lapack_core -lnvpl_blas_lp64_seq -lnvpl_blas_core
+cpu flags: -mcpu=neoverse-v2
+nvcc: Cuda compilation tools, release 13.3, V13.3.73
+gpu arch: sm_100
+cudss: /scratch/10024/zhaochun/seas-gpu-deps/cudss-0.7.1.6 (CUDSS_VERSION 0.7.1.6)
+petsc: 3.24.6 at /scratch/10024/zhaochun/seas-gpu-deps/petsc-3.24.6-cuda
+# build_horizon.sh MODE=cuda stage 'deps' on c109-028.horizon.tacc.utexas.edu at 2026-10-23T16:39:31Z
+source: 0a31efaafd0a68abf684b5d2111725f2c492615b (gpu-qd-bp5), dirty files: 6
+modules: ucx/1.22.0 xalt/3.2.4 TACC gcc/15.3.0 cuda/13.1 ucc/1.9.0 openmpi/5.0.11 nvpl/26.9 cmake/4.4.0 
+mpicc: gcc (GCC) 15.3.0
+mpif90: GNU Fortran (GCC) 15.3.0
+mpi: Open MPI: 5.0.11
+blas/lapack: -L/home1/apps/nvidia/Linux_aarch64/26.9/math_libs/nvpl/lib -lnvpl_lapack_lp64_seq -lnvpl_lapack_core -lnvpl_blas_lp64_seq -lnvpl_blas_core
+cpu flags: -mcpu=neoverse-v2
+nvcc: Cuda compilation tools, release 13.1, V13.1.115
+gpu arch: sm_100
+cudss: /scratch/10024/zhaochun/seas-gpu-deps/cudss-0.7.1.6 (CUDSS_VERSION 0.7.1.6)
+petsc: 3.24.6 at /scratch/10024/zhaochun/seas-gpu-deps/petsc-3.24.6-cuda
+petsc configure options:  PETSC_ARCH=arch-linux-cuda-opt --prefix=/scratch/10024/zhaochun/seas-gpu-deps/petsc-3.24.6-cuda --with-cc=mpicc --with-cxx=mpicxx --with-fc=mpif90 --with-debugging=0 COPTFLAGS=\"-O3 -mcpu=neoverse-v2\" CXXOPTFLAGS=\"-O3 -mcpu=neoverse-v2\" FOPTFLAGS=\"-O3 -mcpu=neoverse-v2\" --with-shared-libraries=1 --with-64-bit-indices=0 --with-x=0 --with-blaslapack-lib=\"-L/home1/apps/nvidia/Linux_aarch64/26.9/math_libs/nvpl/lib -lnvpl_lapack_lp64_seq -lnvpl_lapack_core -lnvpl_blas_lp64_seq -lnvpl_blas_core\" --download-scalapack --download-mumps --download-metis --download-parmetis --download-ptscotch --download-hypre --with-packages-download-dir=/scratch/10024/zhaochun/seas-gpu-deps/downloads --with-cuda=1 --with-cuda-arch=100
+mumps: (no version line)
+hypre: (no version line)
+metis: -DCMAKE_INSTALL_PREFIX=/scratch/10024/zhaochun/seas-gpu-deps/petsc-3.24.6-cuda -DCMAKE_INSTALL_NAME_DIR:STRING="/scratch/10024/zhaochun/seas-gpu-deps/petsc-3.24.6-cuda/lib" -DCMAKE_INSTALL_LIBDIR:STRING="lib" -DCMAKE_VERBOSE_MAKEFILE=1 -DCMAKE_BUILD_TYPE=Release -DCMAKE_AR="/opt/apps/gcc/15.3.0/bin/ar" -DCMAKE_C_COMPILER="mpicc" -DMPI_C_COMPILER="/opt/apps/gcc15/cuda13/openmpi/5.0.11/bin/mpicc" -DCMAKE_RANLIB=/opt/apps/gcc/15.3.0/bin/ranlib -DCMAKE_C_FLAGS:STRING="-fPIC -Wno-lto-type-mismatch -Wno-stringop-overflow -O3 -mcpu=neoverse-v2" -DCMAKE_C_FLAGS_DEBUG:STRING="-fPIC -Wno-lto-type-mismatch -Wno-stringop-overflow -O3 -mcpu=neoverse-v2" -DCMAKE_C_FLAGS_RELEASE:STRING="-fPIC -Wno-lto-type-mismatch -Wno-stringop-overflow -O3 -mcpu=neoverse-v2" -DCMAKE_CXX_COMPILER="mpicxx" -DMPI_CXX_COMPILER="/opt/apps/gcc15/cuda13/openmpi/5.0.11/bin/mpicxx" -DCMAKE_CXX_FLAGS:STRING="-Wno-lto-type-mismatch -Wno-psabi -O3 -mcpu=neoverse-v2 -fPIC" -DCMAKE_CXX_FLAGS_DEBUG:STRING="-Wno-lto-type-mismatch -Wno-psabi -O3 -mcpu=neoverse-v2 -fPIC" -DCMAKE_CXX_FLAGS_RELEASE:STRING="-Wno-lto-type-mismatch -Wno-psabi -O3 -mcpu=neoverse-v2 -fPIC" -DCMAKE_Fortran_COMPILER="mpif90" -DMPI_Fortran_COMPILER="/opt/apps/gcc15/cuda13/openmpi/5.0.11/bin/mpif90" -DCMAKE_Fortran_FLAGS:STRING="-fPIC -ffree-line-length-none -ffree-line-length-0 -Wno-lto-type-mismatch -O3 -mcpu=neoverse-v2 -fallow-argument-mismatch" -DCMAKE_Fortran_FLAGS_DEBUG:STRING="-fPIC -ffree-line-length-none -ffree-line-length-0 -Wno-lto-type-mismatch -O3 -mcpu=neoverse-v2 -fallow-argument-mismatch" -DCMAKE_Fortran_FLAGS_RELEASE:STRING="-fPIC -ffree-line-length-none -ffree-line-length-0 -Wno-lto-type-mismatch -O3 -mcpu=neoverse-v2 -fallow-argument-mismatch" -DBUILD_SHARED_LIBS:BOOL=ON -DBUILD_STATIC_LIBS:BOOL=OFF -DCMAKE_INSTALL_RPATH_USE_LINK_PATH:BOOL=ON -DCMAKE_BUILD_WITH_INSTALL_RPATH:BOOL=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DGKLIB_PATH=../GKlib -DGKRAND=1 -DSHARED=1 -DMATH_LIB="-lm"
+parmetis: -DCMAKE_INSTALL_PREFIX=/scratch/10024/zhaochun/seas-gpu-deps/petsc-3.24.6-cuda -DCMAKE_INSTALL_NAME_DIR:STRING="/scratch/10024/zhaochun/seas-gpu-deps/petsc-3.24.6-cuda/lib" -DCMAKE_INSTALL_LIBDIR:STRING="lib" -DCMAKE_VERBOSE_MAKEFILE=1 -DCMAKE_BUILD_TYPE=Release -DCMAKE_AR="/opt/apps/gcc/15.3.0/bin/ar" -DCMAKE_C_COMPILER="mpicc" -DMPI_C_COMPILER="/opt/apps/gcc15/cuda13/openmpi/5.0.11/bin/mpicc" -DCMAKE_RANLIB=/opt/apps/gcc/15.3.0/bin/ranlib -DCMAKE_C_FLAGS:STRING="-fPIC -Wno-lto-type-mismatch -Wno-stringop-overflow -O3 -mcpu=neoverse-v2" -DCMAKE_C_FLAGS_DEBUG:STRING="-fPIC -Wno-lto-type-mismatch -Wno-stringop-overflow -O3 -mcpu=neoverse-v2" -DCMAKE_C_FLAGS_RELEASE:STRING="-fPIC -Wno-lto-type-mismatch -Wno-stringop-overflow -O3 -mcpu=neoverse-v2" -DCMAKE_CXX_COMPILER="mpicxx" -DMPI_CXX_COMPILER="/opt/apps/gcc15/cuda13/openmpi/5.0.11/bin/mpicxx" -DCMAKE_CXX_FLAGS:STRING="-Wno-lto-type-mismatch -Wno-psabi -O3 -mcpu=neoverse-v2 -fPIC" -DCMAKE_CXX_FLAGS_DEBUG:STRING="-Wno-lto-type-mismatch -Wno-psabi -O3 -mcpu=neoverse-v2 -fPIC" -DCMAKE_CXX_FLAGS_RELEASE:STRING="-Wno-lto-type-mismatch -Wno-psabi -O3 -mcpu=neoverse-v2 -fPIC" -DCMAKE_Fortran_COMPILER="mpif90" -DMPI_Fortran_COMPILER="/opt/apps/gcc15/cuda13/openmpi/5.0.11/bin/mpif90" -DCMAKE_Fortran_FLAGS:STRING="-fPIC -ffree-line-length-none -ffree-line-length-0 -Wno-lto-type-mismatch -O3 -mcpu=neoverse-v2 -fallow-argument-mismatch" -DCMAKE_Fortran_FLAGS_DEBUG:STRING="-fPIC -ffree-line-length-none -ffree-line-length-0 -Wno-lto-type-mismatch -O3 -mcpu=neoverse-v2 -fallow-argument-mismatch" -DCMAKE_Fortran_FLAGS_RELEASE:STRING="-fPIC -ffree-line-length-none -ffree-line-length-0 -Wno-lto-type-mismatch -O3 -mcpu=neoverse-v2 -fallow-argument-mismatch" -DBUILD_SHARED_LIBS:BOOL=ON -DBUILD_STATIC_LIBS:BOOL=OFF -DCMAKE_INSTALL_RPATH_USE_LINK_PATH:BOOL=ON -DCMAKE_BUILD_WITH_INSTALL_RPATH:BOOL=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DGKLIB_PATH=../headers -DMETIS_PATH=/scratch/10024/zhaochun/seas-gpu-deps/petsc-3.24.6-cuda -DSHARED=1
+ptscotch: (no version line)
+scalapack: -DCMAKE_INSTALL_PREFIX=/scratch/10024/zhaochun/seas-gpu-deps/petsc-3.24.6-cuda -DCMAKE_INSTALL_NAME_DIR:STRING="/scratch/10024/zhaochun/seas-gpu-deps/petsc-3.24.6-cuda/lib" -DCMAKE_INSTALL_LIBDIR:STRING="lib" -DCMAKE_VERBOSE_MAKEFILE=1 -DCMAKE_BUILD_TYPE=Release -DCMAKE_AR="/opt/apps/gcc/15.3.0/bin/ar" -DCMAKE_C_COMPILER="mpicc" -DMPI_C_COMPILER="/opt/apps/gcc15/cuda13/openmpi/5.0.11/bin/mpicc" -DCMAKE_RANLIB=/opt/apps/gcc/15.3.0/bin/ranlib -DCMAKE_C_FLAGS:STRING="-fPIC -Wno-lto-type-mismatch -Wno-stringop-overflow -O3 -mcpu=neoverse-v2 -Wno-implicit-int -Wno-int-conversion -Wno-implicit-function-declaration -Wno-deprecated-non-prototype -fno-common" -DCMAKE_C_FLAGS_DEBUG:STRING="-fPIC -Wno-lto-type-mismatch -Wno-stringop-overflow -O3 -mcpu=neoverse-v2 -Wno-implicit-int -Wno-int-conversion -Wno-implicit-function-declaration -Wno-deprecated-non-prototype -fno-common" -DCMAKE_C_FLAGS_RELEASE:STRING="-fPIC -Wno-lto-type-mismatch -Wno-stringop-overflow -O3 -mcpu=neoverse-v2 -Wno-implicit-int -Wno-int-conversion -Wno-implicit-function-declaration -Wno-deprecated-non-prototype -fno-common" -DCMAKE_CXX_COMPILER="mpicxx" -DMPI_CXX_COMPILER="/opt/apps/gcc15/cuda13/openmpi/5.0.11/bin/mpicxx" -DCMAKE_CXX_FLAGS:STRING="-Wno-lto-type-mismatch -Wno-psabi -O3 -mcpu=neoverse-v2 -fPIC" -DCMAKE_CXX_FLAGS_DEBUG:STRING="-Wno-lto-type-mismatch -Wno-psabi -O3 -mcpu=neoverse-v2 -fPIC" -DCMAKE_CXX_FLAGS_RELEASE:STRING="-Wno-lto-type-mismatch -Wno-psabi -O3 -mcpu=neoverse-v2 -fPIC" -DCMAKE_Fortran_COMPILER="mpif90" -DMPI_Fortran_COMPILER="/opt/apps/gcc15/cuda13/openmpi/5.0.11/bin/mpif90" -DCMAKE_Fortran_FLAGS:STRING="-fPIC -ffree-line-length-none -ffree-line-length-0 -Wno-lto-type-mismatch -O3 -mcpu=neoverse-v2 -fallow-argument-mismatch" -DCMAKE_Fortran_FLAGS_DEBUG:STRING="-fPIC -ffree-line-length-none -ffree-line-length-0 -Wno-lto-type-mismatch -O3 -mcpu=neoverse-v2 -fallow-argument-mismatch" -DCMAKE_Fortran_FLAGS_RELEASE:STRING="-fPIC -ffree-line-length-none -ffree-line-length-0 -Wno-lto-type-mismatch -O3 -mcpu=neoverse-v2 -fallow-argument-mismatch" -DBUILD_SHARED_LIBS:BOOL=ON -DBUILD_STATIC_LIBS:BOOL=OFF -DCMAKE_INSTALL_RPATH_USE_LINK_PATH:BOOL=ON -DCMAKE_BUILD_WITH_INSTALL_RPATH:BOOL=ON -DLAPACK_LIBRARIES="-Wl,-rpath,/home1/apps/nvidia/Linux_aarch64/26.9/math_libs/nvpl/lib -L/home1/apps/nvidia/Linux_aarch64/26.9/math_libs/nvpl/lib -lnvpl_lapack_lp64_seq -lnvpl_lapack_core -lnvpl_blas_lp64_seq -lnvpl_blas_core -Wl,-rpath,/home1/apps/nvidia/Linux_aarch64/26.3/cuda/13.1/lib64 -L/home1/apps/nvidia/Linux_aarch64/26.3/cuda/13.1/lib64 -lcudart -lnvtx3interop -Wl,-rpath,/home1/apps/nvidia/Linux_aarch64/26.3/math_libs/13.1/lib64 -L/home1/apps/nvidia/Linux_aarch64/26.3/math_libs/13.1/lib64 -lcufft -lcublas -lcusparse -lcusolver -lcurand -L/home1/apps/nvidia/Linux_aarch64/26.3/cuda/13.1/lib64/stubs -lcuda -lm -Wl,-rpath,/opt/apps/gcc15/cuda13/openmpi/5.0.11/lib -Wl,-rpath,/opt/apps/gcc15/cuda13/openmpi/5.0.11/lib -L/opt/apps/gcc15/cuda13/openmpi/5.0.11/lib -lmpi_usempif08 -lmpi_usempi_ignore_tkr -lmpi_mpifh -lmpi -lgfortran -lm -Wl,-rpath,/opt/apps/gcc/15.3.0/lib/gcc/aarch64-unknown-linux-gnu/15.3.0 -Wl,-rpath,/opt/apps/gcc/15.3.0/lib/gcc/aarch64-unknown-linux-gnu/15.3.0 -L/opt/apps/gcc/15.3.0/lib/gcc/aarch64-unknown-linux-gnu/15.3.0 -Wl,-rpath,/opt/apps/gcc/15.3.0/lib64 -Wl,-rpath,/opt/apps/gcc/15.3.0/lib64 -L/opt/apps/gcc/15.3.0/lib64 -Wl,-rpath,/home1/apps/nvidia/Linux_aarch64/26.9/math_libs/nvpl/lib -Wl,-rpath,/home1/apps/nvidia/Linux_aarch64/26.9/math_libs/nvpl/lib -L/home1/apps/nvidia/Linux_aarch64/26.9/math_libs/nvpl/lib -Wl,-rpath,/home1/apps/nvidia/Linux_aarch64/26.3/cuda/13.1/lib64/stubs -L/home1/apps/nvidia/Linux_aarch64/26.3/cuda/13.1/lib64/stubs -Wl,-rpath,/opt/apps/gcc/15.3.0/aarch64-unknown-linux-gnu/lib -Wl,-rpath,/opt/apps/gcc/15.3.0/aarch64-unknown-linux-gnu/lib -L/opt/apps/gcc/15.3.0/aarch64-unknown-linux-gnu/lib -Wl,-rpath,/opt/apps/gcc/15.3.0/lib -Wl,-rpath,/opt/apps/gcc/15.3.0/lib -L/opt/apps/gcc/15.3.0/lib -Wl,-rpath,/opt/apps/gcc15/cuda13/openmpi/5.0.11/lib -lgfortran -lm -lgcc_s" -DSCALAPACK_BUILD_TESTS=OFF
+#define HYPRE_RELEASE_VERSION "3.0.0"
+#define HYPRE_USING_CUDA 1
+#define HYPRE_USING_CUDA_STREAMS 1
+#define HYPRE_USING_GPU 1
+# build_horizon.sh MODE=cuda stage 'deps' on c101-036.horizon.tacc.utexas.edu at 2026-10-24T06:05:48Z
+source: d079573ae1fc6f0fec349af6a94db35fb08d18bc (gpu-qd-bp5), dirty files: 9
+modules: ucx/1.22.0 xalt/3.2.4 TACC gcc/15.3.0 cuda/13.1 ucc/1.9.0 openmpi/5.0.11 nvpl/26.9 cmake/4.4.0 
+mpicc: gcc (GCC) 15.3.0
+mpif90: GNU Fortran (GCC) 15.3.0
+mpi: Open MPI: 5.0.11
+blas/lapack: -L/home1/apps/nvidia/Linux_aarch64/26.9/math_libs/nvpl/lib -lnvpl_lapack_lp64_seq -lnvpl_lapack_core -lnvpl_blas_lp64_seq -lnvpl_blas_core
+cpu flags: -mcpu=neoverse-v2
+nvcc: Cuda compilation tools, release 13.1, V13.1.115
+gpu arch: sm_100, mfem -arch=compute_90 -code=sm_100
+cudss: /scratch/10024/zhaochun/seas-gpu-deps/cudss-0.7.1.6 (CUDSS_VERSION 0.7.1.6)
+petsc: 3.24.6 at /scratch/10024/zhaochun/seas-gpu-deps/petsc-3.24.6-cuda
+petsc configure options:  PETSC_ARCH=arch-linux-cuda-opt --prefix=/scratch/10024/zhaochun/seas-gpu-deps/petsc-3.24.6-cuda --with-cc=mpicc --with-cxx=mpicxx --with-fc=mpif90 --with-debugging=0 COPTFLAGS=\"-O3 -mcpu=neoverse-v2\" CXXOPTFLAGS=\"-O3 -mcpu=neoverse-v2\" FOPTFLAGS=\"-O3 -mcpu=neoverse-v2\" --with-shared-libraries=1 --with-64-bit-indices=0 --with-x=0 --with-blaslapack-lib=\"-L/home1/apps/nvidia/Linux_aarch64/26.9/math_libs/nvpl/lib -lnvpl_lapack_lp64_seq -lnvpl_lapack_core -lnvpl_blas_lp64_seq -lnvpl_blas_core\" --download-scalapack --download-mumps --download-metis --download-parmetis --download-ptscotch --download-hypre --with-packages-download-dir=/scratch/10024/zhaochun/seas-gpu-deps/downloads --with-cuda=1 --with-cuda-arch=100
+mumps: (no version line)
+hypre: (no version line)
+metis: -DCMAKE_INSTALL_PREFIX=/scratch/10024/zhaochun/seas-gpu-deps/petsc-3.24.6-cuda -DCMAKE_INSTALL_NAME_DIR:STRING="/scratch/10024/zhaochun/seas-gpu-deps/petsc-3.24.6-cuda/lib" -DCMAKE_INSTALL_LIBDIR:STRING="lib" -DCMAKE_VERBOSE_MAKEFILE=1 -DCMAKE_BUILD_TYPE=Release -DCMAKE_AR="/opt/apps/gcc/15.3.0/bin/ar" -DCMAKE_C_COMPILER="mpicc" -DMPI_C_COMPILER="/opt/apps/gcc15/cuda13/openmpi/5.0.11/bin/mpicc" -DCMAKE_RANLIB=/opt/apps/gcc/15.3.0/bin/ranlib -DCMAKE_C_FLAGS:STRING="-fPIC -Wno-lto-type-mismatch -Wno-stringop-overflow -O3 -mcpu=neoverse-v2" -DCMAKE_C_FLAGS_DEBUG:STRING="-fPIC -Wno-lto-type-mismatch -Wno-stringop-overflow -O3 -mcpu=neoverse-v2" -DCMAKE_C_FLAGS_RELEASE:STRING="-fPIC -Wno-lto-type-mismatch -Wno-stringop-overflow -O3 -mcpu=neoverse-v2" -DCMAKE_CXX_COMPILER="mpicxx" -DMPI_CXX_COMPILER="/opt/apps/gcc15/cuda13/openmpi/5.0.11/bin/mpicxx" -DCMAKE_CXX_FLAGS:STRING="-Wno-lto-type-mismatch -Wno-psabi -O3 -mcpu=neoverse-v2 -fPIC" -DCMAKE_CXX_FLAGS_DEBUG:STRING="-Wno-lto-type-mismatch -Wno-psabi -O3 -mcpu=neoverse-v2 -fPIC" -DCMAKE_CXX_FLAGS_RELEASE:STRING="-Wno-lto-type-mismatch -Wno-psabi -O3 -mcpu=neoverse-v2 -fPIC" -DCMAKE_Fortran_COMPILER="mpif90" -DMPI_Fortran_COMPILER="/opt/apps/gcc15/cuda13/openmpi/5.0.11/bin/mpif90" -DCMAKE_Fortran_FLAGS:STRING="-fPIC -ffree-line-length-none -ffree-line-length-0 -Wno-lto-type-mismatch -O3 -mcpu=neoverse-v2 -fallow-argument-mismatch" -DCMAKE_Fortran_FLAGS_DEBUG:STRING="-fPIC -ffree-line-length-none -ffree-line-length-0 -Wno-lto-type-mismatch -O3 -mcpu=neoverse-v2 -fallow-argument-mismatch" -DCMAKE_Fortran_FLAGS_RELEASE:STRING="-fPIC -ffree-line-length-none -ffree-line-length-0 -Wno-lto-type-mismatch -O3 -mcpu=neoverse-v2 -fallow-argument-mismatch" -DBUILD_SHARED_LIBS:BOOL=ON -DBUILD_STATIC_LIBS:BOOL=OFF -DCMAKE_INSTALL_RPATH_USE_LINK_PATH:BOOL=ON -DCMAKE_BUILD_WITH_INSTALL_RPATH:BOOL=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DGKLIB_PATH=../GKlib -DGKRAND=1 -DSHARED=1 -DMATH_LIB="-lm"
+parmetis: -DCMAKE_INSTALL_PREFIX=/scratch/10024/zhaochun/seas-gpu-deps/petsc-3.24.6-cuda -DCMAKE_INSTALL_NAME_DIR:STRING="/scratch/10024/zhaochun/seas-gpu-deps/petsc-3.24.6-cuda/lib" -DCMAKE_INSTALL_LIBDIR:STRING="lib" -DCMAKE_VERBOSE_MAKEFILE=1 -DCMAKE_BUILD_TYPE=Release -DCMAKE_AR="/opt/apps/gcc/15.3.0/bin/ar" -DCMAKE_C_COMPILER="mpicc" -DMPI_C_COMPILER="/opt/apps/gcc15/cuda13/openmpi/5.0.11/bin/mpicc" -DCMAKE_RANLIB=/opt/apps/gcc/15.3.0/bin/ranlib -DCMAKE_C_FLAGS:STRING="-fPIC -Wno-lto-type-mismatch -Wno-stringop-overflow -O3 -mcpu=neoverse-v2" -DCMAKE_C_FLAGS_DEBUG:STRING="-fPIC -Wno-lto-type-mismatch -Wno-stringop-overflow -O3 -mcpu=neoverse-v2" -DCMAKE_C_FLAGS_RELEASE:STRING="-fPIC -Wno-lto-type-mismatch -Wno-stringop-overflow -O3 -mcpu=neoverse-v2" -DCMAKE_CXX_COMPILER="mpicxx" -DMPI_CXX_COMPILER="/opt/apps/gcc15/cuda13/openmpi/5.0.11/bin/mpicxx" -DCMAKE_CXX_FLAGS:STRING="-Wno-lto-type-mismatch -Wno-psabi -O3 -mcpu=neoverse-v2 -fPIC" -DCMAKE_CXX_FLAGS_DEBUG:STRING="-Wno-lto-type-mismatch -Wno-psabi -O3 -mcpu=neoverse-v2 -fPIC" -DCMAKE_CXX_FLAGS_RELEASE:STRING="-Wno-lto-type-mismatch -Wno-psabi -O3 -mcpu=neoverse-v2 -fPIC" -DCMAKE_Fortran_COMPILER="mpif90" -DMPI_Fortran_COMPILER="/opt/apps/gcc15/cuda13/openmpi/5.0.11/bin/mpif90" -DCMAKE_Fortran_FLAGS:STRING="-fPIC -ffree-line-length-none -ffree-line-length-0 -Wno-lto-type-mismatch -O3 -mcpu=neoverse-v2 -fallow-argument-mismatch" -DCMAKE_Fortran_FLAGS_DEBUG:STRING="-fPIC -ffree-line-length-none -ffree-line-length-0 -Wno-lto-type-mismatch -O3 -mcpu=neoverse-v2 -fallow-argument-mismatch" -DCMAKE_Fortran_FLAGS_RELEASE:STRING="-fPIC -ffree-line-length-none -ffree-line-length-0 -Wno-lto-type-mismatch -O3 -mcpu=neoverse-v2 -fallow-argument-mismatch" -DBUILD_SHARED_LIBS:BOOL=ON -DBUILD_STATIC_LIBS:BOOL=OFF -DCMAKE_INSTALL_RPATH_USE_LINK_PATH:BOOL=ON -DCMAKE_BUILD_WITH_INSTALL_RPATH:BOOL=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DGKLIB_PATH=../headers -DMETIS_PATH=/scratch/10024/zhaochun/seas-gpu-deps/petsc-3.24.6-cuda -DSHARED=1
+ptscotch: (no version line)
+scalapack: -DCMAKE_INSTALL_PREFIX=/scratch/10024/zhaochun/seas-gpu-deps/petsc-3.24.6-cuda -DCMAKE_INSTALL_NAME_DIR:STRING="/scratch/10024/zhaochun/seas-gpu-deps/petsc-3.24.6-cuda/lib" -DCMAKE_INSTALL_LIBDIR:STRING="lib" -DCMAKE_VERBOSE_MAKEFILE=1 -DCMAKE_BUILD_TYPE=Release -DCMAKE_AR="/opt/apps/gcc/15.3.0/bin/ar" -DCMAKE_C_COMPILER="mpicc" -DMPI_C_COMPILER="/opt/apps/gcc15/cuda13/openmpi/5.0.11/bin/mpicc" -DCMAKE_RANLIB=/opt/apps/gcc/15.3.0/bin/ranlib -DCMAKE_C_FLAGS:STRING="-fPIC -Wno-lto-type-mismatch -Wno-stringop-overflow -O3 -mcpu=neoverse-v2 -Wno-implicit-int -Wno-int-conversion -Wno-implicit-function-declaration -Wno-deprecated-non-prototype -fno-common" -DCMAKE_C_FLAGS_DEBUG:STRING="-fPIC -Wno-lto-type-mismatch -Wno-stringop-overflow -O3 -mcpu=neoverse-v2 -Wno-implicit-int -Wno-int-conversion -Wno-implicit-function-declaration -Wno-deprecated-non-prototype -fno-common" -DCMAKE_C_FLAGS_RELEASE:STRING="-fPIC -Wno-lto-type-mismatch -Wno-stringop-overflow -O3 -mcpu=neoverse-v2 -Wno-implicit-int -Wno-int-conversion -Wno-implicit-function-declaration -Wno-deprecated-non-prototype -fno-common" -DCMAKE_CXX_COMPILER="mpicxx" -DMPI_CXX_COMPILER="/opt/apps/gcc15/cuda13/openmpi/5.0.11/bin/mpicxx" -DCMAKE_CXX_FLAGS:STRING="-Wno-lto-type-mismatch -Wno-psabi -O3 -mcpu=neoverse-v2 -fPIC" -DCMAKE_CXX_FLAGS_DEBUG:STRING="-Wno-lto-type-mismatch -Wno-psabi -O3 -mcpu=neoverse-v2 -fPIC" -DCMAKE_CXX_FLAGS_RELEASE:STRING="-Wno-lto-type-mismatch -Wno-psabi -O3 -mcpu=neoverse-v2 -fPIC" -DCMAKE_Fortran_COMPILER="mpif90" -DMPI_Fortran_COMPILER="/opt/apps/gcc15/cuda13/openmpi/5.0.11/bin/mpif90" -DCMAKE_Fortran_FLAGS:STRING="-fPIC -ffree-line-length-none -ffree-line-length-0 -Wno-lto-type-mismatch -O3 -mcpu=neoverse-v2 -fallow-argument-mismatch" -DCMAKE_Fortran_FLAGS_DEBUG:STRING="-fPIC -ffree-line-length-none -ffree-line-length-0 -Wno-lto-type-mismatch -O3 -mcpu=neoverse-v2 -fallow-argument-mismatch" -DCMAKE_Fortran_FLAGS_RELEASE:STRING="-fPIC -ffree-line-length-none -ffree-line-length-0 -Wno-lto-type-mismatch -O3 -mcpu=neoverse-v2 -fallow-argument-mismatch" -DBUILD_SHARED_LIBS:BOOL=ON -DBUILD_STATIC_LIBS:BOOL=OFF -DCMAKE_INSTALL_RPATH_USE_LINK_PATH:BOOL=ON -DCMAKE_BUILD_WITH_INSTALL_RPATH:BOOL=ON -DLAPACK_LIBRARIES="-Wl,-rpath,/home1/apps/nvidia/Linux_aarch64/26.9/math_libs/nvpl/lib -L/home1/apps/nvidia/Linux_aarch64/26.9/math_libs/nvpl/lib -lnvpl_lapack_lp64_seq -lnvpl_lapack_core -lnvpl_blas_lp64_seq -lnvpl_blas_core -Wl,-rpath,/home1/apps/nvidia/Linux_aarch64/26.3/cuda/13.1/lib64 -L/home1/apps/nvidia/Linux_aarch64/26.3/cuda/13.1/lib64 -lcudart -lnvtx3interop -Wl,-rpath,/home1/apps/nvidia/Linux_aarch64/26.3/math_libs/13.1/lib64 -L/home1/apps/nvidia/Linux_aarch64/26.3/math_libs/13.1/lib64 -lcufft -lcublas -lcusparse -lcusolver -lcurand -L/home1/apps/nvidia/Linux_aarch64/26.3/cuda/13.1/lib64/stubs -lcuda -lm -Wl,-rpath,/opt/apps/gcc15/cuda13/openmpi/5.0.11/lib -Wl,-rpath,/opt/apps/gcc15/cuda13/openmpi/5.0.11/lib -L/opt/apps/gcc15/cuda13/openmpi/5.0.11/lib -lmpi_usempif08 -lmpi_usempi_ignore_tkr -lmpi_mpifh -lmpi -lgfortran -lm -Wl,-rpath,/opt/apps/gcc/15.3.0/lib/gcc/aarch64-unknown-linux-gnu/15.3.0 -Wl,-rpath,/opt/apps/gcc/15.3.0/lib/gcc/aarch64-unknown-linux-gnu/15.3.0 -L/opt/apps/gcc/15.3.0/lib/gcc/aarch64-unknown-linux-gnu/15.3.0 -Wl,-rpath,/opt/apps/gcc/15.3.0/lib64 -Wl,-rpath,/opt/apps/gcc/15.3.0/lib64 -L/opt/apps/gcc/15.3.0/lib64 -Wl,-rpath,/home1/apps/nvidia/Linux_aarch64/26.9/math_libs/nvpl/lib -Wl,-rpath,/home1/apps/nvidia/Linux_aarch64/26.9/math_libs/nvpl/lib -L/home1/apps/nvidia/Linux_aarch64/26.9/math_libs/nvpl/lib -Wl,-rpath,/home1/apps/nvidia/Linux_aarch64/26.3/cuda/13.1/lib64/stubs -L/home1/apps/nvidia/Linux_aarch64/26.3/cuda/13.1/lib64/stubs -Wl,-rpath,/opt/apps/gcc/15.3.0/aarch64-unknown-linux-gnu/lib -Wl,-rpath,/opt/apps/gcc/15.3.0/aarch64-unknown-linux-gnu/lib -L/opt/apps/gcc/15.3.0/aarch64-unknown-linux-gnu/lib -Wl,-rpath,/opt/apps/gcc/15.3.0/lib -Wl,-rpath,/opt/apps/gcc/15.3.0/lib -L/opt/apps/gcc/15.3.0/lib -Wl,-rpath,/opt/apps/gcc15/cuda13/openmpi/5.0.11/lib -lgfortran -lm -lgcc_s" -DSCALAPACK_BUILD_TESTS=OFF
+#define HYPRE_RELEASE_VERSION "3.0.0"
+#define HYPRE_USING_CUDA 1
+#define HYPRE_USING_CUDA_STREAMS 1
+#define HYPRE_USING_GPU 1
+# build_horizon.sh MODE=cuda stage 'mfem' on c101-036.horizon.tacc.utexas.edu at 2026-10-24T06:09:11Z
+source: d079573ae1fc6f0fec349af6a94db35fb08d18bc (gpu-qd-bp5), dirty files: 9
+modules: ucx/1.22.0 xalt/3.2.4 TACC gcc/15.3.0 cuda/13.1 ucc/1.9.0 openmpi/5.0.11 nvpl/26.9 cmake/4.4.0 
+mpicc: gcc (GCC) 15.3.0
+mpif90: GNU Fortran (GCC) 15.3.0
+mpi: Open MPI: 5.0.11
+blas/lapack: -L/home1/apps/nvidia/Linux_aarch64/26.9/math_libs/nvpl/lib -lnvpl_lapack_lp64_seq -lnvpl_lapack_core -lnvpl_blas_lp64_seq -lnvpl_blas_core
+cpu flags: -mcpu=neoverse-v2
+nvcc: Cuda compilation tools, release 13.1, V13.1.115
+gpu arch: sm_100, mfem -arch=compute_90 -code=sm_100
+cudss: /scratch/10024/zhaochun/seas-gpu-deps/cudss-0.7.1.6 (CUDSS_VERSION 0.7.1.6)
+petsc: 3.24.6 at /scratch/10024/zhaochun/seas-gpu-deps/petsc-3.24.6-cuda
+MFEM_USE_CUDSS         = YES
+MFEM_USE_MPI           = YES
+MFEM_USE_METIS         = YES
+MFEM_USE_LAPACK        = YES
+MFEM_USE_MUMPS         = YES
+MFEM_USE_HDF5          = NO
+MFEM_USE_PETSC         = YES
+MFEM_USE_CUDA          = YES
+# build_horizon.sh MODE=cuda stage 'seas' on c101-036.horizon.tacc.utexas.edu at 2026-10-24T06:10:00Z
+source: d079573ae1fc6f0fec349af6a94db35fb08d18bc (gpu-qd-bp5), dirty files: 9
+modules: ucx/1.22.0 xalt/3.2.4 TACC gcc/15.3.0 cuda/13.1 ucc/1.9.0 openmpi/5.0.11 nvpl/26.9 cmake/4.4.0 
+mpicc: gcc (GCC) 15.3.0
+mpif90: GNU Fortran (GCC) 15.3.0
+mpi: Open MPI: 5.0.11
+blas/lapack: -L/home1/apps/nvidia/Linux_aarch64/26.9/math_libs/nvpl/lib -lnvpl_lapack_lp64_seq -lnvpl_lapack_core -lnvpl_blas_lp64_seq -lnvpl_blas_core
+cpu flags: -mcpu=neoverse-v2
+nvcc: Cuda compilation tools, release 13.1, V13.1.115
+gpu arch: sm_100, mfem -arch=compute_90 -code=sm_100
+cudss: /scratch/10024/zhaochun/seas-gpu-deps/cudss-0.7.1.6 (CUDSS_VERSION 0.7.1.6)
+petsc: 3.24.6 at /scratch/10024/zhaochun/seas-gpu-deps/petsc-3.24.6-cuda
+-rwx------ 1 zhaochun G-821164 57590200 Oct 24 01:09 seas_bp5_full
+-rwx------ 1 zhaochun G-821164 54668744 Oct 24 01:09 seas_test_elasticity_operator
+-rwx------ 1 zhaochun G-821164 56948224 Oct 24 01:09 seas_test_g0_matrix_only
+# build_horizon.sh MODE=cuda stage 'seas' on c101-020.horizon.tacc.utexas.edu at 2026-10-24T20:41:00Z
+source: 3f4053845fdf87ad833326fffecb339f3405fb96 (gpu-qd-bp5), dirty files: 25
+modules: ucx/1.22.0 xalt/3.2.4 TACC gcc/15.3.0 cuda/13.1 ucc/1.9.0 openmpi/5.0.11 nvpl/26.9 cmake/4.4.0 
+mpicc: gcc (GCC) 15.3.0
+mpif90: GNU Fortran (GCC) 15.3.0
+mpi: Open MPI: 5.0.11
+blas/lapack: -L/home1/apps/nvidia/Linux_aarch64/26.9/math_libs/nvpl/lib -lnvpl_lapack_lp64_seq -lnvpl_lapack_core -lnvpl_blas_lp64_seq -lnvpl_blas_core
+cpu flags: -mcpu=neoverse-v2
+nvcc: Cuda compilation tools, release 13.1, V13.1.115
+gpu arch: sm_100, mfem -arch=compute_90 -code=sm_100
+cudss: /scratch/10024/zhaochun/seas-gpu-deps/cudss-0.7.1.6 (CUDSS_VERSION 0.7.1.6)
+petsc: 3.24.6 at /scratch/10024/zhaochun/seas-gpu-deps/petsc-3.24.6-cuda
+-rwx------ 1 zhaochun G-821164 57590200 Oct 24 15:41 seas_bp5_full
+-rwx------ 1 zhaochun G-821164 54668744 Oct 24 15:40 seas_test_elasticity_operator
+-rwx------ 1 zhaochun G-821164 56948224 Oct 24 15:40 seas_test_g0_matrix_only
+# build_horizon.sh MODE=cuda stage 'seas' on c101-020.horizon.tacc.utexas.edu at 2026-10-24T21:07:41Z
+source: 3f4053845fdf87ad833326fffecb339f3405fb96 (gpu-qd-bp5), dirty files: 26
+modules: ucx/1.22.0 xalt/3.2.4 TACC gcc/15.3.0 cuda/13.1 ucc/1.9.0 openmpi/5.0.11 nvpl/26.9 cmake/4.4.0 
+mpicc: gcc (GCC) 15.3.0
+mpif90: GNU Fortran (GCC) 15.3.0
+mpi: Open MPI: 5.0.11
+blas/lapack: -L/home1/apps/nvidia/Linux_aarch64/26.9/math_libs/nvpl/lib -lnvpl_lapack_lp64_seq -lnvpl_lapack_core -lnvpl_blas_lp64_seq -lnvpl_blas_core
+cpu flags: -mcpu=neoverse-v2
+nvcc: Cuda compilation tools, release 13.1, V13.1.115
+gpu arch: sm_100, mfem -arch=compute_90 -code=sm_100
+cudss: /scratch/10024/zhaochun/seas-gpu-deps/cudss-0.7.1.6 (CUDSS_VERSION 0.7.1.6)
+petsc: 3.24.6 at /scratch/10024/zhaochun/seas-gpu-deps/petsc-3.24.6-cuda
+-rwx------ 1 zhaochun G-821164 57590200 Oct 24 16:07 seas_bp5_full
+-rwx------ 1 zhaochun G-821164 54668744 Oct 24 16:07 seas_test_elasticity_operator
+-rwx------ 1 zhaochun G-821164 56948224 Oct 24 16:07 seas_test_g0_matrix_only
+# build_horizon.sh MODE=cuda stage 'seas' on c101-020.horizon.tacc.utexas.edu at 2026-10-24T21:14:13Z
+source: 3f4053845fdf87ad833326fffecb339f3405fb96 (gpu-qd-bp5), dirty files: 26
+modules: ucx/1.22.0 xalt/3.2.4 TACC gcc/15.3.0 cuda/13.1 ucc/1.9.0 openmpi/5.0.11 nvpl/26.9 cmake/4.4.0 
+mpicc: gcc (GCC) 15.3.0
+mpif90: GNU Fortran (GCC) 15.3.0
+mpi: Open MPI: 5.0.11
+blas/lapack: -L/home1/apps/nvidia/Linux_aarch64/26.9/math_libs/nvpl/lib -lnvpl_lapack_lp64_seq -lnvpl_lapack_core -lnvpl_blas_lp64_seq -lnvpl_blas_core
+cpu flags: -mcpu=neoverse-v2
+nvcc: Cuda compilation tools, release 13.1, V13.1.115
+gpu arch: sm_100, mfem -arch=compute_90 -code=sm_100
+cudss: /scratch/10024/zhaochun/seas-gpu-deps/cudss-0.7.1.6 (CUDSS_VERSION 0.7.1.6)
+petsc: 3.24.6 at /scratch/10024/zhaochun/seas-gpu-deps/petsc-3.24.6-cuda
+-rwx------ 1 zhaochun G-821164 57590200 Oct 24 16:14 seas_bp5_full
+-rwx------ 1 zhaochun G-821164 54668744 Oct 24 16:14 seas_test_elasticity_operator
+-rwx------ 1 zhaochun G-821164 56948224 Oct 24 16:14 seas_test_g0_matrix_only
+# build_horizon.sh MODE=cuda stage 'seas' on c105-035.horizon.tacc.utexas.edu at 2026-10-25T01:36:11Z
+source: 3f4053845fdf87ad833326fffecb339f3405fb96 (gpu-qd-bp5), dirty files: 29
+modules: ucx/1.22.0 xalt/3.2.4 TACC gcc/15.3.0 cuda/13.1 ucc/1.9.0 openmpi/5.0.11 nvpl/26.9 cmake/4.4.0 
+mpicc: gcc (GCC) 15.3.0
+mpif90: GNU Fortran (GCC) 15.3.0
+mpi: Open MPI: 5.0.11
+blas/lapack: -L/home1/apps/nvidia/Linux_aarch64/26.9/math_libs/nvpl/lib -lnvpl_lapack_lp64_seq -lnvpl_lapack_core -lnvpl_blas_lp64_seq -lnvpl_blas_core
+cpu flags: -mcpu=neoverse-v2
+nvcc: Cuda compilation tools, release 13.1, V13.1.115
+gpu arch: sm_100, mfem -arch=compute_90 -code=sm_100
+cudss: /scratch/10024/zhaochun/seas-gpu-deps/cudss-0.7.1.6 (CUDSS_VERSION 0.7.1.6)
+petsc: 3.24.6 at /scratch/10024/zhaochun/seas-gpu-deps/petsc-3.24.6-cuda
+-rwx------ 1 zhaochun G-821164 57590200 Oct 24 20:36 seas_bp5_full
+-rwx------ 1 zhaochun G-821164 54668744 Oct 24 20:36 seas_test_elasticity_operator
+-rwx------ 1 zhaochun G-821164 56948224 Oct 24 20:35 seas_test_g0_matrix_only
+green cache: /scratch/10024/zhaochun/seas-qd-green/bp5_prod_p1.bin
