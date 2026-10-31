@@ -1,0 +1,312 @@
+# simple_cases/configs/D2_sharp05.toml — the simple cases (Chunhui Zhao,
+# 2026-10-31: "go ahead with the simple cases, run them on local Mac"):
+# Andy's [4]: a 5 deg sharp bend at x = 0.
+# Fully dynamic (QD and dynamic regimes), mesh sharp05_h500, no sigma_n' floor.
+# Made by simple_cases/scripts/make_decks.py from
+# config/fd_cycle/mapview_rs_fd.toml; the edits are listed there and in
+# simple_cases/README.md.  Plane strain, no 2.5D term, +-240 km box, all
+# walls absorbing in the dynamic regime, 12,000 yr.
+#
+# Run (Mac, from miniapps/seas): simple_cases/scripts/run_simple_mac.sh
+#
+# mapview_rs_fd.toml's notes follow (its mesh: the straight fault, +-60 km).
+#
+# mapview_rs_fd.toml — seas_fd_cycle_driver on a 2-D map view with rate and
+# state: the QD and dynamic regimes, switched on max V (as the BP3-FD and
+# BP5-FD decks).  Chunhui Zhao, 2026-10-29: "there is no plane strain map
+# view benchmark, so it can assume the same layout as tpv205-2d-like (but
+# with rate and state) and run FD".  A test of the map-view path (the slip in
+# the kernel's strike slot) ahead of the UCERF 2D model, not a benchmark.
+#
+# Run from miniapps/seas:
+#   mpirun -np N ./seas_fd_cycle_driver --deck config/fd_cycle/mapview_rs_fd.toml
+#
+# Layout (mapview_rs/mesh/mapview_rs.geo): TPV205-2D's, a straight fault
+# y = 0, |x| <= 15 km, with two free tips, in the box [-60, 60]^2 km; plane
+# strain, the slip in the plane, no free surface.  [fault_geometry] as the
+# TPV205-2D deck: ref_normal = [0, -1] pins the oriented normal n = (0, -1)
+# (the side y > 0 is the S3 plus side, n points away from it), and
+# up = [0, 0, 1] out of the plane puts the slip in the kernel's strike slot,
+# s = (1, 0) (derivation 10.2, case A); the dip slot d = -+e_z is an exact
+# zero.  The kernel's slip is the jump of the side n points away from (y > 0)
+# over the other: slip_s = (u(y > 0) - u(y < 0)) . s, so the plate loading
+# below (y > 0 moving along +x) drives slip_s > 0 (right lateral), and
+# V_init is +V_p in the strike slot.
+#
+# Friction: BP5's scalars (b, Dc, sigma_n, V_0, f_0; SCEC BP5 description)
+# so a 500 m mesh resolves the process zone (mu Dc / (b sigma_n) = 6 km),
+# with a = 0.004 for |x| <= 10 km rising linearly to 0.04 at 12 km, kept to
+# the tips at 15 km.  Steady state at V_p everywhere at t = 0.
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "Map-view rate and state (TPV205-2D layout), switched QD and dynamic regimes (seas_fd_cycle_driver)."
+
+# BP3 / BP5: rho = 2670 kg/m^3, cs = 3.464 km/s, nu = 0.25 (lambda = mu).
+[material_constant_fallback]
+lambda = 32038120320.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+# 500 m on the fault, in m.  Tags: 3 fault, 5 the four sides; no tag 1 (no
+# free surface).
+[mesh]
+path  = "simple_cases/mesh/sharp05_h500.msh"
+order = 1
+
+[velocity]
+use_sidecar = false
+
+# The shear prestress is BuildPrestress's; only sigma_n is read.
+[stress]
+kind          = "fault_local_prestress"
+tau_strike_pa = 0.0
+tau_dip_pa    = 0.0
+sigma_n_pa    = 25.0e6
+
+# The dynamic regime's numerics, those of the BP3-FD and BP5-FD decks:
+# dt = cfl C(p) h_min / (p^2 c_p); Kelvin-Voigt in every element,
+# beta_e = kv_eta (1/3) (h_e / p) / c_s with h_e = 4 A / P.
+[numerics]
+cfl       = 0.5
+kv_eta    = 0.1
+kv_scale  = "node"
+kv_length = "inscribed"
+
+# 12,000 yr of 365 days (mapview_rs_fd.toml: 1500 yr).
+[time]
+tfinal     = 3.784320e+11
+dt_initial = 0.01
+
+[output]
+output_dir = "."
+
+# The fd_cycle layout (fault 3, natural 1, Dirichlet 5); the mesh has no
+# tag 1 face.
+[boundary]
+fault_attr    = 3
+natural_attrs = [1]
+
+[fault_geometry]
+ref_normal      = [0.0, -1.0]
+up              = [0.0, 0.0, 1.0]
+kind            = "vertical_strike_slip"
+orientation     = "propagated"
+pin_by          = "reference"
+tangent         = "pointwise"
+junction_policy = "refuse"
+pin_min_margin  = 0.1
+
+# BP5's scalars; a, Dc and V_init come from [cycle.fields].
+[friction.rate_state]
+a_default       = 0.004
+b_default       = 0.03
+Dc_default      = 0.14
+V_0_default     = 1.0e-6
+f_0_default     = 0.6
+V_init_default  = 1.0e-9
+sigma_n_default = 25.0e6
+state_evolution = "aging_law"
+eta             = "auto"         # 0.5 sqrt(mu rho) = mu / (2 cs); QD regime only
+
+# Steady state at V_init = V_p with the local a: psi0 = f0 + b ln(V0 / V_p),
+# tau0 = sigma_n a asinh(V_p / (2 V0) exp(psi0 / a)) (no eta V_init).
+[cycle]
+ic                   = "scec_fd"
+switching            = true
+qd_radiation_damping = true
+mesh_scale           = 1.0
+plate_rate           = 1.0e-9
+penalty_factor       = 1.0       # both regimes' K
+
+# The BP5-FD switch.
+[cycle.switch]
+V_on               = 1.0e-2
+V_off              = 1.0e-3
+T_dwell            = 10.0
+T_min              = 0.0
+T_max              = 1200.0
+max_dynamic_phases = 0
+
+# Every outer face absorbs in the dynamic regime (the UCERF 2D model's
+# boundary, Chunhui Zhao 2026-10-27): the four sides are Dirichlet faces,
+# so they become walls with the static reaction frozen at each switch
+# (hook H3) plus the absorber.
+[cycle.absorbing]
+faces = "all"
+
+# The QD stages through the stage operators and the discrete Green's
+# function; in map view G is packed on the strike slot (the in-plane one).
+[cycle.qd]
+solver        = "mumps"
+petsc_options = "tests/verification/petsc_ts_rk45_tandem.cfg"
+ts_atol       = 1.0e-7
+ts_rtol       = 1.0e-50
+operators     = "matrix"
+
+# Dense G: N_f = 120 at p = 1 on the 500 m mesh.  Every 10000 stages the
+# solve path runs too and the largest difference is reported at the end.
+[cycle.qd.green]
+check_every = 10000
+
+[cycle.prestress]
+V_background = 1.0e-9            # psi_bg = f0 + b ln(V0 / V_p)
+eta_V_init   = false
+
+# The plate motion on the four sides: the half y > 0 moves by +(V_p t / 2) x,
+# the half y < 0 by the opposite.  Band 0: no prescribed-slip segment (the
+# fault ends in the medium); the step in the side walls' value at y = 0 is
+# the plate boundary.
+[cycle.loading]
+kind         = "plate"
+plane_point  = [0.0, 0.0]
+plane_normal = [0.0, 1.0]
+slip_dir     = [1.0, 0.0]
+band         = 0.0
+
+# V_init: right lateral at V_p (kernel strike slot); the dip slot is out of
+# the plane: 0.
+[cycle.fields]
+V_init_dip = 0.0
+
+# a: 0.004 for |x| <= 10 km, rising linearly to 0.04 at 12 km.
+[cycle.fields.a]
+center  = [0.0, 0.0]
+axis1   = [1.0, 0.0]
+half1   = 10.0e3
+taper   = 2.0e3
+inside  = 0.004
+outside = 0.04
+
+# Dc = 0.14 m everywhere.
+[cycle.fields.Dc]
+center  = [0.0, 0.0]
+axis1   = [1.0, 0.0]
+half1   = 0.0
+inside  = 0.14
+outside = 0.14
+
+[cycle.fields.V_init]
+center  = [0.0, 0.0]
+axis1   = [1.0, 0.0]
+half1   = 0.0
+inside  = 1.0e-9
+outside = 1.0e-9
+
+# Plane coordinates on the fault: x2 = x (along strike), x3 = y.  Rows every
+# 0.1 yr (365 days) and every 0.1 s while max V > 1e-3 m/s.
+[cycle.output]
+prefix          = "D2_sharp05"
+handback_table  = true
+fast_V          = 1.0e-3
+dt_fast         = 0.1
+dt_slow         = 3153600.0
+event_V         = 1.0e-3
+event_dwell     = 10.0
+plane_origin    = [0.0, 0.0]
+plane_axis1     = [1.0, 0.0]
+plane_axis2     = [0.0, 1.0]
+station_sigma_n = true
+
+# On-fault stations on the trace (make_decks.py): fltst_s<km> every 3 km
+# of arc length from -12 to 12 km; bend_w / bend_e 1 m from the bend
+# vertex (arc: its mid point) on the west / east face; bend_s<km> along
+# the fault from the bend (arc: also its two ends).
+[[cycle.output.station]]
+name = "fltst_s-12"
+x    = [-12000.0, 0.0]
+[[cycle.output.station]]
+name = "fltst_s-09"
+x    = [-9000.0, 0.0]
+[[cycle.output.station]]
+name = "fltst_s-06"
+x    = [-6000.0, 0.0]
+[[cycle.output.station]]
+name = "fltst_s-03"
+x    = [-3000.0, 0.0]
+[[cycle.output.station]]
+name = "fltst_s+00"
+x    = [0.0, 0.0]
+[[cycle.output.station]]
+name = "fltst_s+03"
+x    = [2988.5840942752366, 261.4672282429745]
+[[cycle.output.station]]
+name = "fltst_s+06"
+x    = [5977.168188550473, 522.934456485949]
+[[cycle.output.station]]
+name = "fltst_s+09"
+x    = [8965.75228282571, 784.4016847289234]
+[[cycle.output.station]]
+name = "fltst_s+12"
+x    = [11954.336377100946, 1045.868912971898]
+[[cycle.output.station]]
+name = "bend_w"
+x    = [-1.0, 0.0]
+[[cycle.output.station]]
+name = "bend_e"
+x    = [0.9961946980917455, 0.08715574274765817]
+[[cycle.output.station]]
+name = "bend_s-3.0"
+x    = [-3000.0, 0.0]
+[[cycle.output.station]]
+name = "bend_s-1.0"
+x    = [-1000.0, 0.0]
+[[cycle.output.station]]
+name = "bend_s+1.0"
+x    = [996.1946980917455, 87.15574274765817]
+[[cycle.output.station]]
+name = "bend_s+3.0"
+x    = [2988.5840942752366, 261.4672282429745]
+
+# Off-fault stations (displacement and velocity along x and y) and the
+# along-strike profile from tip to tip; the domain A of the source file is
+# the whole fault.
+[cycle.benchmark]
+region_x2       = [-15.0e3, 15.0e3]
+region_x3       = [-1.0e4, 1.0e4]   # the bent limb reaches y = 1.31 km
+rupture_V       = 1.0e-3
+profile_dt_slow = 157680000.0
+profile_dt_fast = 1.0
+profile_sigma_n = true
+volume_axes     = [[1.0, 0.0], [0.0, 1.0]]
+
+[[cycle.benchmark.volume_station]]
+name = "offst_x+00y+02"
+x    = [0.0, 2000.0]
+[[cycle.benchmark.volume_station]]
+name = "offst_x+00y-02"
+x    = [0.0, -2000.0]
+[[cycle.benchmark.volume_station]]
+name = "offst_x+00y+08"
+x    = [0.0, 8000.0]
+[[cycle.benchmark.volume_station]]
+name = "offst_x+20y+00"
+x    = [20000.0, 0.0]
+
+[[cycle.benchmark.profile]]
+name       = "strike"
+from       = [-15.0e3, 0.0]
+to         = [15.0e3, 0.0]
+points     = 61
+coordinate = "x2"
+
+[cycle.checkpoint]
+every_qd_steps = 1000
+
+# Whole-field snapshots: the fault every 10 yr and 0.1 s; the volume in
+# |x|, |y| <= 30 km every 0.5 s of a dynamic phase only (dt_qd = 1500 yr).
+[cycle.snapshots.fault]
+dt_qd  = 3.1536e8
+dt_dyn = 0.05           # mapview_rs_fd.toml: 0.1 (sigma_n' against slip at the bend)
+
+[cycle.snapshots.volume]
+dt_qd   = 4.7304e10
+dt_dyn  = 1.0           # mapview_rs_fd.toml: 0.5 (1 MB each; disk)
+box_min = [-30.0e3, -30.0e3]
+box_max = [30.0e3, 30.0e3]
