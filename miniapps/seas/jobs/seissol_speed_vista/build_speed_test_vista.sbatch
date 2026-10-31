@@ -145,9 +145,12 @@ for spec in "tpv205/mesh/tpv2053d_200m.msh|tpv2053d_200m|1894583|101:1 103:3 105
       $VENV/bin/python3 -I $SST/retag_msh2.py $SEAS/$msh $in $retag || { ok=0; continue; }
    fi
    s=$(date +%s)
-   ( cd $M && mpirun -np 1 $SEISSOL_VISTA/pumgen/bin/pumgen -s msh2 $in $name ) > $M/$name.pumgen_$SLURM_JOB_ID.log 2>&1
+   # pumgen writes its output under exactly the name given (job 1112276: "tpv104_200m", no suffix)
+   ( cd $M && mpirun -np 1 $SEISSOL_VISTA/pumgen/bin/pumgen -s msh2 $in $name.puml.h5 ) > $M/$name.pumgen_$SLURM_JOB_ID.log 2>&1
    rc=$?; echo "$name: pumgen exit $rc in $(( $(date +%s) - s )) s"
-   [ $rc -eq 0 ] && [ -f $M/$name.puml.h5 ] || { tail -20 $M/$name.pumgen_$SLURM_JOB_ID.log; ok=0; continue; }
+   [ $rc -eq 0 ] && [ -f $M/$name.puml.h5 ] \
+      || { echo "ERROR: $name: pumgen exit $rc, $M/$name.puml.h5 $( [ -f $M/$name.puml.h5 ] && echo present || echo missing)"
+           tail -20 $M/$name.pumgen_$SLURM_JOB_ID.log; ok=0; continue; }
    n=$(h5ls $M/$name.puml.h5/connect | sed -n 's/.*Dataset {\([0-9]*\),.*/\1/p')
    [ "$n" = $ntet ] && echo "$name: $n tets = MFEM's" || { echo "ERROR: $name has '$n' tets, MFEM $ntet"; ok=0; }
    h5dump -d /boundary -b LE -o $M/$name.boundary.bin $M/$name.puml.h5 > /dev/null \
