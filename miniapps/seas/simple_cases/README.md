@@ -15,7 +15,8 @@ the simple cases, run them on local Mac".
 ## Runs
 
 Twelve runs, listed in run order (D1f, D2f and Q1 answer the main
-questions, so they go first), and D5f, added after D1f (last row).
+questions, so they go first), then D5f, added after D1f, and D5f on two
+finer fault meshes (last rows).
 
 | Case | Mesh | Regime | Floor | Why |
 |---|---|---|---|---|
@@ -32,6 +33,8 @@ questions, so they go first), and D5f, added after D1f (last row).
 | D3_arc05L10 | arc05L10_h500 | fully dynamic | none | Andy's [4]: 5 deg arc |
 | D4_sharp015vs | sharp015vs_h500 | fully dynamic | none | 1.5 deg in the creeping part |
 | D5f_arc015L10_floor | arc015L10_h500 | fully dynamic | 1 MPa | D1f with the bend rounded (added later, below) |
+| D5f_arc015L10_h250_floor | arc015L10_h250 | fully dynamic | 1 MPa | D5f with 250 m on the fault (below) |
+| D5f_arc015L10_h125_floor | arc015L10_h125 | fully dynamic | 1 MPa | D5f with 125 m on the fault (below) |
 
 - **No floor (all but D1f, D2f):** a run that reaches sigma_n' <= 0 stops
   there, and that time and place is a result.
@@ -56,6 +59,23 @@ growing about 100 MPa per event (-71, -168, -267 MPa on the west face;
 - **What it tests:** if the spike comes from the corner, it should fall to
   a few MPa per event, spread along the arc, with no tension and no floor
   used (estimate).
+
+### D5f refined: 250 m and 125 m on the fault
+
+Chunhui Zhao, 2026-10-31: "okay keep it recorded, and let's refine the mesh
+1 level / 2 levels for fault and rerun this problem". D5f's arc is a polygon
+of 500 m straight elements, and sigma_n' zigzags between about +7 and +45
+MPa from vertex to vertex (Results, below).
+
+- **Only lc_fault changes** (500 to 250 and 125 m). The points stay on the
+  true arc, so the turn at a vertex halves each level: 0.0375 deg at 250 m,
+  0.019 deg at 125 m. The mesh grows from the fault as in `bend.geo`; the
+  box, the far field (5 km) and everything in the deck stay D5f's.
+- **What it answers:** does the vertex-to-vertex swing shrink with the
+  turn (about half per level if each vertex acts as a small corner), and
+  does the west tip's tension converge or grow as h shrinks?
+- **Stations:** the same places; `bend_w` and `bend_e` follow each mesh's
+  chord, 1 m from the middle vertex.
 
 ## Setup
 
@@ -111,6 +131,8 @@ gmsh -2 $G -format msh22 -setnumber box 240e3 -setnumber theta_deg 5   -setnumbe
 gmsh -2 $G -format msh22 -setnumber box 240e3 -setnumber theta_deg 5   -setnumber arc 10000 -setnumber s_bend 0     -setnumber lc_fault 500 -o arc05L10_h500.msh
 gmsh -2 $G -format msh22 -setnumber box 240e3 -setnumber theta_deg 1.5 -setnumber arc 0     -setnumber s_bend 12500 -setnumber lc_fault 500 -o sharp015vs_h500.msh
 gmsh -2 $G -format msh22 -setnumber box 240e3 -setnumber theta_deg 1.5 -setnumber arc 10000 -setnumber s_bend 0     -setnumber lc_fault 500 -o arc015L10_h500.msh
+gmsh -2 $G -format msh22 -setnumber box 240e3 -setnumber theta_deg 1.5 -setnumber arc 10000 -setnumber s_bend 0     -setnumber lc_fault 250 -o arc015L10_h250.msh
+gmsh -2 $G -format msh22 -setnumber box 240e3 -setnumber theta_deg 1.5 -setnumber arc 10000 -setnumber s_bend 0     -setnumber lc_fault 125 -o arc015L10_h125.msh
 ```
 
 | Mesh | Bend | Nodes | Triangles | sha256 |
@@ -121,8 +143,11 @@ gmsh -2 $G -format msh22 -setnumber box 240e3 -setnumber theta_deg 1.5 -setnumbe
 | arc05L10_h500 | 5 deg over s = -5 to 5 km | 15,644 | 30,902 | 05956834b5a5d81e72192ac56fb83ec1b02079f0ffbbe45eab33d7c92337a529 |
 | sharp015vs_h500 | 1.5 deg at x = 12.5 km | 15,647 | 30,908 | 83c995f896981a81060594d26e7081841aa8e8b5158aaca6fbd8d3cfe7ae9d04 |
 | arc015L10_h500 | 1.5 deg over s = -5 to 5 km | 15,637 | 30,888 | ff417d7642cfa57c981dcab948e55f69d4a6ed1883cb64743b11e88d88ecf9ce |
+| arc015L10_h250 | the same, 250 m on the fault | 19,982 | 39,578 | 6382f4f3d48496b9783079b4f201f0d66392acf5e0a30c36ebad28fc767d6fce |
+| arc015L10_h125 | the same, 125 m on the fault | 27,355 | 54,324 | ad2bcffb83e1a409e63d1173076bdfdbcacb5a7a86777bb6aa39e857183ffe9f |
 
-Each has 60 fault edges of 500 m.
+The 500 m meshes have 60 fault edges; arc015L10_h250 120 and arc015L10_h125
+240.
 
 ## Length and cost (estimates, not measured)
 
@@ -141,11 +166,22 @@ Each has 60 fault edges of 500 m.
 - **Measured (Mac, 932ccc20):** D1f took 2,419 s for 3 events about 4,600
   yr apart, D2f 2,339 s; so about 40 min per fully dynamic case, not 15 to
   20. D5f is run with `WALL_LIMIT=3600` so the cap does not cut it short.
+- **D5f's split (measured, run.log):** 2,498 s in all; the 3 dynamic
+  phases about 96 s (about 23,000 steps each at dt 3.8e-3 s, 1.4 ms per
+  step); QD about 2,400 s (775,592 RHS stages, about 3.1 ms each, with
+  output). G (N_f = 120) builds in 0.3 s.
+- **Refined D5f (estimate, not measured):** the dynamic dt halves each
+  level and the mesh grows 1.28x and 1.75x, so the dynamic phases take about
+  4 and 11 min. QD has 2x and 4x the fault nodes (N_f 240 and 480); if its
+  stage cost and its stage count each grow by up to 1.5x per level, QD
+  takes about 40 to 90 min at 250 m and 40 to 200 min at 125 m. So about 1
+  to 1.5 h and 1 to 3.5 h. They run with `WALL_LIMIT=21600` (6 h each), one
+  after the other.
 
 ## Files
 
-- `mesh/*.msh`: the six meshes (above).
-- `configs/<case>.toml`: the thirteen decks.
+- `mesh/*.msh`: the eight meshes (above).
+- `configs/<case>.toml`: the fifteen decks.
 - `scripts/make_decks.py`: makes the decks; `--check` compares.
 - `scripts/run_simple_mac.sh`: the runs on the Mac, one after the other.
   - Checks: the GitHub-first guard; the binary's code equals HEAD
@@ -176,8 +212,56 @@ git rev-parse HEAD > BUILD_COMMIT_MAC_FDCYCLE
 R=/Users/chunhuizhao/projects/seas-mfem-2d-inplane-results/simple_cases
 simple_cases/scripts/run_simple_mac.sh $R 4
 WALL_LIMIT=3600 simple_cases/scripts/run_simple_mac.sh $R 4 D5f_arc015L10_floor   # D5f alone
+WALL_LIMIT=21600 simple_cases/scripts/run_simple_mac.sh $R 4 D5f_arc015L10_h250_floor D5f_arc015L10_h125_floor
 python3 simple_cases/scripts/analyse_simple.py $R
 ```
+
+## Results (Mac, 2026-10-31)
+
+Run with `run_simple_mac.sh` on 4 ranks; folders
+`/Users/chunhuizhao/projects/seas-mfem-2d-inplane-results/simple_cases/<case>_<commit>/`;
+summary `compare/summary.txt`. sigma_n' in MPa (compression positive,
+prestress 25); hand-back = QD balance max V (m/s) / the fault-wide offset
+median(tau_qd - tau_dyn) (MPa).
+
+| Case | Commit | Exit, wall | Events (yr) | Hand-backs |
+|---|---|---|---|---|
+| D1f | 932ccc20 | 0, 2,419 s | 843, 5,391, 10,063 (7.3, 7.0, 7.2 m) | 8.4e-4 / -0.043; 8.4e-4 / -0.042; 8.5e-4 / -0.044 |
+| D2f | 932ccc20 | 1, 2,339 s | 854, 6,007 (6.7, 7.4 m) | 8.5e-4 / -0.060; 8.6e-4 / -0.051 |
+| Q1 | 932ccc20 | 8 (cap), 2,702 s | event 1 only | QD only |
+| D5f | fc17fbd3 | 0, 2,498 s | 846, 5,345, 9,930 (7.5, 7.5, 7.6 m) | 8.3e-4 / -0.044; 8.3e-4 / -0.045; 8.4e-4 / -0.045 |
+
+Q0, Q2, Q3, Q4 and D0 to D4 were not run (cancelled 2026-10-31: "cancel all
+other queued job").
+
+- **Hand-backs are clean in every run,** bent or not (UCERF's: 0.253 m/s
+  and -0.78 MPa). A bend alone does not reproduce the UCERF hand-back.
+- **D1f, the sharp 1.5 deg corner:** sigma_n' min / max per event, from
+  every fault snapshot, are -71 / +124, -168 / +225, -267 / +328 MPa,
+  both on the two nodes at the vertex (min on the west face, max on the
+  east), reached 15 to 22 s into each phase. They grow about 100 MPa per
+  event and fall back to about 25 MPa within about 1 km.
+- **D2f, the sharp 5 deg corner:** the vertex was at -517 / +608 MPa after
+  2 events. At about 11,749 yr, in calm QD (dt about 5.5e4 s), it stopped
+  with `Non-finite V from friction solver at DOF 67`
+  (rate_state_fault.hpp:1378) at a floored node 0.5 km from the corner:
+  tau 6.4e10 Pa and psi -32 in a trial stage. Friction there is zero, the
+  root is at the bracket's upper end and rounding fails both brackets
+  (dieterich_ruina.hpp). The runaway stage before it is the open question;
+  its checkpoint (step 130,000) is 475 steps before the abort.
+- **Q1, QD only:** the corner goes tensile in event 1 (bend_w -50.6 MPa),
+  so the tension needs no dynamic phase. With no floor the tensile node
+  kept slipping at about 1e-5 m/s, and QD stalled at dt about 0.04 s at
+  843.2 yr until the cap.
+- **D5f, the 10 km arc:** no tension at the bend; its min / max per event
+  are +18 / +32, +12 / +39, +6 / +47 MPa (7x below D1f). But sigma_n'
+  zigzags between about +7 and +45 MPa from vertex to vertex along the
+  arc, and the swing still grows each event. The west tip (DOF 22, x = -15
+  km) goes tensile at the end of each phase: +17, -0.9, -18.2 MPa, the
+  only node that used the floor (D1f's west tip: +18 to +39 MPa; the east
+  tip stays near 25 MPa). Not yet explained.
+- **Figures (Mac):** `<case>_<commit>/gifs/` (fault and domain GIFs,
+  static min / max figures); pages "D1f GIFs" and "D1f vs D5f".
 
 ## How to read the results (from the plan)
 
@@ -231,3 +315,15 @@ python3 simple_cases/scripts/analyse_simple.py $R
   twelve earlier decks are unchanged.
 - **No start-up run in the cloud** (Chunhui Zhao, 2026-10-30: all runs on
   the Mac). D5f's first steps on the Mac are its start-up check.
+
+### D5f refined (cloud, 2026-10-31)
+
+- **Meshes:** from the same `bend.geo` and gmsh 4.15.2; 121 and 241 fault
+  points on the arc; node and triangle counts above.
+- **Stations:** every fault station of the two decks lies on a fault
+  segment (at most 6e-14 m off).
+- **Decks:** `make_decks.py --check` gives "same" for all fifteen; the
+  thirteen earlier decks are unchanged. The two new decks differ from
+  D5f's only in the header, the mesh path, the prefix, two comments
+  (fault size, N_f) and `bend_w` / `bend_e` (each mesh's chord).
+- **No start-up run in the cloud.**

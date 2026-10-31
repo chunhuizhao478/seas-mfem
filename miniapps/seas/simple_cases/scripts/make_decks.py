@@ -4,7 +4,9 @@
 # twelve decks made from config/fd_cycle/mapview_rs_fd.toml, written to
 # simple_cases/configs/<case>.toml; a thirteenth, D5f (2026-10-31: "let's
 # prepare for this case, a smooth design around this bend, and rerun"), is
-# D1f with its 1.5 deg corner rounded into a 10 km arc.  Run from miniapps/seas:
+# D1f with its 1.5 deg corner rounded into a 10 km arc; two more (2026-10-31:
+# "let's refine the mesh 1 level / 2 levels for fault and rerun this
+# problem") are D5f with 250 m and 125 m on the fault.  Run from miniapps/seas:
 #   python3 simple_cases/scripts/make_decks.py [--check]
 # --check: write nothing, exit 1 if a committed deck differs from what this
 # script makes (the decks are committed as made).
@@ -32,16 +34,18 @@ BASE = "config/fd_cycle/mapview_rs_fd.toml"
 YR = 365.0 * 86400.0
 T_FINAL_YR = 12000.0
 FAULT_HALF = 15.0e3
-LC_FAULT = 500.0     # the fault points' spacing in arc length [m]
 
-# mesh: (theta_deg, arc [m], s_bend [m]), as mesh/README and bend.geo
+# mesh: (theta_deg, arc [m], s_bend [m], lc_fault [m]), as the README's gmsh
+# lines and bend.geo; lc_fault is the fault points' spacing in arc length
 MESHES = {
-    "straight_h500": (0.0, 0.0, 0.0),
-    "sharp015_h500": (1.5, 0.0, 0.0),
-    "sharp05_h500": (5.0, 0.0, 0.0),
-    "arc05L10_h500": (5.0, 10000.0, 0.0),
-    "sharp015vs_h500": (1.5, 0.0, 12500.0),
-    "arc015L10_h500": (1.5, 10000.0, 0.0),
+    "straight_h500": (0.0, 0.0, 0.0, 500.0),
+    "sharp015_h500": (1.5, 0.0, 0.0, 500.0),
+    "sharp05_h500": (5.0, 0.0, 0.0, 500.0),
+    "arc05L10_h500": (5.0, 10000.0, 0.0, 500.0),
+    "sharp015vs_h500": (1.5, 0.0, 12500.0, 500.0),
+    "arc015L10_h500": (1.5, 10000.0, 0.0, 500.0),
+    "arc015L10_h250": (1.5, 10000.0, 0.0, 250.0),
+    "arc015L10_h125": (1.5, 10000.0, 0.0, 125.0),
 }
 
 # case: (mesh, regime, floor, plan row), in the run order
@@ -59,6 +63,8 @@ CASES = [
     ("D3_arc05L10", "arc05L10_h500", "D", False, "Andy's [4]: 5 deg over a 10 km arc centred at x = 0"),
     ("D4_sharp015vs", "sharp015vs_h500", "D", False, "addition: a 1.5 deg sharp bend at x = 12.5 km, in the creeping part"),
     ("D5f_arc015L10_floor", "arc015L10_h500", "D", True, "D1f with the bend rounded: 1.5 deg over a 10 km arc centred at x = 0"),
+    ("D5f_arc015L10_h250_floor", "arc015L10_h250", "D", True, "D5f with the fault mesh refined once: 250 m on the fault"),
+    ("D5f_arc015L10_h125_floor", "arc015L10_h125", "D", True, "D5f with the fault mesh refined twice: 125 m on the fault"),
 ]
 
 
@@ -87,14 +93,14 @@ def stations(mesh):
     and the bend set: bend_w and bend_e 1 m from the vertex (or the arc's
     mid point) on the west and the east face, so each face keeps its own
     sigma_n'; bend_s<+-km> along the fault from the bend; the arc's ends."""
-    th, arc, sb = MESHES[mesh]
+    th, arc, sb, lc = MESHES[mesh]
     out = []
     for k in range(-12, 13, 3):
         out.append((f"fltst_s{k:+03d}", trace(k * 1e3, th, arc, sb)))
-    # 1 m along the face's chord (the fault is straight segments of
-    # LC_FAULT between points on the curve), so the point lies on that face
+    # 1 m along the face's chord (the fault is straight segments of lc
+    # between points on the curve), so the point lies on that face
     v = trace(sb, th, arc, sb)
-    for name, u in (("bend_w", sb - LC_FAULT), ("bend_e", sb + LC_FAULT)):
+    for name, u in (("bend_w", sb - lc), ("bend_e", sb + lc)):
         n = trace(u, th, arc, sb)
         L = math.hypot(n[0] - v[0], n[1] - v[1])
         out.append((name, (v[0] + (n[0] - v[0]) / L, v[1] + (n[1] - v[1]) / L)))
@@ -111,7 +117,11 @@ def stations(mesh):
 # the request each deck answers (Chunhui Zhao, 2026-10-31)
 GO = "# 2026-10-31: \"go ahead with the simple cases, run them on local Mac\"):"
 GO_CASE = {"D5f_arc015L10_floor":
-           "# 2026-10-31: \"a smooth design around this bend, and rerun\"):"}
+           "# 2026-10-31: \"a smooth design around this bend, and rerun\"):",
+           "D5f_arc015L10_h250_floor":
+           "# 2026-10-31: \"let's refine the mesh 1 level / 2 levels for fault and rerun\"):",
+           "D5f_arc015L10_h125_floor":
+           "# 2026-10-31: \"let's refine the mesh 1 level / 2 levels for fault and rerun\"):"}
 
 
 def header(case, mesh, regime, floor, row):
@@ -143,6 +153,11 @@ def make(case, mesh, regime, floor, row, base):
         t = t.replace(old, new)
 
     sub('path  = "mapview_rs/mesh/mapview_rs_500m.msh"', f'path  = "simple_cases/mesh/{mesh}.msh"')
+    lc = MESHES[mesh][3]
+    if lc != 500.0:
+        sub("# 500 m on the fault, in m.", f"# {lc:.0f} m on the fault (mapview_rs_fd.toml: 500 m), in m.")
+        sub("# Dense G: N_f = 120 at p = 1 on the 500 m mesh.",
+            f"# Dense G: N_f = {round(2 * 30e3 / lc)} at p = 1 on this {lc:.0f} m mesh (120 at 500 m).")
     sub("# 1500 yr of 365 days.\n[time]\ntfinal     = 4.7304e10",
         f"# {T_FINAL_YR:,.0f} yr of 365 days (mapview_rs_fd.toml: 1500 yr).\n[time]\n"
         f"tfinal     = {T_FINAL_YR * YR:.6e}")

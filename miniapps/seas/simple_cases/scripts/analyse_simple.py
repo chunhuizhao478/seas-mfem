@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # The simple cases' summary (Chunhui Zhao, 2026-10-31: "go ahead with the
 # simple cases, run them on local Mac"; plan "2D plane strain simple tests
-# plan", "What we measure"): one table over the thirteen runs of
+# plan", "What we measure"): one table over the fifteen runs of
 # run_simple_mac.sh, and the sigma_n' histories at the bend.
 #
 # Usage (from miniapps/seas):
@@ -47,7 +47,8 @@ from matplotlib.backends.backend_pdf import PdfPages
 YR = 365.0 * 86400.0
 ORDER = ["Q0_straight", "Q1_sharp015", "Q2_sharp05", "Q3_arc05L10", "Q4_sharp015vs",
          "D0_straight", "D1_sharp015", "D2_sharp05", "D3_arc05L10", "D4_sharp015vs",
-         "D1f_sharp015_floor", "D2f_sharp05_floor", "D5f_arc015L10_floor"]
+         "D1f_sharp015_floor", "D2f_sharp05_floor", "D5f_arc015L10_floor",
+         "D5f_arc015L10_h250_floor", "D5f_arc015L10_h125_floor"]
 BEND = ["bend_w", "bend_e"]
 NEAR = ["bend_s-3.0", "bend_s-1.0", "bend_s+1.0", "bend_s+2.0", "bend_s+3.0",
         "bend_s-5.0", "bend_s+5.0"]
@@ -55,10 +56,16 @@ NEAR = ["bend_s-3.0", "bend_s-1.0", "bend_s+1.0", "bend_s+2.0", "bend_s+3.0",
 # 1.5 deg arc
 GEO_COL = {"straight": "#4a5560", "sharp015": "#2a78d6", "sharp05": "#c0392b",
            "arc05L10": "#1e8a5a", "sharp015vs": "#b8860b", "arc015L10": "#7b4fb5"}
+# the refined D5f runs: lighter steps of the 1.5 deg arc's purple
+CASE_COL = {"D5f_arc015L10_h250_floor": "#a07fd0", "D5f_arc015L10_h125_floor": "#c6b2e6"}
 
 
 def geo_of(case):
     return case.split("_")[1]
+
+
+def col_of(case):
+    return CASE_COL.get(case, GEO_COL[geo_of(case)])
 
 
 def read_table(path):
@@ -328,7 +335,7 @@ def main():
                     if s is None:
                         continue
                     ls = "--" if c.endswith("floor") else "-"
-                    ax.plot(s["t"] / YR, s["sn"], ls, color=GEO_COL[geo_of(c)], lw=1.4, label=c)
+                    ax.plot(s["t"] / YR, s["sn"], ls, color=col_of(c), lw=1.4, label=c)
             for ax, name in zip(axs, BEND):
                 ax.axhline(0.0, color="#888", lw=0.8)
                 ax.set_ylabel(f"sigma_n' at {name} (MPa)")
@@ -346,7 +353,7 @@ def main():
                 if s is None:
                     continue
                 ls = ":" if c.startswith("Q") else ("--" if c.endswith("floor") else "-")
-                ax.plot(s["slip"] - s["slip"][0], s["sn"], ls, color=GEO_COL[geo_of(c)], lw=1.3, label=c)
+                ax.plot(s["slip"] - s["slip"][0], s["sn"], ls, color=col_of(c), lw=1.3, label=c)
         for ax, name in zip(axs, BEND):
             ax.axhline(0.0, color="#888", lw=0.8)
             ax.set_xlabel(f"slip at {name} (m)")
