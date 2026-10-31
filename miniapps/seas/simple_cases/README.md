@@ -15,7 +15,7 @@ the simple cases, run them on local Mac".
 ## Runs
 
 Twelve runs, listed in run order (D1f, D2f and Q1 answer the main
-questions, so they go first).
+questions, so they go first), and D5f, added after D1f (last row).
 
 | Case | Mesh | Regime | Floor | Why |
 |---|---|---|---|---|
@@ -31,6 +31,7 @@ questions, so they go first).
 | D2_sharp05 | sharp05_h500 | fully dynamic | none | Andy's [4]: 5 deg sharp |
 | D3_arc05L10 | arc05L10_h500 | fully dynamic | none | Andy's [4]: 5 deg arc |
 | D4_sharp015vs | sharp015vs_h500 | fully dynamic | none | 1.5 deg in the creeping part |
+| D5f_arc015L10_floor | arc015L10_h500 | fully dynamic | 1 MPa | D1f with the bend rounded (added later, below) |
 
 - **No floor (all but D1f, D2f):** a run that reaches sigma_n' <= 0 stops
   there, and that time and place is a result.
@@ -38,9 +39,27 @@ questions, so they go first).
   before any hand-back (estimate). D1f and D2f test the hand-back on a
   bend instead.
 
+### D5f: D1f with the bend rounded
+
+Chunhui Zhao, 2026-10-31: "let's prepare for this case, a smooth design
+around this bend, and rerun". D1f found sigma_n' at its 1.5 deg corner
+growing about 100 MPa per event (-71, -168, -267 MPa on the west face;
++124, +225, +328 MPa on the east face), all at the vertex.
+
+- **Only the corner changes.** The same 1.5 deg turn is spread over a 10 km
+  arc centred at x = 0 (x from -5 to +5 km, radius 382 km), as the 5 deg
+  arc of Q3/D3. Fault, friction, the 1 MPa floor, box, walls, output and
+  stations are D1f's.
+- **On the 500 m mesh** the arc is 20 straight segments between points on
+  the curve: a turn of 0.075 deg at each of 19 vertices and 0.0375 deg at
+  the two arc ends, instead of 1.5 deg at one vertex.
+- **What it tests:** if the spike comes from the corner, it should fall to
+  a few MPa per event, spread along the arc, with no tension and no floor
+  used (estimate).
+
 ## Setup
 
-All twelve decks are `config/fd_cycle/mapview_rs_fd.toml` with the edits
+All the decks are `config/fd_cycle/mapview_rs_fd.toml` with the edits
 below. `scripts/make_decks.py` makes them, and the run script checks that
 the committed decks are exactly its output.
 
@@ -62,7 +81,7 @@ the committed decks are exactly its output.
     only.
 - **QD only (Q):** `[cycle] switching = false`.
 - **Fully dynamic (D):** `[cycle.output] handback_table = true`.
-- **Floor (D1f, D2f):** `[cycle] sigma_n_floor_pa = 1.0e6` (UCERF run8's).
+- **Floor (D1f, D2f, D5f):** `[cycle] sigma_n_floor_pa = 1.0e6` (UCERF run8's).
 
 ### Stations
 
@@ -91,6 +110,7 @@ gmsh -2 $G -format msh22 -setnumber box 240e3 -setnumber theta_deg 1.5 -setnumbe
 gmsh -2 $G -format msh22 -setnumber box 240e3 -setnumber theta_deg 5   -setnumber arc 0     -setnumber s_bend 0     -setnumber lc_fault 500 -o sharp05_h500.msh
 gmsh -2 $G -format msh22 -setnumber box 240e3 -setnumber theta_deg 5   -setnumber arc 10000 -setnumber s_bend 0     -setnumber lc_fault 500 -o arc05L10_h500.msh
 gmsh -2 $G -format msh22 -setnumber box 240e3 -setnumber theta_deg 1.5 -setnumber arc 0     -setnumber s_bend 12500 -setnumber lc_fault 500 -o sharp015vs_h500.msh
+gmsh -2 $G -format msh22 -setnumber box 240e3 -setnumber theta_deg 1.5 -setnumber arc 10000 -setnumber s_bend 0     -setnumber lc_fault 500 -o arc015L10_h500.msh
 ```
 
 | Mesh | Bend | Nodes | Triangles | sha256 |
@@ -100,6 +120,7 @@ gmsh -2 $G -format msh22 -setnumber box 240e3 -setnumber theta_deg 1.5 -setnumbe
 | sharp05_h500 | 5 deg at x = 0 | 15,609 | 30,832 | 4f3ab900ad8a46be406c270c69610d588a8c4780e7a35d2dc48b7310e4b269fd |
 | arc05L10_h500 | 5 deg over s = -5 to 5 km | 15,644 | 30,902 | 05956834b5a5d81e72192ac56fb83ec1b02079f0ffbbe45eab33d7c92337a529 |
 | sharp015vs_h500 | 1.5 deg at x = 12.5 km | 15,647 | 30,908 | 83c995f896981a81060594d26e7081841aa8e8b5158aaca6fbd8d3cfe7ae9d04 |
+| arc015L10_h500 | 1.5 deg over s = -5 to 5 km | 15,637 | 30,888 | ff417d7642cfa57c981dcab948e55f69d4a6ed1883cb64743b11e88d88ecf9ce |
 
 Each has 60 fault edges of 500 m.
 
@@ -117,11 +138,14 @@ Each has 60 fault edges of 500 m.
 - **Cap:** `WALL_LIMIT` (default 2700 s) per run. Past it the driver stops
   with a checkpoint (exit 8), and the run can go on later with `--restart`.
 - **Disk:** about 0.3 GB per fully dynamic run, much less for QD only.
+- **Measured (Mac, 932ccc20):** D1f took 2,419 s for 3 events about 4,600
+  yr apart, D2f 2,339 s; so about 40 min per fully dynamic case, not 15 to
+  20. D5f is run with `WALL_LIMIT=3600` so the cap does not cut it short.
 
 ## Files
 
-- `mesh/*.msh`: the five meshes (above).
-- `configs/<case>.toml`: the twelve decks.
+- `mesh/*.msh`: the six meshes (above).
+- `configs/<case>.toml`: the thirteen decks.
 - `scripts/make_decks.py`: makes the decks; `--check` compares.
 - `scripts/run_simple_mac.sh`: the runs on the Mac, one after the other.
   - Checks: the GitHub-first guard; the binary's code equals HEAD
@@ -147,10 +171,11 @@ Each has 60 fault edges of 500 m.
 
 ```bash
 conda activate mumps-petsc
-make -f tests/2d_inplane/2d_inplane.mk seas_fd_cycle_driver
+make -f tests/2d_inplane/2d_inplane.mk SEAS_FS_LIB= seas_fd_cycle_driver   # macOS: no -lstdc++fs
 git rev-parse HEAD > BUILD_COMMIT_MAC_FDCYCLE
 R=/Users/chunhuizhao/projects/seas-mfem-2d-inplane-results/simple_cases
 simple_cases/scripts/run_simple_mac.sh $R 4
+WALL_LIMIT=3600 simple_cases/scripts/run_simple_mac.sh $R 4 D5f_arc015L10_floor   # D5f alone
 python3 simple_cases/scripts/analyse_simple.py $R
 ```
 
@@ -166,6 +191,7 @@ python3 simple_cases/scripts/analyse_simple.py $R
 | Q2, D2 against Q3, D3 | the arc passes, the sharp bend fails | the corner matters, not the turn |
 | D2 against Q2 | similar MPa per metre of slip | the tension follows the slip, whatever the regime |
 | Q4, D4 | tension at the creeping bend | creep alone can take a bend into tension |
+| D5f against D1f | the arc's sigma_n' change is a few MPa per event, no floor used | the spike is the corner's, not the 1.5 deg turn's |
 
 ## Checks done before the runs (cloud, 2026-10-31)
 
@@ -192,3 +218,16 @@ python3 simple_cases/scripts/analyse_simple.py $R
   sigma_n' <= 0 (in event 2), the FRIC-GUARD count (205), and the
   hand-back offset (-0.005 MPa). On the twelve start-up folders it reads
   every station.
+
+### D5f (cloud, 2026-10-31)
+
+- **Mesh:** the commands above give the committed `sharp015_h500.msh` byte
+  for byte again; `arc015L10_h500.msh` comes from the same `bend.geo`. Its
+  61 fault points lie on the arc within 4e-12 m; the turns sum to 1.5 deg,
+  at most 0.075 deg at a vertex, all within x = -5 to +5 km.
+- **Stations:** every fault station of D5f lies on a fault segment (largest
+  distance 6e-14 m).
+- **Decks:** `make_decks.py --check` gives "same" for all thirteen; the
+  twelve earlier decks are unchanged.
+- **No start-up run in the cloud** (Chunhui Zhao, 2026-10-30: all runs on
+  the Mac). D5f's first steps on the Mac are its start-up check.

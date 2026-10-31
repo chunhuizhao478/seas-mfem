@@ -1,20 +1,21 @@
 #!/bin/bash
 # The simple cases on the Mac (Chunhui Zhao, 2026-10-31: "go ahead with the
 # simple cases, run them on local Mac"; 2026-10-30: "all run must be run
-# locally, and save data on local disk"): the twelve
+# locally, and save data on local disk"): the thirteen
 # simple_cases/configs/*.toml decks with seas_fd_cycle_driver, one after the
 # other, each into RESULTS/<case>_<commit>/ with run.log and RUN_INFO.txt.
 # Then analyse_simple.py (README.md).
 #
 # Usage (from miniapps/seas of a clean checkout at a pushed commit):
-#   make -f tests/2d_inplane/2d_inplane.mk seas_fd_cycle_driver   (conda env mumps-petsc)
+#   make -f tests/2d_inplane/2d_inplane.mk SEAS_FS_LIB= seas_fd_cycle_driver
+#     (conda env mumps-petsc; SEAS_FS_LIB= because macOS has no -lstdc++fs)
 #   git rev-parse HEAD > BUILD_COMMIT_MAC_FDCYCLE
 #   simple_cases/scripts/run_simple_mac.sh RESULTS [NP [CASE ...]]
 # RESULTS the results folder (e.g.
 # /Users/chunhuizhao/projects/seas-mfem-2d-inplane-results/simple_cases),
-# NP the ranks (default 4), CASE a subset (default all twelve, in the order
-# below: D1f, D2f and Q1 first).  WALL_LIMIT (env, default 2700 s) is each
-# run's --wall-limit: past it the driver stops at the next QD step with a
+# NP the ranks (default 4), CASE a subset (default all thirteen, in the order
+# below: D1f, D2f and Q1 first, D5f last).  WALL_LIMIT (env, default 2700 s)
+# is each run's --wall-limit: past it the driver stops at the next QD step with a
 # checkpoint (exit 8), and the script goes on to the next case; such a run
 # can be continued later with --restart from its checkpoint.
 # The driver must be built at a commit whose code equals HEAD's
@@ -32,7 +33,7 @@ export LC_ALL=C OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 RES=${1:?usage: run_simple_mac.sh RESULTS [NP [CASE ...]]}
 NP=${2:-4}
 shift $(( $# < 2 ? $# : 2 ))
-ALL="D1f_sharp015_floor D2f_sharp05_floor Q1_sharp015 Q0_straight Q2_sharp05 Q3_arc05L10 Q4_sharp015vs D0_straight D1_sharp015 D2_sharp05 D3_arc05L10 D4_sharp015vs"
+ALL="D1f_sharp015_floor D2f_sharp05_floor Q1_sharp015 Q0_straight Q2_sharp05 Q3_arc05L10 Q4_sharp015vs D0_straight D1_sharp015 D2_sharp05 D3_arc05L10 D4_sharp015vs D5f_arc015L10_floor"
 CASES=${*:-$ALL}
 WALL=${WALL_LIMIT:-2700}
 LOCK=${SEAS_MAC_LOCK:-/Users/chunhuizhao/projects/.seas-mac-run.lock}
@@ -44,6 +45,7 @@ mesh_of() {
    Q2_*|D2_*|D2f_*) echo sharp05_h500 ;;
    Q3_*|D3_*) echo arc05L10_h500 ;;
    Q4_*|D4_*) echo sharp015vs_h500 ;;
+   D5f_*) echo arc015L10_h500 ;;
    *) echo unknown ;;
    esac
 }
@@ -54,6 +56,7 @@ mesh_sha() {
    sharp05_h500) echo 4f3ab900ad8a46be406c270c69610d588a8c4780e7a35d2dc48b7310e4b269fd ;;
    arc05L10_h500) echo 05956834b5a5d81e72192ac56fb83ec1b02079f0ffbbe45eab33d7c92337a529 ;;
    sharp015vs_h500) echo 83c995f896981a81060594d26e7081841aa8e8b5158aaca6fbd8d3cfe7ae9d04 ;;
+   arc015L10_h500) echo ff417d7642cfa57c981dcab948e55f69d4a6ed1883cb64743b11e88d88ecf9ce ;;
    *) echo unknown ;;
    esac
 }

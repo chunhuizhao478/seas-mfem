@@ -2,7 +2,9 @@
 # The simple cases' decks (Chunhui Zhao, 2026-10-31: "go ahead with the simple
 # cases, run them on local Mac"; plan "2D plane strain simple tests plan"):
 # twelve decks made from config/fd_cycle/mapview_rs_fd.toml, written to
-# simple_cases/configs/<case>.toml.  Run from miniapps/seas:
+# simple_cases/configs/<case>.toml; a thirteenth, D5f (2026-10-31: "let's
+# prepare for this case, a smooth design around this bend, and rerun"), is
+# D1f with its 1.5 deg corner rounded into a 10 km arc.  Run from miniapps/seas:
 #   python3 simple_cases/scripts/make_decks.py [--check]
 # --check: write nothing, exit 1 if a committed deck differs from what this
 # script makes (the decks are committed as made).
@@ -20,7 +22,7 @@
 #                      so about 0.27 GB per fully dynamic run of 3 events)
 # QD only (Q*):        [cycle] switching = false
 # fully dynamic (D*):  [cycle.output] handback_table = true
-# floor (D1f, D2f):    [cycle] sigma_n_floor_pa = 1.0e6 (UCERF run8's)
+# floor (D1f, D2f, D5f): [cycle] sigma_n_floor_pa = 1.0e6 (UCERF run8's)
 import argparse
 import math
 import os
@@ -39,6 +41,7 @@ MESHES = {
     "sharp05_h500": (5.0, 0.0, 0.0),
     "arc05L10_h500": (5.0, 10000.0, 0.0),
     "sharp015vs_h500": (1.5, 0.0, 12500.0),
+    "arc015L10_h500": (1.5, 10000.0, 0.0),
 }
 
 # case: (mesh, regime, floor, plan row), in the run order
@@ -55,6 +58,7 @@ CASES = [
     ("D2_sharp05", "sharp05_h500", "D", False, "Andy's [4]: a 5 deg sharp bend at x = 0"),
     ("D3_arc05L10", "arc05L10_h500", "D", False, "Andy's [4]: 5 deg over a 10 km arc centred at x = 0"),
     ("D4_sharp015vs", "sharp015vs_h500", "D", False, "addition: a 1.5 deg sharp bend at x = 12.5 km, in the creeping part"),
+    ("D5f_arc015L10_floor", "arc015L10_h500", "D", True, "D1f with the bend rounded: 1.5 deg over a 10 km arc centred at x = 0"),
 ]
 
 
@@ -104,10 +108,16 @@ def stations(mesh):
     return out
 
 
+# the request each deck answers (Chunhui Zhao, 2026-10-31)
+GO = "# 2026-10-31: \"go ahead with the simple cases, run them on local Mac\"):"
+GO_CASE = {"D5f_arc015L10_floor":
+           "# 2026-10-31: \"a smooth design around this bend, and rerun\"):"}
+
+
 def header(case, mesh, regime, floor, row):
     lines = [
         f"# simple_cases/configs/{case}.toml — the simple cases (Chunhui Zhao,",
-        "# 2026-10-31: \"go ahead with the simple cases, run them on local Mac\"):",
+        GO_CASE.get(case, GO),
         f"# {row}.",
         f"# {'QD only' if regime == 'Q' else 'Fully dynamic (QD and dynamic regimes)'}, mesh {mesh}"
         + (", sigma_n' floor 1 MPa." if floor else ", no sigma_n' floor."),

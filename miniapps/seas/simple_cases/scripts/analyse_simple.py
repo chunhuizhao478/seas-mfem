@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # The simple cases' summary (Chunhui Zhao, 2026-10-31: "go ahead with the
 # simple cases, run them on local Mac"; plan "2D plane strain simple tests
-# plan", "What we measure"): one table over the twelve runs of
+# plan", "What we measure"): one table over the thirteen runs of
 # run_simple_mac.sh, and the sigma_n' histories at the bend.
 #
 # Usage (from miniapps/seas):
@@ -47,13 +47,14 @@ from matplotlib.backends.backend_pdf import PdfPages
 YR = 365.0 * 86400.0
 ORDER = ["Q0_straight", "Q1_sharp015", "Q2_sharp05", "Q3_arc05L10", "Q4_sharp015vs",
          "D0_straight", "D1_sharp015", "D2_sharp05", "D3_arc05L10", "D4_sharp015vs",
-         "D1f_sharp015_floor", "D2f_sharp05_floor"]
+         "D1f_sharp015_floor", "D2f_sharp05_floor", "D5f_arc015L10_floor"]
 BEND = ["bend_w", "bend_e"]
 NEAR = ["bend_s-3.0", "bend_s-1.0", "bend_s+1.0", "bend_s+2.0", "bend_s+3.0",
         "bend_s-5.0", "bend_s+5.0"]
-# geometry colours (categorical, fixed order): straight, 1.5 deg, 5 deg, arc, creeping 1.5 deg
+# geometry colours (categorical, fixed order): straight, 1.5 deg, 5 deg, arc, creeping 1.5 deg,
+# 1.5 deg arc
 GEO_COL = {"straight": "#4a5560", "sharp015": "#2a78d6", "sharp05": "#c0392b",
-           "arc05L10": "#1e8a5a", "sharp015vs": "#b8860b"}
+           "arc05L10": "#1e8a5a", "sharp015vs": "#b8860b", "arc015L10": "#7b4fb5"}
 
 
 def geo_of(case):
