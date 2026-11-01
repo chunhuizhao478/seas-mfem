@@ -103,8 +103,10 @@ if [ -n "$MFEM_RUN" ]; then
 fi
 
 # --- SeisSol: order o = p + 1, ClusteredLTS 2, CFL 0.5, one run per layout (ranks per node x threads)
+k=0
 for RPN in $SS_LAYOUTS; do
-   OUT=$BASE/seissol_r$RPN; mkdir -p $OUT/output
+   k=$(( k + 1 ))                         # a layout may be listed twice (the probe repeats one)
+   OUT=$BASE/seissol_r${RPN}_$k; mkdir -p $OUT/output
    cp $SST/decks/$PROB/* $OUT/
    ln -s $SEISSOL_VISTA/meshes/$PUML.puml.h5 $OUT/$PUML.puml.h5
    # the window: decks hold EndTime = 12.0; a shorter TFINAL (the probe) is set here, in the copy only
@@ -117,6 +119,7 @@ for RPN in $SS_LAYOUTS; do
    [ "$SEISSOL_ENV_OK" = 1 ] || { echo "ERROR: the kit environment self-check failed"; exit 2; }
    export OMP_NUM_THREADS=$(( PE - 1 )) SEISSOL_COMMTHREAD=1 OMP_PLACES=cores OMP_PROC_BIND=close
    echo "SeisSol modules: $(module -t list 2>&1 | tr '\n' ' ')"
+   echo "SeisSol MPI and UCX libraries: $(ldd $SSBIN | grep -E 'libmpi\.|libuc[pts]' | awk '{print $3}' | tr '\n' ' ')"
    memlog $OUT/meminfo_kB.log
    s=$(date +%s)
    cd $OUT && mpirun -np $(( SLURM_JOB_NUM_NODES * RPN )) --map-by ppr:$RPN:node:pe=$PE --bind-to core \
@@ -124,7 +127,8 @@ for RPN in $SS_LAYOUTS; do
         $SSBIN parameters.par > $OUT/seissol.log 2>&1
    rc=$?; kill $MON 2>/dev/null; wait $MON 2>/dev/null
    echo "=== SeisSol o$SO, $RPN ranks per node x ($(( PE - 1 )) + 1) threads, $(( SLURM_JOB_NUM_NODES * RPN )) ranks: exit $rc, $(( $(date +%s) - s )) s in the job"
-   grep -a "Simulation time (\|Time spent for initial IO\|Total time spent:\|Minimum timestep\|Theoretical speedup\|Cluster histogram\|^.* : *[0-9]* *, *[0-9]*$\|Load imbalance\|Total calculated HW-FLOP\|error\|Error" $OUT/seissol.log | tail -40
+   grep -a "Simulation time (\|Time spent for initial IO\|Total time spent:\|Minimum timestep\|Theoretical speedup\|Load imbalance\|Total calculated HW-FLOP\|error\|Error" $OUT/seissol.log | tail -30
+   grep -a -A 12 "Cluster histogram" $OUT/seissol.log | grep -a "Cluster histogram\|: *[0-9]* *, *[0-9]*" | head -14
    memsum $OUT/meminfo_kB.log
    exit $rc
    ) || rc_all=1
