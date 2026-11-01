@@ -40,6 +40,8 @@ inline FaultFrameConfig CycleFrameConfig(const CycleConfig &cfg)
    oc.pin = FaultOrientationConfig::Pin::Reference;
    if (dc.pin_min_margin > 0.0) { oc.c_min = dc.pin_min_margin; }
    oc.fault_attrs = {cfg.fault_attr};
+   f.averaged_vertex_normals = dc.averaged_vertex_normals;
+   f.vertex_normal_max_turn_deg = dc.vertex_normal_max_turn_deg;
    return f;
 }
 

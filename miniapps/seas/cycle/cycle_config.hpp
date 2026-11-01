@@ -230,7 +230,10 @@
 //   [fault_geometry]  ref_normal, up (the shared loader), orientation
 //               ["propagated"], pin_by ["reference"], tangent ["pointwise"],
 //               junction_policy ["refuse"] (the only implemented values),
-//               pin_min_margin [the orientation's default]
+//               pin_min_margin [the orientation's default], vertex_normals
+//               ["face" | "averaged"; vertex-normal plan rev1, phase P1:
+//               "averaged" is refused until the operators read it (P3)],
+//               vertex_normal_max_turn_deg [5; > 0]
 //   [pore_pressure] min_sigma_n_pa: the lower bound of sigma_n_eff [0]
 //
 // No solver header (rule M4).
@@ -474,6 +477,8 @@ struct DynamicConfig
    std::array<real_t, 3> ref_normal = {{0.0, -1.0, 0.0}};
    std::array<real_t, 3> up = {{0.0, 0.0, 1.0}};
    real_t pin_min_margin = -1.0;   ///< < 0: the orientation's default
+   bool averaged_vertex_normals = false;   ///< [fault_geometry] vertex_normals
+   real_t vertex_normal_max_turn_deg = 5.0;
    real_t sigma_min = 0.0;         ///< [Pa]
 };
 
@@ -1298,7 +1303,8 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
          const std::string sec = "fault_geometry";
          const toml::value &g = root.at("fault_geometry");
          OnlyKeys(g, sec, {"ref_normal", "up", "kind", "orientation", "pin_by", "tangent",
-                           "junction_policy", "pin_min_margin"});
+                           "junction_policy", "pin_min_margin", "vertex_normals",
+                           "vertex_normal_max_turn_deg"});
          const std::string orient = Str(g, sec, "orientation", "propagated");
          const std::string pin_by = Str(g, sec, "pin_by", "reference");
          const std::string tangent = Str(g, sec, "tangent", "pointwise");
@@ -1312,6 +1318,20 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
             d.pin_min_margin = Real(g, sec, "pin_min_margin", 0.0);
             MFEM_VERIFY(d.pin_min_margin > 0.0, "[fault_geometry].pin_min_margin must be > 0");
          }
+         // vertex-normal plan rev1 (Chunhui Zhao, 2026-11-01): the keys are
+         // read now; the operators read the vertex normals from phase P3, so
+         // "averaged" is refused until then rather than run as "face"
+         const std::string vn = Str(g, sec, "vertex_normals", "face");
+         MFEM_VERIFY(vn == "face" || vn == "averaged", "[fault_geometry] vertex_normals = \""
+                     << vn << "\": \"face\" or \"averaged\"");
+         d.averaged_vertex_normals = (vn == "averaged");
+         d.vertex_normal_max_turn_deg = Real(g, sec, "vertex_normal_max_turn_deg",
+                                             d.vertex_normal_max_turn_deg);
+         MFEM_VERIFY(d.vertex_normal_max_turn_deg > 0.0,
+                     "[fault_geometry].vertex_normal_max_turn_deg must be > 0");
+         MFEM_VERIFY(!d.averaged_vertex_normals, "[fault_geometry] vertex_normals = "
+                     "\"averaged\": not yet read by the QD and dynamic operators (vertex-normal "
+                     "plan rev1: phases P2 and P3); refused so that it does not run as \"face\"");
       }
       d.sigma_min = s.stress.pore_pressure.min_sigma_n_pa;
       MFEM_VERIFY(c.sigma_n_floor == 0.0 || d.sigma_min == 0.0,

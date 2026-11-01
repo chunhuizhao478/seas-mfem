@@ -1367,6 +1367,12 @@ int main(int argc, char *argv[])
                   << "': only \"pointwise\" is implemented (N-09; F8 transport is not)");
       MFEM_VERIFY(junction == "refuse", "[fault_geometry] junction_policy = '" << junction
                   << "': only \"refuse\" is implemented");
+      // vertex-normal plan rev1 (Chunhui Zhao, 2026-11-01): averaged vertex
+      // normals are for seas_fd_cycle_driver's 2-D runs only
+      const std::string vnorm = TomlStr(t_fg, "vertex_normals", "face");
+      MFEM_VERIFY(vnorm == "face", "[fault_geometry] vertex_normals = '" << vnorm
+                  << "': seas_nitsche_dyn_driver uses the face normals only (\"face\"); "
+                  "\"averaged\" is planned for seas_fd_cycle_driver's 2-D runs");
       auto &oc = fs.orientation;
       for (int i = 0; i < 3; i++)
       {

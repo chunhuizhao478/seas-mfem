@@ -36,6 +36,11 @@
 //    8 2-D, no ref_normal                         "ref_normal is required on a 2-D mesh"
 //    9 a 4-entry [fault_geometry] vector          "must be a 2- or 3-element array"
 //   10 a 4-entry cycle vector                     "must be an array of 3 numbers (2 on a 2-D mesh)"
+//   (vertex-normal plan rev1, phase P1, 2026-11-01: the [fault_geometry] keys
+//   vertex_normals and vertex_normal_max_turn_deg; refused while parsing)
+//   11 vertex_normals = "averaged"                "not yet read by the QD and dynamic operators"
+//   12 vertex_normals = "smooth"                  "\"face\" or \"averaged\""
+//   13 vertex_normal_max_turn_deg = 0             "vertex_normal_max_turn_deg must be > 0"
 // The make target also runs the two drivers on a 3-D mesh with a 2-entry
 // ref_normal, which they must refuse right after reading the mesh.
 //
@@ -263,7 +268,10 @@ static int Refuse(int n)
       case 8: text = ReplaceLine(d2, "ref_normal      = [0.0, -1.0]", ""); dim = 2; break;
       case 9: text = ReplaceLine(deck, kRef3, "ref_normal = [0.0, -1.0, 0.0, 0.0]"); break;
       case 10: text = ReplaceLine(deck, st3, "x    = [0.0, 0.0, -22.0e3, 0.0]"); break;
-      default: MFEM_ABORT("--refuse N: N = 1..10");
+      case 11: text = ReplaceLine(deck, kRef3, kRef3 + "\nvertex_normals = \"averaged\""); break;
+      case 12: text = ReplaceLine(deck, kRef3, kRef3 + "\nvertex_normals = \"smooth\""); break;
+      case 13: text = ReplaceLine(deck, kRef3, kRef3 + "\nvertex_normal_max_turn_deg = 0.0"); break;
+      default: MFEM_ABORT("--refuse N: N = 1..13");
    }
    if (g_rank == 0) { std::cout << "--refuse " << n << ": a " << dim << "-D check\n"; }
    const cycle::CycleConfig c = LoadText("refuse" + std::to_string(n), text);

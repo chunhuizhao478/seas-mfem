@@ -25,6 +25,7 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-sigma-floor         # [cycle].sigma_n_floor_pa
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d5-width           # [cycle.finite_width] (2.5D)
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d5-dyn-driver      # [finite_width] of the Nitsche driver
+#   make -f tests/2d_inplane/2d_inplane.mk test-vertex-normals      # vertex-normal plan P1 (T2, T3)
 #   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
 # The 3D parity set (every phase must leave it bit for bit unchanged) is the
 # script tests/2d_inplane/parity_3d.sh (see its header).  The tensor
@@ -64,6 +65,43 @@ test-fault-frame-field: seas_test_fault_frame_field
 	 if [ $$rc -ne 0 ] && echo "$$out" | grep -q "seam rule"; then \
 	    echo "  PASSED: seam bad: refused (exit $$rc, seam-rule message)"; \
 	 else echo "$$out" | tail -20; echo "  FAILED: seam bad: exit $$rc, seam-rule message not found"; exit 1; fi
+
+# Vertex-normal plan rev1, phase P1 (2026-11-01): the averaged vertex normals
+# of FaultFrameField, T2 and T3 on 1, 2 and 4 ranks; the VN-DIGEST line (every
+# vertex normal in hex) must be the same at every rank count; the three
+# refusals must exit non-zero with their messages.
+TEST_VERTEX_NORMALS_SRC = tests/2d_inplane/test_vertex_normals.cpp
+TEST_VERTEX_NORMALS_OBJ = $(TEST_VERTEX_NORMALS_SRC:.cpp=.o)
+$(TEST_VERTEX_NORMALS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(INPLANE_HEADERS) \
+                                 $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_vertex_normals: $(TEST_VERTEX_NORMALS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_VERTEX_NORMALS_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+VN_TMP = $(or $(TMPDIR),/tmp)/seas_test_vertex_normals
+test-vertex-normals: seas_test_vertex_normals
+	@rm -rf $(VN_TMP) && mkdir -p $(VN_TMP)
+	@set -e; for n in 1 2 4; do \
+	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_vertex_normals > $(VN_TMP)/np$$n.log 2>&1 \
+	      || { cat $(VN_TMP)/np$$n.log; echo "  FAILED: $$n rank(s)"; exit 1; }; \
+	   grep -E "PASSED|FAILED|tests passed" $(VN_TMP)/np$$n.log; \
+	   grep "^VN-DIGEST" $(VN_TMP)/np$$n.log > $(VN_TMP)/digest_np$$n.txt; done; \
+	 d=$(VN_TMP)/digest_np; \
+	 if cmp -s $${d}1.txt $${d}2.txt && cmp -s $${d}1.txt $${d}4.txt \
+	    && [ "$$(sort -u $${d}1.txt | wc -l)" -eq 1 ] && [ "$$(wc -l < $${d}1.txt)" -eq 2 ]; \
+	 then echo "  PASSED: T2g the vertex normals are the same bit for bit on 1, 2 and 4 ranks, METIS's partition and one cut along the fault"; \
+	 else echo "  FAILED: T2g the VN-DIGEST lines differ between rank counts"; exit 1; fi
+	@for c in "1 junction" "2 2-D meshes only" "3 must be > 0"; do \
+	   n=$${c%% *}; msg=$${c#* }; \
+	   out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_vertex_normals --refuse $$n 2>&1); rc=$$?; \
+	   if [ $$rc -ne 0 ] && echo "$$out" | grep -q "$$msg"; then \
+	      echo "  PASSED: refusal $$n: exit $$rc, message \"$$msg\""; \
+	   else echo "$$out" | tail -20; echo "  FAILED: refusal $$n: exit $$rc, \"$$msg\" not found"; exit 1; fi; done
 
 # A4: the plate loading (needs the deck loader: the cycle's flags and objects).
 TEST_PLATE_LOADING_SRC = tests/2d_inplane/test_plate_loading.cpp
@@ -208,7 +246,7 @@ seas_test_2d_deck: $(TEST_2D_DECK_OBJ) $(CYCLE_LINK_OBJS)
 # both drivers, given a 3-D mesh and a 2-entry [fault_geometry].ref_normal,
 # must refuse right after reading the mesh (the Nitsche deck's fault
 # ParaView output off, so that an MFEM without HDF5 gets that far).
-DECK_2D_REFUSALS = 1:ref_normal has 2 entries, but the mesh is 3-D|2:up has 2 entries, but the mesh is 3-D|3:x has 2 entries, but the mesh is 3-D|4:plane_origin has 3 entries, but the mesh is 2-D|5:up is required on a 2-D mesh|6:must be [0, 0, +-1]|7:ref_normal has 3 entries, but the mesh is 2-D|8:ref_normal is required on a 2-D mesh|9:must be a 2- or 3-element array|10:must be an array of 3 numbers (2 on a 2-D mesh)
+DECK_2D_REFUSALS = 1:ref_normal has 2 entries, but the mesh is 3-D|2:up has 2 entries, but the mesh is 3-D|3:x has 2 entries, but the mesh is 3-D|4:plane_origin has 3 entries, but the mesh is 2-D|5:up is required on a 2-D mesh|6:must be [0, 0, +-1]|7:ref_normal has 3 entries, but the mesh is 2-D|8:ref_normal is required on a 2-D mesh|9:must be a 2- or 3-element array|10:must be an array of 3 numbers (2 on a 2-D mesh)|11:not yet read by the QD and dynamic operators|12:"face" or "averaged"|13:vertex_normal_max_turn_deg must be > 0
 DECK_2D_TMP = $(or $(TMPDIR),/tmp)/seas_test_2d_deck_drivers
 DECK_2D_DRIVER_MSG = ref_normal has 2 entries, but the mesh is 3-D
 test-2d-deck: seas_test_2d_deck seas_fd_cycle_driver seas_nitsche_dyn_driver
@@ -685,10 +723,12 @@ test-2d5-dyn-driver: seas_nitsche_dyn_driver
                 test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
                 test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
                 test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
-                test-handback-table test-sigma-floor test-2d5-width test-2d5-dyn-driver
+                test-handback-table test-sigma-floor test-2d5-width test-2d5-dyn-driver \
+                test-vertex-normals
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
         test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
         test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
-        test-handback-table test-sigma-floor test-2d5-width test-2d5-dyn-driver 2d-inplane-all
+        test-handback-table test-sigma-floor test-2d5-width test-2d5-dyn-driver test-vertex-normals \
+        2d-inplane-all
