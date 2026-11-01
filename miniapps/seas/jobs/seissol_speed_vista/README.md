@@ -16,7 +16,7 @@ Each pair runs in one allocation, MFEM first, then SeisSol, and both write stati
 |---|---|
 | `build_speed_test_vista.sbatch` | Step B, one node. It builds MFEM (`build_vista.sh`) and checks the two gold meshes. It builds SeisSol elastic o2, o3 and o4 (sve128, PSpaMM, fp64) with the kit's environment `$WORK/seissol/kit/seissol-env-vista.sh`, pinned by sha256, from source `a8e7f04f`. It builds PUMGen v1.1.3. It converts the meshes to `$WORK/seissol/meshes/*.puml.h5` and writes `MESHES.sha256`. Last, it runs `check_parity.py` for all three problems. |
 | `run_pair_vista.sh` | The body of every run job: the guard and input checks (driver commit, mesh and puml sha256, the SeisSol binary in the build manifest, deck parity), then MFEM, then SeisSol in each `SS_LAYOUTS` layout, then `to_scec.py`. |
-| `probe_layout.sbatch` | TPV205 o3 on 4 nodes, 0 to 2 s, SeisSol only, at 2, 4 and 8 ranks per node. It picks `SS_LAYOUTS` for the run jobs (a follow-up commit). |
+| `probe_layout.sbatch` | TPV205 o3 on 4 nodes, 0 to 2 s, SeisSol only, one run per entry of `SS_LAYOUTS` (now 4, 4, 8, 16 ranks per node). It picked `SS_LAYOUTS = 8` for the run jobs. |
 | `run_<prob>_p<N>.sbatch` | The nine paired runs, 0 to 12 s: p1 on 4 nodes, p2 and p3 on 16. MFEM uses 144 ranks per node, except 128 at p = 3 for TPV104 and TPV102, as their golds. |
 | `mfem_decks/<prob>_nitsche_sst.toml` | The gold decks with `paraview_enabled = false`: `tpv205_nitsche.toml`, `tpv104_nitsche.toml` and `tpv102_nitsche_pc_p2_kv0p1.toml`. |
 | `decks/<prob>/` | The SeisSol decks: `parameters.par`, fault and material yaml, on-fault and off-fault receivers. |
@@ -44,3 +44,7 @@ for f in run_tpv205_p{1,2,3}.sbatch run_tpv104_p{1,2,3}.sbatch run_tpv102_p{1,2,
 
 | Job | Commit | What | Result |
 |---|---|---|---|
+| 1112276 | 61484459 | build | FAILED at the mesh step: pumgen writes under the exact name given (fixed in 1831dfa5). |
+| 1112915 | 1831dfa5 | build | Passed. Tet counts equal MFEM's (TPV205 1,894,583; TPV104 2,466,549); boundary tags TPV205 1:22648 3:52456 5:7256, TPV104 1:25142 3:75856 5:8006; parity passes for all three. |
+| 1112916 | 1831dfa5 | probe, 2/4/8 per node | 2 per node 22.68 s, 8 per node 15.45 s; 4 per node crashed in its first steps (UCX "Local length error on mlx5_0:1/IB" under MPI_Test on the communication thread). |
+| 1114522 | 060551aa | probe, 4/4/8/16 per node | All exited 0, no crash: 4 per node 17.77 s and 16.80 s, 8 per node 15.25 s, 16 per node 15.18 s (load imbalance 16.3, 7.9, 6.4, 7.5 %). Binary loads Open MPI 5.0.5 (gcc14) and UCX 1.17.0. 8 and 16 tie, so the runs use 8. Cluster histogram identical in every run; 26,228 rupture faces, as MFEM. |

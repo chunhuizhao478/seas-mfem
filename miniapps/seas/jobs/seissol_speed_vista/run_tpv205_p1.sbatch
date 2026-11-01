@@ -13,7 +13,7 @@
 # 144 ranks per node, deck mfem_decks/tpv205_nitsche_sst.toml), then SeisSol o2 (ClusteredLTS 2,
 # CFL 0.5, decks/tpv205/, SS_LAYOUTS ranks per node with OpenMP threads).  Both write stations only.
 # Submit from miniapps/seas/jobs/seissol_speed_vista/ AFTER build_speed_test_vista.sbatch passed at
-# this commit; SS_LAYOUTS is the layout probe's pick.
+# this commit.  SS_LAYOUTS = 8 from the layout probes (README, Results).
 # Estimate: MFEM about 3.5 min (V3 1100111 171.8 s), SeisSol assumed alike: 0.5 node-h = 0.2 SU; requested 4 x 1 h x 0.33 = 1.3 SU at most.
 TAG=sst
 PROB=tpv205
@@ -23,6 +23,6 @@ ORDER=1
 TFINAL=12.0
 MFEM_RUN=1
 MFEM_RPN=144
-SS_LAYOUTS="4"        # set from probe_layout.sbatch's result
+SS_LAYOUTS="8"        # probes 1112916, 1114522: 8 ranks per node, 17 + 1 threads each
 SS_SCEC=1
 source "$SLURM_SUBMIT_DIR/run_pair_vista.sh"
