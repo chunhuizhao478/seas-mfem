@@ -1,0 +1,14 @@
+commit 4eaf4df769dfb4eb8279deb02f4efa75dc1fe804
+host i614-002.vista.tacc.utexas.edu  nodes 24  ranks 2304
+deck tpv15/configs/tpv15_nitsche.toml  mesh tpv15/mesh/tpv15_200m.msh sha256 5b9f7f0a03ae996291e2829fdd765314332c20e9ec0cfa81c0feb4292125ecec  order 3  tfinal 12.0  flags [--lts rate2]
+modules: ucc/1.9.0 ucx/1.22.0 cmake/4.1.1 xalt/3.1 TACC gcc/14.2.0 nvpl/26.9 cuda/12.6 openmpi/5.0.5 hypre/2.31.0 metis/5.1.0.3 phdf5/1.14.6 
+driver exit 0 after 14666 s
+  LTS (plan item 7): rate2, 4 clusters (hard cap 4), dt0 = 7.99268e-06 s; tets per cluster 320986 63907 58415 2086613; ideal 4.02617x; fault (110370 tets, 210616 buffer tets in 3 layer(s)) in cluster 0 after 2 clustering(s)
+  partition: multi-constraint (BuildLtsAwarePartition, fault weight w = 0); max/mean overall 1.092, per cluster 1.134 1.046 1.065 1.064, fault tets 1.879
+  fault options: tension floor (the law sees max(sigma_n, 0)) slip-path weakening
+  time in ode.Step per rank after step 1: min 7378.23 s, mean 11096.2 s, max 11989.2 s (7.98549 ms/step at the max); step 1 0.00727849 s (with the operator assembly); fast fault on, fused K/K_eta off, dense blocks off
+  fault work: 0.5928 ms/step on the busiest rank; cost per step 6.433 us per tet, 6.815 us per fault-face side (w = 1.059 tets)
+  tension floor: 970270743 DOF-steps with sigma_n < 0 (law saw 0)
+=== done: 1501376 steps, t = 12 s; max|V| 12.6599 m/s; max|V|dt/Dc 0.000252965; sigma_n_eff in [-1.99779e+08, 6.9629e+08] Pa; sigma_pc in [-1.99712e+08, 6.96279e+08] Pa; wall 14658.6 s ===
+first node memory: peak in use 100.3 GB of 237.5 GB (2 s samples)
+15G	/scratch/10024/zhaochun/complex_geometries/tpv15_200m_p3_1098314

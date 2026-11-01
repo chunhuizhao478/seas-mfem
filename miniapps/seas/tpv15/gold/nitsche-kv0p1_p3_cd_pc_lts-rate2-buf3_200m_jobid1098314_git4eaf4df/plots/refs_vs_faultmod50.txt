@@ -1,0 +1,16 @@
+misfit of each reference vs FaultMod50 (dt arrival s, final slip %, peak slip rate %); measures to t = 11.9998 s
+station                                  FaultMod100                    SeisSolGap               SeisSol(no gap)  FM50 slip m
+main_x2_-2_x3_0                 -0.002 s +0.3% -7.6%          +0.037 s -1.3% -1.9%          +0.037 s +2.8% -1.9%        5.823
+main_x2_2_x3_0                          slip 0.263 m                  slip 0.657 m                  slip 0.000 m        0.015
+main_x2_5_x3_0                            both quiet                    both quiet                    both quiet        0.000
+main_x2_9_x3_0                            both quiet                    both quiet                    both quiet        0.000
+main_x2_-2_x3_7.5               -0.022 s +0.3% -1.6%          +0.031 s -1.9% -0.3%          +0.031 s +3.1% -0.3%        5.130
+main_x2_2_x3_7.5                          both quiet                    both quiet                    both quiet        0.000
+main_x2_5_x3_7.5                          both quiet                    both quiet                    both quiet        0.000
+main_x2_9_x3_7.5                          both quiet                    both quiet                    both quiet        0.000
+branch_x2_2_x3_0                +0.003 s -1.8% +1.4%         +0.029 s -3.8% +12.1%         +0.029 s +10.0% +1.5%        5.607
+branch_x2_5_x3_0                +0.005 s -0.7% -5.1%         +0.045 s -2.5% -13.6%         -0.008 s +3.7% +17.4%        6.581
+branch_x2_9_x3_0                +0.027 s +0.1% -0.8%                       no file                       no file        5.445
+branch_x2_2_x3_7.5              -0.013 s -2.1% -8.4%         +0.028 s -5.8% -15.3%         +0.028 s +8.4% +27.3%        5.016
+branch_x2_5_x3_7.5              -0.002 s -0.4% -5.2%          +0.035 s -2.4% -2.3%         +0.017 s +2.9% +19.7%        5.997
+branch_x2_9_x3_7.5              +0.003 s +0.1% -4.6%          +0.052 s -0.2% +4.3%         +0.008 s +2.9% +13.9%        4.949
