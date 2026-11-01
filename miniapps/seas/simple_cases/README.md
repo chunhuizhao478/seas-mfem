@@ -17,7 +17,8 @@ the simple cases, run them on local Mac".
 Twelve runs, listed in run order (D1f, D2f and Q1 answer the main
 questions, so they go first), then D5f, added after D1f, D5f on two
 finer fault meshes, the three P0 penalty runs, the five runs of the
-vertex-normal plan's P3 and P4, and the five smoothed bends (last rows).
+vertex-normal plan's P3 and P4, the five smoothed bends, and the three
+tip zones (last rows).
 
 | Case | Mesh | Regime | Floor | Why |
 |---|---|---|---|---|
@@ -49,6 +50,9 @@ vertex-normal plan's P3 and P4, and the five smoothed bends (last rows).
 | D6f_arc03L10_h250_avg_floor | arc03L10_h250 | fully dynamic | 1 MPa | smoothed bend: 3 deg over 10 km, averaged |
 | D8f_arc03L2p5_h250_avg_floor | arc03L2p5_h250 | fully dynamic | 1 MPa | smoothed bend: 3 deg over 2.5 km, averaged |
 | D10f_sbend03L05_h250_avg_floor | sbend03L05_h250 | fully dynamic | 1 MPa | smoothed bends: +3 then -3 deg, 5 km arcs, averaged |
+| D5f_arc015L10_h250_avg_floor_T1a08 | arc015L10_h250 | fully dynamic | 1 MPa | tip zone T1: a = 0.08 within 3 km of each tip (below) |
+| D5f_arc015L10_h250_avg_floor_T2w8 | arc015L10_h250 | fully dynamic | 1 MPa | tip zone T2: a = 0.04 within 6 km of each tip |
+| D5f_arc015L10_h250_avg_floor_T3a08w8 | arc015L10_h250 | fully dynamic | 1 MPa | tip zone T3: a = 0.08 within 6 km of each tip |
 
 - **No floor (all but D1f, D2f):** a run that reaches sigma_n' <= 0 stops
   there, and that time and place is a result.
@@ -186,6 +190,60 @@ needed, that's not an issue I think".
   appear in any simple case so far.
 - **Order:** the 8 deg cases first (D7f, D9f), then D6f, D8f, D10f.
 
+### Tip zones: a velocity-strengthening patch measured from each tip
+
+Chunhui Zhao, 2026-11-01: "I would like to add functionality about
+velocity strengthening patch near the tip of the fault, and test on
+previous 1.5 degree fault with averaged normal, and see if this could
+reduce the spikes of normal stress on both fault ends".
+
+- **The functionality:** `[cycle.fields.a] kind = "tip_zone"`
+  (`cycle/fault_chains.hpp`, 2-D only), with d the distance along the
+  DOF's own fault to its nearer free tip:
+
+  | d | a |
+  |---|---|
+  | d <= width - taper | tip |
+  | width - taper < d < width | linear from tip to inside |
+  | d >= width | inside |
+
+  - `max_fraction` (optional) caps the width at max_fraction x L per fault.
+  - A fault end on the outer boundary is not a tip.
+  - Junctions and closed faults are refused.
+  - The driver logs the faults and tips it found.
+  - For UCERF's many curved faults, where a rectangle in x cannot follow
+    each fault.
+- **Already in every simple-case deck:** the rect taper gives a = 0.04
+  (a - b = +0.01) for |x| >= 12 km, from 0.004 at 10 km. On this 30 km
+  fault that is the tip zone width 5 km, taper 2 km, tip 0.04. P4's 250 m
+  run still drifts at both ends: by event 3, 12.1 MPa at x = 14.5 km and
+  43.8 MPa at x = -14.75 km (from 25), 7 to 8 MPa per event. The straight
+  D0 drifts the same way (12.3 / 30.4 MPa).
+- **Cases:** P4's 250 m deck (`D5f_arc015L10_h250_avg_floor`: averaged,
+  1 MPa floor, 12,000 yr) with the tip zone in place of the rect taper:
+
+  | Case | tip a (a - b) | Full tip value | Ramp | Weakening part |
+  |---|---|---|---|---|
+  | T1 `_T1a08` | 0.08 (+0.05) | d <= 3 km | 3 to 5 km | 20 km |
+  | T2 `_T2w8` | 0.04 (+0.01) | d <= 6 km | 6 to 8 km | 14 km |
+  | T3 `_T3a08w8` | 0.08 (+0.05) | d <= 6 km | 6 to 8 km | 14 km |
+
+  - b = 0.03 everywhere.
+  - The prestress uses the local a ([cycle.prestress] a = "local"), so
+    the zone starts at steady state at V_p for its own a (tau / sigma_n'
+    0.255 at a = 0.08, 0.531 at 0.04).
+- **What to read:** the tip ends per dynamic phase (analyse_simple.py):
+  sigma_n' at each tip DOF and the largest change within 1 km of it, the
+  tip's slip and peak V. Also event times, mean slip, the hand-backs and
+  the arc's vertex jump. All against `D5f_arc015L10_h250_avg_floor`.
+- **Expected (estimate, not tested):**
+  - The drift should drop with the slip near the tips.
+  - It will not vanish, since the fault still ends in intact rock and
+    creeps there between events.
+  - T2 and T3 shrink the weakening part from 20 to 14 km (about 2
+    nucleation lengths), so their events change too.
+- **Order:** T1, T2, T3, after the smoothed bends.
+
 ## Setup
 
 All the decks are `config/fd_cycle/mapview_rs_fd.toml` with the edits
@@ -304,6 +362,8 @@ station lies on a fault edge to 3e-13 m (checked in the cloud).
 - **Smoothed bends (estimate, not measured):** as P4's 250 m run (3,120 s
   measured), about 50 min each, about 4.2 h for the five, with
   `WALL_LIMIT=21600`.
+- **Tip zones (estimate, not measured):** the same, about 50 min each,
+  about 2.5 h for the three, with `WALL_LIMIT=21600`.
 - **Refined D5f (estimate, not measured):** the dynamic dt halves each
   level and the mesh grows 1.28x and 1.75x, so the dynamic phases take about
   4 and 11 min. QD has 2x and 4x the fault nodes (N_f 240 and 480); if its
@@ -315,7 +375,7 @@ station lies on a fault edge to 3e-13 m (checked in the cloud).
 ## Files
 
 - `mesh/*.msh`: the thirteen meshes (above).
-- `configs/<case>.toml`: the twenty-eight decks.
+- `configs/<case>.toml`: the thirty-one decks.
 - `scripts/make_decks.py`: makes the decks; `--check` compares.
 - `scripts/run_simple_mac.sh`: the runs on the Mac, one after the other.
   - Checks: the GitHub-first guard; the binary's code equals HEAD
@@ -339,7 +399,11 @@ station lies on a fault edge to 3e-13 m (checked in the cloud).
   - the vertex jumps per dynamic phase: at each interior fault vertex the
     largest minus the smallest sigma_n' of its DOFs (one per face), the
     largest over the phase for |x| <= 5 km and over the whole fault, and
-    the |x| <= 5 km one at the phase's end.
+    the |x| <= 5 km one at the phase's end;
+  - the tip ends per dynamic phase: at the west and east tip DOFs,
+    sigma_n' minus its t = 0 value at the phase's end, the slip there and
+    the peak |V| in the phase; the largest |sigma_n' - sigma_n'(0)| within
+    1 km of each tip (where, signed).
 
 ## Workflow (Mac, from `miniapps/seas` of the checkout at the pushed commit)
 
@@ -356,6 +420,7 @@ WALL_LIMIT=3600 simple_cases/scripts/run_simple_mac.sh $R 4 D0_straight_ev1 D0_s
 WALL_LIMIT=21600 simple_cases/scripts/run_simple_mac.sh $R 4 D5f_arc015L10_avg_floor D5f_arc015L10_h250_avg_floor   # P4
 WALL_LIMIT=21600 simple_cases/scripts/run_simple_mac.sh $R 4 D7f_arc08L10_h250_avg_floor D9f_arc08L2p5_h250_avg_floor   # smoothed bends, 8 deg
 WALL_LIMIT=21600 simple_cases/scripts/run_simple_mac.sh $R 4 D6f_arc03L10_h250_avg_floor D8f_arc03L2p5_h250_avg_floor D10f_sbend03L05_h250_avg_floor
+WALL_LIMIT=21600 simple_cases/scripts/run_simple_mac.sh $R 4 D5f_arc015L10_h250_avg_floor_T1a08 D5f_arc015L10_h250_avg_floor_T2w8 D5f_arc015L10_h250_avg_floor_T3a08w8   # tip zones
 python3 simple_cases/scripts/analyse_simple.py $R
 ```
 

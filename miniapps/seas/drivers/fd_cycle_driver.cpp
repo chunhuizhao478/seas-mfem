@@ -992,7 +992,11 @@ int main(int argc, char *argv[])
       // refuses a non-zero [pore_pressure]).
       const spatial::PorePressureSpec no_pp;
       cycle::FaultParams par = cycle::BuildFaultParams(
-         qd.Table(), *s.rate_state, cfg.fields, material, pmesh, no_pp);
+         qd.Table(), *s.rate_state, cfg.fields, material, pmesh, no_pp, cfg.fault_attr);
+      if (root && !par.a_report.empty())
+      {
+         std::cout << "  [cycle.fields.a] tip zone: " << par.a_report;
+      }
       // [cycle.prestress].a = "amax" (BP3): a_max over every rank's DOFs.
       cycle::PrestressConfig pcfg = cfg.prestress;
       if (pcfg.AMax())

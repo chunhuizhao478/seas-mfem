@@ -42,6 +42,13 @@
 #                  phase's last snapshot.  The file is opened without HDF5
 #                  file locking, so a run still writing it does not stop
 #                  the script (it then reads the snapshots written so far).
+#   tip ends       the same file, per dynamic phase (2026-11-01, the tip
+#                  zones): at the west and east free tips (the fault points
+#                  of smallest and largest x), sigma_n' minus its t = 0
+#                  value at the phase's last snapshot, the tip DOF's slip
+#                  there and its peak |V| in the phase; and the largest
+#                  |sigma_n' - sigma_n'(0)| of the DOFs within 1 km of the
+#                  tip in x over the phase's snapshots (signed, where).
 import argparse
 import glob
 import json
@@ -68,7 +75,11 @@ ORDER = ["Q0_straight", "Q1_sharp015", "Q2_sharp05", "Q3_arc05L10", "Q4_sharp015
          # smooth the trace bends if needed")
          "D6f_arc03L10_h250_avg_floor", "D7f_arc08L10_h250_avg_floor",
          "D8f_arc03L2p5_h250_avg_floor", "D9f_arc08L2p5_h250_avg_floor",
-         "D10f_sbend03L05_h250_avg_floor"]
+         "D10f_sbend03L05_h250_avg_floor",
+         # the tip zones on P4's 250 m D5f (Chunhui Zhao, 2026-11-01: "add
+         # functionality about velocity strengthening patch near the tip")
+         "D5f_arc015L10_h250_avg_floor_T1a08", "D5f_arc015L10_h250_avg_floor_T2w8",
+         "D5f_arc015L10_h250_avg_floor_T3a08w8"]
 # the vertex jumps' |x| range [km] where it is not 5 km: the +3 / -3 deg pair's
 # arcs reach |x| = 6.25 km
 XMAX_KM = {"D10f_sbend03L05_h250_avg_floor": 7.0}
@@ -91,7 +102,11 @@ CASE_COL = {"D5f_arc015L10_h250_floor": "#a07fd0", "D5f_arc015L10_h125_floor": "
             # green the +3 / -3 deg pair
             "D6f_arc03L10_h250_avg_floor": "#1f5fbf", "D8f_arc03L2p5_h250_avg_floor": "#6f9fe6",
             "D7f_arc08L10_h250_avg_floor": "#b3261e", "D9f_arc08L2p5_h250_avg_floor": "#e77a6f",
-            "D10f_sbend03L05_h250_avg_floor": "#2f8a3e"}
+            "D10f_sbend03L05_h250_avg_floor": "#2f8a3e",
+            # the tip zones: one brown hue, T1 / T2 / T3 dark to light
+            "D5f_arc015L10_h250_avg_floor_T1a08": "#7a4a1e",
+            "D5f_arc015L10_h250_avg_floor_T2w8": "#b07436",
+            "D5f_arc015L10_h250_avg_floor_T3a08w8": "#d9a66b"}
 
 
 def geo_of(case):
@@ -302,6 +317,63 @@ def vertex_jumps(path, x_max_km=5.0, tol_m=1e-3):
     return out
 
 
+def tip_ends(path, near_m=1000.0):
+    """Per dynamic phase, sigma_n', slip and V at the two free tips (file
+    comment): {phase: {"west"/"east": dict(...)}}; None without h5py or the
+    file."""
+    try:
+        import h5py  # noqa: F401
+    except ImportError:
+        return None
+    if not os.path.exists(path):
+        return None
+    with open_h5(path) as f:
+        g = f["VTKHDF"]
+        n = int(np.ravel(g["NumberOfPoints"])[0])
+        X = g["Points"][:n, :2]
+        t = g["Steps"]["Values"][:]
+        po = g["Steps"]["PointDataOffsets"]
+        fc = f["fd_cycle"]
+        k = min(len(po["normal_stress"]), len(fc["regime"]), len(fc["phase"]))
+        regime, phase = fc["regime"][:k], fc["phase"][:k]
+        rows = [i for i in range(k) if regime[i] == 1]
+        if k == 0 or not rows:
+            return {}
+
+        def field(name, i):
+            o = int(po[name][i])
+            return g["PointData"][name][o:o + n].ravel()
+        sn0 = field("normal_stress", 0)
+        scale = 1e6 if np.abs(sn0).max() > 1e4 else 1.0
+        tips = {"west": int(np.argmin(X[:, 0])), "east": int(np.argmax(X[:, 0]))}
+        near = {"west": X[:, 0] <= X[tips["west"], 0] + near_m,
+                "east": X[:, 0] >= X[tips["east"], 0] - near_m}
+        out = {}
+        for ph in sorted(set(int(phase[i]) for i in rows)):
+            prow = [i for i in rows if int(phase[i]) == ph]
+            res = {e: dict(V_max=0.0, near_dsn=0.0, near_at_km=None) for e in tips}
+            for i in prow:
+                ds = (field("normal_stress", i) - sn0) / scale
+                V = np.abs(field("slip_rate_strike", i))
+                for e, j in tips.items():
+                    r = res[e]
+                    r["V_max"] = max(r["V_max"], float(V[j]))
+                    m = np.nonzero(near[e])[0]
+                    q = m[int(np.argmax(np.abs(ds[m])))]
+                    if abs(ds[q]) > abs(r["near_dsn"]):
+                        r["near_dsn"] = float(ds[q])
+                        r["near_at_km"] = [float(X[q, 0] / 1e3), float(X[q, 1] / 1e3)]
+            last = prow[-1]
+            ds = (field("normal_stress", last) - sn0) / scale
+            sl = field("slip_strike", last)
+            for e, j in tips.items():
+                res[e].update(tip_at_km=[float(X[j, 0] / 1e3), float(X[j, 1] / 1e3)],
+                              sn0=float(sn0[j] / scale), dsn_end=float(ds[j]),
+                              slip_end=float(sl[j]))
+            out[ph] = res
+    return out
+
+
 def run_info(d):
     p = os.path.join(d, "RUN_INFO.txt")
     s = open(p).read() if os.path.exists(p) else ""
@@ -340,6 +412,7 @@ def analyse(case, d):
     r["stations"] = st
     r["fault"] = fault_snapshots(pre + "_fault_snapshots.vtkhdf")
     r["vertex_jumps"] = vertex_jumps(pre + "_fault_snapshots.vtkhdf", x_max_km=XMAX_KM.get(case, 5.0))
+    r["tip_ends"] = tip_ends(pre + "_fault_snapshots.vtkhdf")
     return r
 
 
@@ -372,7 +445,7 @@ def main():
     L.append("friction law first saw sigma_n' <= 0 (FRIC-GUARD, km); per hand-back the QD balance max V")
     L.append("(m/s) / the fault-wide offset median(tau_qd - tau_dyn) (MPa).")
     L.append("")
-    L.append(f"{'case':30s} {'exit':>4s} {'wall':>6s} {'t_end':>8s} {'ev':>3s} "
+    L.append(f"{'case':36s} {'exit':>4s} {'wall':>6s} {'t_end':>8s} {'ev':>3s} "
              f"{'sn_min w/e':>12s} {'bend <= 0':>11s} {'FRIC-GUARD at':>18s}  {'hand-backs':s}")
     for case, r in runs.items():
         bw, be = r["stations"].get("bend_w"), r["stations"].get("bend_e")
@@ -384,7 +457,7 @@ def main():
         b0 = f"{firsts[0][0]:.1f} {'E' if firsts[0][1] else 'Q'}" if firsts else "-"
         hb = "; ".join(f"{b['V_qd']:.2g}/{fmt(b['table'] and b['table']['offset_median_mpa'], '{:+.3f}')}"
                        for b in r["handbacks"]) or "-"
-        L.append(f"{case:30s} {fmt(r['exit'], '{:d}'):>4s} {fmt(r['wall_s'], '{:d}'):>6s} "
+        L.append(f"{case:36s} {fmt(r['exit'], '{:d}'):>4s} {fmt(r['wall_s'], '{:d}'):>6s} "
                  f"{fmt(r['final_yr'], '{:.1f}'):>8s} {len(r['events']):>3d} {snm:>12s} {b0:>11s} {fg:>18s}  {hb}")
     L.append("")
     for case, r in runs.items():
@@ -435,8 +508,21 @@ def main():
     for case, r in runs.items():
         vj = r["vertex_jumps"]
         if vj:
-            L.append(f"   {case:30s} " + " / ".join(fmt(v["jump_mpa"], "{:.2f}") for _, v in sorted(vj.items()))
+            L.append(f"   {case:36s} " + " / ".join(fmt(v["jump_mpa"], "{:.2f}") for _, v in sorted(vj.items()))
                      + (f"   (|x| <= {XMAX_KM[case]:g} km)" if case in XMAX_KM else ""))
+    L.append("")
+    L.append("Tip ends (tip ends, file comment), per dynamic phase: sigma_n' - sigma_n'(0) at the "
+             "tip DOF at the phase's end (MPa) west / east; the largest within 1 km of the tip "
+             "(MPa) west / east; the tip DOF's slip (m) and peak |V| (m/s) west / east:")
+    for case, r in runs.items():
+        te = r.get("tip_ends")
+        if not te:
+            continue
+        for ph, v in sorted(te.items()):
+            w, e = v["west"], v["east"]
+            L.append(f"   {case:36s} phase {ph}: tip {w['dsn_end']:+.2f} / {e['dsn_end']:+.2f}; "
+                     f"within 1 km {w['near_dsn']:+.2f} / {e['near_dsn']:+.2f}; slip "
+                     f"{w['slip_end']:.3f} / {e['slip_end']:.3f}; V {w['V_max']:.3g} / {e['V_max']:.3g}")
     L.append("")
     if missing:
         L.append("no run folder: " + ", ".join(missing))
@@ -460,7 +546,7 @@ def main():
                     s = runs[c]["stations"].get(name)
                     if s is None:
                         continue
-                    ls = "--" if c.endswith("floor") else "-"
+                    ls = "--" if "floor" in c else "-"
                     ax.plot(s["t"] / YR, s["sn"], ls, color=col_of(c), lw=1.4, label=c)
             for ax, name in zip(axs, BEND):
                 ax.axhline(0.0, color="#888", lw=0.8)
@@ -478,7 +564,7 @@ def main():
                 s = r["stations"].get(name)
                 if s is None:
                     continue
-                ls = ":" if c.startswith("Q") else ("--" if c.endswith("floor") else "-")
+                ls = ":" if c.startswith("Q") else ("--" if "floor" in c else "-")
                 ax.plot(s["slip"] - s["slip"][0], s["sn"], ls, color=col_of(c), lw=1.3, label=c)
         for ax, name in zip(axs, BEND):
             ax.axhline(0.0, color="#888", lw=0.8)

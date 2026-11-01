@@ -113,6 +113,14 @@
 //                   inside, outside.  On a 2-D mesh the fault is a line:
 //                   axis2 and half2 are left out and the taper runs along
 //                   axis1 alone (CheckDimension)                   [required]
+//                   kind ["rect_taper"].  [cycle.fields.a] may instead be
+//                   kind = "tip_zone" (2-D only; Chunhui Zhao, 2026-10-29):
+//                   width W, taper, inside, tip [all required] and
+//                   max_fraction [none]: a = tip within W - taper of the
+//                   nearer free tip of the DOF's own fault chain (the
+//                   distance along the chain), linear to inside at W, inside
+//                   beyond; W = min(width, max_fraction L) on a chain of
+//                   length L (cycle/fault_chains.hpp)
 //   [cycle.output]  prefix, fast_V, dt_fast, dt_slow, event_V,
 //                   event_dwell, plane_origin, plane_axis1, plane_axis2,
 //                   station_sigma_n (a ninth station column, the normal
@@ -567,6 +575,9 @@ struct CycleConfig
       // [cycle.fields]: two axes on a fault plane, one on a fault line.
       const std::pair<const char *, const RectTaperSpec *> fl[] =
       {{"a", &fields.a}, {"Dc", &fields.Dc}, {"V_init", &fields.V_init}};
+      MFEM_VERIFY(!fields.a_tip_zone.set || dim == 2,
+                  "[cycle.fields.a] kind = \"tip_zone\" needs a 2-D mesh (fault lines with "
+                  "tips); the mesh is 3-D");
       for (const auto &f : fl)
       {
          MFEM_VERIFY(!f.second->set || f.second->two_axes == (dim == 3),
@@ -730,7 +741,12 @@ inline RectTaperSpec Field(std::vector<DeckVector> &rec, const toml::value &fiel
    RectTaperSpec f;
    if (!fields.contains(name)) { return f; }
    const toml::value &t = fields.at(name);
-   OnlyKeys(t, sec, {"center", "axis1", "axis2", "half1", "half2", "taper", "eps",
+   const std::string kind = Str(t, sec, "kind", "rect_taper");
+   MFEM_VERIFY(kind == "rect_taper",
+               "[" << sec << "] kind = \"" << kind << "\": "
+               << ((kind == "tip_zone") ? "\"tip_zone\" is for [cycle.fields.a] only"
+                   : "must be \"rect_taper\" (or \"tip_zone\" for a)"));
+   OnlyKeys(t, sec, {"kind", "center", "axis1", "axis2", "half1", "half2", "taper", "eps",
                      "inside", "outside"});
    f.center = Vec3(rec, t, sec, "center", f.center, true);
    f.axis1 = Vec3(rec, t, sec, "axis1", f.axis1, true);
@@ -744,6 +760,30 @@ inline RectTaperSpec Field(std::vector<DeckVector> &rec, const toml::value &fiel
    f.eps = Real(t, sec, "eps", 0.0);
    f.inside = Real(t, sec, "inside", 0.0, true);
    f.outside = Real(t, sec, "outside", 0.0, true);
+   f.set = true;
+   f.Validate(name);
+   return f;
+}
+
+/// [cycle.fields.<name>] kind = "tip_zone" (cycle/fault_chains.hpp); unset
+/// when the table is absent or of another kind (Field reads those).
+inline TipZoneSpec TipZone(const toml::value &fields, const std::string &name)
+{
+   const std::string sec = "cycle.fields." + name;
+   TipZoneSpec f;
+   if (!fields.contains(name)) { return f; }
+   const toml::value &t = fields.at(name);
+   if (Str(t, sec, "kind", "rect_taper") != "tip_zone") { return f; }
+   OnlyKeys(t, sec, {"kind", "width", "taper", "inside", "tip", "max_fraction"});
+   f.width = Real(t, sec, "width", 0.0, true);
+   f.taper = Real(t, sec, "taper", 0.0, true);
+   f.inside = Real(t, sec, "inside", 0.0, true);
+   f.tip = Real(t, sec, "tip", 0.0, true);
+   if (t.contains("max_fraction"))
+   {
+      f.max_fraction = Real(t, sec, "max_fraction", 0.0);
+      MFEM_VERIFY(f.max_fraction > 0.0, "[" << sec << "] max_fraction must be > 0");
+   }
    f.set = true;
    f.Validate(name);
    return f;
@@ -977,10 +1017,12 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       const toml::value &f = cy.at("fields");
       OnlyKeys(f, "cycle.fields", {"V_init_dip", "a", "Dc", "V_init"});
       c.fields.V_init_dip = Real(f, "cycle.fields", "V_init_dip", 0.0, true);
-      c.fields.a = Field(c.deck_vectors, f, "a");
+      c.fields.a_tip_zone = TipZone(f, "a");
+      if (!c.fields.a_tip_zone.set) { c.fields.a = Field(c.deck_vectors, f, "a"); }
       c.fields.Dc = Field(c.deck_vectors, f, "Dc");
       c.fields.V_init = Field(c.deck_vectors, f, "V_init");
-      MFEM_VERIFY(c.fields.a.set && c.fields.Dc.set && c.fields.V_init.set,
+      MFEM_VERIFY((c.fields.a.set || c.fields.a_tip_zone.set) && c.fields.Dc.set &&
+                  c.fields.V_init.set,
                   "[cycle.fields.a], [cycle.fields.Dc] and [cycle.fields.V_init] are required");
    }
 

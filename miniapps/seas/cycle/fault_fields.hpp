@@ -14,7 +14,10 @@
 // per-DOF parameters on the owned fault DOFs.  a and Dc come from
 // RectTaperFields through the shared resolver's field callables
 // (spatial::RateStateSidecarFields), so the resolver's validation and its
-// eta = "auto" path run unchanged.  The initial slip rate has two kernel
+// eta = "auto" path run unchanged.  On a 2-D mesh a can instead be a tip-zone
+// field (kind = "tip_zone", cycle/fault_chains.hpp; Chunhui Zhao,
+// 2026-10-29): the distance along the DOF's own fault chain to its nearer
+// free tip sets it.  The initial slip rate has two kernel
 // components: strike from a RectTaperField, dip a constant (V_zero in BP5;
 // on a 2-D BP3 mesh the in-plane slip rate, of either sign).
 //
@@ -26,6 +29,7 @@
 #include "mfem.hpp"
 #include "../spatial/code/spatial_friction.hpp"
 #include "../dynamic/heterogeneous_material.hpp"
+#include "fault_chains.hpp"
 
 #include <algorithm>
 #include <array>
@@ -118,7 +122,8 @@ struct FaultDOFTable
 /// Deck fields of BuildFaultParams.
 struct FaultFieldsConfig
 {
-   RectTaperSpec a;           ///< direct effect a
+   RectTaperSpec a;           ///< direct effect a (kind = "rect_taper", the default)
+   TipZoneSpec a_tip_zone;    ///< a of kind = "tip_zone" (2-D); a and this, never both
    RectTaperSpec Dc;          ///< critical slip distance
    RectTaperSpec V_init;      ///< initial slip rate, kernel strike component
    real_t V_init_dip = 0.0;   ///< initial slip rate, kernel dip component (either sign)
@@ -130,13 +135,18 @@ struct FaultParams
    spatial::RateStatePerDOFParams rs;  ///< a, b, Dc, f_0, V_0, eta, sigma_n_eff;
                                        ///< rs.V_init = |V_init|
    Vector V_init;                      ///< [2N]: (dip, strike) per DOF, kernel frame
+   std::string a_report;               ///< kind = "tip_zone": the chains (for the log)
 };
 
 /// BuildFaultParams (plan 3.3 b):
 ///   fields.a, fields.Dc = RectTaperField(cfg.a), RectTaperField(cfg.Dc)
+///                         (a: TipZoneField(cfg.a_tip_zone) on the chains of
+///                         the faces of fault_attr when the deck gives it)
 ///   fields.V_w          = constant (required by the struct; aging ignores it)
 ///   rs = SpatialFrictionResolver(fields).ResolveRateState(block, table, ...)
 ///   V_init(dip, strike) = (cfg.V_init_dip, RectTaperField(cfg.V_init))
+/// fault_attr: the boundary attribute of the fault faces, which the tip zone
+/// reads (CycleConfig::Load requires 3).
 /// `block` is the deck's [friction.rate_state]; its spatial rules still apply
 /// after the fields, as in the resolver.  The fields are mandatory here, so a
 /// deck cannot fall back to the scalar defaults by omission.
@@ -145,12 +155,16 @@ inline FaultParams BuildFaultParams(const FaultDOFTable &table,
                                     const FaultFieldsConfig &cfg,
                                     const MaterialField &material,
                                     ParMesh &pmesh,
-                                    const spatial::PorePressureSpec &pp)
+                                    const spatial::PorePressureSpec &pp,
+                                    int fault_attr = 3)
 {
-   MFEM_VERIFY(cfg.a.set && cfg.Dc.set && cfg.V_init.set,
+   MFEM_VERIFY((cfg.a.set || cfg.a_tip_zone.set) && cfg.Dc.set && cfg.V_init.set,
                "BuildFaultParams: [cycle.fields.a], [cycle.fields.Dc] and "
                "[cycle.fields.V_init] are all required");
-   cfg.a.Validate("a");
+   MFEM_VERIFY(!(cfg.a.set && cfg.a_tip_zone.set),
+               "BuildFaultParams: [cycle.fields.a] is a rectangle taper or a tip zone, not both");
+   if (cfg.a.set) { cfg.a.Validate("a"); }
+   else { cfg.a_tip_zone.Validate("a"); }
    cfg.Dc.Validate("Dc");
    cfg.V_init.Validate("V_init");
    MFEM_VERIFY(block.state_evolution == spatial::StateEvolutionKind::AgingLaw,
@@ -165,8 +179,22 @@ inline FaultParams BuildFaultParams(const FaultDOFTable &table,
 
    auto fields = std::make_shared<spatial::RateStateSidecarFields>();
    const RectTaperSpec fa = cfg.a, fdc = cfg.Dc;
-   fields->a = [fa](real_t x, real_t y, real_t z)
-   { const real_t p[3] = {x, y, z}; return RectTaperField(fa, p); };
+   FaultParams out;
+   if (cfg.a_tip_zone.set)
+   {
+      // collective: every rank's fault faces
+      auto chains = std::make_shared<const FaultChains>(pmesh, fault_attr);
+      const TipZoneSpec tz = cfg.a_tip_zone;
+      CheckTipZone(tz, *chains, "a");
+      fields->a = [tz, chains](real_t x, real_t y, real_t z)
+      { const real_t p[3] = {x, y, z}; return TipZoneField(tz, *chains, p); };
+      out.a_report = chains->Report(&tz);
+   }
+   else
+   {
+      fields->a = [fa](real_t x, real_t y, real_t z)
+      { const real_t p[3] = {x, y, z}; return RectTaperField(fa, p); };
+   }
    fields->Dc = [fdc](real_t x, real_t y, real_t z)
    { const real_t p[3] = {x, y, z}; return RectTaperField(fdc, p); };
    const real_t V_w = block.V_w_default;
@@ -176,7 +204,6 @@ inline FaultParams BuildFaultParams(const FaultDOFTable &table,
    fields->bbox = {{-big, big, -big, big, -big, big}};
 
    spatial::SpatialFrictionResolver resolver(fields);
-   FaultParams out;
    out.rs = resolver.ResolveRateState(block, table.coords, table.elem, table.attr,
                                       material, pmesh, pp, Vector());
 

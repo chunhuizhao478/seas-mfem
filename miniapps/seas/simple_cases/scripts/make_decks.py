@@ -17,7 +17,12 @@
 # by adjusting the angles (similar to what UCERF fault)"; "we can smooth the
 # trace bends if needed") are smoothed bends at 250 m with averaged normals:
 # 3 and 8 deg over 10 km and over 2.5 km arcs, and a +3 / -3 deg pair of
-# 5 km arcs (SMOOTH below).  Run from miniapps/seas:
+# 5 km arcs (SMOOTH below); three more (2026-11-01: "add functionality
+# about velocity strengthening patch near the tip of the fault, and test on
+# previous 1.5 degree fault with averaged normal") are P4's 250 m D5f with
+# [cycle.fields.a] kind = "tip_zone" (a measured along the fault from each
+# tip): stronger (a = 0.08), wider (from 6 km of each tip) and both
+# (TIPZONE below).  Run from miniapps/seas:
 #   python3 simple_cases/scripts/make_decks.py [--check]
 # --check: write nothing, exit 1 if a committed deck differs from what this
 # script makes (the decks are committed as made).
@@ -44,6 +49,9 @@
 #                      the "_ev1" cases max_dynamic_phases = 1
 # smoothed bends (SMOOTH): as P4's 250 m case (averaged, floor), on their
 #                      own meshes; region_x3's note gives the fault's own |y|
+# tip zones (TIPZONE): as P4's 250 m case (averaged, floor, its mesh), with
+#                      [cycle.fields.a] kind = "tip_zone" in place of the
+#                      rect taper; region_x3's note gives the fault's own |y|
 import argparse
 import math
 import os
@@ -107,6 +115,10 @@ CASES = [
     ("D6f_arc03L10_h250_avg_floor", "arc03L10_h250", "D", True, "smoothed bend: 3 deg over a 10 km arc (R 191 km), averaged vertex normals"),
     ("D8f_arc03L2p5_h250_avg_floor", "arc03L2p5_h250", "D", True, "smoothed bend: 3 deg over a 2.5 km arc (R 47.7 km), averaged vertex normals"),
     ("D10f_sbend03L05_h250_avg_floor", "sbend03L05_h250", "D", True, "smoothed bends: +3 deg then -3 deg, 5 km arcs (R 95.5 km) 2.5 km apart, averaged vertex normals"),
+    # the tip zones on P4's 250 m D5f (2026-11-01)
+    ("D5f_arc015L10_h250_avg_floor_T1a08", "arc015L10_h250", "D", True, "tip zone T1 (stronger): P4's 250 m D5f with a = 0.08 within 3 km of each tip, 2 km taper"),
+    ("D5f_arc015L10_h250_avg_floor_T2w8", "arc015L10_h250", "D", True, "tip zone T2 (wider): P4's 250 m D5f with a = 0.04 within 6 km of each tip, 2 km taper"),
+    ("D5f_arc015L10_h250_avg_floor_T3a08w8", "arc015L10_h250", "D", True, "tip zone T3 (both): P4's 250 m D5f with a = 0.08 within 6 km of each tip, 2 km taper"),
 ]
 SMOOTH = ["D7f_arc08L10_h250_avg_floor", "D9f_arc08L2p5_h250_avg_floor", "D6f_arc03L10_h250_avg_floor",
           "D8f_arc03L2p5_h250_avg_floor", "D10f_sbend03L05_h250_avg_floor"]
@@ -131,6 +143,22 @@ OPTS = {
     "D5f_arc015L10_h250_avg_floor": dict(averaged=True),
 }
 for _c in SMOOTH:
+    OPTS[_c] = dict(averaged=True)
+
+# the tip zones: [cycle.fields.a] kind = "tip_zone" (cycle/fault_chains.hpp),
+# d the distance along the fault to the nearer free tip: a = tip for
+# d <= width - taper, linear to inside at d = width, inside beyond.  The
+# rect taper of mapview_rs_fd.toml (0.004 for |x| <= 10 km, 0.04 from 12 km)
+# is width 5 km, taper 2 km, tip 0.04 on this 30 km fault (to the bent
+# limb's x, which is 5 m shorter than its arc length at the east tip).
+# b = 0.03 everywhere; the prestress takes the local a ([cycle.prestress] a
+# = "local"), so the zone starts at steady state at V_p for its own a.
+TIPZONE = {
+    "D5f_arc015L10_h250_avg_floor_T1a08": dict(width=5.0e3, taper=2.0e3, tip=0.08),
+    "D5f_arc015L10_h250_avg_floor_T2w8": dict(width=8.0e3, taper=2.0e3, tip=0.04),
+    "D5f_arc015L10_h250_avg_floor_T3a08w8": dict(width=8.0e3, taper=2.0e3, tip=0.08),
+}
+for _c in TIPZONE:
     OPTS[_c] = dict(averaged=True)
 
 
@@ -210,6 +238,8 @@ for _c in OPTS:
     GO_CASE[_c] = "# 2026-11-01: \"send this document to 2d thread and start implementation and test\"):"
 for _c in SMOOTH:
     GO_CASE[_c] = "# 2026-11-01: \"we can smooth the trace bends if needed\"):"
+for _c in TIPZONE:
+    GO_CASE[_c] = "# 2026-11-01: \"add functionality about velocity strengthening patch\"):"
 
 
 def header(case, mesh, regime, floor, row):
@@ -272,7 +302,8 @@ def make(case, mesh, regime, floor, row, base):
             sub("pin_min_margin  = 0.1\n",
                 "pin_min_margin  = 0.1\n"
                 "vertex_normals  = \"averaged\"   # "
-                + ("averaged vertex normals" if case in SMOOTH else "vertex-normal plan P3/P4")
+                + ("averaged vertex normals" if case in SMOOTH or case in TIPZONE
+                   else "vertex-normal plan P3/P4")
                 + " (mapview_rs_fd.toml: \"face\")\n")
     sub('prefix          = "mapview_rs_fd"', f'prefix          = "{case}"'
         + ("\nhandback_table  = true" if regime == "D" else ""))
@@ -286,7 +317,28 @@ def make(case, mesh, regime, floor, row, base):
     for name, (x, y) in stations(mesh):
         st += ["[[cycle.output.station]]", f'name = "{name}"', f"x    = [{x!r}, {y!r}]"]
     t = t[:i0] + "\n".join(st) + "\n\n" + t[i1:]
-    if case in SMOOTH:
+    if case in TIPZONE:
+        z = TIPZONE[case]
+        sub("# a: 0.004 for |x| <= 10 km, rising linearly to 0.04 at 12 km.\n"
+            "[cycle.fields.a]\n"
+            "center  = [0.0, 0.0]\n"
+            "axis1   = [1.0, 0.0]\n"
+            "half1   = 10.0e3\n"
+            "taper   = 2.0e3\n"
+            "inside  = 0.004\n"
+            "outside = 0.04\n",
+            f"# a (make_decks.py TIPZONE; mapview_rs_fd.toml: the rect taper, 0.004 for\n"
+            f"# |x| <= 10 km, rising linearly to 0.04 at 12 km): measured along the fault\n"
+            f"# from each free tip, d: a = {z['tip']} for d <= {(z['width'] - z['taper']) / 1e3:g} km, "
+            f"linear to 0.004 at\n"
+            f"# d = {z['width'] / 1e3:g} km, 0.004 beyond (b = 0.03).\n"
+            "[cycle.fields.a]\n"
+            "kind   = \"tip_zone\"\n"
+            f"width  = {z['width'] / 1e3:.1f}e3\n"
+            f"taper  = {z['taper'] / 1e3:.1f}e3\n"
+            "inside = 0.004\n"
+            f"tip    = {z['tip']}\n")
+    if case in SMOOTH or case in TIPZONE:
         th, arc, sb, _ = MESHES[mesh]
         ymax = max(abs(trace(k * 250.0, th, arc, sb, BEND2.get(mesh))[1]) for k in range(-60, 61))
         sub("region_x3       = [-1.0, 1.0]", f"region_x3       = [-1.0e4, 1.0e4]   # the fault reaches |y| = {ymax / 1e3:.2f} km")

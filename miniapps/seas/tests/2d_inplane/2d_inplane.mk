@@ -22,6 +22,7 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-snapshots-volume    # [cycle.snapshots.volume] (2-D and 3-D)
 #   make -f tests/2d_inplane/2d_inplane.mk test-tensor-prestress    # [stress] constant_tensor in the cycle
 #   make -f tests/2d_inplane/2d_inplane.mk test-handback-table      # [cycle.output].handback_table
+#   make -f tests/2d_inplane/2d_inplane.mk test-tip-zone            # [cycle.fields.a] kind = "tip_zone"
 #   make -f tests/2d_inplane/2d_inplane.mk test-sigma-floor         # [cycle].sigma_n_floor_pa
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d5-width           # [cycle.finite_width] (2.5D)
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d5-dyn-driver      # [finite_width] of the Nitsche driver
@@ -651,6 +652,35 @@ test-handback-table: seas_fd_cycle_driver
 	 else printf '%s\n' "$$out" | tail -15; echo "  FAILED: refusal: exit $$rc"; exit 1; fi; \
 	 rm -rf $(HANDBACK_TMP)
 
+# The velocity-strengthening tip zone ([cycle.fields.a] kind = "tip_zone",
+# cycle/fault_chains.hpp; Chunhui Zhao, 2026-10-29): G1, D1-D5 on 1 and 2
+# ranks; then each refusal must exit non-zero with its message.  The check
+# on a mesh file (the UCERF 2-D faults) is tests/2d_inplane/tip_zone_check.py.
+TEST_TIP_ZONE_SRC = tests/2d_inplane/test_tip_zone.cpp
+TEST_TIP_ZONE_OBJ = $(TEST_TIP_ZONE_SRC:.cpp=.o)
+$(TEST_TIP_ZONE_OBJ): %.o: $(SRC)%.cpp $(CYCLE_HEADERS) $(CYCLE_STAMP) \
+                           $(CYCLE_SHARED_HEADERS) $(INPLANE_HEADERS) \
+                           $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
+
+seas_test_tip_zone: $(TEST_TIP_ZONE_OBJ) $(CYCLE_LINK_OBJS)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_TIP_ZONE_OBJ) $(CYCLE_LINK_OBJS) \
+	    $(CYCLE_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+TIP_ZONE_REFUSALS = 1:three or more fault faces|2:form closed chains|3:has no free tip|4:"tip_zone" is for [cycle.fields.a] only|5:needs a 2-D mesh (fault lines with tips)|6:is shorter than the taper|7:taper must be in [0, width]|8:has an unknown key|9:lies on no fault segment|10:max_fraction must be > 0
+test-tip-zone: seas_test_tip_zone
+	@for n in 1 2; do \
+	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_tip_zone || exit 1; \
+	done
+	@list='$(TIP_ZONE_REFUSALS)'; set -f; IFS='|'; for r in $$list; do n=$${r%%:*}; msg=$${r#*:}; \
+	   out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_tip_zone --refuse $$n 2>&1); rc=$$?; \
+	   if [ $$rc -ne 0 ] && printf '%s' "$$out" | grep -qF "$$msg"; then \
+	      echo "  PASSED: refusal $$n: exit $$rc, \"$$msg\""; \
+	   else printf '%s\n' "$$out" | tail -15; echo "  FAILED: refusal $$n: exit $$rc, \"$$msg\" not found"; exit 1; fi; \
+	done
+
 # The opt-in sigma_n' floor ([cycle].sigma_n_floor_pa; Chunhui Zhao,
 # 2026-10-30): K1 (the QD kernels) and D1 (the dynamic operator's CloseDOF,
 # p = 1, 2), then each refusal must exit non-zero with its message; then the
@@ -768,12 +798,12 @@ test-vertex-normal-cycle: seas_test_vertex_normal_cycle
                 test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
                 test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
                 test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
-                test-handback-table test-sigma-floor test-2d5-width test-2d5-dyn-driver \
+                test-handback-table test-tip-zone test-sigma-floor test-2d5-width test-2d5-dyn-driver \
                 test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
         test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
         test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
-        test-handback-table test-sigma-floor test-2d5-width test-2d5-dyn-driver test-vertex-normals \
-        test-vertex-normal-kernels test-vertex-normal-cycle 2d-inplane-all
+        test-handback-table test-tip-zone test-sigma-floor test-2d5-width test-2d5-dyn-driver \
+        test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle 2d-inplane-all
