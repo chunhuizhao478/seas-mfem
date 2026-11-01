@@ -54,6 +54,7 @@ cmake "${TANDEM_SRC}" \
    -DDOMAIN_DIMENSION=3 -DPOLYNOMIAL_DEGREE="${DEGREE}" \
    -DARCH=noarch -DENABLE_HDF5=OFF \
    -DPARMETIS_DIR="${TANDEM_PETSC}" -DMETIS_DIR="${TANDEM_PETSC}" \
+   -DPython3_EXECUTABLE="$(command -v python3)" \
    > cmake.log 2>&1 \
    || { echo "ERROR: cmake failed; tail of ${BUILD}/cmake.log:" >&2; tail -n 40 cmake.log >&2; exit 1; }
 grep -iE 'petsc|lua|eigen|parmetis|arch' cmake.log | head -n 30
