@@ -26,6 +26,7 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d5-width           # [cycle.finite_width] (2.5D)
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d5-dyn-driver      # [finite_width] of the Nitsche driver
 #   make -f tests/2d_inplane/2d_inplane.mk test-vertex-normals      # vertex-normal plan P1 (T2, T3)
+#   make -f tests/2d_inplane/2d_inplane.mk test-vertex-normal-kernels # vertex-normal plan P2 (T1, T4)
 #   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
 # The 3D parity set (every phase must leave it bit for bit unchanged) is the
 # script tests/2d_inplane/parity_3d.sh (see its header).  The tensor
@@ -102,6 +103,28 @@ test-vertex-normals: seas_test_vertex_normals
 	   if [ $$rc -ne 0 ] && echo "$$out" | grep -q "$$msg"; then \
 	      echo "  PASSED: refusal $$n: exit $$rc, message \"$$msg\""; \
 	   else echo "$$out" | tail -20; echo "  FAILED: refusal $$n: exit $$rc, \"$$msg\" not found"; exit 1; fi; done
+
+# Vertex-normal plan rev1, phase P2 (2026-11-01; decision "Per-QP frame from
+# eq. 2"): the kernels with averaged vertex normals (frames, T1 regression, T4
+# adjoint and the per-face operators, a static sawtooth check) on 1, 2 and 4
+# ranks.
+TEST_VN_KERNELS_SRC = tests/2d_inplane/test_vertex_normal_kernels.cpp
+TEST_VN_KERNELS_OBJ = $(TEST_VN_KERNELS_SRC:.cpp=.o)
+$(TEST_VN_KERNELS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(INPLANE_HEADERS) \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_vertex_normal_kernels: $(TEST_VN_KERNELS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_VN_KERNELS_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-vertex-normal-kernels: seas_test_vertex_normal_kernels
+	@for n in 1 2 4; do \
+	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_vertex_normal_kernels \
+	      || { echo "  FAILED: $$n rank(s)"; exit 1; }; done
 
 # A4: the plate loading (needs the deck loader: the cycle's flags and objects).
 TEST_PLATE_LOADING_SRC = tests/2d_inplane/test_plate_loading.cpp
@@ -724,11 +747,11 @@ test-2d5-dyn-driver: seas_nitsche_dyn_driver
                 test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
                 test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
                 test-handback-table test-sigma-floor test-2d5-width test-2d5-dyn-driver \
-                test-vertex-normals
+                test-vertex-normals test-vertex-normal-kernels
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
         test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
         test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
         test-handback-table test-sigma-floor test-2d5-width test-2d5-dyn-driver test-vertex-normals \
-        2d-inplane-all
+        test-vertex-normal-kernels 2d-inplane-all

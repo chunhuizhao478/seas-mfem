@@ -269,19 +269,26 @@ public:
    const real_t *VertexNormal(int fi, int a) const { return vn_[fi][a].data(); }
    int VertexKind(int fi, int a) const { return vkind_[fi][a]; }
    real_t VertexTurnDeg(int fi, int a) const { return vturn_[fi][a]; }
-   /// The frame (n, d, s) at the point x of fault face fi, by (2); Frame(fi)
-   /// itself with the option off or where both nhat equal the face normal.
-   void FrameAt(int fi, const real_t x[3], fault_frame::Frame &fr) const
+   /// True when the frame changes along fault face fi: the option on and
+   /// nhat_0 or nhat_1 not equal to the face normal component by component.
+   bool FrameVaries(int fi) const
    {
+      if (!cfg_.averaged_vertex_normals) { return false; }
       const real_t *n0 = vn_[fi][0].data(), *n1 = vn_[fi][1].data();
       const real_t *nf = Normal(fi);
-      if (!cfg_.averaged_vertex_normals
-          || (n0[0] == nf[0] && n0[1] == nf[1] && n0[2] == nf[2]
-              && n1[0] == nf[0] && n1[1] == nf[1] && n1[2] == nf[2]))
+      return !(n0[0] == nf[0] && n0[1] == nf[1] && n0[2] == nf[2]
+               && n1[0] == nf[0] && n1[1] == nf[1] && n1[2] == nf[2]);
+   }
+   /// The frame (n, d, s) at the point x of fault face fi, by (2); Frame(fi)
+   /// itself where the frame does not vary (FrameVaries false).
+   void FrameAt(int fi, const real_t x[3], fault_frame::Frame &fr) const
+   {
+      if (!FrameVaries(fi))
       {
          fr = frame_[fi];
          return;
       }
+      const real_t *n0 = vn_[fi][0].data(), *n1 = vn_[fi][1].data();
       const real_t *a = vx_[fi][0].data(), *b = vx_[fi][1].data();
       real_t ab2 = 0.0, t = 0.0;
       for (int d = 0; d < 3; d++)

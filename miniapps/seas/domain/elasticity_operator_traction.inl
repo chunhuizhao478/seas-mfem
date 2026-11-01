@@ -310,6 +310,24 @@ void ElasticityDomainOperator<MeshType>::GetFaultDOFBasis(
       }
 #endif
    }
+
+   // Vertex-normal plan rev1, P2: a face whose frame varies has its own
+   // per-DOF triads (SetupVaryingFrames_), eps_f FrameAt at the nodal points.
+   const int nfaces = fault_interior_faces_.Size() + fault_shared_faces_.Size();
+   for (int fi = 0; fi < nfaces; fi++)
+   {
+      const auto &tri = fault_basis_.GetBasis(fi).dof_triad;
+      if (tri.empty()) { continue; }
+      for (int kk = 0; kk < nbf; kk++)
+      {
+         for (int d = 0; d < 3; d++)
+         {
+            dof_basis(d, fi * nbf + kk) = tri[kk].normal[d];
+            dof_basis(3 + d, fi * nbf + kk) = tri[kk].tangent1[d];
+            dof_basis(6 + d, fi * nbf + kk) = tri[kk].tangent2[d];
+         }
+      }
+   }
 }
 
 template <typename MeshType>

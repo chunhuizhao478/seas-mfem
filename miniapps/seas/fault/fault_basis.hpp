@@ -33,6 +33,14 @@ struct FaultBasisQPData
    bool sign_flipped;      ///< Diagnostic only; sign already baked into basis vectors
 };
 
+/// One kernel triad (the sign baked in, as FaultBasisQPData).
+struct FaultBasisTriad
+{
+   real_t normal[3];
+   real_t tangent1[3];
+   real_t tangent2[3];
+};
+
 /// Per-face summary (for backward compatibility and fast access).
 /// Sign convention: all vectors already include the sign_flipped negation
 /// (Tandem convention).  Callers use them directly, no sign factor needed.
@@ -43,6 +51,10 @@ struct FaultBasisData
    real_t tangent2[3];  ///< Second tangent / strike at centroid (with sign baked in)
    bool sign_flipped;   ///< Diagnostic only; sign already baked into basis vectors
    std::vector<FaultBasisQPData> qp_data;  ///< Per-quad-point data (Tandem convention)
+   /// Vertex-normal plan rev1, P2: the kernel triad at each face DOF (nodal
+   /// points), only on a face whose frame varies (SetVaryingFrame); empty
+   /// otherwise, and then the per-DOF triad is the face Jacobian's.
+   std::vector<FaultBasisTriad> dof_triad;
 };
 
 /// Computes and stores per-face local coordinate frames on a fault surface.
@@ -249,6 +261,34 @@ public:
                   "FaultBasis::GetBasis: face index " << fi
                   << " out of range [0, " << num_faces_ << ")");
       return basis_[fi];
+   }
+
+   /// Vertex-normal plan rev1, P2 (averaged vertex normals; Chunhui Zhao,
+   /// 2026-11-01): give face fi a frame that varies along it.  qp holds the
+   /// kernel triad at each quadrature point of qp_data (its nl and
+   /// sign_flipped are kept), dof the triad at each face DOF.  Every kernel
+   /// that reads qp_data (the slip embedding and the traction projection)
+   /// then uses it, which keeps the two exactly adjoint.  The centroid
+   /// triad (normal, tangent1, tangent2) is kept.
+   void SetVaryingFrame(int fi, const std::vector<FaultBasisTriad> &qp,
+                        const std::vector<FaultBasisTriad> &dof)
+   {
+      MFEM_VERIFY(fi >= 0 && fi < num_faces_, "FaultBasis::SetVaryingFrame: face index "
+                  << fi << " out of range [0, " << num_faces_ << ")");
+      auto &b = basis_[fi];
+      MFEM_VERIFY(!b.qp_data.empty() && qp.size() == b.qp_data.size(),
+                  "FaultBasis::SetVaryingFrame: face " << fi << " has " << b.qp_data.size()
+                  << " quadrature points, " << qp.size() << " triads given");
+      for (size_t q = 0; q < qp.size(); q++)
+      {
+         for (int d = 0; d < 3; d++)
+         {
+            b.qp_data[q].normal[d] = qp[q].normal[d];
+            b.qp_data[q].tangent1[d] = qp[q].tangent1[d];
+            b.qp_data[q].tangent2[d] = qp[q].tangent2[d];
+         }
+      }
+      b.dof_triad = dof;
    }
 
    /// Project global traction vector to fault-local tangential components.

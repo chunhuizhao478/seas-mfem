@@ -932,7 +932,74 @@
                                                face_ref);
 #endif
          }
+
+         // Vertex-normal plan rev1, P2: the frames of the faces whose
+         // frame varies (averaged vertex normals; nothing otherwise).
+         SetupVaryingFrames_(face_ir);
       }
+   }
+
+   /// Vertex-normal plan rev1, P2 (Chunhui Zhao, 2026-11-01, decision:
+   /// "Per-QP frame from eq. 2").  On every fault face whose frame varies
+   /// (FaultFrameField::FrameVaries: averaged vertex normals and an end
+   /// normal that is not the face's), the kernel triad at each quadrature
+   /// point of face_ir and at each face DOF (the nodal points) is
+   ///    eps_f (n, d, s)(x),   (n, d, s)(x) = FaultFrameField::FrameAt(fi, x),
+   /// eps_f = -1 when the face's CalcOrtho normal opposes its oriented
+   /// normal (sign_flipped), as ComputeOrientedFrame bakes the sign in.  The
+   /// slip embedding and the traction projection read the triad of each
+   /// quadrature point from qp_data, so they keep their exactly adjoint
+   /// per-quadrature-point form (Tandem's) with this frame; GetFaultDOFBasis
+   /// returns the per-DOF triads.  Every other face keeps its frame bit for
+   /// bit.  Local (no communication).
+   void SetupVaryingFrames_(const IntegrationRule &face_ir)
+   {
+#ifdef MFEM_USE_MPI
+      if (!field_mode_ || !frame_field_->AveragedVertexNormals()) { return; }
+      MFEM_VERIFY(method_ == DGMethod::IP, "ElasticityDomainOperator: averaged vertex "
+                  "normals need the IP method (BR2 embeds the slip per face)");
+      const IntegrationRule &nir = face_quad_->GetNodalRule();
+      const int nbf = nbf_per_face_, n_int = fault_interior_faces_.Size();
+      MFEM_VERIFY(nir.GetNPoints() == nbf, "SetupVaryingFrames_: " << nir.GetNPoints()
+                  << " nodal points, " << nbf << " DOFs per face");
+      std::vector<FaultBasisTriad> qp(face_ir.GetNPoints()), dof(nbf);
+      Vector x;
+      for (int fi = 0; fi < num_fault_faces_; fi++)
+      {
+         if (!frame_field_->FrameVaries(fi)) { continue; }
+         FaceElementTransformations *FTr = nullptr;
+         if (fi < n_int) { FTr = mesh_.GetInteriorFaceTransformations(fault_interior_faces_[fi]); }
+         else if constexpr (IsParallelMesh<MeshType>::value)
+         {
+            FTr = mesh_.GetSharedFaceTransformations(fault_shared_faces_[fi - n_int]);
+         }
+         MFEM_VERIFY(FTr != nullptr, "SetupVaryingFrames_: no transformation for fault face "
+                     << fi);
+         const real_t eps = fault_basis_.GetBasis(fi).sign_flipped ? -1.0 : 1.0;
+         MFEM_VERIFY(eps == frame_field_->Sigma(fi), "SetupVaryingFrames_: fault face " << fi
+                     << " has eps_f " << eps << " but the frame field's sigma_f "
+                     << frame_field_->Sigma(fi) << " (one orientation system)");
+         auto triad_at = [&](const IntegrationPoint &ip, FaultBasisTriad &t)
+         {
+            FTr->Face->Transform(ip, x);
+            real_t x3[3] = {0.0, 0.0, 0.0};
+            for (int d = 0; d < x.Size(); d++) { x3[d] = x(d); }
+            fault_frame::Frame fr;
+            frame_field_->FrameAt(fi, x3, fr);
+            for (int d = 0; d < 3; d++)
+            {
+               t.normal[d] = eps * fr.n[d];
+               t.tangent1[d] = eps * fr.d[d];
+               t.tangent2[d] = eps * fr.s[d];
+            }
+         };
+         for (int q = 0; q < face_ir.GetNPoints(); q++) { triad_at(face_ir.IntPoint(q), qp[q]); }
+         for (int k = 0; k < nbf; k++) { triad_at(nir.IntPoint(k), dof[k]); }
+         fault_basis_.SetVaryingFrame(fi, qp, dof);
+      }
+#else
+      (void)face_ir;
+#endif
    }
 
    /// Phase A (2D in-plane design rev 3): take the fault orientation from
