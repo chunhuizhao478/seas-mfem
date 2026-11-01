@@ -18,10 +18,11 @@
 #
 # Settings: Release, ARCH=noarch (Tandem has no aarch64 target; noarch
 # compiles with -march=native and 8-byte alignment), HDF5 off (output is
-# CSV probes), Tandem's default ageing law.  Before building it prints what
-# it found (compilers, PETSc version and memalign, Eigen, Lua, ParMETIS,
-# numpy) and stops with the first missing dependency named.  It never
-# downloads or installs anything.
+# CSV probes), Tandem's default ageing law, mpif90 and nvpl LAPACK
+# (BLA_VENDOR=NVPL, checked on the binary).  Needs tandem_petsc.sbatch
+# first.  Before building it prints what it found (compilers, PETSc version
+# and memalign, Eigen, Lua, ParMETIS, numpy) and stops with the first
+# missing dependency named.  It never downloads or installs anything.
 
 set -uo pipefail
 source "${SLURM_SUBMIT_DIR}/jobs/vista_qd_speed/tandem/tandem_env.sh"
@@ -46,6 +47,9 @@ ls "${TANDEM_PETSC}"/lib/libparmetis* "${TANDEM_PETSC}"/lib/libmetis* \
 echo "lua modules:"; module spider lua 2>&1 | grep -iE "lua/|liblua" | head -n 5
 
 echo "=== configure ${BUILD} ==="
+# Always a fresh build folder: CMake keeps the compilers and libraries of an
+# earlier configure in its cache.
+case "${BUILD}" in "${TANDEM_ROOT}"/build-d3-p[1-3]) rm -rf "${BUILD}" ;; esac
 mkdir -p "${BUILD}"
 cd "${BUILD}" || exit 1
 cmake "${TANDEM_SRC}" \
@@ -55,9 +59,16 @@ cmake "${TANDEM_SRC}" \
    -DARCH=noarch -DENABLE_HDF5=OFF \
    -DPARMETIS_DIR="${TANDEM_PETSC}" -DMETIS_DIR="${TANDEM_PETSC}" \
    -DPython3_EXECUTABLE="$(command -v python3)" \
+   -DCMAKE_Fortran_COMPILER=mpif90 \
+   -DBLA_VENDOR=NVPL -DBLA_SIZEOF_INTEGER=4 \
    > cmake.log 2>&1 \
    || { echo "ERROR: cmake failed; tail of ${BUILD}/cmake.log:" >&2; tail -n 40 cmake.log >&2; exit 1; }
-grep -iE 'petsc|lua|eigen|parmetis|arch' cmake.log | head -n 30
+grep -iE 'petsc|lua|eigen|parmetis|arch|fortran|lapack|blas' cmake.log | head -n 40
+# Tandem's LAPACK must be the nvpl our PETSc and MFEM use (job 1113226
+# found the system OpenBLAS and gfortran 11 instead).
+grep -q 'Found LAPACK' cmake.log \
+   || { echo "ERROR: cmake did not find LAPACK with BLA_VENDOR=NVPL; see ${BUILD}/cmake.log" >&2; exit 1; }
+grep -E '^CMAKE_Fortran_COMPILER:' CMakeCache.txt
 
 echo "=== build $(date -u +%T) ==="
 make -j 72 tandem > make.log 2>&1 \
@@ -65,6 +76,12 @@ make -j 72 tandem > make.log 2>&1 \
 echo "=== done $(date -u +%T) ==="
 BIN="$(tandem_bin "${DEGREE}")"
 [ -x "${BIN}" ] || { echo "ERROR: ${BIN} missing after make" >&2; exit 1; }
+if ldd "${BIN}" | grep -qi openblas || ! ldd "${BIN}" | grep -q nvpl_lapack; then
+   echo "ERROR: ${BIN} does not link nvpl LAPACK only:" >&2
+   ldd "${BIN}" | grep -iE 'blas|lapack' >&2
+   exit 1
+fi
+ldd "${BIN}" | grep -E 'petsc|mpi|nvpl|lua|parmetis'
 {
    echo "job ${SLURM_JOB_ID:-none} on $(hostname), $(date -u +%FT%TZ)"
    echo "seas-mfem $(git -C "${SEAS_MFEM_ROOT}" rev-parse HEAD)"

@@ -4,16 +4,21 @@
 #
 # Tandem is the upstream code as its authors ship it, at one recorded commit
 # (TANDEM_COMMIT), in its own Vista folder (TANDEM_ROOT, Andy 2026-10-30
-# "approve the Tandem clone").  It builds against the PETSc our CPU runs use
-# (build_horizon.sh MODE=cpu: PETSc 3.24.6 with MUMPS, ParMETIS, nvpl BLAS),
-# so both codes factor with the same MUMPS on the same BLAS.
+# "approve the Tandem clone").  It does not compile against our PETSc 3.24.6
+# (job 1113226: PETSc API changes), so it builds against PETSc 3.22.3, the
+# version Tandem's install guide uses, made by build_horizon.sh MODE=cpu
+# with the same configure as ours (gcc 13, OpenMPI 5, nvpl BLAS,
+# -mcpu=neoverse-v2, 32-bit indices) in ${TANDEM_ROOT}
+# (tandem_petsc.sbatch).  Its MUMPS is the one PETSc 3.22.3 pins, older
+# than ours: a caveat on QD-mode and G-build timings, not on QDGreen steps.
 
 source "${SLURM_SUBMIT_DIR}/jobs/vista/g0_env.sh"
 
 TANDEM_ROOT="${TANDEM_ROOT:-${WORK}/seas-mfem-tandem}"
 TANDEM_SRC="${TANDEM_ROOT}/tandem"
 TANDEM_COMMIT="b75f66692d299673bf85632ed71e2a7da71ff2e0"   # upstream main, 2026-06-29
-TANDEM_PETSC="${TANDEM_PETSC:-${WORK}/seas-gpu-deps/petsc-3.24.6-cpu}"
+TANDEM_PETSC_VERSION="3.22.3"
+TANDEM_PETSC="${TANDEM_PETSC:-${TANDEM_ROOT}/petsc-${TANDEM_PETSC_VERSION}-cpu}"
 TANDEM_MESH_SHA256="f413b957cf1c6d02d2c84b65fc05d1f99232301ed8083cb7d8533c9fa442c3b4"
 
 # numpy for yateto (Tandem's kernel generator): Vista's default python3 has
