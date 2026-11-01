@@ -27,6 +27,7 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d5-dyn-driver      # [finite_width] of the Nitsche driver
 #   make -f tests/2d_inplane/2d_inplane.mk test-vertex-normals      # vertex-normal plan P1 (T2, T3)
 #   make -f tests/2d_inplane/2d_inplane.mk test-vertex-normal-kernels # vertex-normal plan P2 (T1, T4)
+#   make -f tests/2d_inplane/2d_inplane.mk test-vertex-normal-cycle # vertex-normal plan P3 (the cycle)
 #   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
 # The 3D parity set (every phase must leave it bit for bit unchanged) is the
 # script tests/2d_inplane/parity_3d.sh (see its header).  The tensor
@@ -265,11 +266,11 @@ seas_test_2d_deck: $(TEST_2D_DECK_OBJ) $(CYCLE_LINK_OBJS)
 	    $(CYCLE_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
-# K1-K4 on 1 rank; each refusal must exit non-zero with its message; then
+# K1-K5 on 1 rank; each refusal must exit non-zero with its message; then
 # both drivers, given a 3-D mesh and a 2-entry [fault_geometry].ref_normal,
 # must refuse right after reading the mesh (the Nitsche deck's fault
 # ParaView output off, so that an MFEM without HDF5 gets that far).
-DECK_2D_REFUSALS = 1:ref_normal has 2 entries, but the mesh is 3-D|2:up has 2 entries, but the mesh is 3-D|3:x has 2 entries, but the mesh is 3-D|4:plane_origin has 3 entries, but the mesh is 2-D|5:up is required on a 2-D mesh|6:must be [0, 0, +-1]|7:ref_normal has 3 entries, but the mesh is 2-D|8:ref_normal is required on a 2-D mesh|9:must be a 2- or 3-element array|10:must be an array of 3 numbers (2 on a 2-D mesh)|11:not yet read by the QD and dynamic operators|12:"face" or "averaged"|13:vertex_normal_max_turn_deg must be > 0
+DECK_2D_REFUSALS = 1:ref_normal has 2 entries, but the mesh is 3-D|2:up has 2 entries, but the mesh is 3-D|3:x has 2 entries, but the mesh is 3-D|4:plane_origin has 3 entries, but the mesh is 2-D|5:up is required on a 2-D mesh|6:must be [0, 0, +-1]|7:ref_normal has 3 entries, but the mesh is 2-D|8:ref_normal is required on a 2-D mesh|9:must be a 2- or 3-element array|10:must be an array of 3 numbers (2 on a 2-D mesh)|11:is implemented for 2-D meshes only|12:"face" or "averaged"|13:vertex_normal_max_turn_deg must be > 0|14:with [fault_geometry] vertex_normals = "averaged"
 DECK_2D_TMP = $(or $(TMPDIR),/tmp)/seas_test_2d_deck_drivers
 DECK_2D_DRIVER_MSG = ref_normal has 2 entries, but the mesh is 3-D
 test-2d-deck: seas_test_2d_deck seas_fd_cycle_driver seas_nitsche_dyn_driver
@@ -742,16 +743,37 @@ test-2d5-width: seas_test_2d5_width seas_fd_cycle_driver
 test-2d5-dyn-driver: seas_nitsche_dyn_driver
 	MPIEXEC="$(MFEM_MPIEXEC)" MPIEXEC_NP="$(MFEM_MPIEXEC_NP)" tests/2d_inplane/nitsche_finite_width_decks.sh
 
+# Vertex-normal plan rev1, P3 (Chunhui Zhao, 2026-11-01): the cycle's two
+# regimes with vertex_normals = "averaged" on the simple cases' D5f and D0
+# decks (QDPhase and DynPhase, no stepping), C1-C4 on 1, 2 and 4 ranks.
+TEST_VN_CYCLE_SRC = tests/2d_inplane/test_vertex_normal_cycle.cpp
+TEST_VN_CYCLE_OBJ = $(TEST_VN_CYCLE_SRC:.cpp=.o)
+$(TEST_VN_CYCLE_OBJ): %.o: $(SRC)%.cpp $(CYCLE_HEADERS) $(CYCLE_STAMP) \
+                          $(CYCLE_SHARED_HEADERS) $(INPLANE_HEADERS) $(NITSCHE_2D_HEADERS) \
+                          $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
+
+seas_test_vertex_normal_cycle: $(TEST_VN_CYCLE_OBJ) $(CYCLE_LINK_OBJS)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_VN_CYCLE_OBJ) $(CYCLE_LINK_OBJS) \
+	    $(CYCLE_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-vertex-normal-cycle: seas_test_vertex_normal_cycle
+	@for n in 1 2 4; do \
+	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_vertex_normal_cycle < /dev/null || exit 1; \
+	done
+
 2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
                 test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
                 test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
                 test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
                 test-handback-table test-sigma-floor test-2d5-width test-2d5-dyn-driver \
-                test-vertex-normals test-vertex-normal-kernels
+                test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
         test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
         test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
         test-handback-table test-sigma-floor test-2d5-width test-2d5-dyn-driver test-vertex-normals \
-        test-vertex-normal-kernels 2d-inplane-all
+        test-vertex-normal-kernels test-vertex-normal-cycle 2d-inplane-all

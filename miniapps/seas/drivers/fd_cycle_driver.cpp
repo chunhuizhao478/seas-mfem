@@ -115,6 +115,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <sstream>
 #include <string>
 
 using namespace mfem;
@@ -1133,6 +1134,20 @@ int main(int argc, char *argv[])
          out = std::make_unique<cycle::FdCycleOutput>(cfg.output, mpi.GetComm(), locs, commit);
       }
       if (cfg.switching) { out->OpenSwitchLog(commit); }
+      // vertex-normal plan rev1, P3: the fault's vertices with their turn
+      // angles and normals, for checking the averaged vertex normals
+      if (cfg.dyn.averaged_vertex_normals)
+      {
+         Vector vrows;
+         cycle::FaultVertexRows(*qd.Domain().FrameField(), mpi.GetComm(), vrows);
+         std::ostringstream vd;
+         vd << "fd_cycle fault vertices: [fault_geometry] vertex_normals = \"averaged\", "
+               "vertex_normal_max_turn_deg = " << cfg.dyn.vertex_normal_max_turn_deg
+            << "; kind 0 tip, 1 smooth (n_v averaged), 2 kink (each face keeps its normal, "
+               "n_v = 0); commit " << commit;
+         cycle::WriteFaultTable(cfg.output.dir + "/" + cfg.output.prefix + "_vertices.txt",
+                                mpi.GetComm(), vd.str(), cycle::FaultVertexColumns(), vrows);
+      }
       std::unique_ptr<cycle::BenchmarkOutput> bench;
       if (cfg.bench.enabled)
       {

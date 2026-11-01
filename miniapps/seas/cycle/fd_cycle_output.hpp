@@ -14,6 +14,10 @@
 //                    first dynamic phase)
 //   _switch.txt      OpenSwitchLog / SwitchLog (root, switching on): one
 //                    line per regime change or stop
+//   _vertices.txt    WriteFaultTable at start-up, [fault_geometry]
+//                    vertex_normals = "averaged" only: one row per fault
+//                    vertex (cycle_frames.hpp FaultVertexRows: kind, turn
+//                    angle, vertex normal)
 // Sample returns the station rows Write would write, without writing (the
 // switch probe of plan P3).  The SCEC outputs besides the station files
 // ([cycle.benchmark]) are BenchmarkOutput's (bench_output.hpp); it follows

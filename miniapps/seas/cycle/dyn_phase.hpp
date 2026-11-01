@@ -193,6 +193,8 @@ public:
          const FaultFrameConfig fc = CycleFrameConfig(cfg);   // phase A: one system
          fs.orientation = fc.orientation;
          for (int i = 0; i < 3; i++) { fs.up[i] = fc.up[i]; }
+         fs.averaged_vertex_normals = fc.averaged_vertex_normals;
+         fs.vertex_normal_max_turn_deg = fc.vertex_normal_max_turn_deg;
       }
       fs.sigma_min = dc.sigma_min;
       fs.sigma_floor = cfg.sigma_n_floor;   // [cycle].sigma_n_floor_pa (0 = off)
@@ -731,12 +733,23 @@ private:
       MFEM_VERIFY(Bk.Height() == 9 && Bk.Width() == nd, "DynPhase: kernel basis is "
                   << Bk.Height() << " x " << Bk.Width() << ", expected 9 x " << nd);
       Vector loc(FrameMap::kPerDOF * nd), gl(6 * nd);
+      // Averaged vertex normals (vertex-normal plan rev1, P3): on a face whose
+      // frame varies, the DOF's normal is FrameAt's at its node, not the face's.
+      const FaultFrameField &field = *E.FrameField();
+      Vector xd;
+      if (field.AveragedVertexNormals()) { E.GetFaultDOFCoords3D(xd); }
       real_t nmis = 0.0;
       for (int k = 0; k < nd; k++)
       {
          const real_t nk[3] = {Bk(0, k), Bk(1, k), Bk(2, k)};
          const real_t *n = W_->Orientation().Normal(k / nbf);
          const real_t eps = fault_frame::EpsilonF(n, nk);
+         fault_frame::Frame fk;
+         if (field.FrameVaries(k / nbf))
+         {
+            field.FrameAt(k / nbf, &xd(3 * k), fk);
+            n = fk.n;
+         }
          real_t *f = &loc(FrameMap::kPerDOF * k);
          f[0] = eps;
          for (int c = 0; c < 3; c++)
@@ -765,7 +778,9 @@ private:
       normal_mismatch_ = red[1];
       // Phase A: the kernel triad and the census come from one FaultFrameField
       // (the triad is sigma_f (n, d, s) up to the rounding of the per-DOF
-      // CalcOrtho normal), so eps_f n_k = n holds to rounding on every DOF.
+      // CalcOrtho normal), so eps_f n_k = n holds to rounding on every DOF;
+      // with averaged vertex normals n is FrameAt's normal on a face whose
+      // frame varies (the triad is sigma_f FrameAt there, P2).
       MFEM_VERIFY(normal_mismatch_ <= 1e-12, "DynPhase: max |eps_f n_k - n| = "
                   << normal_mismatch_ << " > 1e-12: the kernel triad and the fault census "
                   "do not describe one orientation");

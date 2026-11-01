@@ -167,6 +167,12 @@ struct NitscheFaultSetup
    const IFaultClosure *closure = nullptr;    ///< N-03; must outlive the operator
    FaultOrientationConfig orientation;        ///< N-08
    real_t up[3] = {0.0, 0.0, 1.0};            ///< N-09 frame (F1)
+   /// [fault_geometry] vertex_normals = "averaged" (true) and
+   /// vertex_normal_max_turn_deg, as FaultFrameConfig (vertex-normal plan
+   /// rev1, phase P3; Chunhui Zhao, 2026-11-01); off by default.  The frame
+   /// field must carry the same values (SameFrameConfig).
+   bool averaged_vertex_normals = false;
+   real_t vertex_normal_max_turn_deg = 5.0;
    /// Prestress sigma_0(x).
    std::function<void(const real_t x[3], real_t sigma[9])> prestress;
    /// Nucleation dsigma(x, t) = nucleation_spatial(x) nucleation_temporal(t)
@@ -247,6 +253,8 @@ public:
          auto fc = std::make_shared<FaultFrameConfig>();
          fc->orientation = fault->orientation;
          for (int i = 0; i < 3; i++) { fc->up[i] = fault->up[i]; }
+         fc->averaged_vertex_normals = fault->averaged_vertex_normals;
+         fc->vertex_normal_max_turn_deg = fault->vertex_normal_max_turn_deg;
          ecfg.fault_frames.config = fc;
       }
       elast_ = std::make_unique<ElasticityDomainOperator<ParMesh>>(
@@ -1496,10 +1504,12 @@ private:
          FaultFrameConfig want;
          want.orientation = fs.orientation;
          for (int i = 0; i < 3; i++) { want.up[i] = fs.up[i]; }
+         want.averaged_vertex_normals = fs.averaged_vertex_normals;
+         want.vertex_normal_max_turn_deg = fs.vertex_normal_max_turn_deg;
          MFEM_VERIFY(SameFrameConfig(frames_->Config(), want),
                      "NitscheWaveOperator: the fault frame field was built with another "
-                     "[fault_geometry] (ref_normal, up, pin, margins) than this "
-                     "NitscheFaultSetup asks for");
+                     "[fault_geometry] (ref_normal, up, pin, margins, vertex_normals) than "
+                     "this NitscheFaultSetup asks for");
       }
       const FaultOrientation &orient = frames_->FaultCensus();
 
@@ -1518,15 +1528,40 @@ private:
                      << frames_->Sigma(k / nbf_) << " (one orientation system)");
       }
 
-      // N-09 frame per local face -> per owned DOF (the field computed it
+      // N-09 frame per local DOF -> per owned DOF.  A face whose frame does
+      // not vary: the field's Frame(fi) on every DOF of the face (computed
       // with ComputeFrame(n, up, DegeneracyThreshold(1.0)), as here before).
+      // A face whose frame varies (averaged vertex normals,
+      // FaultFrameField::FrameVaries; vertex-normal plan rev1, P3): the
+      // field's FrameAt at the DOF's node, the frame whose eps_f multiple is
+      // that DOF's kernel triad (SetupVaryingFrames_, P2), checked to 1e-12.
       Vector frame_loc(9 * nd_);
+      Vector x_dof;
+      if (frames_->AveragedVertexNormals()) { elast_->GetFaultDOFCoords3D(x_dof); }
       for (int fi = 0; fi < nloc_faces_; fi++)
       {
-         const fault_frame::Frame &fr = frames_->Frame(fi);
+         const bool varies = frames_->FrameVaries(fi);
          for (int kk = 0; kk < nbf_; kk++)
          {
-            real_t *f = &frame_loc(9 * (fi * nbf_ + kk));
+            const int k = fi * nbf_ + kk;
+            fault_frame::Frame fr = frames_->Frame(fi);
+            if (varies)
+            {
+               frames_->FrameAt(fi, &x_dof(3 * k), fr);
+               real_t nk[3], t1k[3], t2k[3], mis = 0.0;
+               KernelTriad_(k, nk, t1k, t2k);
+               for (int c = 0; c < 3; c++)
+               {
+                  mis = std::max({mis, std::abs(eps_loc_[k] * nk[c] - fr.n[c]),
+                                  std::abs(eps_loc_[k] * t1k[c] - fr.d[c]),
+                                  std::abs(eps_loc_[k] * t2k[c] - fr.s[c])});
+               }
+               MFEM_VERIFY(mis <= 1e-12, "NitscheWaveOperator: local fault DOF " << k
+                           << " (face " << fi << " of rank " << Mpi::WorldRank()
+                           << "): max |eps_f triad_k - FrameAt| = " << mis << " > 1e-12; "
+                           "the kernel triad and the averaged-normal frame differ");
+            }
+            real_t *f = &frame_loc(9 * k);
             for (int c = 0; c < 3; c++) { f[c] = fr.n[c]; f[3 + c] = fr.d[c]; f[6 + c] = fr.s[c]; }
          }
       }

@@ -231,9 +231,10 @@
 //               ["propagated"], pin_by ["reference"], tangent ["pointwise"],
 //               junction_policy ["refuse"] (the only implemented values),
 //               pin_min_margin [the orientation's default], vertex_normals
-//               ["face" | "averaged"; vertex-normal plan rev1, phase P1:
-//               "averaged" is refused until the operators read it (P3)],
-//               vertex_normal_max_turn_deg [5; > 0]
+//               ["face" | "averaged"; vertex-normal plan rev1: "averaged"
+//               only on 2-D meshes (CheckDimension), without [cycle.lts]
+//               and not in a GPU build (D3)], vertex_normal_max_turn_deg
+//               [5; > 0]
 //   [pore_pressure] min_sigma_n_pa: the lower bound of sigma_n_eff [0]
 //
 // No solver header (rule M4).
@@ -560,6 +561,9 @@ struct CycleConfig
                      << ((dim == 2) ? "[x, y]" : "[x, y, z]"));
       }
       spatial::CheckFaultGeometryDimension(shared.fault_geometry, dim);
+      MFEM_VERIFY(dim == 2 || !dyn.averaged_vertex_normals, "[fault_geometry] "
+                  "vertex_normals = \"averaged\" is implemented for 2-D meshes only "
+                  "(vertex-normal plan rev1, D3); the mesh is 3-D");
       // [cycle.fields]: two axes on a fault plane, one on a fault line.
       const std::pair<const char *, const RectTaperSpec *> fl[] =
       {{"a", &fields.a}, {"Dc", &fields.Dc}, {"V_init", &fields.V_init}};
@@ -1318,9 +1322,8 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
             d.pin_min_margin = Real(g, sec, "pin_min_margin", 0.0);
             MFEM_VERIFY(d.pin_min_margin > 0.0, "[fault_geometry].pin_min_margin must be > 0");
          }
-         // vertex-normal plan rev1 (Chunhui Zhao, 2026-11-01): the keys are
-         // read now; the operators read the vertex normals from phase P3, so
-         // "averaged" is refused until then rather than run as "face"
+         // vertex-normal plan rev1 (Chunhui Zhao, 2026-11-01); the QD and
+         // dynamic operators read the vertex normals from phase P3
          const std::string vn = Str(g, sec, "vertex_normals", "face");
          MFEM_VERIFY(vn == "face" || vn == "averaged", "[fault_geometry] vertex_normals = \""
                      << vn << "\": \"face\" or \"averaged\"");
@@ -1329,9 +1332,11 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
                                              d.vertex_normal_max_turn_deg);
          MFEM_VERIFY(d.vertex_normal_max_turn_deg > 0.0,
                      "[fault_geometry].vertex_normal_max_turn_deg must be > 0");
+#if defined(MFEM_USE_CUDA) || defined(MFEM_USE_HIP)
          MFEM_VERIFY(!d.averaged_vertex_normals, "[fault_geometry] vertex_normals = "
-                     "\"averaged\": not yet read by the QD and dynamic operators (vertex-normal "
-                     "plan rev1: phases P2 and P3); refused so that it does not run as \"face\"");
+                     "\"averaged\": not in a GPU build (vertex-normal plan rev1, D3: 2-D CPU "
+                     "only)");
+#endif
       }
       d.sigma_min = s.stress.pore_pressure.min_sigma_n_pa;
       MFEM_VERIFY(c.sigma_n_floor == 0.0 || d.sigma_min == 0.0,
@@ -1442,6 +1447,11 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
 
    if (c.lts.On())
    {
+      // vertex-normal plan rev1, D3: the LTS run is not checked with
+      // per-DOF frames
+      MFEM_VERIFY(!c.dyn.averaged_vertex_normals, "[cycle.lts] mode = \"rate2\" with "
+                  "[fault_geometry] vertex_normals = \"averaged\": not implemented "
+                  "(vertex-normal plan rev1, D3); use global stepping");
       // The Nitsche driver's --lts rate2 conditions (nitsche_lts_run.hpp)
       MFEM_VERIFY(c.dyn.cfl <= 0.6, "[cycle.lts] mode = \"rate2\" needs [numerics].cfl "
                   "<= 0.6 (the rate-2 clusters' stability margin); got " << c.dyn.cfl);

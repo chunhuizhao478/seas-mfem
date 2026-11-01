@@ -9,7 +9,11 @@
 # problem") are D5f with 250 m and 125 m on the fault; three more (P0 of
 # vertex-normal-plan-rev1, 2026-11-01: "send this document to 2d thread and
 # start implementation and test") are D5f's event 1 with the Nitsche penalty
-# scaled by 1, 2 and 4 (OPTS below).  Run from miniapps/seas:
+# scaled by 1, 2 and 4 (OPTS below); five more (P3 and P4 of the plan,
+# 2026-11-01) turn on [fault_geometry] vertex_normals = "averaged": D0's and
+# D0-averaged's event 1 (the straight control off and on), D5f-averaged's
+# event 1 (the smoke run), and D5f and its 250 m refinement averaged for
+# 12,000 yr.  Run from miniapps/seas:
 #   python3 simple_cases/scripts/make_decks.py [--check]
 # --check: write nothing, exit 1 if a committed deck differs from what this
 # script makes (the decks are committed as made).
@@ -31,6 +35,9 @@
 # P0 penalty scan (OPTS): [cycle] penalty_factor = 1, 2, 4; [numerics]
 #                      cfl = 0.25 in all three (D5f: 0.5); [cycle.switch]
 #                      max_dynamic_phases = 1 (stop at the end of event 1)
+# vertex-normal P3/P4 (OPTS): [fault_geometry] vertex_normals = "averaged"
+#                      (the "_avg" cases; turn threshold 5 deg, the default);
+#                      the "_ev1" cases max_dynamic_phases = 1
 import argparse
 import math
 import os
@@ -74,6 +81,11 @@ CASES = [
     ("D5f_arc015L10_pf1_ev1", "arc015L10_h500", "D", True, "P0 of the vertex-normal plan: D5f's event 1, penalty_factor 1, cfl 0.25"),
     ("D5f_arc015L10_pf2_ev1", "arc015L10_h500", "D", True, "P0 of the vertex-normal plan: D5f's event 1, penalty_factor 2, cfl 0.25"),
     ("D5f_arc015L10_pf4_ev1", "arc015L10_h500", "D", True, "P0 of the vertex-normal plan: D5f's event 1, penalty_factor 4, cfl 0.25"),
+    ("D0_straight_ev1", "straight_h500", "D", False, "P3 of the vertex-normal plan: D0's event 1, face normals (the regression's off run)"),
+    ("D0_straight_avg_ev1", "straight_h500", "D", False, "P3 of the vertex-normal plan: D0's event 1 with averaged vertex normals (on a straight fault: as off)"),
+    ("D5f_arc015L10_avg_ev1", "arc015L10_h500", "D", True, "P3 of the vertex-normal plan: D5f's event 1 with averaged vertex normals (the smoke run)"),
+    ("D5f_arc015L10_avg_floor", "arc015L10_h500", "D", True, "P4 of the vertex-normal plan: D5f with averaged vertex normals"),
+    ("D5f_arc015L10_h250_avg_floor", "arc015L10_h250", "D", True, "P4 of the vertex-normal plan: D5f at 250 m with averaged vertex normals"),
 ]
 
 # P0 of vertex-normal-plan-rev1 (/mnt/project-files/2d-inplane/
@@ -88,6 +100,12 @@ OPTS = {
     "D5f_arc015L10_pf1_ev1": dict(penalty=1.0, cfl=0.25, phases=1),
     "D5f_arc015L10_pf2_ev1": dict(penalty=2.0, cfl=0.25, phases=1),
     "D5f_arc015L10_pf4_ev1": dict(penalty=4.0, cfl=0.25, phases=1),
+    # vertex-normal plan P3 (regression and smoke) and P4 (the D5f runs)
+    "D0_straight_ev1": dict(phases=1),
+    "D0_straight_avg_ev1": dict(phases=1, averaged=True),
+    "D5f_arc015L10_avg_ev1": dict(phases=1, averaged=True),
+    "D5f_arc015L10_avg_floor": dict(averaged=True),
+    "D5f_arc015L10_h250_avg_floor": dict(averaged=True),
 }
 
 
@@ -160,7 +178,8 @@ def header(case, mesh, regime, floor, row):
         "# config/fd_cycle/mapview_rs_fd.toml; the edits are listed there and in",
         "# simple_cases/README.md.  Plane strain, no 2.5D term, +-240 km box, all",
         ("# walls absorbing in the dynamic regime, to the end of event 1."
-         if case in OPTS else "# walls absorbing in the dynamic regime, 12,000 yr."),
+         if OPTS.get(case, {}).get("phases") == 1
+         else "# walls absorbing in the dynamic regime, 12,000 yr."),
         "#",
         "# Run (Mac, from miniapps/seas): simple_cases/scripts/run_simple_mac.sh",
         "#",
@@ -195,12 +214,19 @@ def make(case, mesh, regime, floor, row, base):
             "sigma_n_floor_pa     = 1.0e6     # the 1 MPa floor of UCERF run8 (not in mapview_rs_fd.toml)\n")
     o = OPTS.get(case)
     if o:
-        if o["penalty"] != 1.0:
+        if o.get("penalty", 1.0) != 1.0:
             sub("penalty_factor       = 1.0       # both regimes' K\n",
                 f"penalty_factor       = {o['penalty']:.1f}       # both regimes' K (mapview_rs_fd.toml: 1.0)\n")
-        sub("cfl       = 0.5\n", f"cfl       = {o['cfl']}      # P0: penalty up to x 4 (mapview_rs_fd.toml: 0.5)\n")
-        sub("max_dynamic_phases = 0\n",
-            f"max_dynamic_phases = {o['phases']}   # P0: stop at the end of event 1 (mapview_rs_fd.toml: 0)\n")
+        if "cfl" in o:
+            sub("cfl       = 0.5\n", f"cfl       = {o['cfl']}      # P0: penalty up to x 4 (mapview_rs_fd.toml: 0.5)\n")
+        if "phases" in o:
+            why = "P0" if "penalty" in o else "P3"
+            sub("max_dynamic_phases = 0\n",
+                f"max_dynamic_phases = {o['phases']}   # {why}: stop at the end of event 1 (mapview_rs_fd.toml: 0)\n")
+        if o.get("averaged"):
+            sub("pin_min_margin  = 0.1\n",
+                "pin_min_margin  = 0.1\n"
+                "vertex_normals  = \"averaged\"   # vertex-normal plan P3/P4 (mapview_rs_fd.toml: \"face\")\n")
     sub('prefix          = "mapview_rs_fd"', f'prefix          = "{case}"'
         + ("\nhandback_table  = true" if regime == "D" else ""))
     # stations: replace the nine fltst_x entries

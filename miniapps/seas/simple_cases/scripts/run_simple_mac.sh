@@ -34,7 +34,7 @@ export LC_ALL=C OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 RES=${1:?usage: run_simple_mac.sh RESULTS [NP [CASE ...]]}
 NP=${2:-4}
 shift $(( $# < 2 ? $# : 2 ))
-ALL="D1f_sharp015_floor D2f_sharp05_floor Q1_sharp015 Q0_straight Q2_sharp05 Q3_arc05L10 Q4_sharp015vs D0_straight D1_sharp015 D2_sharp05 D3_arc05L10 D4_sharp015vs D5f_arc015L10_floor D5f_arc015L10_h250_floor D5f_arc015L10_h125_floor D5f_arc015L10_pf1_ev1 D5f_arc015L10_pf2_ev1 D5f_arc015L10_pf4_ev1"
+ALL="D1f_sharp015_floor D2f_sharp05_floor Q1_sharp015 Q0_straight Q2_sharp05 Q3_arc05L10 Q4_sharp015vs D0_straight D1_sharp015 D2_sharp05 D3_arc05L10 D4_sharp015vs D5f_arc015L10_floor D5f_arc015L10_h250_floor D5f_arc015L10_h125_floor D5f_arc015L10_pf1_ev1 D5f_arc015L10_pf2_ev1 D5f_arc015L10_pf4_ev1 D0_straight_ev1 D0_straight_avg_ev1 D5f_arc015L10_avg_ev1 D5f_arc015L10_avg_floor D5f_arc015L10_h250_avg_floor"
 CASES=${*:-$ALL}
 WALL=${WALL_LIMIT:-2700}
 LOCK=${SEAS_MAC_LOCK:-/Users/chunhuizhao/projects/.seas-mac-run.lock}

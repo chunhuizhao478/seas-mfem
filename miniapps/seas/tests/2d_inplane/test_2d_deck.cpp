@@ -22,8 +22,13 @@
 //       2-entry [fault_geometry] vector is read with z = 0 and normalized,
 //       a 3-entry one as before, an absent one keeps the default with
 //       entries 0
+//   K5  (vertex-normal plan rev1, phase P3, 2026-11-01) the 2-D form with
+//       [fault_geometry] vertex_normals = "averaged" and
+//       vertex_normal_max_turn_deg = 3: read into DynamicConfig and
+//       CycleFrameConfig, CheckDimension(2) passes; the keys left out:
+//       "face" and 5 deg
 //
-// Modes: (default) K1-K4;  --refuse N (N = 1..10) loads a deck and checks
+// Modes: (default) K1-K5;  --refuse N (N = 1..14) loads a deck and checks
 // it against a dimension, which must abort (the makefile checks the exit
 // status and the message):
 //    1 3-D, ref_normal [nx, ny]                   "ref_normal has 2 entries, but the mesh is 3-D"
@@ -36,11 +41,13 @@
 //    8 2-D, no ref_normal                         "ref_normal is required on a 2-D mesh"
 //    9 a 4-entry [fault_geometry] vector          "must be a 2- or 3-element array"
 //   10 a 4-entry cycle vector                     "must be an array of 3 numbers (2 on a 2-D mesh)"
-//   (vertex-normal plan rev1, phase P1, 2026-11-01: the [fault_geometry] keys
-//   vertex_normals and vertex_normal_max_turn_deg; refused while parsing)
-//   11 vertex_normals = "averaged"                "not yet read by the QD and dynamic operators"
+//   (vertex-normal plan rev1, 2026-11-01: the [fault_geometry] keys
+//   vertex_normals and vertex_normal_max_turn_deg; 12-14 refused while
+//   parsing, 11 by the check against the dimension; phase P3)
+//   11 3-D, vertex_normals = "averaged"           "is implemented for 2-D meshes only"
 //   12 vertex_normals = "smooth"                  "\"face\" or \"averaged\""
 //   13 vertex_normal_max_turn_deg = 0             "vertex_normal_max_turn_deg must be > 0"
+//   14 2-D, "averaged" with [cycle.lts] rate2     "with [fault_geometry] vertex_normals = \"averaged\""
 // The make target also runs the two drivers on a 3-D mesh with a 2-entry
 // ref_normal, which they must refuse right after reading the mesh.
 //
@@ -50,6 +57,7 @@
 
 #include "mfem.hpp"
 #include "../../cycle/cycle_config.hpp"
+#include "../../cycle/cycle_frames.hpp"
 
 #include <unistd.h>
 
@@ -224,6 +232,25 @@ static void TestUpChoices()
                "K3 up [0, 0, -1]: CheckDimension(2) passes");
 }
 
+// ---------------------------------------------------------------------- K5
+static void TestVertexNormalKeys()
+{
+   if (g_rank == 0) { std::cout << "\n=== K5 [fault_geometry] vertex_normals in 2-D ===\n"; }
+   const std::string d2 = To2D(ReadFile(kDeck));
+   const std::string ref2 = "ref_normal      = [0.0, -1.0]";
+   const cycle::CycleConfig c0 = LoadText("k5f", d2);
+   TEST_ASSERT(!c0.dyn.averaged_vertex_normals && c0.dyn.vertex_normal_max_turn_deg == 5.0,
+               "K5 the keys left out: \"face\", 5 deg");
+   const cycle::CycleConfig c = LoadText("k5a", ReplaceLine(d2, ref2, ref2 +
+      "\nvertex_normals = \"averaged\"\nvertex_normal_max_turn_deg = 3.0"));
+   const FaultFrameConfig fc = cycle::CycleFrameConfig(c);
+   TEST_ASSERT(c.dyn.averaged_vertex_normals && c.dyn.vertex_normal_max_turn_deg == 3.0
+               && fc.averaged_vertex_normals && fc.vertex_normal_max_turn_deg == 3.0,
+               "K5 \"averaged\", 3 deg: in DynamicConfig and in CycleFrameConfig");
+   c.CheckDimension(2);
+   TEST_ASSERT(true, "K5 \"averaged\": CheckDimension(2) passes");
+}
+
 // ---------------------------------------------------------------------- K4
 static void TestSpatialLoader()
 {
@@ -271,7 +298,11 @@ static int Refuse(int n)
       case 11: text = ReplaceLine(deck, kRef3, kRef3 + "\nvertex_normals = \"averaged\""); break;
       case 12: text = ReplaceLine(deck, kRef3, kRef3 + "\nvertex_normals = \"smooth\""); break;
       case 13: text = ReplaceLine(deck, kRef3, kRef3 + "\nvertex_normal_max_turn_deg = 0.0"); break;
-      default: MFEM_ABORT("--refuse N: N = 1..13");
+      case 14: text = ReplaceLine(d2, "ref_normal      = [0.0, -1.0]",
+                                  "ref_normal      = [0.0, -1.0]\nvertex_normals = \"averaged\"")
+                      + "\n[cycle.lts]\nmode = \"rate2\"\n";
+               dim = 2; break;
+      default: MFEM_ABORT("--refuse N: N = 1..14");
    }
    if (g_rank == 0) { std::cout << "--refuse " << n << ": a " << dim << "-D check\n"; }
    const cycle::CycleConfig c = LoadText("refuse" + std::to_string(n), text);
@@ -298,6 +329,7 @@ int main(int argc, char *argv[])
    TestDeck3D2D();
    TestUpChoices();
    TestSpatialLoader();
+   TestVertexNormalKeys();
    if (g_rank == 0)
    {
       std::cout << "\ntest_2d_deck: " << (num_tests - num_failed) << " / " << num_tests

@@ -16,7 +16,8 @@ the simple cases, run them on local Mac".
 
 Twelve runs, listed in run order (D1f, D2f and Q1 answer the main
 questions, so they go first), then D5f, added after D1f, D5f on two
-finer fault meshes, and the three P0 penalty runs (last rows).
+finer fault meshes, the three P0 penalty runs, and the five runs of the
+vertex-normal plan's P3 and P4 (last rows).
 
 | Case | Mesh | Regime | Floor | Why |
 |---|---|---|---|---|
@@ -38,6 +39,11 @@ finer fault meshes, and the three P0 penalty runs (last rows).
 | D5f_arc015L10_pf1_ev1 | arc015L10_h500 | fully dynamic, event 1 | 1 MPa | P0: penalty_factor 1 at cfl 0.25 (below) |
 | D5f_arc015L10_pf2_ev1 | arc015L10_h500 | fully dynamic, event 1 | 1 MPa | P0: penalty_factor 2 (below) |
 | D5f_arc015L10_pf4_ev1 | arc015L10_h500 | fully dynamic, event 1 | 1 MPa | P0: penalty_factor 4 (below) |
+| D0_straight_ev1 | straight_h500 | fully dynamic, event 1 | none | P3: the straight control, face normals (below) |
+| D0_straight_avg_ev1 | straight_h500 | fully dynamic, event 1 | none | P3: the same, averaged vertex normals |
+| D5f_arc015L10_avg_ev1 | arc015L10_h500 | fully dynamic, event 1 | 1 MPa | P3: D5f's event 1, averaged (smoke) |
+| D5f_arc015L10_avg_floor | arc015L10_h500 | fully dynamic | 1 MPa | P4: D5f, averaged |
+| D5f_arc015L10_h250_avg_floor | arc015L10_h250 | fully dynamic | 1 MPa | P4: D5f at 250 m, averaged |
 
 - **No floor (all but D1f, D2f):** a run that reaches sigma_n' <= 0 stops
   there, and that time and place is a result.
@@ -106,6 +112,32 @@ before any code changes.
   - the jump grows with the factor (about in proportion, if the penalty
     sets it): the mechanism holds, and P1 starts;
   - the jump does not change: stop and look at the mechanism again.
+
+### P3 and P4: averaged vertex normals (vertex-normal plan)
+
+The same request as P0. P1 to P3 add `[fault_geometry] vertex_normals =
+"averaged"` (default `"face"`): at a fault vertex where two faces turn by
+at most 5 deg, both faces use n_v = (n_A + n_B) / |n_A + n_B|, and the
+frame varies along each face between its two end normals. Each `_avg`
+deck is its base deck plus that one line.
+
+- **P3, regression and smoke** (each to the end of event 1,
+  `max_dynamic_phases = 1`):
+  - `D0_straight_ev1` against D0's run (38e7ad28): the option off is
+    unchanged (the plan asks for bit for bit; on more than one rank two
+    runs of one build can differ in the last bits, so equal to round-off);
+  - `D0_straight_avg_ev1` against `D0_straight_ev1`: on a straight fault
+    the option changes nothing (relative 1e-12 on sigma_n', tau, V);
+  - `D5f_arc015L10_avg_ev1`: the run is clean and the event-1 vertex jump
+    is far below D5f's 13.1 MPa (the target: under 1 MPa).
+- **P4** (12,000 yr, about 3 events, as D5f): `D5f_arc015L10_avg_floor`
+  and `D5f_arc015L10_h250_avg_floor` against D5f and D5f 250 m. The
+  plan's targets: the vertex jump under 1 MPa per event; event times
+  within 1% and mean slip within 2% of face mode; hand-backs as clean; no
+  floored DOF.
+- **Output:** with the option on the driver also writes
+  `<prefix>_vertices.txt`, one row per fault vertex: key, x, y, kind (0
+  tip, 1 smooth, 2 kink), turn angle (deg) and n_v.
 
 ## Setup
 
@@ -204,6 +236,9 @@ The 500 m meshes have 60 fault edges; arc015L10_h250 120 and arc015L10_h125
   about a third of D5f's QD stages (about 13 min); the dynamic phase at
   cfl 0.25 is about 47,000 steps (about 1 min). So about 15 min per run,
   45 min for the three, with `WALL_LIMIT=3600`.
+- **P3 and P4 runs (estimate, not measured):** the `_ev1` runs as P0's
+  at cfl 0.5, about 15 min each; D5f averaged as D5f, about 42 min; at
+  250 m as D5f 250 m, about 53 min (3,189 s).
 - **Refined D5f (estimate, not measured):** the dynamic dt halves each
   level and the mesh grows 1.28x and 1.75x, so the dynamic phases take about
   4 and 11 min. QD has 2x and 4x the fault nodes (N_f 240 and 480); if its
@@ -215,7 +250,7 @@ The 500 m meshes have 60 fault edges; arc015L10_h250 120 and arc015L10_h125
 ## Files
 
 - `mesh/*.msh`: the eight meshes (above).
-- `configs/<case>.toml`: the eighteen decks.
+- `configs/<case>.toml`: the twenty-three decks.
 - `scripts/make_decks.py`: makes the decks; `--check` compares.
 - `scripts/run_simple_mac.sh`: the runs on the Mac, one after the other.
   - Checks: the GitHub-first guard; the binary's code equals HEAD
@@ -252,6 +287,8 @@ simple_cases/scripts/run_simple_mac.sh $R 4
 WALL_LIMIT=3600 simple_cases/scripts/run_simple_mac.sh $R 4 D5f_arc015L10_floor   # D5f alone
 WALL_LIMIT=21600 simple_cases/scripts/run_simple_mac.sh $R 4 D5f_arc015L10_h250_floor D5f_arc015L10_h125_floor
 WALL_LIMIT=3600 simple_cases/scripts/run_simple_mac.sh $R 4 D5f_arc015L10_pf1_ev1 D5f_arc015L10_pf2_ev1 D5f_arc015L10_pf4_ev1   # P0
+WALL_LIMIT=3600 simple_cases/scripts/run_simple_mac.sh $R 4 D0_straight_ev1 D0_straight_avg_ev1 D5f_arc015L10_avg_ev1   # P3
+WALL_LIMIT=21600 simple_cases/scripts/run_simple_mac.sh $R 4 D5f_arc015L10_avg_floor D5f_arc015L10_h250_avg_floor   # P4
 python3 simple_cases/scripts/analyse_simple.py $R
 ```
 
