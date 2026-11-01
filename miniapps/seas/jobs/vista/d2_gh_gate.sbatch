@@ -29,6 +29,14 @@
 # so ("fault on the device: N owned fault DOFs"); the output folder is
 # d2_gh_gate_r<NP>_df1_<jobid>.
 #
+# GPU dynamic-rupture plan D5 (plan rev2 §4.6, where a multi-GPU step goes):
+# GPU_MPI=1 exports MFEM_GPU_AWARE_MPI=1, so the halo and the device fault's
+# messages leave from device memory (Device::GetGPUAwareMPI), and a case
+# fails unless the driver says "Use GPU-aware MPI: yes"; STAGE_TIMERS=N adds
+# --stage-timers N and prints the end-of-run table (timers only read clocks:
+# the same bits).  The output folder gains _gm1 and _st.  Every case still
+# passes the gate first.
+#
 # MF_LAYOUT (default auto: element at p = 1, team2 at p = 2 on the GPU) is
 # passed as --mf-layout.  A case fails when the driver's summary does not say
 # the device step ran.  Both step times are printed (the reference is the gg
@@ -43,6 +51,12 @@ MF_LAYOUT=${MF_LAYOUT:-auto}
 DEVICE_FAULT=${DEVICE_FAULT:-0}
 case "$DEVICE_FAULT" in 0|1) ;; *) echo "ERROR: DEVICE_FAULT is 0 or 1, not '$DEVICE_FAULT'"; exit 2 ;; esac
 DF_TAG=""; [ "$DEVICE_FAULT" = 0 ] || DF_TAG="_df1"
+GPU_MPI=${GPU_MPI:-0}
+STAGE_TIMERS=${STAGE_TIMERS:-0}
+case "$GPU_MPI" in 0|1) ;; *) echo "ERROR: GPU_MPI is 0 or 1, not '$GPU_MPI'"; exit 2 ;; esac
+[[ "$STAGE_TIMERS" =~ ^[0-9]+$ ]] || { echo "ERROR: STAGE_TIMERS is a step count, not '$STAGE_TIMERS'"; exit 2; }
+[ "$GPU_MPI" = 0 ] || { DF_TAG="${DF_TAG}_gm1"; export MFEM_GPU_AWARE_MPI=1; }
+[ "$STAGE_TIMERS" = 0 ] || DF_TAG="${DF_TAG}_st"
 ROOT=$(cd "$SLURM_SUBMIT_DIR/../.." && pwd)              # submitted from miniapps/seas
 NP=${SLURM_NTASKS:?run with sbatch -N NODES -n NP}
 NGPU=$(nvidia-smi -L | grep -c '^GPU ')
@@ -67,7 +81,7 @@ NEW_SHA=$(git -C "$ROOT" rev-parse HEAD)
 OUT=$SCRATCH/gpu_dyn/d2_gh_gate_r${NP}${DF_TAG}_$SLURM_JOB_ID
 mkdir -p "$OUT"
 d1_gh_modules
-{ echo "job $SLURM_JOB_ID on $(hostname), $(date -u +%FT%TZ), NP $NP, TOL $TOL, --mf-layout $MF_LAYOUT, --device-fault $DEVICE_FAULT"
+{ echo "job $SLURM_JOB_ID on $(hostname), $(date -u +%FT%TZ), NP $NP, TOL $TOL, --mf-layout $MF_LAYOUT, --device-fault $DEVICE_FAULT, GPU_MPI $GPU_MPI, STAGE_TIMERS $STAGE_TIMERS"
   echo "new $NEW_SHA ($ROOT)"; echo "reference $REF_RUNS"; head -3 "$REF_RUNS/../RUN_INFO.txt"
   echo "modules: $(module -t list 2>&1 | tr '\n' ' ')"
   nvidia-smi --query-gpu=name,compute_mode,driver_version --format=csv,noheader; } | tee "$OUT/RUN_INFO.txt"
@@ -84,14 +98,19 @@ for c in "${D1_CASES[@]}"; do
       t=$(date +%s)
       ibrun -n "$NP" ./seas_nitsche_dyn_driver --config "$DECK" --mesh "$MESH" --order "$P" \
             --output-dir "$O" --log-every 1000 --device cuda --matrix-free 1 --mf-layout "$MF_LAYOUT" \
-            --device-fault "$DEVICE_FAULT" > "$O/driver.log" 2>&1
+            --device-fault "$DEVICE_FAULT" --stage-timers "$STAGE_TIMERS" > "$O/driver.log" 2>&1
       rc=$?
       echo $rc > "$O/exit_code"
       echo "$CASE cuda: exit $rc in $(( $(date +%s) - t )) s; $(grep -a "=== done" "$O/driver.log" || echo 'no done line')"
       grep -a "time in ode.Step" "$O/driver.log" | sed 's/^/   /'
       grep -a "time in ode.Step" "$G/driver.log" | sed 's/^ */   ref: /'
+      grep -a -E "Use GPU-aware MPI|GPU and CPU core per rank" "$O/driver.log" | sed 's/^ */   /'
+      [ "$STAGE_TIMERS" = 0 ] \
+         || awk '/\[STAGE-TIMERS\] end of run/{p=1} p&&/\[STAGE-TIMERS\]/' "$O/driver.log" | sed 's/^/   /'
       if ! grep -a -q "device step on" "$O/driver.log"; then
          echo "RUN $CASE cuda: FAIL (the summary does not say the device step ran)"; fail=1
+      elif [ "$GPU_MPI" = 1 ] && ! grep -a -q "Use GPU-aware MPI: *yes" "$O/driver.log"; then
+         echo "RUN $CASE cuda: FAIL (GPU_MPI=1 but the driver does not say GPU-aware MPI is on)"; fail=1
       elif [ "$DEVICE_FAULT" = 1 ] && ! grep -a -q "fault on the device: " "$O/driver.log"; then
          echo "RUN $CASE cuda: FAIL (the summary does not say the fault ran on the device)"; fail=1
       elif bash jobs/horizon/check_dyn_gate.sh "$O" "$PROB" "$G" "$PROB" "$TOL" "$O/driver.log" "$rc" \
@@ -104,5 +123,5 @@ for c in "${D1_CASES[@]}"; do
    done
 done
 
-echo "D2 gh gate, $NP GPU(s), --device-fault $DEVICE_FAULT: $([ $fail = 0 ] && echo PASS || echo FAIL); new $NEW_SHA; runs in $OUT/runs; total $(( $(date +%s) - T0 )) s"
+echo "D2 gh gate, $NP GPU(s), --device-fault $DEVICE_FAULT, GPU_MPI $GPU_MPI: $([ $fail = 0 ] && echo PASS || echo FAIL); new $NEW_SHA; runs in $OUT/runs; total $(( $(date +%s) - T0 )) s"
 exit $fail

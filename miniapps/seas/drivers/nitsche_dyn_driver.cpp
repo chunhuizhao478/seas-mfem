@@ -250,6 +250,9 @@
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
+#ifdef __linux__
+#include <sched.h>   // sched_getcpu (the per-rank core line, GPU plan D5)
+#endif
 #include <utility>
 #include <vector>
 
@@ -829,6 +832,26 @@ int main(int argc, char *argv[])
    MFEM_VERIFY(!HypreUsingGPU(), "plan D1 keeps hypre on the host, which this "
                "GPU hypre cannot (it needs hypre >= 2.31)");
    if (g_rank == 0) { device.Print(); }
+   if (Device::Allows(Backend::CUDA_MASK | Backend::HIP_MASK))
+   {
+      // GPU plan D5: which GPU and which CPU core each rank got
+      int mine[2] = {Device::GetId(), -1};
+#ifdef __linux__
+      mine[1] = sched_getcpu();
+#endif
+      std::vector<int> all(2 * nranks);
+      MPI_Gather(mine, 2, MPI_INT, all.data(), 2, MPI_INT, 0, MPI_COMM_WORLD);
+      if (g_rank == 0)
+      {
+         std::ostringstream o;
+         o << "GPU and CPU core per rank (rank:gpu/core):";
+         for (int r = 0; r < nranks; r++)
+         {
+            o << " " << r << ":" << all[2 * r] << "/" << all[2 * r + 1];
+         }
+         std::cout << o.str() << "\n";
+      }
+   }
    SetupTimer setup_timer(wall0);
 
    const std::string cfg_path = ArgStr(argc, argv, "--config", "");
