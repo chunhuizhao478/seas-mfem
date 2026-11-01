@@ -14,6 +14,8 @@ which needs parallel HDF5.
 | `b0_tpv205_200m_p1.sbatch`, `b0_tpv205_200m_p2.sbatch`, `b0_tpv104_200m_p1.sbatch`, `b0_tpv104_200m_p2.sbatch` | B0: the gold's deck, mesh and rank layout (1076378, 1075916, 1075919, 1075917), the defaults except `--mesh-setup every-rank` (the LTS gold jobs' mesh setup), 0 to 1.0 s. Pass when the run reproduces the trunk code's 1 s run of the LTS gold job beside that gold: the same `=== done` line as its `gts_driver.log` and the same largest station difference from the gold (`compare_stations.py`). |
 | `run_b0_vista.sh` | Shared body of the B0 jobs. |
 | `tpv26_200m_p2.sbatch` | B2: TPV26 on the 200 m mirror mesh, p = 2, 0 to 13.0 s, 24 nodes x 128 ranks, rank-0 mesh setup (the default; logs the first node's committed memory), through `jobs/vista_nitsche/run_nitsche_vista.sh` (output `$SCRATCH/nitsche_benchmarks/tpv26_mirror200m_p2_<job>`). Compared with DRDG3D TPV26 over 0 to 12 s off Vista; the rupture-time contour file comes from `scripts/make_cplot.py`. |
+| `tpv27_200m_p2.sbatch` | B4: TPV27 (the TPV26 deck with Drucker-Prager viscoplasticity, `tpv27/configs/tpv27_nitsche_kv0p1.toml`) on the same 200 m mirror mesh, p = 2, 0 to 13.0 s, 24 nodes x 128 ranks, as `tpv26_200m_p2.sbatch` (output `$SCRATCH/nitsche_benchmarks/tpv27_mirror200m_p2_<job>`, with `rheology.vtkhdf`: plastic strain and eta every 0.5 s). Compared with DRDG3D TPV27 over 0 to 12 s and with TPV26 p = 2 off Vista. |
+| `tpv27_200m_p1.sbatch` | TPV27 at p = 1 (the plastic state at one node per tet), the same deck and mesh, 0 to 13.0 s, 8 nodes x 128 ranks (output `$SCRATCH/nitsche_benchmarks/tpv27_mirror200m_p1_<job>`). Compared with DRDG3D TPV27 over 0 to 12 s. |
 
 TPV102 has no Vista gold (its golds ran on Frontera), so its B0 is the cloud check only: the TPV205,
 TPV104 and TPV102 decks on 1000 m meshes, 3 ranks, 0 to 0.6 s, every output file byte-identical to the
@@ -32,9 +34,11 @@ sbatch build_tpv2627_vista.sbatch
 sbatch b0_tpv205_200m_p1.sbatch; sbatch b0_tpv104_200m_p1.sbatch
 sbatch b0_tpv205_200m_p2.sbatch; sbatch b0_tpv104_200m_p2.sbatch
 sbatch tpv26_200m_p2.sbatch
+sbatch tpv27_200m_p2.sbatch; sbatch tpv27_200m_p1.sbatch
 ```
 
-Cost at most: build 0.66 SU, B0 0.66 + 0.66 + 2.64 + 2.64 SU, B2 15.8 SU (estimate 7 SU).
+Cost at most: build 0.66 SU, B0 0.66 + 0.66 + 2.64 + 2.64 SU, B2 15.8 SU (estimate 7 SU), B4 15.8 SU
+(estimate 5 SU), TPV27 p = 1 2.6 SU (estimate 1 SU).
 
 Memory: Vista compute nodes use strict overcommit (mode 2, ratio 50, no swap; read on i617-101 by the
 benchmarks thread, 2026-10-21), so a node can commit at most 118.8 GiB, half its RAM, and past that every
