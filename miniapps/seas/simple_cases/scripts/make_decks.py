@@ -13,7 +13,11 @@
 # 2026-11-01) turn on [fault_geometry] vertex_normals = "averaged": D0's and
 # D0-averaged's event 1 (the straight control off and on), D5f-averaged's
 # event 1 (the smoke run), and D5f and its 250 m refinement averaged for
-# 12,000 yr.  Run from miniapps/seas:
+# 12,000 yr; five more (2026-11-01: "do you suggest we run a few more cases
+# by adjusting the angles (similar to what UCERF fault)"; "we can smooth the
+# trace bends if needed") are smoothed bends at 250 m with averaged normals:
+# 3 and 8 deg over 10 km and over 2.5 km arcs, and a +3 / -3 deg pair of
+# 5 km arcs (SMOOTH below).  Run from miniapps/seas:
 #   python3 simple_cases/scripts/make_decks.py [--check]
 # --check: write nothing, exit 1 if a committed deck differs from what this
 # script makes (the decks are committed as made).
@@ -38,6 +42,8 @@
 # vertex-normal P3/P4 (OPTS): [fault_geometry] vertex_normals = "averaged"
 #                      (the "_avg" cases; turn threshold 5 deg, the default);
 #                      the "_ev1" cases max_dynamic_phases = 1
+# smoothed bends (SMOOTH): as P4's 250 m case (averaged, floor), on their
+#                      own meshes; region_x3's note gives the fault's own |y|
 import argparse
 import math
 import os
@@ -59,7 +65,16 @@ MESHES = {
     "arc015L10_h500": (1.5, 10000.0, 0.0, 500.0),
     "arc015L10_h250": (1.5, 10000.0, 0.0, 250.0),
     "arc015L10_h125": (1.5, 10000.0, 0.0, 125.0),
+    # the smoothed bends (2026-11-01), 250 m: 3 and 8 deg over 10 and 2.5 km
+    "arc03L10_h250": (3.0, 10000.0, 0.0, 250.0),
+    "arc08L10_h250": (8.0, 10000.0, 0.0, 250.0),
+    "arc03L2p5_h250": (3.0, 2500.0, 0.0, 250.0),
+    "arc08L2p5_h250": (8.0, 2500.0, 0.0, 250.0),
+    "sbend03L05_h250": (3.0, 5000.0, -3750.0, 250.0),
 }
+# a second, smooth bend (bend.geo's theta2_deg, arc2, s_bend2): +3 deg over
+# 5 km centred at s = -3.75 km, then -3 deg over 5 km centred at +3.75 km
+BEND2 = {"sbend03L05_h250": (-3.0, 5000.0, 3750.0)}
 
 # case: (mesh, regime, floor, plan row), in the run order
 CASES = [
@@ -86,7 +101,15 @@ CASES = [
     ("D5f_arc015L10_avg_ev1", "arc015L10_h500", "D", True, "P3 of the vertex-normal plan: D5f's event 1 with averaged vertex normals (the smoke run)"),
     ("D5f_arc015L10_avg_floor", "arc015L10_h500", "D", True, "P4 of the vertex-normal plan: D5f with averaged vertex normals"),
     ("D5f_arc015L10_h250_avg_floor", "arc015L10_h250", "D", True, "P4 of the vertex-normal plan: D5f at 250 m with averaged vertex normals"),
+    # the smoothed bends, in the run order (8 deg first)
+    ("D7f_arc08L10_h250_avg_floor", "arc08L10_h250", "D", True, "smoothed bend: 8 deg over a 10 km arc (R 71.6 km), averaged vertex normals"),
+    ("D9f_arc08L2p5_h250_avg_floor", "arc08L2p5_h250", "D", True, "smoothed bend: 8 deg over a 2.5 km arc (R 17.9 km), averaged vertex normals"),
+    ("D6f_arc03L10_h250_avg_floor", "arc03L10_h250", "D", True, "smoothed bend: 3 deg over a 10 km arc (R 191 km), averaged vertex normals"),
+    ("D8f_arc03L2p5_h250_avg_floor", "arc03L2p5_h250", "D", True, "smoothed bend: 3 deg over a 2.5 km arc (R 47.7 km), averaged vertex normals"),
+    ("D10f_sbend03L05_h250_avg_floor", "sbend03L05_h250", "D", True, "smoothed bends: +3 deg then -3 deg, 5 km arcs (R 95.5 km) 2.5 km apart, averaged vertex normals"),
 ]
+SMOOTH = ["D7f_arc08L10_h250_avg_floor", "D9f_arc08L2p5_h250_avg_floor", "D6f_arc03L10_h250_avg_floor",
+          "D8f_arc03L2p5_h250_avg_floor", "D10f_sbend03L05_h250_avg_floor"]
 
 # P0 of vertex-normal-plan-rev1 (/mnt/project-files/2d-inplane/
 # nonplanar-literature/): if the arc's vertex jump in sigma_n' is the Nitsche
@@ -107,11 +130,26 @@ OPTS = {
     "D5f_arc015L10_avg_floor": dict(averaged=True),
     "D5f_arc015L10_h250_avg_floor": dict(averaged=True),
 }
+for _c in SMOOTH:
+    OPTS[_c] = dict(averaged=True)
 
 
-def trace(u, theta_deg, arc, s_bend):
+def trace(u, theta_deg, arc, s_bend, bend2=None):
     """Point (x, y) [m] of the fault at u, its arc length from the centre of
-    the straight west part (u = x there), as mesh/bend.geo builds it."""
+    the straight west part (u = x there), as mesh/bend.geo builds it;
+    bend2 = (theta2_deg, arc2, s_bend2), the second smooth bend, or None."""
+    if bend2 is not None:
+        th2, arc2, sb2 = math.radians(bend2[0]), bend2[1], bend2[2]
+        a2s, a2e = sb2 - arc2 / 2.0, sb2 + arc2 / 2.0
+        if u > a2s:
+            th, k2 = math.radians(theta_deg), th2 / arc2
+            X2, Y2 = trace(a2s, theta_deg, arc, s_bend)
+            if u <= a2e:
+                ph = th + (u - a2s) * k2
+                return X2 + (math.sin(ph) - math.sin(th)) / k2, Y2 - (math.cos(ph) - math.cos(th)) / k2
+            X3 = X2 + (math.sin(th + th2) - math.sin(th)) / k2
+            Y3 = Y2 - (math.cos(th + th2) - math.cos(th)) / k2
+            return X3 + (u - a2e) * math.cos(th + th2), Y3 + (u - a2e) * math.sin(th + th2)
     th = math.radians(theta_deg)
     s = u - s_bend
     if arc == 0.0:
@@ -135,23 +173,28 @@ def stations(mesh):
     mid point) on the west and the east face, so each face keeps its own
     sigma_n'; bend_s<+-km> along the fault from the bend; the arc's ends."""
     th, arc, sb, lc = MESHES[mesh]
+    b2 = BEND2.get(mesh)
     out = []
     for k in range(-12, 13, 3):
-        out.append((f"fltst_s{k:+03d}", trace(k * 1e3, th, arc, sb)))
-    # 1 m along the face's chord (the fault is straight segments of lc
-    # between points on the curve), so the point lies on that face
-    v = trace(sb, th, arc, sb)
-    for name, u in (("bend_w", sb - lc), ("bend_e", sb + lc)):
-        n = trace(u, th, arc, sb)
-        L = math.hypot(n[0] - v[0], n[1] - v[1])
-        out.append((name, (v[0] + (n[0] - v[0]) / L, v[1] + (n[1] - v[1]) / L)))
-    offs = [-3.0, -1.0, 1.0, 3.0]
-    if sb + 3e3 > FAULT_HALF:
-        offs = [-3.0, -1.0, 1.0, 2.0]       # the tip is 2.5 km past the bend
-    if arc > 0.0:
-        offs = [-arc / 2e3] + offs + [arc / 2e3]
-    for d in offs:
-        out.append((f"bend_s{d:+.1f}", trace(sb + d * 1e3, th, arc, sb)))
+        out.append((f"fltst_s{k:+03d}", trace(k * 1e3, th, arc, sb, b2)))
+    # the bend set, and with a second bend the same set again (bend2_...)
+    for tag, c, a in [("bend", sb, arc)] + ([("bend2", b2[2], b2[1])] if b2 else []):
+        # 1 m along the face's chord (the fault is straight segments of lc
+        # between points on the curve), so the point lies on that face
+        v = trace(c, th, arc, sb, b2)
+        for name, u in ((tag + "_w", c - lc), (tag + "_e", c + lc)):
+            n = trace(u, th, arc, sb, b2)
+            L = math.hypot(n[0] - v[0], n[1] - v[1])
+            out.append((name, (v[0] + (n[0] - v[0]) / L, v[1] + (n[1] - v[1]) / L)))
+        offs = [-3.0, -1.0, 1.0, 3.0]
+        if c + 3e3 > FAULT_HALF:
+            offs = [-3.0, -1.0, 1.0, 2.0]       # the tip is 2.5 km past the bend
+        if a > 0.0:
+            offs = [-a / 2e3] + offs + [a / 2e3]
+        for d in offs:
+            # +-1.25 km (a 2.5 km arc's ends) keeps its second decimal
+            nm = f"{d:+.1f}" if abs(d * 10.0 - round(d * 10.0)) < 1e-9 else f"{d:+.2f}"
+            out.append((f"{tag}_s{nm}", trace(c + d * 1e3, th, arc, sb, b2)))
     return out
 
 
@@ -165,6 +208,8 @@ GO_CASE = {"D5f_arc015L10_floor":
            "# 2026-10-31: \"let's refine the mesh 1 level / 2 levels for fault and rerun\"):"}
 for _c in OPTS:
     GO_CASE[_c] = "# 2026-11-01: \"send this document to 2d thread and start implementation and test\"):"
+for _c in SMOOTH:
+    GO_CASE[_c] = "# 2026-11-01: \"we can smooth the trace bends if needed\"):"
 
 
 def header(case, mesh, regime, floor, row):
@@ -226,7 +271,9 @@ def make(case, mesh, regime, floor, row, base):
         if o.get("averaged"):
             sub("pin_min_margin  = 0.1\n",
                 "pin_min_margin  = 0.1\n"
-                "vertex_normals  = \"averaged\"   # vertex-normal plan P3/P4 (mapview_rs_fd.toml: \"face\")\n")
+                "vertex_normals  = \"averaged\"   # "
+                + ("averaged vertex normals" if case in SMOOTH else "vertex-normal plan P3/P4")
+                + " (mapview_rs_fd.toml: \"face\")\n")
     sub('prefix          = "mapview_rs_fd"', f'prefix          = "{case}"'
         + ("\nhandback_table  = true" if regime == "D" else ""))
     # stations: replace the nine fltst_x entries
@@ -239,7 +286,12 @@ def make(case, mesh, regime, floor, row, base):
     for name, (x, y) in stations(mesh):
         st += ["[[cycle.output.station]]", f'name = "{name}"', f"x    = [{x!r}, {y!r}]"]
     t = t[:i0] + "\n".join(st) + "\n\n" + t[i1:]
-    sub("region_x3       = [-1.0, 1.0]", "region_x3       = [-1.0e4, 1.0e4]   # the bent limb reaches y = 1.31 km")
+    if case in SMOOTH:
+        th, arc, sb, _ = MESHES[mesh]
+        ymax = max(abs(trace(k * 250.0, th, arc, sb, BEND2.get(mesh))[1]) for k in range(-60, 61))
+        sub("region_x3       = [-1.0, 1.0]", f"region_x3       = [-1.0e4, 1.0e4]   # the fault reaches |y| = {ymax / 1e3:.2f} km")
+    else:
+        sub("region_x3       = [-1.0, 1.0]", "region_x3       = [-1.0e4, 1.0e4]   # the bent limb reaches y = 1.31 km")
     sub("dt_dyn = 0.1\n", "dt_dyn = 0.05           # mapview_rs_fd.toml: 0.1 (sigma_n' against slip at the bend)\n")
     sub("dt_dyn  = 0.5\n", "dt_dyn  = 1.0           # mapview_rs_fd.toml: 0.5 (1 MB each; disk)\n")
     return header(case, mesh, regime, floor, row) + t

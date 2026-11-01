@@ -16,8 +16,8 @@ the simple cases, run them on local Mac".
 
 Twelve runs, listed in run order (D1f, D2f and Q1 answer the main
 questions, so they go first), then D5f, added after D1f, D5f on two
-finer fault meshes, the three P0 penalty runs, and the five runs of the
-vertex-normal plan's P3 and P4 (last rows).
+finer fault meshes, the three P0 penalty runs, the five runs of the
+vertex-normal plan's P3 and P4, and the five smoothed bends (last rows).
 
 | Case | Mesh | Regime | Floor | Why |
 |---|---|---|---|---|
@@ -44,6 +44,11 @@ vertex-normal plan's P3 and P4 (last rows).
 | D5f_arc015L10_avg_ev1 | arc015L10_h500 | fully dynamic, event 1 | 1 MPa | P3: D5f's event 1, averaged (smoke) |
 | D5f_arc015L10_avg_floor | arc015L10_h500 | fully dynamic | 1 MPa | P4: D5f, averaged |
 | D5f_arc015L10_h250_avg_floor | arc015L10_h250 | fully dynamic | 1 MPa | P4: D5f at 250 m, averaged |
+| D7f_arc08L10_h250_avg_floor | arc08L10_h250 | fully dynamic | 1 MPa | smoothed bend: 8 deg over 10 km, averaged (below) |
+| D9f_arc08L2p5_h250_avg_floor | arc08L2p5_h250 | fully dynamic | 1 MPa | smoothed bend: 8 deg over 2.5 km, averaged |
+| D6f_arc03L10_h250_avg_floor | arc03L10_h250 | fully dynamic | 1 MPa | smoothed bend: 3 deg over 10 km, averaged |
+| D8f_arc03L2p5_h250_avg_floor | arc03L2p5_h250 | fully dynamic | 1 MPa | smoothed bend: 3 deg over 2.5 km, averaged |
+| D10f_sbend03L05_h250_avg_floor | sbend03L05_h250 | fully dynamic | 1 MPa | smoothed bends: +3 then -3 deg, 5 km arcs, averaged |
 
 - **No floor (all but D1f, D2f):** a run that reaches sigma_n' <= 0 stops
   there, and that time and place is a result.
@@ -127,7 +132,9 @@ deck is its base deck plus that one line.
     unchanged (the plan asks for bit for bit; on more than one rank two
     runs of one build can differ in the last bits, so equal to round-off);
   - `D0_straight_avg_ev1` against `D0_straight_ev1`: on a straight fault
-    the option changes nothing (relative 1e-12 on sigma_n', tau, V);
+    the option changes nothing (no face frame varies, so both modes take
+    the same code path; on 4 ranks two runs of one deck differ by about
+    1e-7 after 827 yr, so the bit-for-bit check is on 1 rank, below);
   - `D5f_arc015L10_avg_ev1`: the run is clean and the event-1 vertex jump
     is far below D5f's 13.1 MPa (the target: under 1 MPa).
 - **P4** (12,000 yr, about 3 events, as D5f): `D5f_arc015L10_avg_floor`
@@ -138,6 +145,46 @@ deck is its base deck plus that one line.
 - **Output:** with the option on the driver also writes
   `<prefix>_vertices.txt`, one row per fault vertex: key, x, y, kind (0
   tip, 1 smooth, 2 kink), turn angle (deg) and n_v.
+
+### Smoothed bends: how tight can a smoothed bend be?
+
+Chunhui Zhao, 2026-11-01, after P4: "do you suggest we run a few more
+cases by adjusting the angles (similar to what UCERF fault) before we move
+back to UCERF fault configuration?"; "we can smooth the trace bends if
+needed, that's not an issue I think".
+
+- **Question:** the UCERF traces will be smoothed, so what arc is tight
+  enough to stay clean with averaged normals? The UCERF trace at 500 m
+  has about 180 vertices turning 1 to 5 deg and 5 above 5 deg (the
+  largest 8.74 deg).
+- **Cases:** P4's 250 m deck (averaged, 1 MPa floor, 12,000 yr) on five
+  meshes; each arc's ends and middle are fault points.
+
+| Case | Bend | Radius | Turn per vertex |
+|---|---|---|---|
+| D6f_arc03L10_h250_avg_floor | 3 deg over s = -5 to 5 km | 191 km | 0.075 deg |
+| D7f_arc08L10_h250_avg_floor | 8 deg over s = -5 to 5 km | 71.6 km | 0.2 deg |
+| D8f_arc03L2p5_h250_avg_floor | 3 deg over s = -1.25 to 1.25 km | 47.7 km | 0.3 deg |
+| D9f_arc08L2p5_h250_avg_floor | 8 deg over s = -1.25 to 1.25 km | 17.9 km | 0.8 deg |
+| D10f_sbend03L05_h250_avg_floor | +3 deg over s = -6.25 to -1.25 km, -3 deg over 1.25 to 6.25 km | 95.5 km | 0.15 deg |
+
+- **Comparisons:** D6f against D8f and D7f against D9f change the arc
+  length at one angle; D6f against D7f the angle at one length; D10f two
+  bends in a row (the fault ends parallel to its start, 0.39 km north).
+  All against P4's 1.5 deg arc at 250 m (`D5f_arc015L10_h250_avg_floor`).
+- **What to read:** the vertex jump (|x| <= 5 km; 7 km for D10f), the arc's
+  sigma_n' min and max and how they change per event, any tension or
+  floored DOF, event times and mean slip, the hand-backs.
+- **Expected (estimate, not tested):** the smooth drift across the arc
+  (about 1.5 MPa per event at each end of P4's 1.5 deg arc) is the bend's
+  own stress and grows with the angle; it scales with slip times
+  curvature, so the 17.9 km arc may reach tension in a few events (about
+  13 MPa per event, rough) with clean numerics. That would set the
+  smoothing limit; it is physics, not mesh.
+- **Not covered:** UCERF events slip much more than the 7.5 m here, and
+  the bend stress grows with slip; the UCERF hand-back problem does not
+  appear in any simple case so far.
+- **Order:** the 8 deg cases first (D7f, D9f), then D6f, D8f, D10f.
 
 ## Setup
 
@@ -181,8 +228,10 @@ All on the fault trace, placed by arc length u from the fault centre
 ## Meshes
 
 Made in the cloud with gmsh 4.15.2 from `../bend_convergence/mesh/bend.geo`
-(its new inputs `box` and `s_bend`; its defaults still give the nine bend
-meshes byte for byte):
+(its new inputs `box` and `s_bend`, and for the smoothed bends' pair
+`theta2_deg`, `arc2` and `s_bend2`; its defaults still give the nine bend
+meshes byte for byte, and all thirteen meshes here were remade byte for
+byte after the second bend was added):
 
 ```bash
 cd simple_cases/mesh
@@ -195,6 +244,12 @@ gmsh -2 $G -format msh22 -setnumber box 240e3 -setnumber theta_deg 1.5 -setnumbe
 gmsh -2 $G -format msh22 -setnumber box 240e3 -setnumber theta_deg 1.5 -setnumber arc 10000 -setnumber s_bend 0     -setnumber lc_fault 500 -o arc015L10_h500.msh
 gmsh -2 $G -format msh22 -setnumber box 240e3 -setnumber theta_deg 1.5 -setnumber arc 10000 -setnumber s_bend 0     -setnumber lc_fault 250 -o arc015L10_h250.msh
 gmsh -2 $G -format msh22 -setnumber box 240e3 -setnumber theta_deg 1.5 -setnumber arc 10000 -setnumber s_bend 0     -setnumber lc_fault 125 -o arc015L10_h125.msh
+# the smoothed bends (2026-11-01)
+gmsh -2 $G -format msh22 -setnumber box 240e3 -setnumber theta_deg 3   -setnumber arc 10000 -setnumber s_bend 0     -setnumber lc_fault 250 -o arc03L10_h250.msh
+gmsh -2 $G -format msh22 -setnumber box 240e3 -setnumber theta_deg 8   -setnumber arc 10000 -setnumber s_bend 0     -setnumber lc_fault 250 -o arc08L10_h250.msh
+gmsh -2 $G -format msh22 -setnumber box 240e3 -setnumber theta_deg 3   -setnumber arc 2500  -setnumber s_bend 0     -setnumber lc_fault 250 -o arc03L2p5_h250.msh
+gmsh -2 $G -format msh22 -setnumber box 240e3 -setnumber theta_deg 8   -setnumber arc 2500  -setnumber s_bend 0     -setnumber lc_fault 250 -o arc08L2p5_h250.msh
+gmsh -2 $G -format msh22 -setnumber box 240e3 -setnumber theta_deg 3   -setnumber arc 5000  -setnumber s_bend -3750 -setnumber theta2_deg -3 -setnumber arc2 5000 -setnumber s_bend2 3750 -setnumber lc_fault 250 -o sbend03L05_h250.msh
 ```
 
 | Mesh | Bend | Nodes | Triangles | sha256 |
@@ -207,9 +262,16 @@ gmsh -2 $G -format msh22 -setnumber box 240e3 -setnumber theta_deg 1.5 -setnumbe
 | arc015L10_h500 | 1.5 deg over s = -5 to 5 km | 15,637 | 30,888 | ff417d7642cfa57c981dcab948e55f69d4a6ed1883cb64743b11e88d88ecf9ce |
 | arc015L10_h250 | the same, 250 m on the fault | 19,982 | 39,578 | 6382f4f3d48496b9783079b4f201f0d66392acf5e0a30c36ebad28fc767d6fce |
 | arc015L10_h125 | the same, 125 m on the fault | 27,355 | 54,324 | ad2bcffb83e1a409e63d1173076bdfdbcacb5a7a86777bb6aa39e857183ffe9f |
+| arc03L10_h250 | 3 deg over s = -5 to 5 km, 250 m | 19,978 | 39,570 | f535f8fecae6fdcf5265d18e5d442ff3ec13b1d2949a9ca47f6cdbb44882bdd1 |
+| arc08L10_h250 | 8 deg over s = -5 to 5 km, 250 m | 20,004 | 39,622 | 102383a4cbfd420a3c21cfdddafe9e6b5ef37e49e9bbeb121b55c32336eb70e9 |
+| arc03L2p5_h250 | 3 deg over s = -1.25 to 1.25 km, 250 m | 19,957 | 39,528 | f497007515d145c22cb67b67fa0f4756fff5777bca00b0a22e5eca80d106bda5 |
+| arc08L2p5_h250 | 8 deg over s = -1.25 to 1.25 km, 250 m | 19,999 | 39,612 | 9a182625e106083f2331b96a26600fe8f39b0d6da8edd907df99854527078505 |
+| sbend03L05_h250 | +3 then -3 deg, 5 km arcs, 250 m | 19,979 | 39,572 | 85e6ff91e7d6d8d73664c6f0f198aa965238f0f40eb509d0ceb1eca1d147b376 |
 
-The 500 m meshes have 60 fault edges; arc015L10_h250 120 and arc015L10_h125
-240.
+The 500 m meshes have 60 fault edges; the 250 m meshes 120 and
+arc015L10_h125 240. On the smoothed-bend meshes every fault point lies on
+its curve to 6e-12 m, the turns add up to 3, 8 and 0 deg, and every
+station lies on a fault edge to 3e-13 m (checked in the cloud).
 
 ## Length and cost (estimates, not measured)
 
@@ -239,6 +301,9 @@ The 500 m meshes have 60 fault edges; arc015L10_h250 120 and arc015L10_h125
 - **P3 and P4 runs (estimate, not measured):** the `_ev1` runs as P0's
   at cfl 0.5, about 15 min each; D5f averaged as D5f, about 42 min; at
   250 m as D5f 250 m, about 53 min (3,189 s).
+- **Smoothed bends (estimate, not measured):** as P4's 250 m run (3,120 s
+  measured), about 50 min each, about 4.2 h for the five, with
+  `WALL_LIMIT=21600`.
 - **Refined D5f (estimate, not measured):** the dynamic dt halves each
   level and the mesh grows 1.28x and 1.75x, so the dynamic phases take about
   4 and 11 min. QD has 2x and 4x the fault nodes (N_f 240 and 480); if its
@@ -249,8 +314,8 @@ The 500 m meshes have 60 fault edges; arc015L10_h250 120 and arc015L10_h125
 
 ## Files
 
-- `mesh/*.msh`: the eight meshes (above).
-- `configs/<case>.toml`: the twenty-three decks.
+- `mesh/*.msh`: the thirteen meshes (above).
+- `configs/<case>.toml`: the twenty-eight decks.
 - `scripts/make_decks.py`: makes the decks; `--check` compares.
 - `scripts/run_simple_mac.sh`: the runs on the Mac, one after the other.
   - Checks: the GitHub-first guard; the binary's code equals HEAD
@@ -289,10 +354,12 @@ WALL_LIMIT=21600 simple_cases/scripts/run_simple_mac.sh $R 4 D5f_arc015L10_h250_
 WALL_LIMIT=3600 simple_cases/scripts/run_simple_mac.sh $R 4 D5f_arc015L10_pf1_ev1 D5f_arc015L10_pf2_ev1 D5f_arc015L10_pf4_ev1   # P0
 WALL_LIMIT=3600 simple_cases/scripts/run_simple_mac.sh $R 4 D0_straight_ev1 D0_straight_avg_ev1 D5f_arc015L10_avg_ev1   # P3
 WALL_LIMIT=21600 simple_cases/scripts/run_simple_mac.sh $R 4 D5f_arc015L10_avg_floor D5f_arc015L10_h250_avg_floor   # P4
+WALL_LIMIT=21600 simple_cases/scripts/run_simple_mac.sh $R 4 D7f_arc08L10_h250_avg_floor D9f_arc08L2p5_h250_avg_floor   # smoothed bends, 8 deg
+WALL_LIMIT=21600 simple_cases/scripts/run_simple_mac.sh $R 4 D6f_arc03L10_h250_avg_floor D8f_arc03L2p5_h250_avg_floor D10f_sbend03L05_h250_avg_floor
 python3 simple_cases/scripts/analyse_simple.py $R
 ```
 
-## Results (Mac, 2026-10-31)
+## Results (Mac, 2026-10-31 and 2026-11-01)
 
 Run with `run_simple_mac.sh` on 4 ranks; folders
 `/Users/chunhuizhao/projects/seas-mfem-2d-inplane-results/simple_cases/<case>_<commit>/`;
@@ -362,6 +429,20 @@ column is the QD balance only; their offsets are about -0.04 MPa, as above.
 - **QD only against fully dynamic (Q0 against D0):** 4 events about 3,440
   yr apart with mean slip 5.6 m, against 3 events about 4,370 yr apart
   with 7.4 m.
+- **P3 and P4, averaged vertex normals (83eeb186, 2026-11-01):**
+  - P3: `D0_straight_ev1`, `D0_straight_avg_ev1` and
+    `D5f_arc015L10_avg_ev1` exit 0 (260, 212, 208 s); event 1 at 827.01,
+    827.01 and 845.67 yr. On 1 rank, D0 averaged and face give identical
+    data (every text output and snapshot dataset). On 4 ranks they differ
+    by about 1e-7 relative, as much as a repeat of the same run.
+  - P4, event times and mean slip within 0.07% and 0.2% of face mode,
+    hand-backs as clean. The vertex jump per event: 0.44 / 0.73 / 0.99 MPa
+    at 500 m (face 13.07 / 26.44 / 40.05), 0.34 / 0.52 / 0.70 at 250 m (face
+    13.64 / 27.61 / 41.88). The arc's sigma_n' at 250 m: 24.2-26.0,
+    23.4-27.7, 22.6-29.4 MPa per event, the same at 500 m to about 0.3 MPa.
+  - The 500 m west tip is floored in events 2 and 3, as in face mode; at
+    250 m nothing is floored. Near the ends at 250 m sigma_n' reaches +12
+    and +44 MPa by event 3 (as D0's end drift).
 - **Figures (Mac):** `<case>_<commit>/gifs/` (fault and domain GIFs,
   static min / max figures); pages "D1f GIFs", "D1f vs D5f", "D5f arc
   refinement" and the summary "Simple Fault Cases"

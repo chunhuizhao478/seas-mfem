@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # The simple cases' summary (Chunhui Zhao, 2026-10-31: "go ahead with the
 # simple cases, run them on local Mac"; plan "2D plane strain simple tests
-# plan", "What we measure"): one table over the eighteen runs of
+# plan", "What we measure"): one table over the twenty-eight runs of
 # run_simple_mac.sh, and the sigma_n' histories at the bend.
 #
 # Usage (from miniapps/seas):
@@ -60,7 +60,18 @@ ORDER = ["Q0_straight", "Q1_sharp015", "Q2_sharp05", "Q3_arc05L10", "Q4_sharp015
          "D0_straight", "D1_sharp015", "D2_sharp05", "D3_arc05L10", "D4_sharp015vs",
          "D1f_sharp015_floor", "D2f_sharp05_floor", "D5f_arc015L10_floor",
          "D5f_arc015L10_h250_floor", "D5f_arc015L10_h125_floor",
-         "D5f_arc015L10_pf1_ev1", "D5f_arc015L10_pf2_ev1", "D5f_arc015L10_pf4_ev1"]
+         "D5f_arc015L10_pf1_ev1", "D5f_arc015L10_pf2_ev1", "D5f_arc015L10_pf4_ev1",
+         # vertex-normal plan P3 (event 1) and P4 (Chunhui Zhao, 2026-11-01)
+         "D0_straight_ev1", "D0_straight_avg_ev1", "D5f_arc015L10_avg_ev1",
+         "D5f_arc015L10_avg_floor", "D5f_arc015L10_h250_avg_floor",
+         # the smoothed bends, 250 m, averaged (Chunhui Zhao, 2026-11-01: "we can
+         # smooth the trace bends if needed")
+         "D6f_arc03L10_h250_avg_floor", "D7f_arc08L10_h250_avg_floor",
+         "D8f_arc03L2p5_h250_avg_floor", "D9f_arc08L2p5_h250_avg_floor",
+         "D10f_sbend03L05_h250_avg_floor"]
+# the vertex jumps' |x| range [km] where it is not 5 km: the +3 / -3 deg pair's
+# arcs reach |x| = 6.25 km
+XMAX_KM = {"D10f_sbend03L05_h250_avg_floor": 7.0}
 BEND = ["bend_w", "bend_e"]
 NEAR = ["bend_s-3.0", "bend_s-1.0", "bend_s+1.0", "bend_s+2.0", "bend_s+3.0",
         "bend_s-5.0", "bend_s+5.0"]
@@ -72,7 +83,15 @@ GEO_COL = {"straight": "#4a5560", "sharp015": "#2a78d6", "sharp05": "#c0392b",
 CASE_COL = {"D5f_arc015L10_h250_floor": "#a07fd0", "D5f_arc015L10_h125_floor": "#c6b2e6",
             # the P0 penalty scan: one orange hue, darker with the factor
             "D5f_arc015L10_pf1_ev1": "#e8a33d", "D5f_arc015L10_pf2_ev1": "#c96a24",
-            "D5f_arc015L10_pf4_ev1": "#8f3a12"}
+            "D5f_arc015L10_pf4_ev1": "#8f3a12",
+            # averaged vertex normals (P3, P4): one teal hue, lighter when refined
+            "D0_straight_avg_ev1": "#5f8f8c", "D5f_arc015L10_avg_ev1": "#0f7f7a",
+            "D5f_arc015L10_avg_floor": "#0f7f7a", "D5f_arc015L10_h250_avg_floor": "#55b3ad",
+            # the smoothed bends: blue 3 deg, red 8 deg (lighter: the 2.5 km arc),
+            # green the +3 / -3 deg pair
+            "D6f_arc03L10_h250_avg_floor": "#1f5fbf", "D8f_arc03L2p5_h250_avg_floor": "#6f9fe6",
+            "D7f_arc08L10_h250_avg_floor": "#b3261e", "D9f_arc08L2p5_h250_avg_floor": "#e77a6f",
+            "D10f_sbend03L05_h250_avg_floor": "#2f8a3e"}
 
 
 def geo_of(case):
@@ -80,7 +99,9 @@ def geo_of(case):
 
 
 def col_of(case):
-    return CASE_COL.get(case, GEO_COL[geo_of(case)])
+    # not CASE_COL.get(case, GEO_COL[...]): the default is looked up first, and
+    # the smoothed bends' geometries have no GEO_COL entry
+    return CASE_COL[case] if case in CASE_COL else GEO_COL[geo_of(case)]
 
 
 def read_table(path):
@@ -318,7 +339,7 @@ def analyse(case, d):
             st[name] = s
     r["stations"] = st
     r["fault"] = fault_snapshots(pre + "_fault_snapshots.vtkhdf")
-    r["vertex_jumps"] = vertex_jumps(pre + "_fault_snapshots.vtkhdf")
+    r["vertex_jumps"] = vertex_jumps(pre + "_fault_snapshots.vtkhdf", x_max_km=XMAX_KM.get(case, 5.0))
     return r
 
 
@@ -336,7 +357,10 @@ def main():
 
     runs, missing = {}, []
     for case in ORDER:
-        ds = sorted(glob.glob(os.path.join(a.results, case + "_*/")))
+        # exactly <case>_<commit>/: a prefix match would take D0_straight_ev1_<commit>
+        # for D0_straight
+        ds = sorted(d for d in glob.glob(os.path.join(a.results, case + "_*/"))
+                    if re.fullmatch(re.escape(case) + r"_[0-9a-f]{7,40}", os.path.basename(d.rstrip("/"))))
         if not ds:
             missing.append(case)
             continue
@@ -348,7 +372,7 @@ def main():
     L.append("friction law first saw sigma_n' <= 0 (FRIC-GUARD, km); per hand-back the QD balance max V")
     L.append("(m/s) / the fault-wide offset median(tau_qd - tau_dyn) (MPa).")
     L.append("")
-    L.append(f"{'case':20s} {'exit':>4s} {'wall':>6s} {'t_end':>8s} {'ev':>3s} "
+    L.append(f"{'case':30s} {'exit':>4s} {'wall':>6s} {'t_end':>8s} {'ev':>3s} "
              f"{'sn_min w/e':>12s} {'bend <= 0':>11s} {'FRIC-GUARD at':>18s}  {'hand-backs':s}")
     for case, r in runs.items():
         bw, be = r["stations"].get("bend_w"), r["stations"].get("bend_e")
@@ -360,7 +384,7 @@ def main():
         b0 = f"{firsts[0][0]:.1f} {'E' if firsts[0][1] else 'Q'}" if firsts else "-"
         hb = "; ".join(f"{b['V_qd']:.2g}/{fmt(b['table'] and b['table']['offset_median_mpa'], '{:+.3f}')}"
                        for b in r["handbacks"]) or "-"
-        L.append(f"{case:20s} {fmt(r['exit'], '{:d}'):>4s} {fmt(r['wall_s'], '{:d}'):>6s} "
+        L.append(f"{case:30s} {fmt(r['exit'], '{:d}'):>4s} {fmt(r['wall_s'], '{:d}'):>6s} "
                  f"{fmt(r['final_yr'], '{:.1f}'):>8s} {len(r['events']):>3d} {snm:>12s} {b0:>11s} {fg:>18s}  {hb}")
     L.append("")
     for case, r in runs.items():
@@ -400,16 +424,19 @@ def main():
                      f"{fmt(fs['first_le0_t_yr'], '{:.4f}')} yr")
         vj = r["vertex_jumps"]
         for ph, v in sorted((vj or {}).items()):
-            L.append(f"   vertex jump, dynamic phase {ph} ({v['snapshots']} snapshots): |x| <= 5 km "
+            L.append(f"   vertex jump, dynamic phase {ph} ({v['snapshots']} snapshots): "
+                     f"|x| <= {XMAX_KM.get(case, 5.0):g} km "
                      f"{fmt(v['jump_mpa'], '{:.2f}')} MPa at {v['at_km']} km, {fmt(v['t_s'], '{:.2f}')} s "
                      f"into the phase, {fmt(v['jump_end_mpa'], '{:.2f}')} at its end; whole fault "
                      f"{fmt(v['jump_all_mpa'], '{:.2f}')} at {v['all_at_km']} km")
         L.append("")
-    L.append("Vertex jumps (MPa), the largest per dynamic phase, |x| <= 5 km (vertex jumps, file comment):")
+    L.append("Vertex jumps (MPa), the largest per dynamic phase, |x| <= 5 km unless noted (vertex jumps, "
+             "file comment):")
     for case, r in runs.items():
         vj = r["vertex_jumps"]
         if vj:
-            L.append(f"   {case:26s} " + " / ".join(fmt(v["jump_mpa"], "{:.2f}") for _, v in sorted(vj.items())))
+            L.append(f"   {case:30s} " + " / ".join(fmt(v["jump_mpa"], "{:.2f}") for _, v in sorted(vj.items()))
+                     + (f"   (|x| <= {XMAX_KM[case]:g} km)" if case in XMAX_KM else ""))
     L.append("")
     if missing:
         L.append("no run folder: " + ", ".join(missing))

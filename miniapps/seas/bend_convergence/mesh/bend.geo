@@ -36,6 +36,17 @@
 //           arc centre) moves to x = s_bend on y = 0, e.g. s_bend = 12500
 //           puts a sharp bend in the creeping part (a = 0.04 from 12 km).
 //   gmsh -2 bend.geo -format msh22 -setnumber box 240e3 -setnumber theta_deg 1.5 -setnumber arc 0 -setnumber s_bend 12500 -setnumber lc_fault 500 -o sharp015vs_h500.msh
+//
+// A second, smooth bend for the smoothed-bend cases (Chunhui Zhao,
+// 2026-11-01: "we can smooth the trace bends if needed"; simple_cases/
+// README.md), off by default (theta2_deg = 0 leaves every mesh above as it
+// was):
+//   theta2_deg  the second bend's turn [deg], + left, - right;
+//   arc2        its arc length [m] (> 0: an arc of radius arc2 / |theta2|);
+//   s_bend2     the arc length s of its centre [m], past the first bend.
+// Between the bends the fault is straight at theta to the x axis, after the
+// second one at theta + theta2.
+//   gmsh -2 bend.geo -format msh22 -setnumber box 240e3 -setnumber theta_deg 3 -setnumber arc 5000 -setnumber s_bend -3750 -setnumber theta2_deg -3 -setnumber arc2 5000 -setnumber s_bend2 3750 -setnumber lc_fault 250 -o sbend03L05_h250.msh
 
 DefineConstant[ lc_fault = {500, Min 1, Max 5000, Name "Fault resolution [m]" } ];
 DefineConstant[ lc = {5e3, Min 100, Max 50e3, Name "Far-field resolution [m]" } ];
@@ -43,6 +54,9 @@ DefineConstant[ theta_deg = {5, Min 0, Max 45, Name "Bend angle [deg]" } ];
 DefineConstant[ arc = {0, Min 0, Max 30e3, Name "Arc length of the bend [m], 0 = sharp" } ];
 DefineConstant[ box = {120e3, Min 30e3, Max 1000e3, Name "Box half-width [m]" } ];
 DefineConstant[ s_bend = {0, Min -15e3, Max 15e3, Name "Arc-length position of the bend centre [m]" } ];
+DefineConstant[ theta2_deg = {0, Min -45, Max 45, Name "Second bend angle [deg], 0 = none" } ];
+DefineConstant[ arc2 = {0, Min 0, Max 30e3, Name "Arc length of the second bend [m]" } ];
+DefineConstant[ s_bend2 = {0, Min -15e3, Max 15e3, Name "Arc-length position of the second bend centre [m]" } ];
 
 Fault_half_length = 15e3;
 Xmax = box;
@@ -64,6 +78,29 @@ Plane Surface(1) = {1};
 // fault, s from -15 to 15 km in steps of lc_fault
 n = Round(2 * Fault_half_length / lc_fault);
 s0 = -arc / 2;
+If (theta2_deg != 0)
+   If (arc2 <= 0 || s_bend2 - arc2 / 2 < s_bend + arc / 2)
+      General.AbortOnError = 3;   // stop gmsh (exit 1, no mesh written)
+      Error("bend.geo: the second bend needs arc2 > 0 and to start past the first bend");
+   EndIf
+   th2 = theta2_deg * Pi / 180;
+   k2 = th2 / arc2;
+   a2s = s_bend2 - arc2 / 2;
+   a2e = s_bend2 + arc2 / 2;
+   // the point where the second arc starts (the first bend's last limb)
+   t2 = a2s - s_bend;
+   If (arc == 0)
+      X2 = t2 * Cos(th); Y2 = t2 * Sin(th);
+   Else
+      R = arc / th;
+      X2 = s0 + R * Sin(th) + (t2 + s0) * Cos(th);
+      Y2 = R * (1 - Cos(th)) + (t2 + s0) * Sin(th);
+   EndIf
+   X2 = X2 + s_bend;
+   // and where it ends
+   X3 = X2 + (Sin(th + th2) - Sin(th)) / k2;
+   Y3 = Y2 - (Cos(th + th2) - Cos(th)) / k2;
+EndIf
 For i In {0 : n}
    s = -Fault_half_length + i * lc_fault - s_bend;
    If (arc == 0)
@@ -87,6 +124,17 @@ For i In {0 : n}
       EndIf
    EndIf
    x = x + s_bend;
+   If (theta2_deg != 0)
+      u = -Fault_half_length + i * lc_fault;
+      If (u > a2s)
+         If (u <= a2e)
+            ph = th + (u - a2s) * k2;
+            x = X2 + (Sin(ph) - Sin(th)) / k2; y = Y2 - (Cos(ph) - Cos(th)) / k2;
+         Else
+            x = X3 + (u - a2e) * Cos(th + th2); y = Y3 + (u - a2e) * Sin(th + th2);
+         EndIf
+      EndIf
+   EndIf
    Point(1000 + i) = {x, y, 0, lc_fault};
 EndFor
 For i In {0 : n - 1}

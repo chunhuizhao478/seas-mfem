@@ -1,7 +1,7 @@
 #!/bin/bash
 # The simple cases on the Mac (Chunhui Zhao, 2026-10-31: "go ahead with the
 # simple cases, run them on local Mac"; 2026-10-30: "all run must be run
-# locally, and save data on local disk"): the eighteen
+# locally, and save data on local disk"): the twenty-eight
 # simple_cases/configs/*.toml decks with seas_fd_cycle_driver, one after the
 # other, each into RESULTS/<case>_<commit>/ with run.log and RUN_INFO.txt.
 # Then analyse_simple.py (README.md).
@@ -13,9 +13,10 @@
 #   simple_cases/scripts/run_simple_mac.sh RESULTS [NP [CASE ...]]
 # RESULTS the results folder (e.g.
 # /Users/chunhuizhao/projects/seas-mfem-2d-inplane-results/simple_cases),
-# NP the ranks (default 4), CASE a subset (default all eighteen, in the order
-# below: D1f, D2f and Q1 first, then the three D5f, the three P0 penalty
-# runs last).  WALL_LIMIT (env, default 2700 s)
+# NP the ranks (default 4), CASE a subset (default all twenty-eight, in the
+# order below: D1f, D2f and Q1 first, then the three D5f, the three P0
+# penalty runs, the five vertex-normal P3/P4 runs, and the five smoothed
+# bends last, 8 deg first).  WALL_LIMIT (env, default 2700 s)
 # is each run's --wall-limit: past it the driver stops at the next QD step with a
 # checkpoint (exit 8), and the script goes on to the next case; such a run
 # can be continued later with --restart from its checkpoint.
@@ -34,7 +35,7 @@ export LC_ALL=C OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 RES=${1:?usage: run_simple_mac.sh RESULTS [NP [CASE ...]]}
 NP=${2:-4}
 shift $(( $# < 2 ? $# : 2 ))
-ALL="D1f_sharp015_floor D2f_sharp05_floor Q1_sharp015 Q0_straight Q2_sharp05 Q3_arc05L10 Q4_sharp015vs D0_straight D1_sharp015 D2_sharp05 D3_arc05L10 D4_sharp015vs D5f_arc015L10_floor D5f_arc015L10_h250_floor D5f_arc015L10_h125_floor D5f_arc015L10_pf1_ev1 D5f_arc015L10_pf2_ev1 D5f_arc015L10_pf4_ev1 D0_straight_ev1 D0_straight_avg_ev1 D5f_arc015L10_avg_ev1 D5f_arc015L10_avg_floor D5f_arc015L10_h250_avg_floor"
+ALL="D1f_sharp015_floor D2f_sharp05_floor Q1_sharp015 Q0_straight Q2_sharp05 Q3_arc05L10 Q4_sharp015vs D0_straight D1_sharp015 D2_sharp05 D3_arc05L10 D4_sharp015vs D5f_arc015L10_floor D5f_arc015L10_h250_floor D5f_arc015L10_h125_floor D5f_arc015L10_pf1_ev1 D5f_arc015L10_pf2_ev1 D5f_arc015L10_pf4_ev1 D0_straight_ev1 D0_straight_avg_ev1 D5f_arc015L10_avg_ev1 D5f_arc015L10_avg_floor D5f_arc015L10_h250_avg_floor D7f_arc08L10_h250_avg_floor D9f_arc08L2p5_h250_avg_floor D6f_arc03L10_h250_avg_floor D8f_arc03L2p5_h250_avg_floor D10f_sbend03L05_h250_avg_floor"
 CASES=${*:-$ALL}
 WALL=${WALL_LIMIT:-2700}
 LOCK=${SEAS_MAC_LOCK:-/Users/chunhuizhao/projects/.seas-mac-run.lock}
@@ -49,6 +50,11 @@ mesh_of() {
    D5f_arc015L10_h250_*) echo arc015L10_h250 ;;
    D5f_arc015L10_h125_*) echo arc015L10_h125 ;;
    D5f_*) echo arc015L10_h500 ;;
+   D6f_*) echo arc03L10_h250 ;;
+   D7f_*) echo arc08L10_h250 ;;
+   D8f_*) echo arc03L2p5_h250 ;;
+   D9f_*) echo arc08L2p5_h250 ;;
+   D10f_*) echo sbend03L05_h250 ;;
    *) echo unknown ;;
    esac
 }
@@ -62,6 +68,11 @@ mesh_sha() {
    arc015L10_h500) echo ff417d7642cfa57c981dcab948e55f69d4a6ed1883cb64743b11e88d88ecf9ce ;;
    arc015L10_h250) echo 6382f4f3d48496b9783079b4f201f0d66392acf5e0a30c36ebad28fc767d6fce ;;
    arc015L10_h125) echo ad2bcffb83e1a409e63d1173076bdfdbcacb5a7a86777bb6aa39e857183ffe9f ;;
+   arc03L10_h250) echo f535f8fecae6fdcf5265d18e5d442ff3ec13b1d2949a9ca47f6cdbb44882bdd1 ;;
+   arc08L10_h250) echo 102383a4cbfd420a3c21cfdddafe9e6b5ef37e49e9bbeb121b55c32336eb70e9 ;;
+   arc03L2p5_h250) echo f497007515d145c22cb67b67fa0f4756fff5777bca00b0a22e5eca80d106bda5 ;;
+   arc08L2p5_h250) echo 9a182625e106083f2331b96a26600fe8f39b0d6da8edd907df99854527078505 ;;
+   sbend03L05_h250) echo 85e6ff91e7d6d8d73664c6f0f198aa965238f0f40eb509d0ceb1eca1d147b376 ;;
    *) echo unknown ;;
    esac
 }
