@@ -6,7 +6,10 @@
 # prepare for this case, a smooth design around this bend, and rerun"), is
 # D1f with its 1.5 deg corner rounded into a 10 km arc; two more (2026-10-31:
 # "let's refine the mesh 1 level / 2 levels for fault and rerun this
-# problem") are D5f with 250 m and 125 m on the fault.  Run from miniapps/seas:
+# problem") are D5f with 250 m and 125 m on the fault; three more (P0 of
+# vertex-normal-plan-rev1, 2026-11-01: "send this document to 2d thread and
+# start implementation and test") are D5f's event 1 with the Nitsche penalty
+# scaled by 1, 2 and 4 (OPTS below).  Run from miniapps/seas:
 #   python3 simple_cases/scripts/make_decks.py [--check]
 # --check: write nothing, exit 1 if a committed deck differs from what this
 # script makes (the decks are committed as made).
@@ -25,6 +28,9 @@
 # QD only (Q*):        [cycle] switching = false
 # fully dynamic (D*):  [cycle.output] handback_table = true
 # floor (D1f, D2f, D5f): [cycle] sigma_n_floor_pa = 1.0e6 (UCERF run8's)
+# P0 penalty scan (OPTS): [cycle] penalty_factor = 1, 2, 4; [numerics]
+#                      cfl = 0.25 in all three (D5f: 0.5); [cycle.switch]
+#                      max_dynamic_phases = 1 (stop at the end of event 1)
 import argparse
 import math
 import os
@@ -65,7 +71,24 @@ CASES = [
     ("D5f_arc015L10_floor", "arc015L10_h500", "D", True, "D1f with the bend rounded: 1.5 deg over a 10 km arc centred at x = 0"),
     ("D5f_arc015L10_h250_floor", "arc015L10_h250", "D", True, "D5f with the fault mesh refined once: 250 m on the fault"),
     ("D5f_arc015L10_h125_floor", "arc015L10_h125", "D", True, "D5f with the fault mesh refined twice: 125 m on the fault"),
+    ("D5f_arc015L10_pf1_ev1", "arc015L10_h500", "D", True, "P0 of the vertex-normal plan: D5f's event 1, penalty_factor 1, cfl 0.25"),
+    ("D5f_arc015L10_pf2_ev1", "arc015L10_h500", "D", True, "P0 of the vertex-normal plan: D5f's event 1, penalty_factor 2, cfl 0.25"),
+    ("D5f_arc015L10_pf4_ev1", "arc015L10_h500", "D", True, "P0 of the vertex-normal plan: D5f's event 1, penalty_factor 4, cfl 0.25"),
 ]
+
+# P0 of vertex-normal-plan-rev1 (/mnt/project-files/2d-inplane/
+# nonplanar-literature/): if the arc's vertex jump in sigma_n' is the Nitsche
+# penalty acting on the two faces' slip-direction mismatch, it grows with
+# penalty_factor.  The explicit step does not see the penalty
+# (solver/nitsche_cfl.hpp: dt = cfl C(p) h / (p^2 c_p)); the face stiffness
+# grows with it, so omega_max can grow up to about sqrt(4) = 2 at factor 4.
+# cfl 0.25 keeps D5f's margin (cfl 0.5 at factor 1) at factor 4; the factor
+# 1 run at the same cfl separates the step's own effect from the penalty's.
+OPTS = {
+    "D5f_arc015L10_pf1_ev1": dict(penalty=1.0, cfl=0.25, phases=1),
+    "D5f_arc015L10_pf2_ev1": dict(penalty=2.0, cfl=0.25, phases=1),
+    "D5f_arc015L10_pf4_ev1": dict(penalty=4.0, cfl=0.25, phases=1),
+}
 
 
 def trace(u, theta_deg, arc, s_bend):
@@ -122,6 +145,8 @@ GO_CASE = {"D5f_arc015L10_floor":
            "# 2026-10-31: \"let's refine the mesh 1 level / 2 levels for fault and rerun\"):",
            "D5f_arc015L10_h125_floor":
            "# 2026-10-31: \"let's refine the mesh 1 level / 2 levels for fault and rerun\"):"}
+for _c in OPTS:
+    GO_CASE[_c] = "# 2026-11-01: \"send this document to 2d thread and start implementation and test\"):"
 
 
 def header(case, mesh, regime, floor, row):
@@ -134,7 +159,8 @@ def header(case, mesh, regime, floor, row):
         "# Made by simple_cases/scripts/make_decks.py from",
         "# config/fd_cycle/mapview_rs_fd.toml; the edits are listed there and in",
         "# simple_cases/README.md.  Plane strain, no 2.5D term, +-240 km box, all",
-        "# walls absorbing in the dynamic regime, 12,000 yr.",
+        ("# walls absorbing in the dynamic regime, to the end of event 1."
+         if case in OPTS else "# walls absorbing in the dynamic regime, 12,000 yr."),
         "#",
         "# Run (Mac, from miniapps/seas): simple_cases/scripts/run_simple_mac.sh",
         "#",
@@ -167,6 +193,14 @@ def make(case, mesh, regime, floor, row, base):
         sub("penalty_factor       = 1.0       # both regimes' K\n",
             "penalty_factor       = 1.0       # both regimes' K\n"
             "sigma_n_floor_pa     = 1.0e6     # the 1 MPa floor of UCERF run8 (not in mapview_rs_fd.toml)\n")
+    o = OPTS.get(case)
+    if o:
+        if o["penalty"] != 1.0:
+            sub("penalty_factor       = 1.0       # both regimes' K\n",
+                f"penalty_factor       = {o['penalty']:.1f}       # both regimes' K (mapview_rs_fd.toml: 1.0)\n")
+        sub("cfl       = 0.5\n", f"cfl       = {o['cfl']}      # P0: penalty up to x 4 (mapview_rs_fd.toml: 0.5)\n")
+        sub("max_dynamic_phases = 0\n",
+            f"max_dynamic_phases = {o['phases']}   # P0: stop at the end of event 1 (mapview_rs_fd.toml: 0)\n")
     sub('prefix          = "mapview_rs_fd"', f'prefix          = "{case}"'
         + ("\nhandback_table  = true" if regime == "D" else ""))
     # stations: replace the nine fltst_x entries

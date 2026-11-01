@@ -15,8 +15,8 @@ the simple cases, run them on local Mac".
 ## Runs
 
 Twelve runs, listed in run order (D1f, D2f and Q1 answer the main
-questions, so they go first), then D5f, added after D1f, and D5f on two
-finer fault meshes (last rows).
+questions, so they go first), then D5f, added after D1f, D5f on two
+finer fault meshes, and the three P0 penalty runs (last rows).
 
 | Case | Mesh | Regime | Floor | Why |
 |---|---|---|---|---|
@@ -35,6 +35,9 @@ finer fault meshes (last rows).
 | D5f_arc015L10_floor | arc015L10_h500 | fully dynamic | 1 MPa | D1f with the bend rounded (added later, below) |
 | D5f_arc015L10_h250_floor | arc015L10_h250 | fully dynamic | 1 MPa | D5f with 250 m on the fault (below) |
 | D5f_arc015L10_h125_floor | arc015L10_h125 | fully dynamic | 1 MPa | D5f with 125 m on the fault (below) |
+| D5f_arc015L10_pf1_ev1 | arc015L10_h500 | fully dynamic, event 1 | 1 MPa | P0: penalty_factor 1 at cfl 0.25 (below) |
+| D5f_arc015L10_pf2_ev1 | arc015L10_h500 | fully dynamic, event 1 | 1 MPa | P0: penalty_factor 2 (below) |
+| D5f_arc015L10_pf4_ev1 | arc015L10_h500 | fully dynamic, event 1 | 1 MPa | P0: penalty_factor 4 (below) |
 
 - **No floor (all but D1f, D2f):** a run that reaches sigma_n' <= 0 stops
   there, and that time and place is a result.
@@ -76,6 +79,33 @@ MPa from vertex to vertex (Results, below).
   does the west tip's tension converge or grow as h shrinks?
 - **Stations:** the same places; `bend_w` and `bend_e` follow each mesh's
   chord, 1 m from the middle vertex.
+
+### P0: the penalty scan (vertex-normal plan)
+
+Chunhui Zhao, 2026-11-01: "send this document to 2d thread and start
+implementation and test", for
+`/mnt/project-files/2d-inplane/nonplanar-literature/vertex-normal-plan-rev1.pdf`
+(averaged vertex normals on the fault). Its phase P0 checks the mechanism
+before any code changes.
+
+- **The inferred mechanism:** at an arc vertex the two straight faces
+  prescribe the slip along two tangents a turn apart, and the Nitsche
+  penalty acts on the mismatch. If so, the vertex jump in sigma_n'
+  (about 13 MPa in event 1 at 500 m) grows with `penalty_factor`.
+- **Only three keys change** from D5f's deck:
+  - `[cycle] penalty_factor` = 1, 2, 4;
+  - `[numerics] cfl` = 0.25 (D5f: 0.5). The explicit step does not see the
+    penalty (`solver/nitsche_cfl.hpp`), but the face stiffness does, so
+    omega_max can grow up to about 2x at factor 4 (estimate). 0.25 keeps
+    D5f's margin at factor 4;
+  - `[cycle.switch] max_dynamic_phases = 1`: the run stops at the end of
+    event 1, before switching back to QD.
+- **The factor 1 run** uses the same cfl 0.25, so the step's own effect is
+  separated from the penalty's (D5f itself is factor 1 at cfl 0.5).
+- **What it answers** (analyse_simple.py, "Vertex jumps"):
+  - the jump grows with the factor (about in proportion, if the penalty
+    sets it): the mechanism holds, and P1 starts;
+  - the jump does not change: stop and look at the mechanism again.
 
 ## Setup
 
@@ -170,6 +200,10 @@ The 500 m meshes have 60 fault edges; arc015L10_h250 120 and arc015L10_h125
   phases about 96 s (about 23,000 steps each at dt 3.8e-3 s, 1.4 ms per
   step); QD about 2,400 s (775,592 RHS stages, about 3.1 ms each, with
   output). G (N_f = 120) builds in 0.3 s.
+- **P0 runs (estimate, not measured):** QD to event 1 at about 846 yr is
+  about a third of D5f's QD stages (about 13 min); the dynamic phase at
+  cfl 0.25 is about 47,000 steps (about 1 min). So about 15 min per run,
+  45 min for the three, with `WALL_LIMIT=3600`.
 - **Refined D5f (estimate, not measured):** the dynamic dt halves each
   level and the mesh grows 1.28x and 1.75x, so the dynamic phases take about
   4 and 11 min. QD has 2x and 4x the fault nodes (N_f 240 and 480); if its
@@ -181,7 +215,7 @@ The 500 m meshes have 60 fault edges; arc015L10_h250 120 and arc015L10_h125
 ## Files
 
 - `mesh/*.msh`: the eight meshes (above).
-- `configs/<case>.toml`: the fifteen decks.
+- `configs/<case>.toml`: the eighteen decks.
 - `scripts/make_decks.py`: makes the decks; `--check` compares.
 - `scripts/run_simple_mac.sh`: the runs on the Mac, one after the other.
   - Checks: the GitHub-first guard; the binary's code equals HEAD
@@ -201,7 +235,11 @@ The 500 m meshes have 60 fault edges; arc015L10_h250 120 and arc015L10_h125
     or between), the first time it is <= 0, its value after each event,
     and the slip split into event slip and creep;
   - where the friction law first saw sigma_n' <= 0 (FRIC-GUARD);
-  - the lowest sigma_n' on the whole fault (fault snapshots, needs h5py).
+  - the lowest sigma_n' on the whole fault (fault snapshots, needs h5py);
+  - the vertex jumps per dynamic phase: at each interior fault vertex the
+    largest minus the smallest sigma_n' of its DOFs (one per face), the
+    largest over the phase for |x| <= 5 km and over the whole fault, and
+    the |x| <= 5 km one at the phase's end.
 
 ## Workflow (Mac, from `miniapps/seas` of the checkout at the pushed commit)
 
@@ -213,6 +251,7 @@ R=/Users/chunhuizhao/projects/seas-mfem-2d-inplane-results/simple_cases
 simple_cases/scripts/run_simple_mac.sh $R 4
 WALL_LIMIT=3600 simple_cases/scripts/run_simple_mac.sh $R 4 D5f_arc015L10_floor   # D5f alone
 WALL_LIMIT=21600 simple_cases/scripts/run_simple_mac.sh $R 4 D5f_arc015L10_h250_floor D5f_arc015L10_h125_floor
+WALL_LIMIT=3600 simple_cases/scripts/run_simple_mac.sh $R 4 D5f_arc015L10_pf1_ev1 D5f_arc015L10_pf2_ev1 D5f_arc015L10_pf4_ev1   # P0
 python3 simple_cases/scripts/analyse_simple.py $R
 ```
 
@@ -230,9 +269,17 @@ median(tau_qd - tau_dyn) (MPa).
 | D2f | 932ccc20 | 1, 2,339 s | 854, 6,007 (6.7, 7.4 m) | 8.5e-4 / -0.060; 8.6e-4 / -0.051 |
 | Q1 | 932ccc20 | 8 (cap), 2,702 s | event 1 only | QD only |
 | D5f | fc17fbd3 | 0, 2,498 s | 846, 5,345, 9,930 (7.5, 7.5, 7.6 m) | 8.3e-4 / -0.044; 8.3e-4 / -0.045; 8.4e-4 / -0.045 |
+| D5f 250 m | 38e7ad28 | 0, 3,189 s | 843, 5,327, 9,898 (7.5, 7.5, 7.7 m) | 8.4e-4; 8.4e-4; 8.4e-4 |
+| D5f 125 m | 38e7ad28 | 1 (cancelled), 2,968 s | 841, 5,315 (7.5, 7.5 m) | 8.4e-4; 8.5e-4 |
+| D0 | 38e7ad28 | 0, 2,498 s | 827, 5,202, 9,572 (7.5, 7.3, 7.4 m) | 8.3e-4; 8.2e-4; 8.2e-4 |
+| Q0 | 38e7ad28 | 0, 2,409 s | 827, 4,258, 7,700, 11,143 (5.7, 5.6, 5.6, 5.6 m) | QD only |
 
-Q0, Q2, Q3, Q4 and D0 to D4 were not run (cancelled 2026-10-31: "cancel all
-other queued job").
+Q2, Q3, Q4 and D1 to D4 were not run (cancelled 2026-10-31: "cancel all
+other queued job"). D0 and Q0 ran later (2026-10-31: "can we also run the
+straight lines benchmark"); the 125 m run was stopped after event 2
+(2026-10-31: "you can then cancel 125m run, because we don't see much
+improvement with mesh refinement"). For the four 38e7ad28 rows the hand-back
+column is the QD balance only; their offsets are about -0.04 MPa, as above.
 
 - **Hand-backs are clean in every run,** bent or not (UCERF's: 0.253 m/s
   and -0.78 MPa). A bend alone does not reproduce the UCERF hand-back.
@@ -260,8 +307,29 @@ other queued job").
   km) goes tensile at the end of each phase: +17, -0.9, -18.2 MPa, the
   only node that used the floor (D1f's west tip: +18 to +39 MPa; the east
   tip stays near 25 MPa). Not yet explained.
+- **D5f refined, the vertex jump does not shrink with h:** the largest
+  sigma_n' jump across a vertex with |x| <= 5 km, over every dynamic
+  snapshot, per event: 13.1 / 26.4 / 40.0 MPa at 500 m, 13.6 / 27.6 / 41.9
+  at 250 m, 14.1 / 28.4 at 125 m (2 events). Event times, mean slip and
+  hand-backs agree within about 1%.
+- **The 500 m west-tip tension was the mesh:** at 250 m the west tip's
+  lowest sigma_n' is +23.3 / +18.6 / +13.8 MPa, and the floor is never
+  used at 250 or 125 m.
+- **D0, the straight control:** the same jump is 0.6 / 0.9 / 1.2 MPa, so
+  the sawtooth comes from the arc's vertices. Hand-backs are as clean as
+  on the bends.
+- **The ends drift even on a straight fault:** sigma_n' at x = -14.5 km
+  falls from 25 to 12.3 MPa by event 3 in D0 (9.6 MPa by event 4 in Q0),
+  with the tip node rising to about 30 MPa; the east end changes less. Not
+  yet explained.
+- **QD only against fully dynamic (Q0 against D0):** 4 events about 3,440
+  yr apart with mean slip 5.6 m, against 3 events about 4,370 yr apart
+  with 7.4 m.
 - **Figures (Mac):** `<case>_<commit>/gifs/` (fault and domain GIFs,
-  static min / max figures); pages "D1f GIFs" and "D1f vs D5f".
+  static min / max figures); pages "D1f GIFs", "D1f vs D5f", "D5f arc
+  refinement" and the summary "Simple Fault Cases"
+  (https://claude.ai/artifact/VWN8Gc4QZW8XLYTQvUYdHb). The jumps above are
+  the Mac's measure; analyse_simple.py's "Vertex jumps" computes the same.
 
 ## How to read the results (from the plan)
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # The simple cases' summary (Chunhui Zhao, 2026-10-31: "go ahead with the
 # simple cases, run them on local Mac"; plan "2D plane strain simple tests
-# plan", "What we measure"): one table over the fifteen runs of
+# plan", "What we measure"): one table over the eighteen runs of
 # run_simple_mac.sh, and the sigma_n' histories at the bend.
 #
 # Usage (from miniapps/seas):
@@ -31,6 +31,17 @@
 #                  events file's windows) and creep (the rest)
 #   whole fault    <case>_fault_snapshots.vtkhdf: the lowest sigma_n' of any
 #                  DOF over the snapshots (where, when)
+#   vertex jumps   the same file, per dynamic phase (2026-11-01, P0 of
+#                  vertex-normal-plan-rev1): at p = 1 the snapshot points
+#                  are per face, so each interior fault vertex has one DOF
+#                  per face at the same place; the jump there is the
+#                  largest minus the smallest sigma_n' of those DOFs.  The
+#                  largest jump over the phase's dynamic snapshots, for the
+#                  vertices with |x| <= 5 km (the arc and the corner) and
+#                  over the whole fault, and the |x| <= 5 km one in the
+#                  phase's last snapshot.  The file is opened without HDF5
+#                  file locking, so a run still writing it does not stop
+#                  the script (it then reads the snapshots written so far).
 import argparse
 import glob
 import json
@@ -48,7 +59,8 @@ YR = 365.0 * 86400.0
 ORDER = ["Q0_straight", "Q1_sharp015", "Q2_sharp05", "Q3_arc05L10", "Q4_sharp015vs",
          "D0_straight", "D1_sharp015", "D2_sharp05", "D3_arc05L10", "D4_sharp015vs",
          "D1f_sharp015_floor", "D2f_sharp05_floor", "D5f_arc015L10_floor",
-         "D5f_arc015L10_h250_floor", "D5f_arc015L10_h125_floor"]
+         "D5f_arc015L10_h250_floor", "D5f_arc015L10_h125_floor",
+         "D5f_arc015L10_pf1_ev1", "D5f_arc015L10_pf2_ev1", "D5f_arc015L10_pf4_ev1"]
 BEND = ["bend_w", "bend_e"]
 NEAR = ["bend_s-3.0", "bend_s-1.0", "bend_s+1.0", "bend_s+2.0", "bend_s+3.0",
         "bend_s-5.0", "bend_s+5.0"]
@@ -57,7 +69,10 @@ NEAR = ["bend_s-3.0", "bend_s-1.0", "bend_s+1.0", "bend_s+2.0", "bend_s+3.0",
 GEO_COL = {"straight": "#4a5560", "sharp015": "#2a78d6", "sharp05": "#c0392b",
            "arc05L10": "#1e8a5a", "sharp015vs": "#b8860b", "arc015L10": "#7b4fb5"}
 # the refined D5f runs: lighter steps of the 1.5 deg arc's purple
-CASE_COL = {"D5f_arc015L10_h250_floor": "#a07fd0", "D5f_arc015L10_h125_floor": "#c6b2e6"}
+CASE_COL = {"D5f_arc015L10_h250_floor": "#a07fd0", "D5f_arc015L10_h125_floor": "#c6b2e6",
+            # the P0 penalty scan: one orange hue, darker with the factor
+            "D5f_arc015L10_pf1_ev1": "#e8a33d", "D5f_arc015L10_pf2_ev1": "#c96a24",
+            "D5f_arc015L10_pf4_ev1": "#8f3a12"}
 
 
 def geo_of(case):
@@ -172,14 +187,24 @@ def station(path, ev):
                 t=t, sn=sn, slip=slip)
 
 
+def open_h5(path):
+    """The snapshot file, read only and without HDF5 file locking where this
+    h5py has the option (a run may still be writing it)."""
+    import h5py
+    try:
+        return h5py.File(path, "r", locking=False)
+    except TypeError:
+        return h5py.File(path, "r")
+
+
 def fault_snapshots(path):
     try:
-        import h5py
+        import h5py  # noqa: F401
     except ImportError:
         return dict(note="h5py missing: fault snapshots left out")
     if not os.path.exists(path):
         return dict(note="no fault snapshot file")
-    with h5py.File(path, "r") as f:
+    with open_h5(path) as f:
         g = f["VTKHDF"]
         n = int(np.ravel(g["NumberOfPoints"])[0])
         X = g["Points"][:n, :2]
@@ -193,6 +218,67 @@ def fault_snapshots(path):
     return dict(snapshots=len(t), sn_min_mpa=float(S[i, j] / (1e6 if abs(S).max() > 1e4 else 1.0)),
                 sn_min_at_km=[float(X[j, 0] / 1e3), float(X[j, 1] / 1e3)], sn_min_t_yr=float(t[i] / YR),
                 first_le0_t_yr=(float(t[neg[0]] / YR) if len(neg) else None))
+
+
+def vertex_jumps(path, x_max_km=5.0, tol_m=1e-3):
+    """Per dynamic phase, the sigma_n' jump at the fault vertices (file
+    comment): {phase: dict(snapshots, jump_mpa, at_km, t_s, jump_all_mpa,
+    all_at_km, jump_end_mpa)}, t_s counted from the phase's first snapshot;
+    None without h5py or the file."""
+    try:
+        import h5py  # noqa: F401
+    except ImportError:
+        return None
+    if not os.path.exists(path):
+        return None
+    with open_h5(path) as f:
+        g = f["VTKHDF"]
+        n = int(np.ravel(g["NumberOfPoints"])[0])
+        X = g["Points"][:n, :2]
+        t = g["Steps"]["Values"][:]
+        off = g["Steps"]["PointDataOffsets"]["normal_stress"][:]
+        fc = f["fd_cycle"]
+        k = min(len(off), len(fc["regime"]), len(fc["phase"]))
+        regime, phase = fc["regime"][:k], fc["phase"][:k]
+        rows = [i for i in range(k) if regime[i] == 1]
+        S = {i: g["PointData"]["normal_stress"][int(off[i]):int(off[i]) + n].ravel() for i in rows}
+    if not rows:
+        return {}
+    scale = 1e6 if max(np.abs(s).max() for s in S.values()) > 1e4 else 1.0
+    key = np.round(X / tol_m).astype(np.int64)
+    _, inv, cnt = np.unique(key, axis=0, return_inverse=True, return_counts=True)
+    inv = inv.ravel()
+    order = np.argsort(inv, kind="stable")
+    starts = np.r_[0, np.nonzero(np.diff(inv[order]))[0] + 1]
+    shared = cnt >= 2
+    # one representative point per vertex group
+    gx = X[order[starts]]
+    near = shared & (np.abs(gx[:, 0]) <= x_max_km * 1e3)
+    out = {}
+    for ph in sorted(set(int(phase[i]) for i in rows)):
+        best, best_all, end = (-1.0, None, None), (-1.0, None), None
+        prow = [i for i in rows if int(phase[i]) == ph]
+        for i in prow:
+            s = S[i][order] / scale
+            jmp = np.maximum.reduceat(s, starts) - np.minimum.reduceat(s, starts)
+            if near.any():
+                j = int(np.argmax(np.where(near, jmp, -1.0)))
+                if jmp[j] > best[0]:
+                    best = (float(jmp[j]), j, float(t[i] - t[prow[0]]))
+                end = float(jmp[near].max())
+            ja = int(np.argmax(np.where(shared, jmp, -1.0)))
+            if shared[ja] and jmp[ja] > best_all[0]:
+                best_all = (float(jmp[ja]), ja)
+        out[ph] = dict(snapshots=len(prow),
+                       jump_mpa=(best[0] if best[1] is not None else None),
+                       at_km=([float(gx[best[1], 0] / 1e3), float(gx[best[1], 1] / 1e3)]
+                              if best[1] is not None else None),
+                       t_s=best[2] if best[1] is not None else None,
+                       jump_all_mpa=(best_all[0] if best_all[1] is not None else None),
+                       all_at_km=([float(gx[best_all[1], 0] / 1e3), float(gx[best_all[1], 1] / 1e3)]
+                                  if best_all[1] is not None else None),
+                       jump_end_mpa=end)
+    return out
 
 
 def run_info(d):
@@ -232,6 +318,7 @@ def analyse(case, d):
             st[name] = s
     r["stations"] = st
     r["fault"] = fault_snapshots(pre + "_fault_snapshots.vtkhdf")
+    r["vertex_jumps"] = vertex_jumps(pre + "_fault_snapshots.vtkhdf")
     return r
 
 
@@ -311,7 +398,19 @@ def main():
             L.append(f"   fault snapshots: {fs['snapshots']}; lowest sn {fs['sn_min_mpa']:.2f} at "
                      f"{fs['sn_min_at_km']} km, {fs['sn_min_t_yr']:.4f} yr; first <= 0 "
                      f"{fmt(fs['first_le0_t_yr'], '{:.4f}')} yr")
+        vj = r["vertex_jumps"]
+        for ph, v in sorted((vj or {}).items()):
+            L.append(f"   vertex jump, dynamic phase {ph} ({v['snapshots']} snapshots): |x| <= 5 km "
+                     f"{fmt(v['jump_mpa'], '{:.2f}')} MPa at {v['at_km']} km, {fmt(v['t_s'], '{:.2f}')} s "
+                     f"into the phase, {fmt(v['jump_end_mpa'], '{:.2f}')} at its end; whole fault "
+                     f"{fmt(v['jump_all_mpa'], '{:.2f}')} at {v['all_at_km']} km")
         L.append("")
+    L.append("Vertex jumps (MPa), the largest per dynamic phase, |x| <= 5 km (vertex jumps, file comment):")
+    for case, r in runs.items():
+        vj = r["vertex_jumps"]
+        if vj:
+            L.append(f"   {case:26s} " + " / ".join(fmt(v["jump_mpa"], "{:.2f}") for _, v in sorted(vj.items())))
+    L.append("")
     if missing:
         L.append("no run folder: " + ", ".join(missing))
     open(os.path.join(out, "summary.txt"), "w").write("\n".join(L) + "\n")

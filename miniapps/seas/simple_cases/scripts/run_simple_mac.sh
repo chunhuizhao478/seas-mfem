@@ -1,7 +1,7 @@
 #!/bin/bash
 # The simple cases on the Mac (Chunhui Zhao, 2026-10-31: "go ahead with the
 # simple cases, run them on local Mac"; 2026-10-30: "all run must be run
-# locally, and save data on local disk"): the fifteen
+# locally, and save data on local disk"): the eighteen
 # simple_cases/configs/*.toml decks with seas_fd_cycle_driver, one after the
 # other, each into RESULTS/<case>_<commit>/ with run.log and RUN_INFO.txt.
 # Then analyse_simple.py (README.md).
@@ -13,8 +13,9 @@
 #   simple_cases/scripts/run_simple_mac.sh RESULTS [NP [CASE ...]]
 # RESULTS the results folder (e.g.
 # /Users/chunhuizhao/projects/seas-mfem-2d-inplane-results/simple_cases),
-# NP the ranks (default 4), CASE a subset (default all fifteen, in the order
-# below: D1f, D2f and Q1 first, the three D5f last).  WALL_LIMIT (env, default 2700 s)
+# NP the ranks (default 4), CASE a subset (default all eighteen, in the order
+# below: D1f, D2f and Q1 first, then the three D5f, the three P0 penalty
+# runs last).  WALL_LIMIT (env, default 2700 s)
 # is each run's --wall-limit: past it the driver stops at the next QD step with a
 # checkpoint (exit 8), and the script goes on to the next case; such a run
 # can be continued later with --restart from its checkpoint.
@@ -33,7 +34,7 @@ export LC_ALL=C OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 RES=${1:?usage: run_simple_mac.sh RESULTS [NP [CASE ...]]}
 NP=${2:-4}
 shift $(( $# < 2 ? $# : 2 ))
-ALL="D1f_sharp015_floor D2f_sharp05_floor Q1_sharp015 Q0_straight Q2_sharp05 Q3_arc05L10 Q4_sharp015vs D0_straight D1_sharp015 D2_sharp05 D3_arc05L10 D4_sharp015vs D5f_arc015L10_floor D5f_arc015L10_h250_floor D5f_arc015L10_h125_floor"
+ALL="D1f_sharp015_floor D2f_sharp05_floor Q1_sharp015 Q0_straight Q2_sharp05 Q3_arc05L10 Q4_sharp015vs D0_straight D1_sharp015 D2_sharp05 D3_arc05L10 D4_sharp015vs D5f_arc015L10_floor D5f_arc015L10_h250_floor D5f_arc015L10_h125_floor D5f_arc015L10_pf1_ev1 D5f_arc015L10_pf2_ev1 D5f_arc015L10_pf4_ev1"
 CASES=${*:-$ALL}
 WALL=${WALL_LIMIT:-2700}
 LOCK=${SEAS_MAC_LOCK:-/Users/chunhuizhao/projects/.seas-mac-run.lock}
