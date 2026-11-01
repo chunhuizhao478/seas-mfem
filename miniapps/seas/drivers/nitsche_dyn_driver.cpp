@@ -78,6 +78,16 @@
 // log10 theta (aging law, with V_0, f_0, b from [friction.rate_state]), psi
 // (strong rate weakening) or the slip path (slip weakening).
 //
+// Station output interval (Chunhui Zhao, 2026-10-25): [output.stations] dt
+// (s, a number or a string such as "1e-4s"; optional) writes the stations (and the copy envelopes) every
+// max(1, round(dt / dt_F)) fault steps and at the last step, dt_F being the
+// fault step (the global step, or with LTS the fault cluster's), as
+// [output] paraview_fault_dt does for the fault frames.  It cannot be
+// combined with --station-every.  Absent, the stations come every
+// --station-every steps (default 1), every bit as before.  [output.stations]
+// takes only file, snap_tolerance_m and dt: any other key aborts the run, so
+// a misspelt dt cannot fall back to every step.
+//
 // --lts-report 1 (plan item 7, local time stepping, phase P0): rank 0 prints
 // the rate-2 cluster report of solver/nitsche_lts_setup.hpp for the serial
 // mesh and the run stops before the partition.  --lts-report-cap n picks the
@@ -1684,11 +1694,37 @@ int main(int argc, char *argv[])
    std::unique_ptr<FaultStationWriter> stations;
    std::unique_ptr<StationCopyAverage> station_avg;
    std::string state_label = "log10_theta";
+   long st_every = station_every;   // header, "Station output interval"
+   bool st_last = false;
    if (t_st)
    {
       MFEM_VERIFY(t_st->is_table() && t_st->contains("file") && t_st->contains("snap_tolerance_m"),
                   "[output.stations] needs file (the station CSV) and snap_tolerance_m (m); "
                   "there are no defaults");
+      for (const auto &kv : t_st->as_table())
+      {
+         MFEM_VERIFY(kv.first == "file" || kv.first == "snap_tolerance_m" || kv.first == "dt",
+                     "[output.stations]: unknown key '" << kv.first
+                     << "' (keys: file, snap_tolerance_m, dt)");
+      }
+      if (t_st->contains("dt"))
+      {
+         // seconds, a number or a string such as "1e-4s" (as paraview_fault_dt)
+         const toml::value &v = t_st->at("dt");
+         const real_t st_dt = v.is_string() ? spatial::SpatialTimeParseSeconds(v.as_string())
+                              : TomlReal(t_st, "dt", 0.0);
+         MFEM_VERIFY(st_dt > 0.0, "[output.stations] dt = " << st_dt << "; it must be > 0 (s)");
+         MFEM_VERIFY(ArgStr(argc, argv, "--station-every", "").empty(),
+                     "[output.stations] dt and --station-every both set the station output; give one");
+         st_every = std::max(1L, std::lround(st_dt / dt));
+         st_last = true;
+         if (g_rank == 0)
+         {
+            std::cout << std::setprecision(10) << "  stations every " << st_every << " fault steps ("
+                      << st_every * dt << " s; [output.stations] dt = " << st_dt
+                      << " s) and at the last step\n";
+         }
+      }
       const std::string st_path = TomlStr(t_st, "file", "");
       const real_t snap_tol = TomlReal(t_st, "snap_tolerance_m", 0.0);
       MFEM_VERIFY(snap_tol > 0.0, "[output.stations] snap_tolerance_m = " << snap_tol
@@ -2034,7 +2070,7 @@ int main(int argc, char *argv[])
          W_fric += 0.5 * (er.t - er_prev.t) * (er.P_fric + er_prev.P_fric);
          er_prev = er;
       }
-      if (stations && s % station_every == 0)
+      if (stations && (s % st_every == 0 || (st_last && s == nsteps)))
       {
          fill_dofdata();
          if (station_avg) { station_avg->Apply(t, dofdata); }

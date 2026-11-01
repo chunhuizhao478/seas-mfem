@@ -152,6 +152,10 @@ paraview_free_surface  = "off"   # the Nitsche driver writes no free-surface sli
 [output.stations]
 file             = "tpv22/stations/tpv22_fault_stations.csv"
 snap_tolerance_m = 700.0
+# Rows every round(dt / dt_F) fault steps and at the last step (driver header,
+# "Station output interval"; Chunhui Zhao, 2026-10-25).
+# At 200 m, p = 2 and 3, dt_F is 127 and 75 us, so every step is still written.
+dt               = "1e-4s"
 
 # Linear slip weakening: mu = mu_s - (mu_s - mu_d) min(slip/d_c, 1).
 [friction.slip_weakening]
