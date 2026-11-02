@@ -18,8 +18,8 @@
 #
 # Settings: Release, ARCH=noarch (Tandem has no aarch64 target; noarch
 # compiles with -march=native and 8-byte alignment), HDF5 off (output is
-# CSV probes), Tandem's default ageing law, mpif90 and nvpl LAPACK
-# (BLA_VENDOR=NVPL, checked on the binary).  Needs tandem_petsc.sbatch
+# CSV probes), Tandem's default ageing law, mpif90 and nvpl LAPACK (named
+# library by library, checked on the binary).  Needs tandem_petsc.sbatch
 # first.  Before building it prints what it found (compilers, PETSc version
 # and memalign, Eigen, Lua, ParMETIS, numpy) and stops with the first
 # missing dependency named.  It never downloads or installs anything.
@@ -52,6 +52,16 @@ echo "=== configure ${BUILD} ==="
 case "${BUILD}" in "${TANDEM_ROOT}"/build-d3-p[1-3]) rm -rf "${BUILD}" ;; esac
 mkdir -p "${BUILD}"
 cd "${BUILD}" || exit 1
+# nvpl named library by library: CMake's BLA_VENDOR=NVPL search finds none
+# on Vista (job 1114529).  The same four libraries our PETSc links
+# (build_horizon.sh BLASLAPACK_LIB).
+[ -n "${TACC_NVPL_LIB:-}" ] || { echo "ERROR: TACC_NVPL_LIB unset (nvpl module)" >&2; exit 1; }
+NVPL_LIBS=""
+for l in nvpl_lapack_lp64_seq nvpl_lapack_core nvpl_blas_lp64_seq nvpl_blas_core; do
+   [ -f "${TACC_NVPL_LIB}/lib${l}.so" ] || { echo "ERROR: no ${TACC_NVPL_LIB}/lib${l}.so" >&2; exit 1; }
+   NVPL_LIBS="${NVPL_LIBS:+${NVPL_LIBS};}${TACC_NVPL_LIB}/lib${l}.so"
+done
+echo "nvpl: ${NVPL_LIBS}"
 cmake "${TANDEM_SRC}" \
    -DCMAKE_C_COMPILER=mpicc -DCMAKE_CXX_COMPILER=mpicxx \
    -DCMAKE_BUILD_TYPE=Release \
@@ -60,14 +70,14 @@ cmake "${TANDEM_SRC}" \
    -DPARMETIS_DIR="${TANDEM_PETSC}" -DMETIS_DIR="${TANDEM_PETSC}" \
    -DPython3_EXECUTABLE="$(command -v python3)" \
    -DCMAKE_Fortran_COMPILER=mpif90 \
-   -DBLA_VENDOR=NVPL -DBLA_SIZEOF_INTEGER=4 \
+   -DBLAS_LIBRARIES="${NVPL_LIBS}" -DLAPACK_LIBRARIES="${NVPL_LIBS}" \
    > cmake.log 2>&1 \
    || { echo "ERROR: cmake failed; tail of ${BUILD}/cmake.log:" >&2; tail -n 40 cmake.log >&2; exit 1; }
 grep -iE 'petsc|lua|eigen|parmetis|arch|fortran|lapack|blas' cmake.log | head -n 40
 # Tandem's LAPACK must be the nvpl our PETSc and MFEM use (job 1113226
 # found the system OpenBLAS and gfortran 11 instead).
 grep -q 'Found LAPACK' cmake.log \
-   || { echo "ERROR: cmake did not find LAPACK with BLA_VENDOR=NVPL; see ${BUILD}/cmake.log" >&2; exit 1; }
+   || { echo "ERROR: cmake did not find LAPACK (nvpl); see ${BUILD}/cmake.log" >&2; exit 1; }
 grep -E '^CMAKE_Fortran_COMPILER:' CMakeCache.txt
 
 echo "=== build $(date -u +%T) ==="
