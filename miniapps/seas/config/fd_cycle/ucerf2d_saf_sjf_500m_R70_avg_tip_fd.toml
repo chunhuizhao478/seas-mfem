@@ -24,6 +24,9 @@
 #   - no [cycle.probe] (it ran the first dynamic phase on for up to 240 s);
 #   - the run stops after the tenth dynamic phase (run8: 2); tfinal is a
 #     backstop;
+#   - T_max 3,600 s (run8: 1,200 s) and volume snapshots every 10 s in a
+#     dynamic phase (run8: 2 s): see [cycle.switch] and
+#     [cycle.snapshots.volume];
 #   - on-fault and saf1 off-fault stations moved onto the new traces (same
 #     rule; the cities are unchanged); the output prefix.
 # Kept: the stress tensor, Dc 0.47, b 0.03, the 1 MPa sigma_n' floor, the
@@ -153,13 +156,19 @@ penalty_factor       = 1.0
 # opt-in sigma_n' floor of the friction law in both regimes (Andy 10-30 card + "okay continue")
 sigma_n_floor_pa     = 1.0e6
 
-# The BP5-FD switch; stop after 10 dynamic phases.
+# The BP5-FD switch; stop after 10 dynamic phases.  T_max 3,600 s: the
+# first run of this deck at 52643d1d (Mac, 2026-11-01) stopped at T_max =
+# 1,200 s after event 1 (exit 4): afterslip in the NW tip zone of saf1 kept
+# max V at 1.74e-3 m/s > V_off, falling about 0.085% per second, so about
+# 1,850 s were needed (estimate); run8 (no tip zones) switched back at
+# 313.5 s (Chunhui Zhao, 2026-11-02: the card "Cap 3,600 s, 10 s volume,
+# 10 events").
 [cycle.switch]
 V_on               = 1.0e-2
 V_off              = 1.0e-3
 T_dwell            = 10.0
 T_min              = 0.0
-T_max              = 1200.0
+T_max              = 3600.0
 max_dynamic_phases = 10
 
 # All four faces absorb in the dynamic regime; the long walls keep their
@@ -617,13 +626,13 @@ dt_dyn = 0.5
 # output is the volume snapshot (displacement and velocity, east and north,
 # float64, 3 points per triangle).  Box = the faults' extent plus 100 km:
 # about 243,000 triangles on this mesh, about 35 MB per snapshot (run8's
-# mesh: 243,684, 35 MB); every 2 s in a dynamic phase (Nyquist 0.25 Hz;
-# about 5.5 GB for run8's 313 s phase, about 55 GB for 10) and
-# every 10,000 yr in the QD regime (Chunhui Zhao, 2026-10-29: "this is too
-# much, we need to reduce the size", "the sampling frequency", "let's do
-# 2s").
+# mesh: 243,684, 35 MB); every 10 s in a dynamic phase (Nyquist 0.05 Hz;
+# about 6.5 GB for a 1,850 s phase, about 65 GB for 10; Chunhui Zhao,
+# 2026-11-02, the card above; at 2 s the first run wrote 21 GB in its
+# 1,200 s phase) and every 10,000 yr in the QD regime.  The fault output
+# ([cycle.snapshots.fault], every 0.5 s) and the stations are unchanged.
 [cycle.snapshots.volume]
 dt_qd   = 3.1536e11
-dt_dyn  = 2.0
+dt_dyn  = 10.0
 box_min = [-217000.0, -578000.0]
 box_max = [430000.0, -39000.0]
