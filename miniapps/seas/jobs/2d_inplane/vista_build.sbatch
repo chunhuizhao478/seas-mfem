@@ -29,7 +29,11 @@
 #   3. the 2D tests of the BP3-FD path (tests/2d_inplane/2d_inplane.mk):
 #      test-2d-deck, test-prestress-bp3 (B7: the five BP3-FD decks on their
 #      1 km meshes, 1 and 2 ranks), test-2d-absorbing and test-absorbing-all
-#      (the dynamic regime's walls, 1 and 2 ranks)
+#      (the dynamic regime's walls, 1 and 2 ranks); and of the map-view runs
+#      (jobs/2d_inplane/vista_2d_cycle.sbatch; Chunhui Zhao, 2026-11-02):
+#      test-sigma-floor (the floor), test-relaxation (sigma_n' relaxation:
+#      the kernels, the update rule, the deck keys, and a restart through a
+#      switch back repeating the run byte for byte), test-tip-zone
 #   4. snapshots on a 2D mesh: config/fd_cycle/bp3_fd_d60_thrust.toml on its
 #      1 km mesh to the end of the first dynamic phase on 2 ranks (A), and
 #      again stopped at QD step 1200 and restarted from that checkpoint (B);
@@ -86,7 +90,8 @@ echo "commit $(cat BUILD_COMMIT_VISTA)"
 fails=0
 
 # 3. The 2D tests of the BP3-FD path
-for t in test-2d-deck test-prestress-bp3 test-2d-absorbing test-absorbing-all; do
+for t in test-2d-deck test-prestress-bp3 test-2d-absorbing test-absorbing-all \
+         test-sigma-floor test-relaxation test-tip-zone; do
    s=$(date +%s)
    $MK $t > "$RUNS/$t.log" 2>&1; rc=$?
    echo "$t exit $rc in $(( $(date +%s) - s )) s"

@@ -6,7 +6,9 @@
 //   <dir>/<prefix>_fault_snapshots.vtkhdf     on every owned fault DOF:
 //       slip_strike, slip_dip [m], slip_rate_strike, slip_rate_dip [m/s],
 //       state (theta) [s], normal_stress (sigma_n_eff, compression
-//       positive) [MPa], shear_stress_strike, shear_stress_dip [MPa]
+//       positive) [MPa], shear_stress_strike, shear_stress_dip [MPa], and
+//       with [cycle.relaxation] normal_stress_relaxation (r [MPa]: the law
+//       sees normal_stress - r, then the floor; Chunhui Zhao, 2026-11-02)
 //   <dir>/<prefix>_surface_snapshots.vtkhdf   on the free surface:
 //       displacement, velocity (global XYZ) [m, m/s]
 //   <dir>/<prefix>_volume_snapshots.vtkhdf    on the elements (all, or those
@@ -478,6 +480,7 @@ public:
          fault_.fields = {{"slip_strike", 1}, {"slip_dip", 1}, {"slip_rate_strike", 1},
                           {"slip_rate_dip", 1}, {"state", 1}, {"normal_stress", 1},
                           {"shear_stress_strike", 1}, {"shear_stress_dip", 1}};
+         if (cfg.Relaxation()) { fault_.fields.push_back({"normal_stress_relaxation", 1}); }
          Open_(fault_, "fault", restart, commit,
                "fd_cycle fault snapshots: slip [m], slip rate [m/s] (kernel strike and dip "
                "components, as the station files), state theta [s], normal stress "
@@ -968,10 +971,15 @@ private:
       MFEM_VERIFY(f.slip_strike.Size() == N && f.sigma_n.Size() == N && f.theta.Size() == N,
                   "snapshots: the regime filled " << f.slip_strike.Size() << " fault values "
                   "(sigma_n " << f.sigma_n.Size() << ") for " << N << " owned DOFs");
-      std::vector<double> loc(static_cast<size_t>(kFaultFields * N));
+      // kFaultFields, plus normal_stress_relaxation with [cycle.relaxation]
+      const int nf = static_cast<int>(fault_.fields.size());
+      const bool relax = (nf == kFaultFields + 1);
+      MFEM_VERIFY(!relax || f.sigma_red.Size() == N, "snapshots: the regime filled "
+                  << f.sigma_red.Size() << " relaxation values for " << N << " owned DOFs");
+      std::vector<double> loc(static_cast<size_t>(nf * N));
       for (int j = 0; j < N; j++)
       {
-         double *r = &loc[static_cast<size_t>(kFaultFields * j)];
+         double *r = &loc[static_cast<size_t>(nf * j)];
          r[0] = f.slip_strike(j);
          r[1] = f.slip_dip(j);
          r[2] = f.V_strike(j);
@@ -980,9 +988,10 @@ private:
          r[5] = f.sigma_n(j) / 1e6;
          r[6] = -(f.tau_a_strike(j) + f.tau_b_strike(j) + f.eta * f.V_strike(j)) / 1e6;
          r[7] = -(f.tau_a_dip(j) + f.tau_b_dip(j) + f.eta * f.V_dip(j)) / 1e6;
+         if (relax) { r[8] = f.sigma_red(j) / 1e6; }
       }
       std::vector<std::vector<double>> all;
-      GatherFields_(fault_, loc, std::vector<int>(kFaultFields, 1), all);
+      GatherFields_(fault_, loc, std::vector<int>(nf, 1), all);
       Append_(fault_, t, regime, phase, reason, step, all);
    }
 

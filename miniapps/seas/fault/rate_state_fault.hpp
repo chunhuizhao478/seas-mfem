@@ -278,6 +278,24 @@ public:
    }
    real_t SigmaNFloor() const { return sigma_floor_; }
 
+   /// Opt-in normal-stress reduction (Chunhui Zhao, 2026-11-02: sigma_n'
+   /// relaxation for the UCERF 2-D runs, cycle/normal_stress_relaxation.hpp):
+   /// with `red` non-null (NumNodes() values, Pa, compression positive) the
+   /// BP5 vector path's law sees sigma_n_eff - red(i), and then the floor,
+   /// at every node (ComputeRHS, RecomputeSlipRate, their kernels and host
+   /// reruns, the floor counts).  The caller owns `red` and may change its
+   /// values between calls.  Null (the default) is off: every bit unchanged.
+   void SetSigmaNReduction(const Vector *red)
+   {
+      MFEM_VERIFY(SlipComponents == 2 || red == nullptr,
+                  "SetSigmaNReduction: the BP5 vector path only");
+      MFEM_VERIFY(red == nullptr || red->Size() == num_nodes_,
+                  "SetSigmaNReduction: " << red->Size() << " values for "
+                  << num_nodes_ << " fault nodes");
+      sigma_red_ = red;
+   }
+   const Vector *SigmaNReduction() const { return sigma_red_; }
+
    /// Where the floor acted on this rank since the last ResetFloorStats:
    /// ComputeRHS calls with a floored node, the most nodes floored in one
    /// call, and the lowest true sigma_n_eff below the floor with its node.
@@ -1223,6 +1241,7 @@ private:
       in.a = &a_values_;
       in.eta = &eta_values_;
       in.sigma_floor = sigma_floor_;
+      in.sigma_red = sigma_red_;
       return in;
    }
 
@@ -1231,12 +1250,14 @@ private:
    void CountFloored_(const Vector *normal_traction) const
    {
       if (normal_traction) { normal_traction->HostRead(); }
+      if (sigma_red_) { sigma_red_->HostRead(); }
       HostReadParams_();
       int n = 0;
       for (int i = 0; i < num_nodes_; i++)
       {
          const real_t sigma_n_pre = SigmaNAt_(i);
-         const real_t s = normal_traction ? sigma_n_pre + (*normal_traction)(i) : sigma_n_pre;
+         real_t s = normal_traction ? sigma_n_pre + (*normal_traction)(i) : sigma_n_pre;
+         if (sigma_red_) { s -= (*sigma_red_)(i); }
          if (s < sigma_floor_)
          {
             n++;
@@ -1277,6 +1298,7 @@ private:
       traction.HostRead();
       state.HostRead();
       if (normal_traction) { normal_traction->HostRead(); }
+      if (sigma_red_) { sigma_red_->HostRead(); }
       HostReadParams_();
       const Vector &a_values = geom_->GetAValues();
       const Vector &eta_values = geom_->GetEtaValues();
@@ -1306,6 +1328,8 @@ private:
                // No floor — match Tandem exactly.
                sigma_n_eff = sigma_n_pre + (*normal_traction)(i);
             }
+            // SetSigmaNReduction: less the reduction, as in the kernel
+            if (sigma_red_) { sigma_n_eff -= (*sigma_red_)(i); }
 
             // v58: catch first non-finite friction input or sigma_n_eff <= 0
             {
@@ -1395,6 +1419,7 @@ private:
       traction.HostRead();
       state.HostRead();
       if (normal_traction) { normal_traction->HostRead(); }
+      if (sigma_red_) { sigma_red_->HostRead(); }
       HostReadParams_();
       V_out.SetSize(SlipComponents * num_nodes_);
       V_out.HostWrite();
@@ -1417,6 +1442,8 @@ private:
             {
                sigma_n_eff = sigma_n_pre + (*normal_traction)(i);
             }
+            // SetSigmaNReduction: less the reduction, as in the kernel
+            if (sigma_red_) { sigma_n_eff -= (*sigma_red_)(i); }
             // SetSigmaNFloor: the law sees the floor, as in the kernel
             if (sigma_floor_ > 0.0 && sigma_n_eff < sigma_floor_) { sigma_n_eff = sigma_floor_; }
 
@@ -1430,6 +1457,8 @@ private:
 
    /// SetSigmaNFloor (0 = off) and where it acted.
    real_t sigma_floor_ = 0.0;
+   /// SetSigmaNReduction (null = off; not owned).
+   const Vector *sigma_red_ = nullptr;
    mutable FloorStats floor_stats_;
 
    /// GPU plan G4: the aging law in psi form behind evolution_, or null.

@@ -244,6 +244,45 @@ reduce the spikes of normal stress on both fault ends".
     nucleation lengths), so their events change too.
 - **Order:** T1, T2, T3, after the smoothed bends.
 
+### Relaxation: D9f with sigma_n' relaxation and a 10 MPa floor
+
+Chunhui Zhao, 2026-11-02: "implement the relaxation, test and verify it,
+and apply to UCERF 2D plane strain, with 10MPa cap, and rerun the problem".
+Design: `/mnt/project-files/2d-inplane/relaxation/relaxation-design-rev0.md`
+(Ozawa, Ando & Dunham 2023, eq. 6, normal stress only).
+
+- **The functionality:** `[cycle.relaxation] t_relax_yr`
+  (`cycle/normal_stress_relaxation.hpp`), off when absent:
+
+  ```
+  sigma_law = max(sigma0 + dsig - r, sigma_floor)      both regimes
+  dr/dt     = (dsig - r) / t_r                        QD regime; r = 0 at t = 0
+  ```
+
+  - dsig: the elastic normal-traction change (slip plus loading).
+  - r is frozen in the dynamic regime (the normal-stress hook).
+  - The bulk and the outputs keep the elastic stress; the fault
+    snapshots add `normal_stress_relaxation` (r, MPa).
+- **Cases:** D9f (8 deg over 2.5 km, R 17.9 km, the tightest smoothed
+  bend; 2 events in 12,000 yr, 3 DOFs on the 1 MPa floor at event 2),
+  with the floor at 10 MPa (the UCERF rerun's) and 30,000 yr (about 5
+  events, estimate):
+
+  | Case | Floor | Relaxation |
+  |---|---|---|
+  | `D9f_arc08L2p5_h250_avg_floor10` | 10 MPa | none |
+  | `D9f_arc08L2p5_h250_avg_floor10_relax5k` | 10 MPa | t_r = 5,000 yr |
+
+- **What to read:** sigma_n' of the law (`normal_stress` -
+  `normal_stress_relaxation`) at the arc ends per event: with relaxation
+  it should level off, without it keep falling to the floor; on DOFs
+  away from the bend, r against a (t - t_r (1 - exp(-t / t_r))) of the
+  load drift a. Also event times and slip, the floored DOFs, the
+  hand-backs.
+- **Expected (estimate, not tested):** the D9f arc-end notch (about
+  15-30 MPa per event) is large next to 25 MPa, so the 10 MPa floor still
+  acts in both runs; relaxation should shorten how long DOFs sit on it.
+
 ## Setup
 
 All the decks are `config/fd_cycle/mapview_rs_fd.toml` with the edits
@@ -375,7 +414,7 @@ station lies on a fault edge to 3e-13 m (checked in the cloud).
 ## Files
 
 - `mesh/*.msh`: the thirteen meshes (above).
-- `configs/<case>.toml`: the thirty-one decks.
+- `configs/<case>.toml`: the thirty-three decks.
 - `scripts/make_decks.py`: makes the decks; `--check` compares.
 - `scripts/run_simple_mac.sh`: the runs on the Mac, one after the other.
   - Checks: the GitHub-first guard; the binary's code equals HEAD

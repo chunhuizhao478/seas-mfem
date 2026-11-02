@@ -19,7 +19,11 @@
 //      clock, file sizes, the open event's per-DOF arrays).  V1 (P1) had no
 //      phase count, which reads as 0, and no catalog last-above time (see
 //      ReadCycleCheckpoint); V1 and V2 have no snapshot record; V1 to V3
-//      have no digest and no benchmark state.
+//      have no digest and no benchmark state.  With [cycle.relaxation] the
+//      block is FD_CYCLE_V5: V4 and the relaxation record (t_relax, t_n, and
+//      r_n and dsig_n per owned fault DOF, cycle/normal_stress_relaxation.hpp;
+//      Chunhui Zhao, 2026-11-02).  Without it the block stays V4, byte for
+//      byte as before.
 // Blocks 1 and 2 are written by the existing functions unchanged, so the
 // readers of seas_bp5_full can read the first two blocks.
 //
@@ -72,6 +76,11 @@ struct CheckpointInfo
    real_t fault_digest = std::numeric_limits<real_t>::quiet_NaN();
    bool bench = false;                         ///< V4: [cycle.benchmark] was on
    BenchmarkOutput::State bench_state;
+   /// V5: [cycle.relaxation] was on; then t_relax [s], t_n [s], r_n and
+   /// dsig_n [Pa] per owned fault DOF.
+   bool relax = false;
+   real_t relax_t_relax = 0.0, relax_t_n = 0.0;
+   Vector relax_r, relax_d;
 };
 
 /// A number that changes when this rank's owned fault DOFs (positions, 3 N)
@@ -111,7 +120,7 @@ inline void WriteCycleCheckpoint(const std::string &prefix, const CheckpointInfo
       MFEM_VERIFY(out.good(), "WriteCycleCheckpoint: cannot append to " << fn);
       const FdCycleOutput::State &o = info.out;
       out << std::setprecision(17) << std::scientific;
-      out << "FD_CYCLE_V4\n";
+      out << (info.relax ? "FD_CYCLE_V5\n" : "FD_CYCLE_V4\n");
       out << "commit " << info.commit << "\n";
       out << "ic " << info.ic << "\n";
       out << "regime " << info.regime << "\n";
@@ -152,6 +161,18 @@ inline void WriteCycleCheckpoint(const std::string &prefix, const CheckpointInfo
          {
             out << names[k] << " " << vs[k]->Size();
             for (int i = 0; i < vs[k]->Size(); i++) { out << " " << (*vs[k])(i); }
+            out << "\n";
+         }
+      }
+      if (info.relax)
+      {
+         MFEM_VERIFY(info.relax_r.Size() == info.relax_d.Size(),
+                     "WriteCycleCheckpoint: relaxation r and dsig sizes differ");
+         out << "relax " << info.relax_t_relax << " " << info.relax_t_n << " "
+             << info.relax_r.Size() << "\n";
+         for (const Vector *v : {&info.relax_r, &info.relax_d})
+         {
+            for (int i = 0; i < v->Size(); i++) { out << (i ? " " : "") << (*v)(i); }
             out << "\n";
          }
       }
@@ -200,8 +221,9 @@ inline void ReadCycleCheckpoint(const std::string &prefix, const std::string &co
       if (tok == "FD_CYCLE_V2") { version = 2; break; }
       if (tok == "FD_CYCLE_V3") { version = 3; break; }
       if (tok == "FD_CYCLE_V4") { version = 4; break; }
+      if (tok == "FD_CYCLE_V5") { version = 5; break; }
    }
-   MFEM_VERIFY(version > 0, "ReadCycleCheckpoint: " << fn << " has no FD_CYCLE_V1-V4 "
+   MFEM_VERIFY(version > 0, "ReadCycleCheckpoint: " << fn << " has no FD_CYCLE_V1-V5 "
                "block (not written by seas_fd_cycle_driver)");
    auto tag = [&](const char *want)
    {
@@ -283,6 +305,19 @@ inline void ReadCycleCheckpoint(const std::string &prefix, const std::string &co
             vs[k]->SetSize(n);
             for (int i = 0; i < n; i++) { in >> (*vs[k])(i); }
          }
+      }
+   }
+   info.relax = false;
+   if (version >= 5)
+   {
+      int n = -1;
+      tag("relax"); in >> info.relax_t_relax >> info.relax_t_n >> n;
+      MFEM_VERIFY(n >= 0, "ReadCycleCheckpoint: " << fn << ": relaxation size " << n);
+      info.relax = true;
+      for (Vector *v : {&info.relax_r, &info.relax_d})
+      {
+         v->SetSize(n);
+         for (int i = 0; i < n; i++) { in >> (*v)(i); }
       }
    }
    MFEM_VERIFY(!in.fail(), "ReadCycleCheckpoint: " << fn << ": cannot read the cycle block");

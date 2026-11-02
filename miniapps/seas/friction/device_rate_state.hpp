@@ -44,6 +44,12 @@ namespace seas
 /// sets kRSSigmaNFloored (no print, no stop).  sigma_floor = 0 (the default)
 /// leaves every bit unchanged.
 ///
+/// Opt-in normal-stress reduction (Chunhui Zhao, 2026-11-02: sigma_n'
+/// relaxation for the UCERF 2-D runs, cycle/normal_stress_relaxation.hpp):
+/// with RSFaultInputs::sigma_red non-null the law sees sigma_n_eff -
+/// sigma_red[i], before the floor.  Null (the default) leaves every bit
+/// unchanged.
+///
 /// A kernel cannot print or abort.  Where the host code prints or aborts, a
 /// node sets a bit in its status word instead (RSStatus), and the caller
 /// reruns the host code, which prints today's lines and aborts as before.
@@ -359,6 +365,9 @@ struct RSFaultInputs
    const Vector *a;
    const Vector *eta;
    real_t sigma_floor = 0.0;   ///< > 0: the law sees max(sigma_n_eff, it)
+   /// per-node amount taken off sigma_n_eff before the floor (Pa,
+   /// compression positive), or nullptr (the default: nothing)
+   const Vector *sigma_red = nullptr;
 };
 
 /// The normal stress the law sees: sigma_n_eff, or the floor where
@@ -397,6 +406,7 @@ inline RSReduceValue RSFaultRHS(int N, bool use_dev, const RSDeviceParams &prm,
    real_t *VS = slip_rate.Write(use_dev);
    const RSDeviceParams p = prm;
    const real_t fl = in.sigma_floor;
+   const real_t *RED = in.sigma_red ? in.sigma_red->Read(use_dev) : nullptr;
 
    RSReduceValue res;
    res.first = 0.0;
@@ -408,8 +418,9 @@ inline RSReduceValue RSFaultRHS(int N, bool use_dev, const RSDeviceParams &prm,
       const real_t tau1 = TP[2*i + 1] + T[2*i + 1];
       const real_t sigma_n_pre = SN ? SN[i] : sn0;
       int status = 0;
-      const real_t sigma_n_eff =
-         RSFlooredSigmaN(TN ? sigma_n_pre + TN[i] : sigma_n_pre, fl, status);
+      real_t sigma_n_el = TN ? sigma_n_pre + TN[i] : sigma_n_pre;
+      if (RED) { sigma_n_el -= RED[i]; }
+      const real_t sigma_n_eff = RSFlooredSigmaN(sigma_n_el, fl, status);
       real_t V_0, V_1, dpsi;
       const real_t V_abs = RSNodeRHS(psi, tau0, tau1, sigma_n_eff, A[i],
                                      ETA[i], DC[i], p, V_0, V_1, dpsi, status);
@@ -442,6 +453,7 @@ inline int RSFaultSlipRate(int N, bool use_dev, real_t V0,
    const real_t *ETA = in.eta->Read(use_dev);
    real_t *VO = V.Write(use_dev);
    const real_t fl = in.sigma_floor;
+   const real_t *RED = in.sigma_red ? in.sigma_red->Read(use_dev) : nullptr;
 
    RSReduceValue res;
    res.first = 0.0;
@@ -453,8 +465,9 @@ inline int RSFaultSlipRate(int N, bool use_dev, real_t V0,
       const real_t tau1 = TP[2*i + 1] + T[2*i + 1];
       const real_t sigma_n_pre = SN ? SN[i] : sn0;
       int status = 0;
-      const real_t sigma_n_eff =
-         RSFlooredSigmaN(TN ? sigma_n_pre + TN[i] : sigma_n_pre, fl, status);
+      real_t sigma_n_el = TN ? sigma_n_pre + TN[i] : sigma_n_pre;
+      if (RED) { sigma_n_el -= RED[i]; }
+      const real_t sigma_n_eff = RSFlooredSigmaN(sigma_n_el, fl, status);
       real_t V_0, V_1;
       RSSolveSlipRateVectorPsi(tau0, tau1, psi, sigma_n_eff, ETA[i], A[i], V0,
                                V_0, V_1, status);

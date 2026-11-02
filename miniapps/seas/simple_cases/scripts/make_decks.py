@@ -22,7 +22,10 @@
 # previous 1.5 degree fault with averaged normal") are P4's 250 m D5f with
 # [cycle.fields.a] kind = "tip_zone" (a measured along the fault from each
 # tip): stronger (a = 0.08), wider (from 6 km of each tip) and both
-# (TIPZONE below).  Run from miniapps/seas:
+# (TIPZONE below); two more (2026-11-02: "implement the relaxation, test and
+# verify it, and apply to UCERF 2D plane strain, with 10MPa cap") are D9f
+# with the floor at 10 MPa for 30,000 yr, without and with sigma_n'
+# relaxation, t_r 5 kyr (RELAX below).  Run from miniapps/seas:
 #   python3 simple_cases/scripts/make_decks.py [--check]
 # --check: write nothing, exit 1 if a committed deck differs from what this
 # script makes (the decks are committed as made).
@@ -52,6 +55,10 @@
 # tip zones (TIPZONE): as P4's 250 m case (averaged, floor, its mesh), with
 #                      [cycle.fields.a] kind = "tip_zone" in place of the
 #                      rect taper; region_x3's note gives the fault's own |y|
+# relaxation (RELAX):  as D9f (averaged, its mesh), with [cycle]
+#                      sigma_n_floor_pa = 10.0e6, [time] tfinal 30,000 yr,
+#                      and in the _relax case [cycle.relaxation]
+#                      t_relax_yr = 5000
 import argparse
 import math
 import os
@@ -119,6 +126,8 @@ CASES = [
     ("D5f_arc015L10_h250_avg_floor_T1a08", "arc015L10_h250", "D", True, "tip zone T1 (stronger): P4's 250 m D5f with a = 0.08 within 3 km of each tip, 2 km taper"),
     ("D5f_arc015L10_h250_avg_floor_T2w8", "arc015L10_h250", "D", True, "tip zone T2 (wider): P4's 250 m D5f with a = 0.04 within 6 km of each tip, 2 km taper"),
     ("D5f_arc015L10_h250_avg_floor_T3a08w8", "arc015L10_h250", "D", True, "tip zone T3 (both): P4's 250 m D5f with a = 0.08 within 6 km of each tip, 2 km taper"),
+    ("D9f_arc08L2p5_h250_avg_floor10", "arc08L2p5_h250", "D", True, "relaxation control: D9f with the sigma_n' floor at 10 MPa, 30,000 yr, no relaxation"),
+    ("D9f_arc08L2p5_h250_avg_floor10_relax5k", "arc08L2p5_h250", "D", True, "relaxation V1: D9f with sigma_n' relaxation (t_r 5 kyr) and the floor at 10 MPa, 30,000 yr"),
 ]
 SMOOTH = ["D7f_arc08L10_h250_avg_floor", "D9f_arc08L2p5_h250_avg_floor", "D6f_arc03L10_h250_avg_floor",
           "D8f_arc03L2p5_h250_avg_floor", "D10f_sbend03L05_h250_avg_floor"]
@@ -159,6 +168,18 @@ TIPZONE = {
     "D5f_arc015L10_h250_avg_floor_T3a08w8": dict(width=8.0e3, taper=2.0e3, tip=0.08),
 }
 for _c in TIPZONE:
+    OPTS[_c] = dict(averaged=True)
+
+# sigma_n' relaxation (relaxation design rev 0, V1): D9f, the tightest
+# smoothed bend (R 17.9 km, 25 MPa sigma_n'), whose two events in 12,000 yr
+# put 3 DOFs on the 1 MPa floor at event 2; here the floor is 10 MPa (the
+# UCERF rerun's) and the run 30,000 yr (about 5 events), once without and
+# once with relaxation ([cycle.relaxation], cycle/normal_stress_relaxation.hpp).
+RELAX = {
+    "D9f_arc08L2p5_h250_avg_floor10": dict(floor=10.0e6, years=30000.0, t_relax_yr=None),
+    "D9f_arc08L2p5_h250_avg_floor10_relax5k": dict(floor=10.0e6, years=30000.0, t_relax_yr=5000.0),
+}
+for _c in RELAX:
     OPTS[_c] = dict(averaged=True)
 
 
@@ -240,6 +261,8 @@ for _c in SMOOTH:
     GO_CASE[_c] = "# 2026-11-01: \"we can smooth the trace bends if needed\"):"
 for _c in TIPZONE:
     GO_CASE[_c] = "# 2026-11-01: \"add functionality about velocity strengthening patch\"):"
+for _c in RELAX:
+    GO_CASE[_c] = "# 2026-11-02: \"implement the relaxation, test and verify it\"):"
 
 
 def header(case, mesh, regime, floor, row):
@@ -248,13 +271,14 @@ def header(case, mesh, regime, floor, row):
         GO_CASE.get(case, GO),
         f"# {row}.",
         f"# {'QD only' if regime == 'Q' else 'Fully dynamic (QD and dynamic regimes)'}, mesh {mesh}"
-        + (", sigma_n' floor 1 MPa." if floor else ", no sigma_n' floor."),
+        + ((f", sigma_n' floor {RELAX[case]['floor'] / 1e6:g} MPa." if case in RELAX
+            else ", sigma_n' floor 1 MPa.") if floor else ", no sigma_n' floor."),
         "# Made by simple_cases/scripts/make_decks.py from",
         "# config/fd_cycle/mapview_rs_fd.toml; the edits are listed there and in",
         "# simple_cases/README.md.  Plane strain, no 2.5D term, +-240 km box, all",
         ("# walls absorbing in the dynamic regime, to the end of event 1."
          if OPTS.get(case, {}).get("phases") == 1
-         else "# walls absorbing in the dynamic regime, 12,000 yr."),
+         else f"# walls absorbing in the dynamic regime, {RELAX.get(case, {}).get('years', T_FINAL_YR):,.0f} yr."),
         "#",
         "# Run (Mac, from miniapps/seas): simple_cases/scripts/run_simple_mac.sh",
         "#",
@@ -278,15 +302,29 @@ def make(case, mesh, regime, floor, row, base):
         sub("# 500 m on the fault, in m.", f"# {lc:.0f} m on the fault (mapview_rs_fd.toml: 500 m), in m.")
         sub("# Dense G: N_f = 120 at p = 1 on the 500 m mesh.",
             f"# Dense G: N_f = {round(2 * 30e3 / lc)} at p = 1 on this {lc:.0f} m mesh (120 at 500 m).")
+    years = RELAX.get(case, {}).get("years", T_FINAL_YR)
     sub("# 1500 yr of 365 days.\n[time]\ntfinal     = 4.7304e10",
-        f"# {T_FINAL_YR:,.0f} yr of 365 days (mapview_rs_fd.toml: 1500 yr).\n[time]\n"
-        f"tfinal     = {T_FINAL_YR * YR:.6e}")
+        f"# {years:,.0f} yr of 365 days (mapview_rs_fd.toml: 1500 yr).\n[time]\n"
+        f"tfinal     = {years * YR:.6e}")
     if regime == "Q":
         sub("switching            = true", "switching            = false   # QD only (mapview_rs_fd.toml: true)")
-    if floor:
+    if floor and case in RELAX:
+        sub("penalty_factor       = 1.0       # both regimes' K\n",
+            "penalty_factor       = 1.0       # both regimes' K\n"
+            f"sigma_n_floor_pa     = {RELAX[case]['floor'] / 1e6:.1f}e6    # the UCERF rerun's 10 MPa floor (Chunhui Zhao, 2026-11-02:"
+            " \"with 10MPa cap\"; D9f: 1 MPa)\n")
+    elif floor:
         sub("penalty_factor       = 1.0       # both regimes' K\n",
             "penalty_factor       = 1.0       # both regimes' K\n"
             "sigma_n_floor_pa     = 1.0e6     # the 1 MPa floor of UCERF run8 (not in mapview_rs_fd.toml)\n")
+    if RELAX.get(case, {}).get("t_relax_yr"):
+        sub("# The BP5-FD switch.\n[cycle.switch]\n",
+            "# sigma_n' relaxation (make_decks.py RELAX; cycle/normal_stress_relaxation.hpp):\n"
+            "# the friction law sees sigma0 + dsig - r, dr/dt = (dsig - r) / t_r in the QD\n"
+            "# regime, r frozen in the dynamic regime; the outputs keep the elastic sigma_n'.\n"
+            "[cycle.relaxation]\n"
+            f"t_relax_yr = {RELAX[case]['t_relax_yr']:.1f}\n\n"
+            "# The BP5-FD switch.\n[cycle.switch]\n")
     o = OPTS.get(case)
     if o:
         if o.get("penalty", 1.0) != 1.0:
@@ -302,7 +340,7 @@ def make(case, mesh, regime, floor, row, base):
             sub("pin_min_margin  = 0.1\n",
                 "pin_min_margin  = 0.1\n"
                 "vertex_normals  = \"averaged\"   # "
-                + ("averaged vertex normals" if case in SMOOTH or case in TIPZONE
+                + ("averaged vertex normals" if case in SMOOTH or case in TIPZONE or case in RELAX
                    else "vertex-normal plan P3/P4")
                 + " (mapview_rs_fd.toml: \"face\")\n")
     sub('prefix          = "mapview_rs_fd"', f'prefix          = "{case}"'
@@ -338,7 +376,7 @@ def make(case, mesh, regime, floor, row, base):
             f"taper  = {z['taper'] / 1e3:.1f}e3\n"
             "inside = 0.004\n"
             f"tip    = {z['tip']}\n")
-    if case in SMOOTH or case in TIPZONE:
+    if case in SMOOTH or case in TIPZONE or case in RELAX:
         th, arc, sb, _ = MESHES[mesh]
         ymax = max(abs(trace(k * 250.0, th, arc, sb, BEND2.get(mesh))[1]) for k in range(-60, 61))
         sub("region_x3       = [-1.0, 1.0]", f"region_x3       = [-1.0e4, 1.0e4]   # the fault reaches |y| = {ymax / 1e3:.2f} km")

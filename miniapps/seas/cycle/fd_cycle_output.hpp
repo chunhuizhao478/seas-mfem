@@ -294,6 +294,9 @@ struct StationFields
    Vector theta;                     ///< state variable theta [s]
    Vector sigma_n;                   ///< sigma_n_eff, compression positive [Pa]
    real_t eta = 0.0;                 ///< multiplies E(V) in tau
+   /// [cycle.relaxation]: r per DOF [Pa] (the law sees sigma_n - r, then the
+   /// floor); empty when off
+   Vector sigma_red;
 };
 
 /// The regime's displacement u and velocity v, vectors of the QD regime's

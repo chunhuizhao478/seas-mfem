@@ -334,6 +334,24 @@ void PrintQDFloor(const MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::Q
    std::cout << s.str();
 }
 
+/// [cycle.relaxation]: r and the lowest sigma_n' the law sees before the
+/// floor (sigma0 + dsig - r) at the relaxation's time, printed on root.
+/// Collective.
+void PrintRelaxation(const MPIContext &mpi, const cycle::CycleConfig &cfg,
+                     const cycle::QDPhase &qd, const std::string &when)
+{
+   if (!cfg.Relaxation()) { return; }
+   const cycle::QDPhase::RelaxInfo r = qd.RelaxationSummary();
+   if (!mpi.IsRoot()) { return; }
+   std::ostringstream s;
+   s << std::setprecision(6) << "  sigma_n' relaxation " << when << " (t = "
+     << qd.Relaxation()->Time() / BP5Params::seconds_per_year << " yr): r in ["
+     << r.r_min / 1e6 << ", " << r.r_max / 1e6 << "] MPa; lowest sigma0 + dsig - r "
+     << r.min_sigma / 1e6 << " MPa at (" << r.x[0] / 1e3 << ", " << r.x[1] / 1e3 << ", "
+     << r.x[2] / 1e3 << ") km\n";
+   std::cout << s.str();
+}
+
 /// The dynamic regime's settings, once per run (main builds one DynPhase and
 /// every dynamic phase re-enters it).
 void PrintDynamicSetup(const MPIContext &mpi, const cycle::CycleConfig &cfg,
@@ -526,6 +544,7 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
       v = &dyn.Ud();
    };
    PrintQDFloor(mpi, cfg, qd, "before dynamic phase " + std::to_string(phase));
+   PrintRelaxation(mpi, cfg, qd, "before dynamic phase " + std::to_string(phase));
    if (root)
    {
       if (t == 0.0)
@@ -1061,6 +1080,12 @@ int main(int argc, char *argv[])
                       << "prestress sigma_n' is >= " << smin / 1e6 << " MPa\n";
          }
       }
+      if (cfg.Relaxation() && root)
+      {
+         std::cout << "  sigma_n' relaxation: t_r = " << cfg.relax_t / BP5Params::seconds_per_year
+                   << " yr ([cycle.relaxation]); the law sees sigma0 + dsig - r, dr/dt = "
+                   << "(dsig - r) / t_r in the QD regime, r frozen in the dynamic regime\n";
+      }
       qd.Setup(par, pre);
 
       // psi0 of the kernel against BuildPrestress's (a check value).
@@ -1109,6 +1134,18 @@ int main(int argc, char *argv[])
          dt = info.dt_next;
          rejections_before = info.rejections;
          ctl.Restore(info.dyn_phases);
+         MFEM_VERIFY(info.relax == cfg.Relaxation(), "restart: the checkpoint was written "
+                     "with [cycle.relaxation] " << (info.relax ? "on" : "off") << ", the deck "
+                     "has it " << (cfg.Relaxation() ? "on" : "off"));
+         if (info.relax)
+         {
+            MFEM_VERIFY(info.relax_t_relax == cfg.relax_t && info.relax_t_n == info.t,
+                        "restart: the checkpoint's relaxation has t_relax "
+                        << info.relax_t_relax << " s at t " << info.relax_t_n
+                        << " s; the deck has " << cfg.relax_t << " s, the checkpoint t "
+                        << info.t << " s");
+            qd.SetRelaxationState(info.relax_t_n, info.relax_r, info.relax_d);
+         }
          qd.RestoreTS(info.step);
          MFEM_VERIFY(info.bench == cfg.bench.enabled, "restart: the checkpoint was written "
                      "with [cycle.benchmark] " << (info.bench ? "on" : "off") << ", the deck "
@@ -1213,6 +1250,14 @@ int main(int argc, char *argv[])
          info.fault_digest = cycle::FaultDigest(qd.Table().coords);
          info.bench = (bench != nullptr);
          if (bench) { info.bench_state = bench->GetState(); }
+         if (const cycle::NormalStressRelaxation *rx = qd.Relaxation())
+         {
+            info.relax = true;
+            info.relax_t_relax = rx->TRelax();
+            info.relax_t_n = rx->Time();
+            info.relax_r = rx->R();
+            info.relax_d = rx->Delta();
+         }
          cycle::CheckpointData d;
          d.state = qd.State();
          d.displacement = qd.Displacement();   // solved here with the Green's function
@@ -1232,6 +1277,7 @@ int main(int argc, char *argv[])
                                                  lts.on ? &lts : nullptr,
                                                  qd.Domain().FrameField(),
                                                  qd.SubstrateShape());
+         if (cfg.Relaxation()) { dyn->SetNormalStressRelaxation(qd.Relaxation()->R()); }
          PrintDynamicSetup(mpi, cfg, *dyn, MPI_Wtime() - w);
       }
       auto dynamic_phase = [&](real_t ts, real_t Vs)
@@ -1412,6 +1458,7 @@ int main(int argc, char *argv[])
          if (bench) { bench->Flush(); }
          qd.Operator().PrintQDGreenCheckSummary(std::cout);
          PrintQDFloor(mpi, cfg, qd, "since the last switch");
+         PrintRelaxation(mpi, cfg, qd, "at the end");
          if (root)
          {
             // rc 7 (the guard) and 3 (a non-finite balance) stop at the switch back.

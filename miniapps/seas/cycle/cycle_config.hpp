@@ -56,6 +56,14 @@
 //                        the prestress sigma_n' must be >= the floor at every
 //                        fault DOF (the driver refuses otherwise).  A
 //                        regularization, not fault opening.
+//   [cycle.relaxation] t_relax_yr: opt-in sigma_n' relaxation of the friction
+//                   law in both regimes [absent = off] (Chunhui Zhao,
+//                   2026-11-02; cycle/normal_stress_relaxation.hpp): the law
+//                   sees sigma0 + dsig - r (then the floor) with dr/dt =
+//                   (dsig - r) / t_r in the QD regime and r frozen in the
+//                   dynamic one.  t_relax_yr > 0 (years of 365.25 days).
+//                   Refused with [friction.prakash_clifton]; outputs keep
+//                   the elastic sigma_n' (the fault snapshots add r).
 //   [cycle.qd]      solver ("mumps" | "mumps_blr"), blr_tol,
 //                   petsc_options (PETSc TS options file; it must pick an RK
 //                   tableau with the FSAL property, see qd_phase.hpp),
@@ -512,6 +520,8 @@ struct CycleConfig
    real_t plate_rate = 0.0;   ///< Vp [m/s] of the Dirichlet loading
    real_t penalty_factor = 1.0;   ///< IP penalty scale of both regimes
    real_t sigma_n_floor = 0.0;    ///< [cycle].sigma_n_floor_pa [Pa]; 0 = off
+   real_t relax_t = 0.0;          ///< [cycle.relaxation].t_relax_yr [s]; 0 = off
+   bool Relaxation() const { return relax_t > 0.0; }
 
    QDConfig qd;
    SwitchConfig switch_cfg;
@@ -879,7 +889,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
    }
    OnlyKeys(cy, "cycle", {"ic", "switching", "qd_radiation_damping", "mesh_scale",
                           "plate_rate", "penalty_factor", "sigma_n_floor_pa", "qd", "switch",
-                          "probe",
+                          "probe", "relaxation",
                           "prestress", "fields", "output", "checkpoint", "snapshots",
                           "benchmark", "lts", "loading", "absorbing", "finite_width"});
    c.ic = Str(cy, "cycle", "ic", "", true);
@@ -908,6 +918,17 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       MFEM_VERIFY(std::isfinite(c.sigma_n_floor) && c.sigma_n_floor > 0.0,
                   "[cycle].sigma_n_floor_pa = " << c.sigma_n_floor << " must be > 0 Pa "
                   "(leave it out for no floor)");
+   }
+   if (cy.contains("relaxation"))
+   {
+      const std::string sec = "cycle.relaxation";
+      const toml::value &rx = cy.at("relaxation");
+      OnlyKeys(rx, sec, {"t_relax_yr"});
+      const real_t ty = Real(rx, sec, "t_relax_yr", 0.0, true);
+      MFEM_VERIFY(std::isfinite(ty) && ty > 0.0,
+                  "[" << sec << "].t_relax_yr = " << ty << " must be > 0 (leave the "
+                  "section out for no relaxation)");
+      c.relax_t = ty * 365.25 * 24.0 * 3600.0;   // BP5Params::seconds_per_year
    }
 
    if (cy.contains("qd"))
@@ -990,6 +1011,9 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       OnlyKeys(pr, sec, {"V_off", "T_dwell"});
       c.probe.V_off = PositiveReals(pr, sec, "V_off");
       c.probe.T_dwell = PositiveReals(pr, sec, "T_dwell");
+      MFEM_VERIFY(!c.Relaxation(), "[cycle.probe] with [cycle.relaxation]: the switch "
+                  "probe's QD solves would move the relaxation clock (relaxation design "
+                  "rev 0); run the probe without it");
       MFEM_VERIFY(c.switching, "[cycle.probe] needs [cycle].switching = true");
    }
 
@@ -1336,6 +1360,9 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
          const toml::value &p = root.at("friction").at("prakash_clifton");
          OnlyKeys(p, sec, {"v_star", "length"});
          d.pc = true;
+         MFEM_VERIFY(!c.Relaxation(), "[cycle.relaxation] with [" << sec << "]: the "
+                     "relaxation is not combined with Prakash-Clifton (relaxation design "
+                     "rev 0)");
          d.pc_v_star = Real(p, sec, "v_star", 0.0, true);
          d.pc_length = Real(p, sec, "length", 0.0, true);
          MFEM_VERIFY(d.pc_v_star > 0.0 && d.pc_length > 0.0, "[" << sec << "] v_star = "

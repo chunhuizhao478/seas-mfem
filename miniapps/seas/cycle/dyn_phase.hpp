@@ -79,6 +79,12 @@
 // Nitsche driver's stations; gamma includes sigma_F^eta with Kelvin-Voigt)
 // and eta = 0, so the station row -(tau + eta V) has the QD rows' sign.
 //
+// [cycle.relaxation] (Chunhui Zhao, 2026-11-02; cycle/normal_stress_relaxation.hpp):
+// SetNormalStressRelaxation(r) hands W the QD regime's r through the
+// normal-stress hook H-2D1 (FrozenNormalStressReduction): the law sees
+// sigma_eff - r, then the floor; r does not change during a phase (the QD
+// regime does not step).  FillStationFields reports it as sigma_red.
+//
 // This file and qd_phase.hpp are the only cycle files that include solver
 // headers (rule M4).
 
@@ -94,6 +100,7 @@
 #include "state_bridge.hpp"
 #include "fd_cycle_output.hpp"
 #include "absorbing_faces.hpp"
+#include "normal_stress_relaxation.hpp"
 
 #include "../domain/nitsche_wave_operator.hpp"
 #include "../domain/boundary_config.hpp"
@@ -391,6 +398,21 @@ public:
    /// Runs after every fault step with t = t0 + tau (local per-DOF work only:
    /// between sync points the record is not reduced).
    void SetFaultStepHook(std::function<void(real_t)> hook) { fault_hook_ = std::move(hook); }
+
+   /// [cycle.relaxation]: the law sees sigma_eff - r(j) at owned DOF j (r
+   /// on the QD table's owned DOFs, held by the caller, unchanged during a
+   /// phase).  Once per run, before the first Enter.
+   void SetNormalStressRelaxation(const Vector &r)
+   {
+      MFEM_VERIFY(!relax_mod_, "DynPhase::SetNormalStressRelaxation: already set");
+      MFEM_VERIFY(!W_->HasPrakashClifton(), "DynPhase: [cycle.relaxation] with "
+                  "Prakash-Clifton (relaxation design rev 0)");
+      MFEM_VERIFY(W_->NormalStressModifier() == nullptr, "DynPhase: [cycle.relaxation] "
+                  "needs the normal-stress hook, which holds another modifier");
+      relax_r_ = &r;
+      relax_mod_ = std::make_unique<FrozenNormalStressReduction>(r);
+      W_->SetNormalStressModifier(relax_mod_.get());
+   }
 
    bool Lts() const { return lts_ != nullptr; }
    /// The time one Step() advances: dt, or the LTS sync interval.
@@ -690,6 +712,8 @@ public:
          f.theta(j) = fr_->PsiToTheta(W_->State()(j), W_->FaultDc()(j));
       }
       f.eta = 0.0;
+      if (relax_r_) { f.sigma_red = *relax_r_; }   // [cycle.relaxation]: frozen r
+      else { f.sigma_red.SetSize(0); }
    }
 
    /// Plan R8: max over local fault DOFs of |eps_f t_k (this copy) - eps_f
@@ -799,6 +823,8 @@ private:
    std::unique_ptr<DieterichRuinaFriction> fr_;
    std::unique_ptr<RateStateClosure> closure_;
    std::unique_ptr<NitscheWaveOperator> W_;
+   const Vector *relax_r_ = nullptr;   ///< [cycle.relaxation]: the QD regime's r
+   std::unique_ptr<FrozenNormalStressReduction> relax_mod_;
    std::unique_ptr<CentralDifferenceSolver> ode_;
    std::unique_ptr<NitscheLtsRun> lts_;
    std::function<void(real_t)> fault_hook_;

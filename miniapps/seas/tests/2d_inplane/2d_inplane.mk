@@ -24,6 +24,7 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-handback-table      # [cycle.output].handback_table
 #   make -f tests/2d_inplane/2d_inplane.mk test-tip-zone            # [cycle.fields.a] kind = "tip_zone"
 #   make -f tests/2d_inplane/2d_inplane.mk test-sigma-floor         # [cycle].sigma_n_floor_pa
+#   make -f tests/2d_inplane/2d_inplane.mk test-relaxation          # [cycle.relaxation] (sigma_n' relaxation)
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d5-width           # [cycle.finite_width] (2.5D)
 #   make -f tests/2d_inplane/2d_inplane.mk test-2d5-dyn-driver      # [finite_width] of the Nitsche driver
 #   make -f tests/2d_inplane/2d_inplane.mk test-vertex-normals      # vertex-normal plan P1 (T2, T3)
@@ -735,6 +736,37 @@ test-sigma-floor: seas_test_sigma_floor seas_fd_cycle_driver
 	 else printf '%s\n' "$$out" | tail -15; echo "  FAILED: seas_fd_cycle_driver ok: exit $$rc"; exit 1; fi; \
 	 rm -rf $(SIGMA_FLOOR_TMP)
 
+# The opt-in sigma_n' relaxation ([cycle.relaxation] t_relax_yr,
+# cycle/normal_stress_relaxation.hpp; Chunhui Zhao, 2026-11-02: "implement
+# the relaxation, test and verify it"): K1 (the QD kernels with the
+# reduction) and R1-R4 (the update rule, the stage contract, the dynamic
+# view) on 1 rank, then each refusal must exit non-zero with its message;
+# then the driver on the BP3-FD d60 deck (1 km mesh): the deck refusals, the
+# checkpoint versions, and a stop + restart through a switch back repeating
+# the run byte for byte (tests/2d_inplane/relaxation_decks.sh).
+TEST_RELAXATION_SRC = tests/2d_inplane/test_relaxation.cpp
+TEST_RELAXATION_OBJ = $(TEST_RELAXATION_SRC:.cpp=.o)
+$(TEST_RELAXATION_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) friction/device_rate_state.hpp \
+                             cycle/normal_stress_relaxation.hpp fault/fault_normal_stress_modifier.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+seas_test_relaxation: $(TEST_RELAXATION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_RELAXATION_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+RELAXATION_REFUSALS = 1:NormalStressRelaxation: t_relax = 0.0000000000000000e+00 s (must be > 0)|2:SetDelta: 3 values for 2 DOFs
+test-relaxation: seas_test_relaxation seas_fd_cycle_driver
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_relaxation
+	@list='$(RELAXATION_REFUSALS)'; set -f; IFS='|'; for r in $$list; do n=$${r%%:*}; msg=$${r#*:}; \
+	   out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_relaxation --refuse $$n 2>&1); rc=$$?; \
+	   if [ $$rc -ne 0 ] && printf '%s' "$$out" | grep -qF "$$msg"; then \
+	      echo "  PASSED: refusal $$n: exit $$rc, \"$$msg\""; \
+	   else printf '%s\n' "$$out" | tail -15; echo "  FAILED: refusal $$n: exit $$rc, \"$$msg\" not found"; exit 1; fi; \
+	done
+	MPIEXEC="$(MFEM_MPIEXEC)" MPIEXEC_NP="$(MFEM_MPIEXEC_NP)" tests/2d_inplane/relaxation_decks.sh
+
 # The opt-in 2.5D finite width ([cycle.finite_width], cycle/finite_width.hpp;
 # Chunhui Zhao, 2026-10-30): U1-U5 and U7 of the derivation note's Level 1 on 1 rank
 # and U1, U2, U4, U5, U7 on 2 ranks; each API refusal must exit non-zero with its
@@ -798,12 +830,12 @@ test-vertex-normal-cycle: seas_test_vertex_normal_cycle
                 test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
                 test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
                 test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
-                test-handback-table test-tip-zone test-sigma-floor test-2d5-width test-2d5-dyn-driver \
+                test-handback-table test-tip-zone test-sigma-floor test-relaxation test-2d5-width test-2d5-dyn-driver \
                 test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
         test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
         test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
-        test-handback-table test-tip-zone test-sigma-floor test-2d5-width test-2d5-dyn-driver \
+        test-handback-table test-tip-zone test-sigma-floor test-relaxation test-2d5-width test-2d5-dyn-driver \
         test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle 2d-inplane-all

@@ -25,6 +25,7 @@
 
 #include <memory>
 #include <cmath>
+#include <functional>
 
 namespace mfem
 {
@@ -182,6 +183,15 @@ public:
    /// caller points at the same object.
    void SetStageTimers(StageTimers *timers) { stage_timers_ = timers; }
 
+   /// Called with the stage time t in Mult() just before the fault RHS
+   /// (Chunhui Zhao, 2026-11-02: the sigma_n' relaxation fills the kernel's
+   /// normal-stress reduction at t, cycle/normal_stress_relaxation.hpp).
+   /// Empty (the default): nothing is called, every bit unchanged.
+   void SetFrictionStageHook(std::function<void(real_t)> hook)
+   {
+      friction_stage_hook_ = std::move(hook);
+   }
+
    /// Set face tracer (non-owning pointer, caller manages lifetime).
    void SetFaceTracer(FaceTraceLogger<MeshType> *tracer)
    {
@@ -250,6 +260,7 @@ private:
    mutable Vector local_normal_traction_;
 
    StageTimers *stage_timers_ = nullptr;
+   std::function<void(real_t)> friction_stage_hook_;   ///< SetFrictionStageHook
 
    // Face tracer decomposition vectors (allocated only when tracer is active)
    FaceTraceLogger<MeshType> *face_tracer_ = nullptr;
@@ -678,6 +689,7 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
    // v51: pass elastic normal traction for sigma_n feedback (nullptr = use constant)
    {
       ScopedStageTimer timer(stage_timers_, StageTimers::Friction);
+      if (friction_stage_hook_) { friction_stage_hook_(t); }
       fault_->ComputeRHS(traction_, state, rate,
                           elastic_sigma_n_ ? &normal_traction_ : nullptr);
    }

@@ -79,6 +79,14 @@
 // 1e-11 relative after 25 steps).  The price: every checkpoint step moves the
 // run by the same round-off against a run without checkpoints.
 //
+// [cycle.relaxation] (Chunhui Zhao, 2026-11-02; cycle/normal_stress_relaxation.hpp):
+// Setup makes the relaxation, hands its reduction to the kernel
+// (SetSigmaNReduction) and fills it at every stage time (the operator's
+// friction stage hook); the post-step hook accepts each step (before the
+// monitor, so the monitor, the switch and a checkpoint see r_{n+1}); Solve
+// sets dsig from its evaluation; Reenter restarts the clock with r kept.
+// Off (the default): no hook, no reduction, every bit unchanged.
+//
 // This file and dyn_phase.hpp are the only cycle files that include solver
 // headers (rule M4).
 
@@ -94,6 +102,7 @@
 #include "prestress.hpp"
 #include "fd_cycle_output.hpp"
 #include "bench_output.hpp"
+#include "normal_stress_relaxation.hpp"
 
 #include "../solver/seas_operator.hpp"
 #include "../domain/elasticity_operator.hpp"
@@ -247,6 +256,14 @@ public:
 
       op_ = std::make_unique<PBP5SEASOp>(dom_.get(), fault_.get(), &mpi_);
       op_->SetElasticSigmaN(true);
+      if (cfg_.Relaxation())
+      {
+         // [cycle.relaxation]: r = 0 at t = 0, so the start is unchanged
+         relax_ = std::make_unique<NormalStressRelaxation>(N, cfg_.relax_t);
+         fault_->SetSigmaNReduction(&relax_->Reduction());
+         NormalStressRelaxation *rx = relax_.get();
+         op_->SetFrictionStageHook([rx](real_t t) { rx->Fill(t); });
+      }
       // QD speed items 1, 3, 4 (seas_bp5_full --qd-operators, --qd-green*):
       // after SetElasticSigmaN, which they build N_u, N_delta for.
       matrix_ = (cfg_.qd.operators == "matrix");
@@ -356,7 +373,65 @@ public:
       op_->SetTime(t);
       Vector rate(state_.Size());
       op_->Mult(state_, rate);
+      if (relax_)
+      {
+         // dsig at t_n: every caller solves at the relaxation's time (the
+         // start, the switch at an accepted step, the re-entry)
+         MFEM_VERIFY(t == relax_->Time(), "QDPhase::Solve: t = " << t << " s is not the "
+                     "relaxation's time " << relax_->Time() << " s");
+         relax_->SetDelta(RelaxDelta_());
+      }
       return op_->GetMaxSlipRate();
+   }
+
+   /// [cycle.relaxation], or null when off.
+   const NormalStressRelaxation *Relaxation() const { return relax_.get(); }
+   /// A checkpoint's relaxation state (restart), before the first stage.
+   void SetRelaxationState(real_t t_n, const Vector &r, const Vector &dsig)
+   {
+      MFEM_VERIFY(relax_, "QDPhase::SetRelaxationState: [cycle.relaxation] is off");
+      relax_->SetState(t_n, r, dsig);
+   }
+   /// [cycle.relaxation] over all ranks: r range and the lowest sigma_n'
+   /// the law sees before the floor (sigma0 + dsig - r at t_n) with its
+   /// position.  Collective; every rank must call it (off: zeros, inf).
+   struct RelaxInfo
+   {
+      double r_min = 0.0, r_max = 0.0;
+      double min_sigma = std::numeric_limits<double>::infinity();
+      double x[3] = {0.0, 0.0, 0.0};
+   };
+   RelaxInfo RelaxationSummary() const
+   {
+      RelaxInfo info;
+      double lo = std::numeric_limits<double>::infinity(), hi = -lo, smin = lo;
+      int imin = -1;
+      if (relax_)
+      {
+         const Vector &r = relax_->R(), &d = relax_->Delta();
+         for (int i = 0; i < r.Size(); i++)
+         {
+            lo = std::min(lo, static_cast<double>(r(i)));
+            hi = std::max(hi, static_cast<double>(r(i)));
+            const double sl = sigma0_(i) + d(i) - r(i);
+            if (sl < smin) { smin = sl; imin = i; }
+         }
+      }
+      MPI_Allreduce(&lo, &info.r_min, 1, MPI_DOUBLE, MPI_MIN, mpi_.GetComm());
+      MPI_Allreduce(&hi, &info.r_max, 1, MPI_DOUBLE, MPI_MAX, mpi_.GetComm());
+      struct { double v; int rank; } in{smin, mpi_.Rank()}, out;
+      MPI_Allreduce(&in, &out, 1, MPI_DOUBLE_INT, MPI_MINLOC, mpi_.GetComm());
+      info.min_sigma = out.v;
+      if (std::isfinite(out.v))
+      {
+         if (mpi_.Rank() == out.rank)
+         {
+            for (int k = 0; k < 3; k++) { info.x[k] = table_.coords(3 * imin + k); }
+         }
+         MPI_Bcast(info.x, 3, MPI_DOUBLE, out.rank, mpi_.GetComm());
+      }
+      if (!relax_) { info.r_min = info.r_max = 0.0; }
+      return info;
    }
    /// What the last evaluation left, for the bridge (owned fault DOFs; slip
    /// and slip rate as kernel (dip, strike) pairs, 2 N values).  The
@@ -457,6 +532,10 @@ public:
       f.theta = theta;
       SigmaN(f.sigma_n);
       f.eta = eta_;
+      // [cycle.relaxation]: the reduction the last evaluation used (r at
+      // the accepted step, where the monitor reads it)
+      if (relax_) { f.sigma_red = relax_->Reduction(); }
+      else { f.sigma_red.SetSize(0); }
    }
 
    /// Stations on this rank's owned fault DOFs, in the plane frame of the
@@ -666,6 +745,7 @@ public:
    real_t Reenter(const Vector &slip_k, const Vector &psi, real_t t, int step, real_t dt0)
    {
       SetFaultState(slip_k, psi);
+      if (relax_) { relax_->Restart(t); }   // r kept from the switch; the clock at t
       const real_t Vmax = Solve(t);
       InitTS(dt0);
       TS ts = *ode_;
@@ -857,6 +937,16 @@ private:
    }
 
 #ifdef MFEM_USE_PETSC
+   /// [cycle.relaxation]: dsig of the last evaluation, the elastic normal
+   /// traction the kernel used (the accepted state's after a step: FSAL).
+   const Vector &RelaxDelta_() const
+   {
+      const Vector *nt = op_->GetFrictionNormalTraction();
+      MFEM_VERIFY(nt, "QDPhase: [cycle.relaxation] needs the elastic normal traction "
+                  "of the last evaluation");
+      return *nt;
+   }
+
    /// The monitor at one step; false: stop there.  The skipped step (a
    /// restart's or a re-entry's) counts as `true`.
    bool CallMonitor_(int step, real_t t)
@@ -886,6 +976,11 @@ private:
       PetscReal t;
       PetscCall(TSGetStepNumber(ts, &step));
       PetscCall(TSGetTime(ts, &t));
+      if (self->relax_)
+      {
+         // [cycle.relaxation]: accept the step (the file comment)
+         self->relax_->Accept(static_cast<real_t>(t), self->RelaxDelta_());
+      }
       if (!self->CallMonitor_(static_cast<int>(step), static_cast<real_t>(t)))
       {
          PetscCall(TSSetConvergedReason(ts, TS_CONVERGED_USER));
@@ -910,6 +1005,7 @@ private:
    std::unique_ptr<PBP5SEASOp> op_;
    Vector state_;
    Vector sigma0_;   ///< sigma0 per owned fault DOF (Setup), for SigmaN
+   std::unique_ptr<NormalStressRelaxation> relax_;   ///< [cycle.relaxation] or null
    real_t eta_ = 0.0;
    bool matrix_ = false;
    bool loading_checked_ = false;
