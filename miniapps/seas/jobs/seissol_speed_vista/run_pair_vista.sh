@@ -10,6 +10,17 @@
 #   MFEM_RUN   1 = run MFEM first (empty in the probe)
 #   SS_LAYOUTS SeisSol MPI ranks per node, one run per entry (the probe has three; a run job has the one
 #              the probe picked)
+# and, for the equal-global-step runs (Chunhui Zhao 2026-11-02: "use global time stepping for both
+# cases", "make sure both are equivalent time steps", "remove station output"), optionally
+#   GTS          1 = global time stepping in both codes: MFEM --lts off, SeisSol ClusteredLTS = 1
+#                (empty = each code's LTS: MFEM --lts rate2, SeisSol ClusteredLTS = 2)
+#   FIX_DT       the one time step both codes take [s]: MFEM [time] dt_max, SeisSol &Discretization
+#                FixTimestep.  It must not exceed MFEM's own CFL step (the job checks: MFEM's dt equals
+#                FIX_DT and its CFL step is not smaller; SeisSol's logged minimum timestep equals FIX_DT)
+#   NO_STATIONS  1 = no station output in either code: the MFEM deck copy loses [output.stations],
+#                the SeisSol copy gets OutputPointType = 0 and ReceiverOutput = 0
+#   MFEM_LAYOUTS MFEM ranks per node, one MFEM run per entry (empty = MFEM_RPN; the probe lists several)
+# The committed decks are not changed: these edits go into the per-run copies, after the parity check.
 # One allocation runs MFEM, then SeisSol, on the same nodes, so the times compare only within a job (S1
 # 1102099 against V3 1100111: the same MFEM job 18 % slower on other nodes).  Only stations are written
 # by either code (plan section 4).  Prints, per code: the job seconds of each run, MFEM's ode.Step and
@@ -74,11 +85,30 @@ rc_all=0
 memlog() { ( while :; do echo "$(date +%s) $(awk '/^MemTotal|^MemAvailable/{print $2}' /proc/meminfo | tr '\n' ' ')"; sleep 2; done ) > $1 & MON=$!; }
 memsum() { awk '{u=($2-$3)/1048576; if(u>m)m=u; t=$2/1048576} END{printf "first node memory: peak in use %.1f GB of %.1f GB (2 s samples)\n", m, t}' $1; }
 
-# --- MFEM: central difference, --lts rate2, all cores one rank each (MFEM_RPN ranks per node)
+# --- MFEM: central difference, --lts rate2 (or off with GTS), all cores one rank each (ranks per node from
+# MFEM_LAYOUTS, else MFEM_RPN)
+MFEM_LTS=rate2; [ "$GTS" = 1 ] && MFEM_LTS=off
+SS_CLUSTERED=2; [ "$GTS" = 1 ] && SS_CLUSTERED=1
+echo "time stepping: MFEM --lts $MFEM_LTS, SeisSol ClusteredLTS $SS_CLUSTERED; FIX_DT ${FIX_DT:-none}; stations $([ "$NO_STATIONS" = 1 ] && echo off || echo on)"
+relsame() { awk -v a="$1" -v b="$2" -v t="$3" 'BEGIN{d=a-b; if(d<0)d=-d; exit !(a>0 && d<=t*a)}'; }
 if [ -n "$MFEM_RUN" ]; then
-   OUT=$BASE/mfem; mkdir -p $OUT
-   DECK=jobs/seissol_speed_vista/mfem_decks/${PROB}_nitsche_sst.toml
-   cp $DECK $OUT/
+   km=0
+   for MFEM_RPN in ${MFEM_LAYOUTS:-$MFEM_RPN}; do
+   km=$(( km + 1 ))
+   OUT=$BASE/mfem; [ -n "$MFEM_LAYOUTS" ] && OUT=$BASE/mfem_r${MFEM_RPN}_$km
+   mkdir -p $OUT
+   SRC_DECK=jobs/seissol_speed_vista/mfem_decks/${PROB}_nitsche_sst.toml
+   DECK=$OUT/${PROB}_nitsche_sst.toml
+   cp $SRC_DECK $DECK
+   if [ -n "$FIX_DT" ]; then
+      sed -i "s/^\( *dt_max *= *\)\"[^\"]*\"/\1\"${FIX_DT}s\"/" $DECK
+      grep -q "^ *dt_max *= *\"${FIX_DT}s\"" $DECK || { echo "ERROR: dt_max not set to $FIX_DT in $DECK"; exit 2; }
+   fi
+   if [ "$NO_STATIONS" = 1 ]; then
+      # drop the [output.stations] table (its header to the next table header)
+      awk '/^\[/{skip=($0=="[output.stations]")} !skip' $DECK > $DECK.tmp && mv $DECK.tmp $DECK
+      ! grep -q "^\[output.stations\]" $DECK || { echo "ERROR: [output.stations] still in $DECK"; exit 2; }
+   fi
    (
    export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
    module purge; module load TACC
@@ -93,13 +123,26 @@ if [ -n "$MFEM_RUN" ]; then
    else LAUNCH="mpirun -np $(( SLURM_JOB_NUM_NODES * MFEM_RPN )) --map-by ppr:$MFEM_RPN:node --bind-to core"; fi
    echo "MFEM launcher: $LAUNCH"
    $LAUNCH ./seas_nitsche_dyn_driver --config $DECK --mesh $MESH --order $ORDER \
-         --tfinal $TFINAL --output-dir $OUT --log-every 1000 --lts rate2 > $OUT/driver.log 2>&1
+         --tfinal $TFINAL --output-dir $OUT --log-every 1000 --lts $MFEM_LTS > $OUT/driver.log 2>&1
    rc=$?; kill $MON 2>/dev/null; wait $MON 2>/dev/null
    echo "=== MFEM p$ORDER on $(( SLURM_JOB_NUM_NODES * MFEM_RPN )) ranks ($MFEM_RPN per node): driver exit $rc, $(( $(date +%s) - s )) s in the job"
-   grep -a "partition:\|LTS\|time in ode.Step per rank\|rank balance\|halo\|setup (wall\|station output:\|loop\|=== done" $OUT/driver.log || tail -20 $OUT/driver.log
+   grep -a "partition:\|LTS\|  dt = \|time in ode.Step per rank\|rank balance\|halo\|setup (wall\|station output:\|loop\|=== done" $OUT/driver.log || tail -20 $OUT/driver.log
    memsum $OUT/meminfo_kB.log
+   if [ -n "$FIX_DT" ]; then
+      # "  dt = <dt> s (CFL walk: cfl <c> x C(p) <C> -> <dt_cfl>; dt_max <dt_max>), <n> steps ..."
+      L=$(grep -a -m1 "^  dt = " $OUT/driver.log)
+      DTM=$(echo "$L" | awk '{print $3}'); DTC=$(echo "$L" | sed 's/.*-> *\([^;]*\);.*/\1/')
+      echo "MFEM dt $DTM s, its CFL step $DTC s, FIX_DT $FIX_DT s"
+      relsame $DTM $FIX_DT 1e-5 || { echo "ERROR: MFEM dt $DTM is not FIX_DT $FIX_DT"; rc=2; }
+      awk -v c="$DTC" -v f="$FIX_DT" 'BEGIN{exit !(c>=f)}' || { echo "ERROR: FIX_DT $FIX_DT exceeds MFEM's CFL step $DTC"; rc=2; }
+   fi
+   if [ "$NO_STATIONS" = 1 ]; then
+      n=$(find $OUT -iname '*station*' ! -name '*.toml' | wc -l)
+      echo "MFEM station files written: $n"; [ $n = 0 ] || { find $OUT -iname '*station*' ! -name '*.toml'; rc=2; }
+   fi
    exit $rc
    ) || rc_all=1
+   done
 fi
 
 # --- SeisSol: order o = p + 1, ClusteredLTS 2, CFL 0.5, one run per layout (ranks per node x threads)
@@ -112,6 +155,18 @@ for RPN in $SS_LAYOUTS; do
    # the window: decks hold EndTime = 12.0; a shorter TFINAL (the probe) is set here, in the copy only
    sed -i "s/^\( *EndTime *= *\)12\.0/\1$TFINAL/" $OUT/parameters.par
    grep -q "^ *EndTime *= *$TFINAL" $OUT/parameters.par || { echo "ERROR: EndTime not set to $TFINAL"; rc_all=2; continue; }
+   sed -i "s/^\( *ClusteredLTS *= *\)[0-9]*/\1$SS_CLUSTERED/" $OUT/parameters.par
+   grep -q "^ *ClusteredLTS *= *$SS_CLUSTERED\b" $OUT/parameters.par || { echo "ERROR: ClusteredLTS not set"; rc_all=2; continue; }
+   if [ -n "$FIX_DT" ]; then
+      sed -i "s/^\( *ClusteredLTS *= *$SS_CLUSTERED.*\)$/\1\nFixTimestep = $FIX_DT/" $OUT/parameters.par
+      grep -q "^FixTimestep = $FIX_DT\$" $OUT/parameters.par || { echo "ERROR: FixTimestep not set"; rc_all=2; continue; }
+   fi
+   if [ "$NO_STATIONS" = 1 ]; then
+      sed -i "s/^\( *OutputPointType *= *\)[0-9]*/\10/; s/^\( *ReceiverOutput *= *\)[0-9]*/\10/" $OUT/parameters.par
+      grep -q "^ *OutputPointType *= *0\b" $OUT/parameters.par && grep -q "^ *ReceiverOutput *= *0\b" $OUT/parameters.par \
+         || { echo "ERROR: SeisSol station output not switched off"; rc_all=2; continue; }
+   fi
+   grep -a "ClusteredLTS\|FixTimestep\|OutputPointType\|ReceiverOutput\|EndTime" $OUT/parameters.par
    PE=$(( 144 / RPN ))                    # cores per rank; one of them runs SeisSol's communication thread
    (
    set +u
@@ -130,6 +185,17 @@ for RPN in $SS_LAYOUTS; do
    grep -a "Simulation time (\|Time spent for initial IO\|Total time spent:\|Minimum timestep\|Theoretical speedup\|Load imbalance\|Total calculated HW-FLOP\|error\|Error" $OUT/seissol.log | tail -30
    grep -a -A 12 "Cluster histogram" $OUT/seissol.log | grep -a "Cluster histogram\|: *[0-9]* *, *[0-9]*" | head -14
    memsum $OUT/meminfo_kB.log
+   if [ -n "$FIX_DT" ]; then
+      # "Minimum timestep: 245.0900 µs" (Unit.cpp formatPrefix: fixed, 4 decimals, SI prefix)
+      SMIN=$(grep -a -m1 "Minimum timestep" $OUT/seissol.log | sed 's/.*Minimum timestep[^:]*: *//' \
+             | awk '{u=$2; f=1; if(u=="ms")f=1e-3; else if(u=="\302\265s"||u=="us")f=1e-6; else if(u=="ns")f=1e-9; else if(u!="s")f=0; printf "%.10g", $1*f}')
+      echo "SeisSol minimum timestep $SMIN s, FIX_DT $FIX_DT s"
+      relsame "${SMIN:-0}" $FIX_DT 1e-5 || { echo "ERROR: SeisSol minimum timestep '$SMIN' is not FIX_DT $FIX_DT"; rc=2; }
+   fi
+   if [ "$NO_STATIONS" = 1 ]; then
+      n=$(find $OUT/output -iname '*receiver*' | wc -l)
+      echo "SeisSol receiver files written: $n"; [ $n = 0 ] || rc=2
+   fi
    exit $rc
    ) || rc_all=1
    [ -n "$SS_SCEC" ] && $SEISSOL_VISTA/venv/bin/python3 -I $SST/to_scec.py --problem $PROB --seissol-dir $OUT/output --out $OUT/scec

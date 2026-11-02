@@ -23,6 +23,8 @@ Each pair runs in one allocation, MFEM first, then SeisSol, and both write stati
 | `check_parity.py` | Compares each MFEM deck with its SeisSol deck: friction, stresses, nucleation, material, stations, window, output. Fields are compared at about 1,600 to 2,400 fault points with a relative tolerance of 1e-9. It exits 1 on a difference. |
 | `to_scec.py` | Converts SeisSol receiver output to our station-file format. |
 | `retag_msh2.py` | Renames the TPV205 mesh's boundary tags 101/103/105 to 1/3/5 in a copy for pumgen. SeisSol reads 101 and 105 as rupture faces. |
+| `probe_gts.sbatch` | Equal-global-step probe: TPV205 p2 / o3, 16 nodes, 0 to 2 s, both codes at one fixed step, no stations; MFEM at 144, 96, 72 and SeisSol at 8, 16 ranks per node. |
+| `run_gts_<prob>_p<N>.sbatch` | The nine equal-global-step pairs, 0 to 12 s: both codes global stepping at `FIX_DT` (MFEM's own CFL step, rounded down), MFEM damping on, no stations. |
 | `NOTES.md` | The parity tables with file:line on both sides, and the open items. |
 
 ## Submit (in `$WORK/seas-mfem-profiling`, at the pushed commit, from this folder)
@@ -33,6 +35,17 @@ sbatch --dependency=afterok:<build> probe_layout.sbatch
 # after the probe: set SS_LAYOUTS in run_*.sbatch (a reviewed commit), then step C:
 for f in run_tpv205_p{1,2,3}.sbatch run_tpv104_p{1,2,3}.sbatch run_tpv102_p{1,2,3}.sbatch; do sbatch $f; done
 ```
+
+## Equal global step (Chunhui Zhao 2026-11-02)
+
+"MFEM needs damping", "make sure both are equivalent time steps", "use global time stepping for both
+cases", "remove station output".  `run_pair_vista.sh` takes `GTS=1` (MFEM `--lts off`, SeisSol
+`ClusteredLTS = 1`), `FIX_DT` (MFEM `[time] dt_max`, SeisSol `&Discretization FixTimestep`; the job fails
+unless MFEM's logged dt and SeisSol's logged minimum timestep both equal it and MFEM's CFL step is not
+smaller) and `NO_STATIONS=1` (MFEM deck copy without `[output.stations]`, SeisSol `OutputPointType = 0`,
+`ReceiverOutput = 0`; the job fails if either writes station files).  The edits go into each run's deck
+copies after the parity check; the committed decks are unchanged.  This measures cost per step at the
+same step; it is not either code's production speed (the LTS rows below are).
 
 ## What the physics does not share (NOTES.md, Open)
 
@@ -48,3 +61,5 @@ for f in run_tpv205_p{1,2,3}.sbatch run_tpv104_p{1,2,3}.sbatch run_tpv102_p{1,2,
 | 1112915 | 1831dfa5 | build | Passed. Tet counts equal MFEM's (TPV205 1,894,583; TPV104 2,466,549); boundary tags TPV205 1:22648 3:52456 5:7256, TPV104 1:25142 3:75856 5:8006; parity passes for all three. |
 | 1112916 | 1831dfa5 | probe, 2/4/8 per node | 2 per node 22.68 s, 8 per node 15.45 s; 4 per node crashed in its first steps (UCX "Local length error on mlx5_0:1/IB" under MPI_Test on the communication thread). |
 | 1114522 | 060551aa | probe, 4/4/8/16 per node | All exited 0, no crash: 4 per node 17.77 s and 16.80 s, 8 per node 15.25 s, 16 per node 15.18 s (load imbalance 16.3, 7.9, 6.4, 7.5 %). Binary loads Open MPI 5.0.5 (gcc14) and UCX 1.17.0. 8 and 16 tie, so the runs use 8. Cluster histogram identical in every run; 26,228 rupture faces, as MFEM. |
+| 1114558 | 59ff1ad3 | build | Passed; parity 33/33, 39/39, 37/37. The pumgen rerun wrote new puml sha256s (TPV205 be2166da), same tags. |
+| 1114559-67 | 59ff1ad3 | nine LTS pairs, 0 to 12 s | All exited 0, no UCX error. MFEM stepping (max rank) / SeisSol simulation time, s: TPV205 127.0/43.2, 358.9/29.9, 1762.5/55.3; TPV104 206.4/48.7, 490.4/39.4, 2809.5/87.5; TPV102 210.8/48.5, 489.0/39.1, 2776.0/206.4 (SeisSol imbalance 65 %, suspect) at p = 1/2/3: MFEM 2.9-4.3x, 12.0-12.5x, about 32x slower, each code with its own LTS and time step. to_scec.py wrote nothing (kit Python called outside the kit environment). |
