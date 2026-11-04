@@ -283,6 +283,29 @@ Design: `/mnt/project-files/2d-inplane/relaxation/relaxation-design-rev0.md`
   15-30 MPa per event) is large next to 25 MPa, so the 10 MPa floor still
   acts in both runs; relaxation should shorten how long DOFs sit on it.
 
+## PML hand-back check (PML design plan rev2, P3, test T5; 2026-11-04)
+
+- **Why:** the plan's Proposition 3: with the CFS-PML the dynamic phase
+  settles to the QD static state, so the hand-back jump
+  |tau_qd - tau_dyn| should fall to the D4 target, 0.05 MPa.
+- **Cases:** D0 (straight), event 1 (about 827 yr) and its hand-back,
+  900 yr; Kelvin-Voigt 0.1 as D0. The band: every outer face, 150 km
+  (30 elements of 5 km), N 2, R0 1e-3.
+
+  | Case | Outer boundary in the dynamic regime |
+  |---|---|
+  | `D0_straight_hb_ref` | absorbing walls (D0's) |
+  | `D0_straight_hb_pml0p005` | CFS-PML, f_alpha 0.005 Hz (s0 14.2, dt / 3.8) |
+  | `D0_straight_hb_pml0p01` | CFS-PML, f_alpha 0.01 Hz (s0 7.6, dt / 2.8) |
+  | `D0_straight_hb_pml0p02` | CFS-PML, f_alpha 0.02 Hz (s0 4.3, dt / 2.1) |
+  | `D0_straight_hb_sponge` | sponge comparator (same profile, no stretch) |
+
+- **What to read:** the hand-back line ("largest |tau_qd - tau_dyn|") and
+  `<prefix>_handback_phase1.txt`; the QD balance V; event time and slip
+  against the reference; the dynamic phase's length and wall time.
+- **Expected (estimate):** the CFS-PML cases below the reference's jump,
+  the smallest f_alpha lowest; the sponge between.
+
 ## Setup
 
 All the decks are `config/fd_cycle/mapview_rs_fd.toml` with the edits
@@ -414,7 +437,7 @@ station lies on a fault edge to 3e-13 m (checked in the cloud).
 ## Files
 
 - `mesh/*.msh`: the thirteen meshes (above).
-- `configs/<case>.toml`: the thirty-three decks.
+- `configs/<case>.toml`: the thirty-eight decks.
 - `scripts/make_decks.py`: makes the decks; `--check` compares.
 - `scripts/run_simple_mac.sh`: the runs on the Mac, one after the other.
   - Checks: the GitHub-first guard; the binary's code equals HEAD

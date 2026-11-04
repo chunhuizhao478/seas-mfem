@@ -182,7 +182,7 @@ public:
                                         seed_.Wf, seed_.lf, DGMethod::IP, st,
                                         BCMode::FarField, BasisType::GaussLobatto, frames,
                                         MakeCycleLoading(cfg, pml_wall_factor_));
-      if (pml_band_) { dom_->SetPmlBand(pml_band_); }
+      if (pml_band_ && cfg.pml.Cfs()) { dom_->SetPmlBand(pml_band_); }
       if (st == SolverType::MUMPS_BLR) { dom_->SetBLRTol(cfg.qd.blr_tol); }
       if (cfg.penalty_factor != 1.0) { dom_->SetPenaltyFactor(cfg.penalty_factor); }
       // [cycle.finite_width]: the 2.5D term, before the first K is used
@@ -881,7 +881,9 @@ private:
       prm.thickness = P.thickness;
       prm.power = P.power;
       prm.R0 = P.R0;
-      prm.f_alpha = P.f_alpha;
+      // the sponge has no stretch: f_alpha only feeds PmlBand's alpha,
+      // which nothing reads then
+      prm.f_alpha = P.Sponge() ? 1.0 : P.f_alpha;
       prm.c_ref = P.c_ref;
       auto band = std::make_shared<PmlBand>(pmesh, P.wall_attrs, prm, pmesh.GetComm());
       // every interior boundary element (fault faces, prescribed-slip faces)
@@ -902,14 +904,21 @@ private:
       MFEM_VERIFY(inside == 0, "[cycle.pml]: " << inside << " interior faces (fault or "
                   "prescribed slip) have a vertex inside a band; thin the band or "
                   "move the walls");
-      if (P.wall_speed_factor == 1.0) { pml_wall_factor_ = 1.0; }
+      if (P.Sponge() || P.wall_speed_factor == 1.0) { pml_wall_factor_ = 1.0; }
       else if (P.AutoWallSpeed())
       {
          const auto &m = cfg_.loading.plane_normal;
          pml_wall_factor_ = band->WallSpeedFactor(m.data());
       }
       else { pml_wall_factor_ = P.wall_speed_factor; }
-      if (mpi_.Rank() == 0)
+      if (mpi_.Rank() == 0 && P.Sponge())
+      {
+         std::cout << "[cycle.pml] sponge (dynamic phase only; QD unchanged): "
+                   << band->Walls().size() << " walls, L = " << P.thickness << " m, N = "
+                   << P.power << ", R0 = " << P.R0 << ", c = " << P.c_ref << " m/s; d0 = "
+                   << band->D0() << " 1/s\n";
+      }
+      else if (mpi_.Rank() == 0)
       {
          std::cout << "[cycle.pml] QD band: " << band->Walls().size() << " walls, L = "
                    << P.thickness << " m, N = " << P.power << ", R0 = " << P.R0

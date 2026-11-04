@@ -20,6 +20,9 @@
 //       3x larger box with plain walls (no reflection back by T), and the
 //       same small box without the band: the band's reflection measure is
 //       printed and must be < 5% of the no-band one
+//   T2KV T2 with Kelvin-Voigt damping (eta_bar 0.1, node scale), 2-D (P3)
+//   T3  ... also the sponge comparator on the same band: printed, must run
+//       finite and absorb (misfit below the bare walls') (P3)
 //   T4  no growth: the band box (h = 1 km) run 10 S-wave transits; the
 //       inner energy over the second half below 1e-3 of its peak, finite
 //   CFL the stable step with K_p (penalty x kappa) against plain K by power
@@ -246,7 +249,7 @@ void TestS1(int D)
 // One rest run: the static solution of the operator the run starts from
 // (K0 with the band, plain K without), then nsteps from (u_s, 0); returns
 // max |V| / (gamma c_s).
-real_t RestRun(int D, int nsteps, bool with_band)
+real_t RestRun(int D, int nsteps, bool with_band, real_t kv_eta = 0.0)
 {
    const real_t H = 10e3, L = 4e3, gam = 1e-4;
    const int n = (D == 2) ? 10 : 4;
@@ -289,6 +292,10 @@ real_t RestRun(int D, int nsteps, bool with_band)
    const real_t dt = 0.5 * 2.0 / std::sqrt(OmegaMax2(*op));
    if (!with_band) { op = Op(pm, p, g); }
    op->SetTimeStep(dt);
+   if (kv_eta > 0.0)
+   {
+      op->SetKelvinVoigt(kv_eta, NitscheWaveOperator::KVScale::Node, -1.0);
+   }
    op->SetTime(0.0);
    if (with_band) { op->PmlEnter(us); }
    Vector U(us), V(N);
@@ -329,6 +336,23 @@ void TestT2(int D, int nsteps)
    Check(vb <= std::max(1e-12, 2.0 * vp), s.str(), vb);
 }
 
+// P3: the band with Kelvin-Voigt damping (whole domain, eta_bar 0.1, node
+// scale, the simple-case decks' setting): the static state stays at rest.
+void TestT2KV(int D, int nsteps)
+{
+   const real_t vb = RestRun(D, nsteps, true, 0.1);
+   const real_t vp = RestRun(D, nsteps, false, 0.1);
+   if (g_rank == 0)
+   {
+      std::printf("  T2KV %d-D, kv_eta 0.1, %d steps: max |V| / (gamma c_s) band %.3e, "
+                  "no band %.3e\n", D, nsteps, vb, vp);
+   }
+   std::ostringstream s;
+   s << "T2KV " << D << "-D: with Kelvin-Voigt the static state stays at rest, <= "
+        "max(1e-12, 2 x the no-band floor)";
+   Check(vb <= std::max(1e-12, 2.0 * vp), s.str(), vb);
+}
+
 // ------------------------------------------------------------------ T3 / T4
 // Values at element centroids inside |x_i| < Hin.
 void Centroids(ParMesh &pm, const ParGridFunction &u, real_t Hin,
@@ -355,7 +379,8 @@ struct PulseRun
    bool finite = true;
 };
 
-PulseRun RunPulse(real_t Hbox, real_t h, int p, const std::shared_ptr<const PmlBand> *band_in,
+// mode: 0 no band, 1 the CFS-PML, 2 the sponge (same band and profile)
+PulseRun RunPulse(real_t Hbox, real_t h, int p, int mode,
                   real_t L, real_t fa, real_t Hin, real_t dt, real_t T, real_t snap_dt)
 {
    const int n = static_cast<int>(std::lround(2 * Hbox / h));
@@ -364,7 +389,8 @@ PulseRun RunPulse(real_t Hbox, real_t h, int p, const std::shared_ptr<const PmlB
    DFn g0 = [](const Vector &, real_t, Vector &u) { u = 0.0; };
    auto op = Op(pm, p, g0);
    std::shared_ptr<const PmlBand> band;
-   if (band_in) { band = MakeBand(pm, L, fa); op->SetPml(band); }
+   if (mode == 1) { band = MakeBand(pm, L, fa); op->SetPml(band); }
+   if (mode == 2) { op->SetSponge(MakeBand(pm, L, fa)); }
    op->SetTimeStep(dt);
    op->SetTime(0.0);
    auto &fes = op->Elasticity().GetFESpace();
@@ -468,25 +494,27 @@ void TestT3T4(bool t3, bool t4)
    {
       const real_t h = 500.0, T = 7.0, sdt = 0.1;
       const real_t dt = BandDt(Hb, h, p, L, fa);
-      std::shared_ptr<const PmlBand> dummy;
-      PulseRun ref = RunPulse(3 * Hin, h, p, nullptr, 0, 0, Hin, dt, T, sdt);
-      PulseRun bnd = RunPulse(Hb, h, p, &dummy, L, fa, Hin, dt, T, sdt);
-      PulseRun plain = RunPulse(Hin, h, p, nullptr, 0, 0, Hin, dt, T, sdt);
-      const real_t mb = Misfit(bnd, ref), mp = Misfit(plain, ref);
+      PulseRun ref = RunPulse(3 * Hin, h, p, 0, 0, 0, Hin, dt, T, sdt);
+      PulseRun bnd = RunPulse(Hb, h, p, 1, L, fa, Hin, dt, T, sdt);
+      PulseRun plain = RunPulse(Hin, h, p, 0, 0, 0, Hin, dt, T, sdt);
+      PulseRun spg = RunPulse(Hb, h, p, 2, L, fa, Hin, dt, T, sdt);
+      const real_t mb = Misfit(bnd, ref), mp = Misfit(plain, ref), ms = Misfit(spg, ref);
       if (g_rank == 0)
       {
          std::printf("  T3 inner-box misfit vs the 3x box (max over t <= %.0f s): band %.4e, "
-                     "no band (Dirichlet walls) %.4e, ratio %.4f\n", T, mb, mp, mb / mp);
+                     "no band (Dirichlet walls) %.4e, ratio %.4f; sponge (same band and "
+                     "profile) %.4e\n", T, mb, mp, mb / mp, ms);
       }
       Check(bnd.finite && mb < 0.05 * mp, "T3 the band's reflection < 5% of the bare walls'", mb / mp);
+      Check(spg.finite && ms < mp, "T3 the sponge runs and absorbs (misfit below the bare walls')",
+            ms / mp);
    }
    if (t4)
    {
       // stability, not accuracy: the coarser mesh, 10 S-wave transits of the box
       const real_t h = 1000.0, T = 10.0 * 2 * Hb / Cs(), sdt = 0.5;
       const real_t dt = BandDt(Hb, h, p, L, fa);
-      std::shared_ptr<const PmlBand> dummy;
-      PulseRun bnd = RunPulse(Hb, h, p, &dummy, L, fa, Hin, dt, T, sdt);
+      PulseRun bnd = RunPulse(Hb, h, p, 1, L, fa, Hin, dt, T, sdt);
       real_t peak = 0.0;
       for (real_t e : bnd.energy) { peak = std::max(peak, e); }
       const real_t last = bnd.energy.empty() ? 0.0 : bnd.energy.back();
@@ -514,7 +542,7 @@ int main(int argc, char *argv[])
    g_rank = Mpi::WorldRank();
    const char *only = "";
    OptionsParser args(argc, argv);
-   args.AddOption(&only, "-o", "--only", "Comma-separated parts (S0,S1,T2,T3,T4).");
+   args.AddOption(&only, "-o", "--only", "Comma-separated parts (S0,S1,T2,T2KV,T3,T4).");
    args.Parse();
    if (!args.Good()) { if (g_rank == 0) { args.PrintUsage(std::cout); } return 1; }
    {
@@ -536,6 +564,11 @@ int main(int argc, char *argv[])
    {
       if (g_rank == 0) { std::cout << "T2: rest stays at rest\n"; }
       TestT2(2, 10000); TestT2(3, 2000);
+   }
+   if (Want("T2KV"))
+   {
+      if (g_rank == 0) { std::cout << "T2KV: rest stays at rest with Kelvin-Voigt\n"; }
+      TestT2KV(2, 10000);
    }
    if (Want("T3") || Want("T4"))
    {

@@ -377,6 +377,11 @@ void PrintDynamicSetup(const MPIContext &mpi, const cycle::CycleConfig &cfg,
       std::cout << "    PML band (dynamic): K_p (penalty x kappa), C_d and the memory terms; "
                 << "the CFL step divided by sqrt(kappa_max = " << dyn.PmlKappaMax() << ")\n";
    }
+   if (dyn.HasSponge())
+   {
+      std::cout << "    sponge band (comparator): rho sum_a d_a U' on the band elements, "
+                << "K and the CFL step unchanged\n";
+   }
    std::cout << "    Kelvin-Voigt: ";
    if (dyn.HasKelvinVoigt())
    {

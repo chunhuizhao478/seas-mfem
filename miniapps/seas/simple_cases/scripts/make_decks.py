@@ -25,7 +25,11 @@
 # (TIPZONE below); two more (2026-11-02: "implement the relaxation, test and
 # verify it, and apply to UCERF 2D plane strain, with 10MPa cap") are D9f
 # with the floor at 10 MPa for 30,000 yr, without and with sigma_n'
-# relaxation, t_r 5 kyr (RELAX below).  Run from miniapps/seas:
+# relaxation, t_r 5 kyr (RELAX below); five more (P3 of the PML design plan
+# rev2, test T5, 2026-11-04: "start P3") are D0 to the end of event 1 and its
+# hand-back, 900 yr: the absorbing walls (the reference), the CFS-PML band at
+# f_alpha = 0.005, 0.01 and 0.02 Hz, and the sponge comparator (PML below).
+# Run from miniapps/seas:
 #   python3 simple_cases/scripts/make_decks.py [--check]
 # --check: write nothing, exit 1 if a committed deck differs from what this
 # script makes (the decks are committed as made).
@@ -59,6 +63,12 @@
 #                      sigma_n_floor_pa = 10.0e6, [time] tfinal 30,000 yr,
 #                      and in the _relax case [cycle.relaxation]
 #                      t_relax_yr = 5000
+# PML hand-back (PML):  as D0, [time] tfinal 900 yr (event 1 at ~827 yr, its
+#                      hand-back, then QD); the band cases [cycle.absorbing]
+#                      faces = "off" and [cycle.pml] on every outer face
+#                      (attributes 5 and 1), 150 km (30 elements of 5 km),
+#                      N 2, R0 1e-3; kind "cfs" with f_alpha_hz and
+#                      wall_speed_factor = "auto" (D3), or kind "sponge"
 import argparse
 import math
 import os
@@ -128,6 +138,12 @@ CASES = [
     ("D5f_arc015L10_h250_avg_floor_T3a08w8", "arc015L10_h250", "D", True, "tip zone T3 (both): P4's 250 m D5f with a = 0.08 within 6 km of each tip, 2 km taper"),
     ("D9f_arc08L2p5_h250_avg_floor10", "arc08L2p5_h250", "D", True, "relaxation control: D9f with the sigma_n' floor at 10 MPa, 30,000 yr, no relaxation"),
     ("D9f_arc08L2p5_h250_avg_floor10_relax5k", "arc08L2p5_h250", "D", True, "relaxation V1: D9f with sigma_n' relaxation (t_r 5 kyr) and the floor at 10 MPa, 30,000 yr"),
+    # PML plan rev2 P3 (test T5): event 1 and its hand-back, 900 yr
+    ("D0_straight_hb_ref", "straight_h500", "D", False, "PML P3 (T5) reference: D0's event 1 and hand-back with the absorbing walls"),
+    ("D0_straight_hb_pml0p005", "straight_h500", "D", False, "PML P3 (T5): D0's event 1 and hand-back, CFS-PML band, f_alpha 0.005 Hz"),
+    ("D0_straight_hb_pml0p01", "straight_h500", "D", False, "PML P3 (T5): D0's event 1 and hand-back, CFS-PML band, f_alpha 0.01 Hz"),
+    ("D0_straight_hb_pml0p02", "straight_h500", "D", False, "PML P3 (T5): D0's event 1 and hand-back, CFS-PML band, f_alpha 0.02 Hz"),
+    ("D0_straight_hb_sponge", "straight_h500", "D", False, "PML P3 (T5) comparator: D0's event 1 and hand-back, sponge band (same profile)"),
 ]
 SMOOTH = ["D7f_arc08L10_h250_avg_floor", "D9f_arc08L2p5_h250_avg_floor", "D6f_arc03L10_h250_avg_floor",
           "D8f_arc03L2p5_h250_avg_floor", "D10f_sbend03L05_h250_avg_floor"]
@@ -264,6 +280,19 @@ for _c in TIPZONE:
 for _c in RELAX:
     GO_CASE[_c] = "# 2026-11-02: \"implement the relaxation, test and verify it\"):"
 
+# PML plan rev2 P3 (T5): kind None = the absorbing walls (the reference)
+PML = {
+    "D0_straight_hb_ref": dict(kind=None),
+    "D0_straight_hb_pml0p005": dict(kind="cfs", f_alpha=0.005),
+    "D0_straight_hb_pml0p01": dict(kind="cfs", f_alpha=0.01),
+    "D0_straight_hb_pml0p02": dict(kind="cfs", f_alpha=0.02),
+    "D0_straight_hb_sponge": dict(kind="sponge"),
+}
+PML_YEARS = 900.0
+PML_L_KM = 150.0
+for _c in PML:
+    GO_CASE[_c] = "# 2026-11-04: \"start P3\" of the PML design plan rev2, test T5):"
+
 
 def header(case, mesh, regime, floor, row):
     lines = [
@@ -276,7 +305,12 @@ def header(case, mesh, regime, floor, row):
         "# Made by simple_cases/scripts/make_decks.py from",
         "# config/fd_cycle/mapview_rs_fd.toml; the edits are listed there and in",
         "# simple_cases/README.md.  Plane strain, no 2.5D term, +-240 km box, all",
-        ("# walls absorbing in the dynamic regime, to the end of event 1."
+        (f"# walls Dirichlet with a {PML_L_KM:.0f} km {'sponge' if PML[case]['kind'] == 'sponge' else 'CFS-PML'} band, "
+         f"{PML_YEARS:.0f} yr (event 1, its hand-back)."
+         if PML.get(case, {}).get("kind")
+         else f"# walls absorbing in the dynamic regime, {PML_YEARS:.0f} yr (event 1, its hand-back)."
+         if case in PML
+         else "# walls absorbing in the dynamic regime, to the end of event 1."
          if OPTS.get(case, {}).get("phases") == 1
          else f"# walls absorbing in the dynamic regime, {RELAX.get(case, {}).get('years', T_FINAL_YR):,.0f} yr."),
         "#",
@@ -302,7 +336,7 @@ def make(case, mesh, regime, floor, row, base):
         sub("# 500 m on the fault, in m.", f"# {lc:.0f} m on the fault (mapview_rs_fd.toml: 500 m), in m.")
         sub("# Dense G: N_f = 120 at p = 1 on the 500 m mesh.",
             f"# Dense G: N_f = {round(2 * 30e3 / lc)} at p = 1 on this {lc:.0f} m mesh (120 at 500 m).")
-    years = RELAX.get(case, {}).get("years", T_FINAL_YR)
+    years = PML_YEARS if case in PML else RELAX.get(case, {}).get("years", T_FINAL_YR)
     sub("# 1500 yr of 365 days.\n[time]\ntfinal     = 4.7304e10",
         f"# {years:,.0f} yr of 365 days (mapview_rs_fd.toml: 1500 yr).\n[time]\n"
         f"tfinal     = {years * YR:.6e}")
@@ -325,6 +359,27 @@ def make(case, mesh, regime, floor, row, base):
             "[cycle.relaxation]\n"
             f"t_relax_yr = {RELAX[case]['t_relax_yr']:.1f}\n\n"
             "# The BP5-FD switch.\n[cycle.switch]\n")
+    pk = PML.get(case, {}).get("kind")
+    if pk:
+        sub('[cycle.absorbing]\nfaces = "all"\n',
+            '[cycle.absorbing]\nfaces = "off"   # the PML band instead (mapview_rs_fd.toml: "all")\n\n'
+            "# PML design plan rev2 (cycle/cycle_config.hpp PmlConfig): the band on every\n"
+            "# outer face, the walls Dirichlet in both regimes"
+            + (".  CFS-PML: QD with the static stretch\n"
+               "# (K0), the dynamic phase in the time domain; the wall speed times\n"
+               "# (W + 2 Delta L) / W (D3).\n" if pk == "cfs" else
+               ".  Sponge (the comparator):\n"
+               "# the dynamic damping rho sum_a d_a U' alone, the same profile; QD and the\n"
+               "# walls unchanged.\n")
+            + "[cycle.pml]\n"
+            "on           = true\n"
+            f'kind         = "{pk}"\n'
+            "wall_attrs   = [5, 1]\n"
+            f"thickness_km = {PML_L_KM:.1f}   # 30 elements of 5 km\n"
+            "power        = 2\n"
+            "R0           = 1.0e-3\n"
+            + (f"f_alpha_hz   = {PML[case]['f_alpha']}\n"
+               'wall_speed_factor = "auto"\n' if pk == "cfs" else ""))
     o = OPTS.get(case)
     if o:
         if o.get("penalty", 1.0) != 1.0:

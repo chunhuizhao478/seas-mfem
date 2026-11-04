@@ -198,8 +198,6 @@ public:
          MFEM_VERIFY(!cfg.absorbing.On() && !(lts != nullptr && lts->on) &&
                      !cfg.finite_width.On(), "DynPhase: [cycle.pml] with "
                      "[cycle.absorbing], [cycle.lts] or [cycle.finite_width]");
-         MFEM_VERIFY(dc.kv_eta == 0.0, "DynPhase: [cycle.pml] with Kelvin-Voigt "
-                     "([numerics] kv_eta > 0): not implemented");
       }
       {
          // [cycle.loading], as QD (with the band: the same D3 wall factor)
@@ -270,7 +268,13 @@ public:
       dcfg.penalty_factor = cfg.penalty_factor;
       dcfg.fault_frames.field = frames;
       W_ = std::make_unique<NitscheWaveOperator>(*wmesh, p, *material_, bc_, dcfg, &fs);
-      if (pml)
+      if (pml && cfg.pml.Sponge())
+      {
+         // the comparator: the band damping alone, K unchanged
+         sponge_ = true;
+         W_->SetSponge(pml);
+      }
+      else if (pml)
       {
          // K_p, C_d and the memory terms (before SetTimeStep)
          pml_ = pml;
@@ -620,6 +624,7 @@ public:
    /// divided by its square root); 1 without the band.
    real_t PmlKappaMax() const { return pml_kappa_max_; }
    bool HasPml() const { return pml_ != nullptr; }
+   bool HasSponge() const { return sponge_; }
    long Steps() const { return steps_; }
    /// Global max |V| of the last step (0 before the first).
    real_t MaxV() const { return W_->LastStep().max_V; }
@@ -865,6 +870,7 @@ private:
    std::unique_ptr<NitscheWaveOperator> W_;
    std::shared_ptr<const PmlBand> pml_;   ///< [cycle.pml] (null: off)
    real_t pml_kappa_max_ = 1.0;
+   bool sponge_ = false;                  ///< [cycle.pml] kind = "sponge"
    const Vector *relax_r_ = nullptr;   ///< [cycle.relaxation]: the QD regime's r
    std::unique_ptr<FrozenNormalStressReduction> relax_mod_;
    std::unique_ptr<CentralDifferenceSolver> ode_;

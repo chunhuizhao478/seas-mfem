@@ -435,10 +435,15 @@ struct AbsorbingConfig
 /// elements and faces, the penalty times kappa).  P2: the dynamic phase
 /// keeps the walls Dirichlet and runs the time-domain band (K_p, C_d and the
 /// memory terms of domain/pml_memory.hpp), its CFL step divided by
-/// sqrt(kappa_max).
+/// sqrt(kappa_max).  Kelvin-Voigt damps K alone (it vanishes at rest).
+/// P3: kind = "sponge", the comparator (dynamic damping only).
 struct PmlConfig
 {
    bool on = false;
+   /// "cfs" (the CFS-PML, D1) or "sponge" (the comparator of plan rev2
+   /// Section 7.4: the dynamic damping rho sum_a d_a U' alone, the same
+   /// profile; QD and the walls' speed unchanged; f_alpha_hz not used)
+   std::string kind = "cfs";
    std::vector<int> wall_attrs;    ///< boundary attributes whose faces are walls
    real_t thickness = 0.0;         ///< thickness_km, stored in m
    int power = 2;                  ///< N of the profile (2.13)
@@ -450,6 +455,8 @@ struct PmlConfig
    /// given; 1 = unchanged.
    real_t wall_speed_factor = 0.0;
    bool On() const { return on; }
+   bool Sponge() const { return on && kind == "sponge"; }
+   bool Cfs() const { return on && kind == "cfs"; }
    bool AutoWallSpeed() const { return wall_speed_factor == 0.0; }
 };
 
@@ -1545,15 +1552,18 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
    {
       const std::string sec = "cycle.pml";
       const toml::value &pt = cy.at("pml");
-      OnlyKeys(pt, sec, {"on", "wall_attrs", "thickness_km", "power", "R0", "f_alpha_hz",
-                         "c_ref", "wall_speed_factor"});
+      OnlyKeys(pt, sec, {"on", "kind", "wall_attrs", "thickness_km", "power", "R0",
+                         "f_alpha_hz", "c_ref", "wall_speed_factor"});
       PmlConfig &P = c.pml;
       P.on = Bool(pt, sec, "on", false);
+      P.kind = Str(pt, sec, "kind", P.kind);
+      MFEM_VERIFY(P.kind == "cfs" || P.kind == "sponge", "[" << sec << "].kind = \""
+                  << P.kind << "\" must be \"cfs\" or \"sponge\"");
       P.wall_attrs = Ints(pt, sec, "wall_attrs", {});
       P.thickness = 1.0e3 * Real(pt, sec, "thickness_km", 0.0, P.on);
       P.power = Int(pt, sec, "power", P.power);
       P.R0 = Real(pt, sec, "R0", P.R0);
-      P.f_alpha = Real(pt, sec, "f_alpha_hz", 0.0, P.on);
+      P.f_alpha = Real(pt, sec, "f_alpha_hz", 0.0, P.on && P.kind == "cfs");
       const real_t lam = s.material_fallback.lambda, mu = s.material_fallback.mu;
       const real_t rho = s.material_fallback.rho;
       P.c_ref = Real(pt, sec, "c_ref", std::sqrt((lam + 2.0 * mu) / rho));
@@ -1576,8 +1586,17 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
                      << "].thickness_km must be > 0");
          MFEM_VERIFY(P.power >= 1, "[" << sec << "].power must be >= 1");
          MFEM_VERIFY(P.R0 > 0.0 && P.R0 < 1.0, "[" << sec << "].R0 must be in (0, 1)");
-         MFEM_VERIFY(P.f_alpha > 0.0 && std::isfinite(P.f_alpha), "[" << sec
-                     << "].f_alpha_hz must be > 0 (CFS-PML, decision D1)");
+         MFEM_VERIFY(P.kind == "sponge" || (P.f_alpha > 0.0 && std::isfinite(P.f_alpha)),
+                     "[" << sec << "].f_alpha_hz must be > 0 (CFS-PML, decision D1)");
+         MFEM_VERIFY(P.kind == "cfs" || (!pt.contains("f_alpha_hz") &&
+                     !pt.contains("wall_speed_factor")), "[" << sec << "] kind = "
+                     "\"sponge\": f_alpha_hz and wall_speed_factor do not apply (no stretch)");
+         if (P.kind == "sponge")
+         {
+            MFEM_VERIFY(c.switching, "[" << sec << "] kind = \"sponge\" acts in the "
+                        "dynamic phase only; it needs [cycle].switching = true");
+            P.wall_speed_factor = 1.0;
+         }
          MFEM_VERIFY(P.c_ref > 0.0, "[" << sec << "].c_ref must be > 0 m/s");
          MFEM_VERIFY(!c.absorbing.On(), "[" << sec << "] with [cycle.absorbing] faces = \""
                      << c.absorbing.faces << "\": the PML keeps the walls Dirichlet; use "
@@ -1586,9 +1605,6 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
                      "(plan rev2, Section 7.3); use global stepping");
          MFEM_VERIFY(!c.finite_width.On(), "[" << sec << "] with [cycle.finite_width]: "
                      "not implemented");
-         MFEM_VERIFY(c.dyn.kv_eta == 0.0 || !c.switching, "[" << sec << "] with "
-                     "Kelvin-Voigt damping ([numerics] kv_eta > 0) in the dynamic phase: "
-                     "not implemented (plan rev2, Section 7.3)");
          MFEM_VERIFY(P.wall_speed_factor == 1.0 || c.loading.Plate(), "[" << sec
                      << "].wall_speed_factor needs [cycle.loading] kind = \"plate\"");
       }

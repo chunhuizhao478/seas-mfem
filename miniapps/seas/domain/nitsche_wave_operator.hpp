@@ -393,9 +393,8 @@ public:
    void SetPml(std::shared_ptr<const PmlBand> band)
    {
       MFEM_VERIFY(band, "SetPml: no band");
-      MFEM_VERIFY(!pml_, "SetPml: called twice");
+      MFEM_VERIFY(!pml_ && !sponge_, "SetPml: the band is already set");
       MFEM_VERIFY(dt_ == 0.0 && !mass_damped_, "SetPml before SetTimeStep");
-      MFEM_VERIFY(!kv_, "SetPml: not with Kelvin-Voigt damping");
       MFEM_VERIFY(dense_state_ == 0 && fused_state_ == 0,
                   "SetPml after the dense or fused stiffness read K");
       // the dense blocks and the fused sweep copy K once; with the band, K x
@@ -438,6 +437,61 @@ public:
       MFEM_VERIFY(dt_ > 0.0, "PmlEnter before SetTimeStep");
       pml_->Enter(u_s, GetTime());
    }
+   /// The sponge comparator of PML plan rev2 (Sections 6.2 and 7.4): the
+   /// band's damping rho sum_a d_a(x) U' on the band elements (the C_d of
+   /// the PML, the same profile d_a), K unchanged.  It vanishes at rest, and
+   /// K(0) = K, so the switch and the hand-back need no band load.  Before
+   /// SetTimeStep; collective.  Not with SetPml.
+   void SetSponge(std::shared_ptr<const PmlBand> band)
+   {
+      MFEM_VERIFY(band, "SetSponge: no band");
+      MFEM_VERIFY(!pml_ && !sponge_, "SetSponge: the band is already set");
+      MFEM_VERIFY(dt_ == 0.0 && !mass_damped_, "SetSponge before SetTimeStep");
+      MFEM_VERIFY(band->Dim() == dim_, "SetSponge: band dimension");
+      sponge_ = band;
+      const ParFiniteElementSpace &fes = elast_->GetFESpace();
+      const int N = band->Params().power;
+      Vector sh, x(dim_);
+      for (int e = 0; e < mesh_.GetNE(); e++)
+      {
+         if (!PmlBandElement(mesh_, e, *band)) { continue; }
+         const FiniteElement &fe = *fes.GetFE(e);
+         ElementTransformation &T = *mesh_.GetElementTransformation(e);
+         const IntegrationRule &ir = IntRules.Get(fe.GetGeomType(), 2 * fe.GetOrder() + N);
+         const int nd = fe.GetDof();
+         sh.SetSize(nd);
+         auto it = damping_blocks_.find(e);
+         if (it == damping_blocks_.end())
+         {
+            it = damping_blocks_.emplace(e, DenseMatrix(dim_ * nd)).first;
+            it->second = 0.0;
+         }
+         DenseMatrix &B = it->second;
+         for (int q = 0; q < ir.GetNPoints(); q++)
+         {
+            const IntegrationPoint &ip = ir.IntPoint(q);
+            T.SetIntPoint(&ip);
+            T.Transform(ip, x);
+            const PmlPoint pp = band->At(x.GetData());
+            real_t dsum = 0.0;
+            for (int k = 0; k < pp.nact; k++) { dsum += pp.d[k]; }
+            if (dsum == 0.0) { continue; }
+            fe.CalcShape(ip, sh);
+            const real_t s = ip.weight * T.Weight() * rho_e_(e) * dsum;
+            for (int k = 0; k < nd; k++)
+               for (int l = 0; l < nd; l++)
+               {
+                  const real_t v = s * sh(k) * sh(l);
+                  for (int c = 0; c < dim_; c++) { B(c * nd + k, c * nd + l) += v; }
+               }
+         }
+      }
+      int local = damping_blocks_.empty() ? 0 : 1, global = 0;
+      MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_LOR, mesh_.GetComm());
+      has_damping_global_ = (global != 0);
+   }
+   bool HasSponge() const { return sponge_ != nullptr; }
+
    PmlDynamicTerms *Pml() { return pml_.get(); }
    const PmlDynamicTerms *Pml() const { return pml_.get(); }
    ParMesh &GetMesh() const { return mesh_; }
@@ -1749,6 +1803,7 @@ private:
    mutable Vector Kx_, F_, Cv_;
    Vector b_const_;            ///< hook H3: the constant load (empty: none)
    std::unique_ptr<PmlDynamicTerms> pml_;   ///< dynamic PML (null: none)
+   std::shared_ptr<const PmlBand> sponge_;  ///< sponge comparator (null: none)
    mutable Vector pml_f_;
    mutable Vector zero_v_;     ///< hook H3: zero velocity for StiffnessMult
 

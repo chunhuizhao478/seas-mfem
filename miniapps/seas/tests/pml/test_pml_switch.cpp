@@ -13,6 +13,9 @@
 //              max |M^-1 K_p u_s|.  Control: without b_band (the static
 //              band load) the same DOFs see > 1e-3 a_K
 //   dt         DynPhase's step is the plain CFL step / sqrt(kappa_max)
+// P3: --as-is runs a P3 deck's own band (the Mac, test-pml-decks);
+// --parse-only only reads it.  --kind sponge (the comparator: no QD band, wall factor 1, no b_band,
+// the plain step) and --kv-eta 0.1 (Kelvin-Voigt as the simple-case decks).
 //   steps      n dynamic steps finite; the band DOFs' max |U - u_s| printed
 //
 // Usage (from miniapps/seas; PETSc needed):
@@ -56,7 +59,16 @@ int main(int argc, char *argv[])
    MPIContext mpi(&argc, &argv);
    const char *deck = "simple_cases/configs/D0_straight.toml";
    int n_dyn = 200;
+   const char *kind = "cfs";
+   real_t kv = 0.0;
+   bool as_is = false, parse_only = false;
    OptionsParser args(argc, argv);
+   args.AddOption(&as_is, "-as", "--as-is", "-no-as", "--no-as-is",
+                  "Use the deck's own [cycle.pml], [cycle.absorbing] and kv_eta (the P3 decks).");
+   args.AddOption(&parse_only, "-po", "--parse-only", "-no-po", "--no-parse-only",
+                  "Only read the deck and print its [cycle.pml] (no solve).");
+   args.AddOption(&kind, "-k", "--kind", "[cycle.pml] kind: cfs or sponge.");
+   args.AddOption(&kv, "-kv", "--kv-eta", "Kelvin-Voigt eta_bar of the dynamic phase (0: off).");
    args.AddOption(&deck, "-d", "--deck", "2-D switching deck with loaded walls (attribute 5).");
    args.AddOption(&n_dyn, "-n", "--dyn-steps", "Dynamic steps after the switch.");
    args.Parse();
@@ -71,9 +83,28 @@ int main(int argc, char *argv[])
 #else
    cycle::CycleConfig cfg = cycle::CycleConfig::Load(deck);
    MFEM_VERIFY(cfg.switching, deck << ": a switching deck is needed");
+   if (as_is)
+   {
+      MFEM_VERIFY(cfg.pml.On(), deck << ": --as-is needs [cycle.pml] on");
+      if (mpi.IsRoot())
+      {
+         std::printf("  deck %s: [cycle.pml] kind %s, walls %zu attrs, L %.0f m, N %d, R0 %g, "
+                     "f_alpha %g Hz, c %.2f m/s, wall factor %s; absorbing \"%s\", kv_eta %g, "
+                     "max_dynamic_phases %d\n", deck, cfg.pml.kind.c_str(),
+                     cfg.pml.wall_attrs.size(), cfg.pml.thickness, cfg.pml.power, cfg.pml.R0,
+                     cfg.pml.f_alpha, cfg.pml.c_ref,
+                     cfg.pml.AutoWallSpeed() ? "auto" : std::to_string(cfg.pml.wall_speed_factor).c_str(),
+                     cfg.absorbing.faces.c_str(), cfg.dyn.kv_eta,
+                     cfg.switch_cfg.max_dynamic_phases);
+      }
+      if (parse_only) { return 0; }
+   }
+   else
+   {
    cfg.absorbing.faces = "off";
-   cfg.dyn.kv_eta = 0.0;
+   cfg.dyn.kv_eta = kv;
    cfg.pml.on = true;
+   cfg.pml.kind = kind;
    cfg.pml.wall_attrs = {5, 1};
    cfg.pml.thickness = 100e3;
    cfg.pml.power = 2;
@@ -83,7 +114,9 @@ int main(int argc, char *argv[])
       const auto &m = cfg.shared.material_fallback;
       cfg.pml.c_ref = std::sqrt((m.lambda + 2.0 * m.mu) / m.rho);
    }
-   cfg.pml.wall_speed_factor = 0.0;   // "auto"
+   cfg.pml.wall_speed_factor = cfg.pml.Sponge() ? 1.0 : 0.0;   // "auto" for the CFS-PML
+   }
+   const bool sponge = cfg.pml.Sponge();
    MFEMInitializePetsc(&argc, &argv, cfg.qd.petsc_options.c_str(), NULL);
    {
       std::unique_ptr<Mesh> smesh = cycle::LoadScaledMesh(cfg.shared.mesh.path, cfg.mesh_scale);
@@ -92,7 +125,8 @@ int main(int argc, char *argv[])
       if (mpi.IsRoot())
       {
          std::cout << "test_pml_switch: " << deck << ", p = " << cfg.shared.mesh.order
-                   << ", ranks " << mpi.Size() << "\n";
+                   << ", ranks " << mpi.Size() << ", kind " << cfg.pml.kind << ", kv_eta "
+                   << kv << "\n";
       }
       cycle::QDPhase qd(pmesh, mpi, cfg);
       const spatial::SpatialFrictionConfig &s = cfg.shared;
@@ -176,12 +210,15 @@ int main(int argc, char *argv[])
       real_t a_band = 0.0;
       for (int i = 0; i < A0.Size(); i++) { if (inb[i]) { a_band = std::max(a_band, std::abs(A0(i))); } }
       a_band = GMax(mpi, a_band);
-      // control: the same without b_band
-      Vector bb(W.Pml()->BandLoad()), Mbb;
-      W.Mass().Apply(bb, Mbb);
+      // control: the same without b_band (the CFS-PML only; the sponge has none)
       real_t c_band = 0.0;
-      for (int i = 0; i < A0.Size(); i++)
-      { if (inb[i]) { c_band = std::max(c_band, std::abs(A0(i) + Mbb(i))); } }
+      if (!sponge)
+      {
+         Vector bb(W.Pml()->BandLoad()), Mbb;
+         W.Mass().Apply(bb, Mbb);
+         for (int i = 0; i < A0.Size(); i++)
+         { if (inb[i]) { c_band = std::max(c_band, std::abs(A0(i) + Mbb(i))); } }
+      }
       c_band = GMax(mpi, c_band);
       if (mpi.IsRoot())
       {
@@ -189,7 +226,10 @@ int main(int argc, char *argv[])
                      "without b_band %.4e\n", aK, a_band, c_band);
       }
       Check(mpi, a_band <= 1e-9 * aK, "rest: A^0 on the band DOFs <= 1e-9 a_K", a_band / aK);
-      Check(mpi, c_band > 1e-3 * aK, "rest control: without b_band > 1e-3 a_K", c_band / aK);
+      if (!sponge)
+      {
+         Check(mpi, c_band > 1e-3 * aK, "rest control: without b_band > 1e-3 a_K", c_band / aK);
+      }
 
       // dt
       {
@@ -202,7 +242,8 @@ int main(int argc, char *argv[])
             std::printf("  dt %.4e s = plain %.4e s / sqrt(kappa_max %.3f)\n", dyn.Dt(), plain,
                         dyn.PmlKappaMax());
          }
-         Check(mpi, std::abs(dyn.Dt() / want - 1.0) < 1e-14, "dt: plain CFL / sqrt(kappa_max)",
+         Check(mpi, std::abs(dyn.Dt() / want - 1.0) < 1e-14, sponge ? "dt: the plain CFL step "
+               "(the sponge leaves K alone, kappa_max = 1)" : "dt: plain CFL / sqrt(kappa_max)",
                std::abs(dyn.Dt() / want - 1.0));
       }
 
