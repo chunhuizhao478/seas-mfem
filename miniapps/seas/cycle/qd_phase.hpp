@@ -173,12 +173,16 @@ public:
       // [cycle.loading] (cycle/loading.hpp; default the BP5 function).
       // The prescribed-slip faces must lie in the loading's band (loading.hpp).
       CheckCreepInBand(pmesh, {5}, cfg.loading);
+      // [cycle.pml] (PML plan rev2, P1): the band, before the operator, so
+      // the loading takes the D3 wall speed factor
+      if (cfg.pml.On()) { SetupPmlBand_(pmesh); }
       FaultFrameSource frames;
       frames.config = std::make_shared<const FaultFrameConfig>(CycleFrameConfig(cfg));
       dom_ = std::make_unique<DomainOp>(pmesh, s.mesh.order, lambda, mu, cfg.plate_rate,
                                         seed_.Wf, seed_.lf, DGMethod::IP, st,
                                         BCMode::FarField, BasisType::GaussLobatto, frames,
-                                        MakeCycleLoading(cfg));
+                                        MakeCycleLoading(cfg, pml_wall_factor_));
+      if (pml_band_) { dom_->SetPmlBand(pml_band_); }
       if (st == SolverType::MUMPS_BLR) { dom_->SetBLRTol(cfg.qd.blr_tol); }
       if (cfg.penalty_factor != 1.0) { dom_->SetPenaltyFactor(cfg.penalty_factor); }
       // [cycle.finite_width]: the 2.5D term, before the first K is used
@@ -188,6 +192,11 @@ public:
                                                        /*compute_bp5_params=*/false);
       BuildTable_();
    }
+
+   /// [cycle.pml]: the band (null when off) and the D3 wall speed factor
+   /// (1 when off), for the dynamic phase (P2) to use the same ones.
+   std::shared_ptr<const PmlBand> PmlBandPtr() const { return pml_band_; }
+   real_t PmlWallSpeedFactor() const { return pml_wall_factor_; }
 
    /// The owned fault DOFs in the operator's owned order.
    const FaultDOFTable &Table() const { return table_; }
@@ -862,6 +871,61 @@ private:
       }
    }
 
+   /// [cycle.pml] (PML plan rev2, P1, Section 7.2): finds the walls on the
+   /// mesh, refuses a fault or prescribed-slip face with a vertex inside a
+   /// band, and sets the D3 wall speed factor.  Collective.
+   void SetupPmlBand_(ParMesh &pmesh)
+   {
+      const PmlConfig &P = cfg_.pml;
+      PmlBandParams prm;
+      prm.thickness = P.thickness;
+      prm.power = P.power;
+      prm.R0 = P.R0;
+      prm.f_alpha = P.f_alpha;
+      prm.c_ref = P.c_ref;
+      auto band = std::make_shared<PmlBand>(pmesh, P.wall_attrs, prm, pmesh.GetComm());
+      // every interior boundary element (fault faces, prescribed-slip faces)
+      // must lie outside the bands (Section 3.7)
+      long long inside = 0;
+      Array<int> v;
+      for (int be = 0; be < pmesh.GetNBE(); be++)
+      {
+         if (pmesh.GetFaceInformation(pmesh.GetBdrElementFaceIndex(be)).IsBoundary())
+         { continue; }
+         pmesh.GetBdrElementVertices(be, v);
+         for (int k = 0; k < v.Size(); k++)
+         {
+            if (band->InBand(pmesh.GetVertex(v[k]))) { inside++; break; }
+         }
+      }
+      MPI_Allreduce(MPI_IN_PLACE, &inside, 1, MPI_LONG_LONG, MPI_SUM, pmesh.GetComm());
+      MFEM_VERIFY(inside == 0, "[cycle.pml]: " << inside << " interior faces (fault or "
+                  "prescribed slip) have a vertex inside a band; thin the band or "
+                  "move the walls");
+      if (P.wall_speed_factor == 1.0) { pml_wall_factor_ = 1.0; }
+      else if (P.AutoWallSpeed())
+      {
+         const auto &m = cfg_.loading.plane_normal;
+         pml_wall_factor_ = band->WallSpeedFactor(m.data());
+      }
+      else { pml_wall_factor_ = P.wall_speed_factor; }
+      if (mpi_.Rank() == 0)
+      {
+         std::cout << "[cycle.pml] QD band: " << band->Walls().size() << " walls, L = "
+                   << P.thickness << " m, N = " << P.power << ", R0 = " << P.R0
+                   << ", f_alpha = " << P.f_alpha << " Hz, c = " << P.c_ref
+                   << " m/s; d0 = " << band->D0() << " 1/s, s0 at the wall = "
+                   << band->S0Wall() << ", Delta L = " << band->DeltaL()
+                   << " m; wall speed factor (D3) = " << pml_wall_factor_ << "\n";
+         for (const PmlWall &w : band->Walls())
+         {
+            std::cout << "  wall attr " << w.attr << ": n = (" << w.n[0] << ", " << w.n[1]
+                      << ", " << w.n[2] << "), n . x = " << w.h << " m\n";
+         }
+      }
+      pml_band_ = band;
+   }
+
    /// [cycle.finite_width] (cycle/finite_width.hpp): U_pl1 by the deck's
    /// substrate, then ElasticityDomainOperator::SetFiniteWidth (QD time is
    /// physical time: no offset).  "locked_reference" solves K u = b(t = 1)
@@ -996,6 +1060,8 @@ private:
    const CycleConfig &cfg_;
    BP5Params seed_;
    std::unique_ptr<DomainOp> dom_;
+   std::shared_ptr<const PmlBand> pml_band_;   ///< [cycle.pml] (null: off)
+   real_t pml_wall_factor_ = 1.0;              ///< D3 wall speed factor
    Vector U_pl1_;   ///< [cycle.finite_width] substrate shape (SubstrateShape)
    std::unique_ptr<FaultGeometry<ParMesh>> geom_;
    FaultDOFTable table_;

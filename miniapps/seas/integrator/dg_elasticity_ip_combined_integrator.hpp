@@ -18,6 +18,7 @@
 #include "../constitutive/constitutive_model.hpp"
 #include "../constitutive/linear_elastic.hpp"
 #include "../fault/fault_basis.hpp"
+#include "../domain/pml_band.hpp"
 #include <cmath>
 #include <memory>
 #include <vector>
@@ -66,6 +67,18 @@ public:
       side_ = s;
    }
 
+   /// PML design plan rev2, Sections 3.5 and 4.3 (P1): on band faces use the
+   /// zero-frequency band tensor C0 in the consistency and symmetry terms and
+   /// the shared penalty kappa_gamma P (decision D6).  sigma0(u) n =
+   /// S0 sigma~(grad u Lambda0^-1) Lambda0^-1 n, so at a band quadrature point
+   /// the plain terms take the stretched shape gradients Lambda0^-1 grad phi
+   /// and the traction normal S0 Lambda0^-1 n; the penalty keeps |n| and is
+   /// multiplied by kappa_gamma, the largest kappa (3.14) on the face.  Faces
+   /// with no quadrature point inside a band run the plain code unchanged.
+   /// nullptr (the default) turns it off.
+   void SetPmlBand(const PmlBand *band) { band_ = band; }
+   const PmlBand *GetPmlBand() const { return band_; }
+
    /// Assemble the full face matrix: consistency + symmetry + penalty.
    /// Mirrors Tandem's assembleSurface kernel.
    void AssembleFaceMatrix(const FiniteElement &el1,
@@ -92,6 +105,12 @@ public:
       DenseMatrix dshape1_adj(ndof1, dim_), dshape2_adj(std::max(ndof2,1), dim_);
       DenseMatrix adjJ(dim_);
       Vector nor(dim_);
+
+      // PML band (SetPmlBand): kappa_gamma over the face's quadrature points
+      const real_t kappa_face = BandFaceKappa_(Trans, ir);
+      const bool band_face = (kappa_face > 0.0);
+      Vector nor_t(dim_);
+      DenseMatrix dtmp;
 
       for (int q = 0; q < ir.GetNPoints(); q++)
       {
@@ -131,6 +150,18 @@ public:
          real_t penalty = ComputePenalty(el1, el2, detJ1, detJ2,
                                          lam1, mu1, lam2, mu2, nl_q,
                                          is_interior);
+         // PML band face: stretched gradients, traction normal S0 Lambda0^-1 n,
+         // penalty kappa_gamma P.  nor_t is the normal of the traction terms.
+         const Vector *nor_tr = &nor;
+         if (band_face)
+         {
+            const PmlPoint pb = BandPoint_(Trans, ip);
+            StretchRows_(pb, dshape1_adj, dtmp);
+            if (is_interior) { StretchRows_(pb, dshape2_adj, dtmp); }
+            StretchNormal_(pb, nor, nor_t);
+            nor_tr = &nor_t;
+            penalty *= kappa_face;
+         }
          // SetSide: keep side 1's (s1) or side 2's (s2) terms; both are 1
          // for the whole form
          const real_t s1 = (side_ == 2) ? 0.0 : 1.0;
@@ -155,7 +186,7 @@ public:
             dshape1_adj, dshape1_adj,
             lam1, mu1, detJ1,
             lam1, mu1, detJ1,
-            nor, nl_q, w_q,
+            *nor_tr, nl_q, w_q,
             is_interior ? -0.5*s1 : -1.0,  // c0
             is_interior ? 0.5*epsilon_*s1 : epsilon_,  // c1
             penalty,  // c2 (same side)
@@ -170,7 +201,7 @@ public:
             dshape1_adj, dshape2_adj,
             lam2, mu2, detJ2,  // trial = elem2 for consistency
             lam1, mu1, detJ1,  // test = elem1 for symmetry (but c1 uses trial side)
-            nor, nl_q, w_q,
+            *nor_tr, nl_q, w_q,
             -0.5*s2,            // c0 (same as block 00 — test is elem1)
             -0.5*epsilon_*s1,    // c1 (negated — trial is elem2)
             -penalty,            // c2 (cross side)
@@ -183,7 +214,7 @@ public:
             dshape2_adj, dshape1_adj,
             lam1, mu1, detJ1,  // trial = elem1
             lam2, mu2, detJ2,  // test = elem2
-            nor, nl_q, w_q,
+            *nor_tr, nl_q, w_q,
             0.5*s1,             // c0 (negated — test is elem2)
             0.5*epsilon_*s2,     // c1 (trial is elem1)
             -penalty,            // c2 (cross side)
@@ -196,7 +227,7 @@ public:
             dshape2_adj, dshape2_adj,
             lam2, mu2, detJ2,
             lam2, mu2, detJ2,
-            nor, nl_q, w_q,
+            *nor_tr, nl_q, w_q,
             0.5*s2,             // c0
             -0.5*epsilon_*s2,    // c1
             penalty,             // c2 (same side)
@@ -383,6 +414,12 @@ public:
       DenseMatrix adjJ(dim_);
       Vector nor(dim_);
 
+      // PML band (SetPmlBand): same changes as in AssembleFaceMatrix
+      const real_t kappa_face = BandFaceKappa_(Trans, ir);
+      const bool band_face = (kappa_face > 0.0);
+      DenseMatrix dtmp;
+      Vector nor_t(dim_);
+
       for (int q = 0; q < nq; q++)
       {
          const IntegrationPoint &ip = ir.IntPoint(q);
@@ -405,6 +442,14 @@ public:
          // Boundary penalty: single element (Tandem: penalty_[fctNo] = p(0))
          real_t penalty = ComputePenalty(fe1, fe1, detJ1, detJ1,
                                           lam1, mu1, lam1, mu1, nl_q, false);
+         if (band_face)
+         {
+            const PmlPoint pb = BandPoint_(Trans, ip);
+            StretchRows_(pb, dshape1_adj, dtmp);
+            StretchNormal_(pb, nor, nor_t);
+            nor = nor_t;          // the traction normal; nl_q is kept above
+            penalty *= kappa_face;
+         }
 
          // Prescribed Dirichlet value at this quad point
          real_t f_q[3];
@@ -855,6 +900,57 @@ private:
    real_t epsilon_;
    real_t penalty_factor_;
    int side_ = 0;   // SetSide
+   const PmlBand *band_ = nullptr;   // SetPmlBand
+
+   /// kappa_gamma: the largest kappa (3.14) over the face's quadrature
+   /// points; 0 when there is no band or no point of the face is in one.
+   real_t BandFaceKappa_(FaceElementTransformations &Trans,
+                         const IntegrationRule &ir) const
+   {
+      if (!band_) { return 0.0; }
+      real_t kmax = 0.0;
+      Vector x(dim_);
+      for (int q = 0; q < ir.GetNPoints(); q++)
+      {
+         Trans.Transform(ir.IntPoint(q), x);
+         if (!band_->InBand(x.GetData())) { continue; }
+         kmax = std::max(kmax, band_->At(x).kappa);
+      }
+      return kmax;
+   }
+
+   PmlPoint BandPoint_(FaceElementTransformations &Trans,
+                       const IntegrationPoint &ip) const
+   {
+      Vector x(dim_);
+      Trans.Transform(ip, x);
+      return band_->At(x);
+   }
+
+   /// rows of dshape (one per basis function) times Lambda0^-1 (symmetric)
+   void StretchRows_(const PmlPoint &p, DenseMatrix &dshape, DenseMatrix &tmp) const
+   {
+      tmp = dshape;
+      for (int k = 0; k < dshape.Height(); k++)
+         for (int i = 0; i < dim_; i++)
+         {
+            real_t v = 0.0;
+            for (int j = 0; j < dim_; j++) { v += tmp(k, j) * p.Linv[j][i]; }
+            dshape(k, i) = v;
+         }
+   }
+
+   /// out = S0 Lambda0^-1 nor
+   void StretchNormal_(const PmlPoint &p, const Vector &nor, Vector &out) const
+   {
+      out.SetSize(dim_);
+      for (int i = 0; i < dim_; i++)
+      {
+         real_t v = 0.0;
+         for (int j = 0; j < dim_; j++) { v += p.Linv[i][j] * nor(j); }
+         out(i) = p.S0 * v;
+      }
+   }
 
 public:
    /// Public accessor for diagnostic use.

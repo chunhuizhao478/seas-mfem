@@ -33,9 +33,18 @@
          cached_a_->KeepNbrBlock(true);
       }
 
-      // Volume term: ∫_Ω σ(u):ε(v) dV
-      cached_a_->AddDomainIntegrator(
-         new ElasticityIntegrator(*lambda_ptr_, *mu_ptr_));
+      // Volume term: ∫_Ω σ(u):ε(v) dV; with the PML QD band (SetPmlBand)
+      // ∫ C0 ∇u:∇v on band elements, the same ElasticityIntegrator elsewhere
+      if (pml_band_)
+      {
+         cached_a_->AddDomainIntegrator(
+            new PmlBandElasticityIntegrator(*lambda_ptr_, *mu_ptr_, *pml_band_));
+      }
+      else
+      {
+         cached_a_->AddDomainIntegrator(
+            new ElasticityIntegrator(*lambda_ptr_, *mu_ptr_));
+      }
       // 2.5D finite width (SetFiniteWidth): + ∫_Ω β u·v dV, the M_beta of
       // the substrate load
       if (beta_over_mu_ > 0.0)
@@ -72,16 +81,17 @@
          // one pass with the same traction operator, same quadrature (2p+1),
          // and same penalty formula. K, fault slip b, Dirichlet b, and traction
          // recovery all use this same integrator.
-         cached_a_->AddInteriorFaceIntegrator(
-            new DGElasticityIPCombinedIntegrator(
-               *lambda_ptr_, *mu_ptr_, dim_, epsilon_, penalty_factor_));
+         auto *face_integ = new DGElasticityIPCombinedIntegrator(
+            *lambda_ptr_, *mu_ptr_, dim_, epsilon_, penalty_factor_);
+         face_integ->SetPmlBand(pml_band_.get());   // PML QD band (null: off)
+         cached_a_->AddInteriorFaceIntegrator(face_integ);
 
          if (dirichlet_bdr_marker_.Size() > 0)
          {
-            cached_a_->AddBdrFaceIntegrator(
-               new DGElasticityIPCombinedIntegrator(
-                  *lambda_ptr_, *mu_ptr_, dim_, epsilon_, penalty_factor_),
-               dirichlet_bdr_marker_);
+            auto *bdr_integ = new DGElasticityIPCombinedIntegrator(
+               *lambda_ptr_, *mu_ptr_, dim_, epsilon_, penalty_factor_);
+            bdr_integ->SetPmlBand(pml_band_.get());
+            cached_a_->AddBdrFaceIntegrator(bdr_integ, dirichlet_bdr_marker_);
          }
       }
 
@@ -1178,6 +1188,7 @@
             // (same formula as K's boundary face, Tandem's rhs_boundary)
             DGElasticityIPCombinedIntegrator dir_integ(
                *lambda_ptr_, *mu_ptr_, dim, epsilon_, penalty_factor_);
+            dir_integ.SetPmlBand(pml_band_.get());   // PML QD band (null: off)
 
             int quad_order_dir = 2 * fe->GetOrder() + 1;
             const IntegrationRule &ir_dir = IntRules.Get(
@@ -1400,6 +1411,7 @@
          {
             DGElasticityIPCombinedIntegrator dir_integ(
                *lambda_ptr_, *mu_ptr_, dim, epsilon_, penalty_factor_);
+            dir_integ.SetPmlBand(pml_band_.get());   // PML QD band (null: off)
 
             int quad_order_dir = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;
             const IntegrationRule &ir_dir = IntRules.Get(
@@ -1719,6 +1731,7 @@
             {
                DGElasticityIPCombinedIntegrator dir_integ(
                   *lambda_ptr_, *mu_ptr_, dim, epsilon_, penalty_factor_);
+               dir_integ.SetPmlBand(pml_band_.get());   // PML QD band (null: off)
 
                int quad_order_dir = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;
                const IntegrationRule &ir_dir = IntRules.Get(

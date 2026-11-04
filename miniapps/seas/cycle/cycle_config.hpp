@@ -429,6 +429,28 @@ struct AbsorbingConfig
    bool FreeSurface() const { return faces != "all"; }
 };
 
+/// [cycle.pml]: the PML band (PML design plan rev2, Section 7.2; decisions
+/// D1-D6 at their Section 7.7 defaults, Chunhui Zhao 2026-11-04).  Off by
+/// default.  P1 (this table) builds the QD band: QD uses K0 (C0 on band
+/// elements and faces, the penalty times kappa).  The dynamic PML is P2;
+/// until then [cycle].switching = true is refused with the table on.
+struct PmlConfig
+{
+   bool on = false;
+   std::vector<int> wall_attrs;    ///< boundary attributes whose faces are walls
+   real_t thickness = 0.0;         ///< thickness_km, stored in m
+   int power = 2;                  ///< N of the profile (2.13)
+   real_t R0 = 1e-3;               ///< target round-trip amplitude at normal incidence
+   real_t f_alpha = 0.0;           ///< f_alpha_hz, the CFS shift frequency [Hz]
+   real_t c_ref = 0.0;             ///< c of (2.13) [m/s]; 0 in the deck = c_p of the material
+   /// D3: the loaded walls move faster by this factor, (W + 2 Delta L) / W
+   /// for "auto" (stored as 0, set by QDPhase from the band), or the number
+   /// given; 1 = unchanged.
+   real_t wall_speed_factor = 0.0;
+   bool On() const { return on; }
+   bool AutoWallSpeed() const { return wall_speed_factor == 0.0; }
+};
+
 /// [cycle.switch]: the regime controller (plan 3.3 g).  Defaults: Thrase's
 /// BP1-FD thresholds, the spec's 10 s event end, T_max about six times the
 /// longest Tandem p=1 phase (plan 6.5).
@@ -536,6 +558,7 @@ struct CycleConfig
    LoadingConfig loading;         ///< [cycle.loading] (default: the BP5 function)
    AbsorbingConfig absorbing;
    FiniteWidthConfig finite_width;   ///< [cycle.finite_width] (default: off)
+   PmlConfig pml;                    ///< [cycle.pml] (default: off)
    int checkpoint_every = 0;
    std::vector<DeckVector> deck_vectors;   ///< every vector key Load read
 
@@ -891,7 +914,8 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
                           "plate_rate", "penalty_factor", "sigma_n_floor_pa", "qd", "switch",
                           "probe", "relaxation",
                           "prestress", "fields", "output", "checkpoint", "snapshots",
-                          "benchmark", "lts", "loading", "absorbing", "finite_width"});
+                          "benchmark", "lts", "loading", "absorbing", "finite_width",
+                          "pml"});
    c.ic = Str(cy, "cycle", "ic", "", true);
    MFEM_VERIFY(c.ic == "gold" || c.ic == "scec_fd",
                "[cycle].ic must be \"gold\" or \"scec_fd\"; got \"" << c.ic << "\"");
@@ -1512,6 +1536,60 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       MFEM_VERIFY(!c.lts.On(), "[" << sec << "] with [cycle.lts] mode = \"rate2\": the LTS "
                   "run integrates its own element matrices, without beta; use global "
                   "stepping");
+   }
+
+   // ---- [cycle.pml] (PML design plan rev2, P1) ----
+   if (cy.contains("pml"))
+   {
+      const std::string sec = "cycle.pml";
+      const toml::value &pt = cy.at("pml");
+      OnlyKeys(pt, sec, {"on", "wall_attrs", "thickness_km", "power", "R0", "f_alpha_hz",
+                         "c_ref", "wall_speed_factor"});
+      PmlConfig &P = c.pml;
+      P.on = Bool(pt, sec, "on", false);
+      P.wall_attrs = Ints(pt, sec, "wall_attrs", {});
+      P.thickness = 1.0e3 * Real(pt, sec, "thickness_km", 0.0, P.on);
+      P.power = Int(pt, sec, "power", P.power);
+      P.R0 = Real(pt, sec, "R0", P.R0);
+      P.f_alpha = Real(pt, sec, "f_alpha_hz", 0.0, P.on);
+      const real_t lam = s.material_fallback.lambda, mu = s.material_fallback.mu;
+      const real_t rho = s.material_fallback.rho;
+      P.c_ref = Real(pt, sec, "c_ref", std::sqrt((lam + 2.0 * mu) / rho));
+      if (pt.contains("wall_speed_factor") && pt.at("wall_speed_factor").is_string())
+      {
+         MFEM_VERIFY(Str(pt, sec, "wall_speed_factor", "") == "auto", "[" << sec
+                     << "].wall_speed_factor must be \"auto\" or a number >= 1");
+         P.wall_speed_factor = 0.0;
+      }
+      else if (pt.contains("wall_speed_factor"))
+      {
+         P.wall_speed_factor = Real(pt, sec, "wall_speed_factor", 1.0);
+         MFEM_VERIFY(P.wall_speed_factor >= 1.0, "[" << sec << "].wall_speed_factor = "
+                     << P.wall_speed_factor << " must be >= 1 (or \"auto\")");
+      }
+      if (P.on)
+      {
+         MFEM_VERIFY(!P.wall_attrs.empty(), "[" << sec << "].wall_attrs is required");
+         MFEM_VERIFY(P.thickness > 0.0 && std::isfinite(P.thickness), "[" << sec
+                     << "].thickness_km must be > 0");
+         MFEM_VERIFY(P.power >= 1, "[" << sec << "].power must be >= 1");
+         MFEM_VERIFY(P.R0 > 0.0 && P.R0 < 1.0, "[" << sec << "].R0 must be in (0, 1)");
+         MFEM_VERIFY(P.f_alpha > 0.0 && std::isfinite(P.f_alpha), "[" << sec
+                     << "].f_alpha_hz must be > 0 (CFS-PML, decision D1)");
+         MFEM_VERIFY(P.c_ref > 0.0, "[" << sec << "].c_ref must be > 0 m/s");
+         MFEM_VERIFY(!c.absorbing.On(), "[" << sec << "] with [cycle.absorbing] faces = \""
+                     << c.absorbing.faces << "\": the PML keeps the walls Dirichlet; use "
+                     "faces = \"off\"");
+         MFEM_VERIFY(!c.lts.On(), "[" << sec << "] with [cycle.lts]: not implemented "
+                     "(plan rev2, Section 7.3); use global stepping");
+         MFEM_VERIFY(!c.finite_width.On(), "[" << sec << "] with [cycle.finite_width]: "
+                     "not implemented");
+         MFEM_VERIFY(!c.switching, "[" << sec << "] with [cycle].switching = true: the "
+                     "dynamic PML is phase P2 of the plan and is not built yet; this "
+                     "build runs the QD band only (switching = false)");
+         MFEM_VERIFY(P.wall_speed_factor == 1.0 || c.loading.Plate(), "[" << sec
+                     << "].wall_speed_factor needs [cycle.loading] kind = \"plate\"");
+      }
    }
 
    if (c.lts.On())

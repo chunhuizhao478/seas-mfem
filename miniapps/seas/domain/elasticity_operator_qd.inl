@@ -172,6 +172,9 @@ void ElasticityDomainOperator<MeshType>::BuildQDStageOperators(
 
       DGElasticityIPCombinedIntegrator integ(
          *lambda_ptr_, *mu_ptr_, dim, epsilon_, penalty_factor_);
+      // PML QD band (null: off): its Dirichlet columns (T_D) use C0 and
+      // kappa P on band wall faces; fault faces lie outside every band
+      integ.SetPmlBand(pml_band_.get());
       QDTriplets tB, tD, tCu, tCd, tNu, tNd;
       Array<int> vdofs1, vdofs2;
       Vector face_slip(2 * nbf), delta, elvec1, elvec2, trac_local;

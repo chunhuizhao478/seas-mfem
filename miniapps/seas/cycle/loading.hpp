@@ -58,12 +58,22 @@ namespace cycle
 {
 
 /// The [cycle.loading] function with plate rate Vp (see the file comment).
-inline DirichletFunc MakePlateLoading(const LoadingConfig &L, real_t Vp)
+/// wall_factor (PML plan rev2, decision D3): beyond the band the two sides
+/// move by +-(wall_factor Vp t / 2) s; the band (prescribed-slip faces)
+/// keeps Vp.  1 (the default) is the function above, bit for bit.
+inline DirichletFunc MakePlateLoading(const LoadingConfig &L, real_t Vp,
+                                      real_t wall_factor = 1.0)
 {
-   if (!L.Plate()) { return MakeBP5DirichletFunc(Vp); }
+   if (!L.Plate())
+   {
+      MFEM_VERIFY(wall_factor == 1.0, "MakePlateLoading: a wall speed factor needs "
+                  "kind = \"plate\"");
+      return MakeBP5DirichletFunc(Vp);
+   }
    const std::array<real_t, 3> p = L.plane_point, m = L.plane_normal, s = L.slip_dir;
    const real_t b = L.band, band_sign = L.band_sign;
-   return [Vp, p, m, s, b, band_sign](const Vector &x, real_t t, Vector &u)
+   const real_t half = (wall_factor == 1.0) ? 0.5 : 0.5 * wall_factor;
+   return [Vp, p, m, s, b, band_sign, half](const Vector &x, real_t t, Vector &u)
    {
       const int dim = x.Size();
       u.SetSize(dim);
@@ -72,8 +82,8 @@ inline DirichletFunc MakePlateLoading(const LoadingConfig &L, real_t Vp)
                        ? (x(0) - p[0]) * m[0] + (x(1) - p[1]) * m[1] + (x(2) - p[2]) * m[2]
                        : (x(0) - p[0]) * m[0] + (x(1) - p[1]) * m[1];
       real_t Vh = Vp * t;
-      if (d > b)       { Vh *= 0.5; }
-      else if (d < -b) { Vh *= -0.5; }
+      if (d > b)       { Vh *= half; }
+      else if (d < -b) { Vh *= -half; }
       else             { Vh *= band_sign; }
       for (int i = 0; i < dim; i++)
       {
@@ -82,10 +92,11 @@ inline DirichletFunc MakePlateLoading(const LoadingConfig &L, real_t Vp)
    };
 }
 
-/// The cycle's loading: [cycle.loading] at [cycle].plate_rate.
-inline DirichletFunc MakeCycleLoading(const CycleConfig &cfg)
+/// The cycle's loading: [cycle.loading] at [cycle].plate_rate; wall_factor:
+/// the [cycle.pml] wall speed factor (D3), 1 without the PML.
+inline DirichletFunc MakeCycleLoading(const CycleConfig &cfg, real_t wall_factor = 1.0)
 {
-   return MakePlateLoading(cfg.loading, cfg.plate_rate);
+   return MakePlateLoading(cfg.loading, cfg.plate_rate, wall_factor);
 }
 
 #ifdef MFEM_USE_MPI

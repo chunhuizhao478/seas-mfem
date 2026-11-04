@@ -28,6 +28,8 @@
 #include "../integrator/dg_elasticity_br2_integrator.hpp"
 #include "../integrator/dg_elasticity_ip_penalty_integrator.hpp"
 #include "../integrator/dg_elasticity_ip_combined_integrator.hpp"
+#include "../integrator/pml_elasticity_integrators.hpp"
+#include "pml_band.hpp"
 #include "../fault/face_quadrature.hpp"
 #include "matrix_stats.hpp"
 #include "../common/stage_timers.hpp"
@@ -372,6 +374,31 @@ public:
       substrate_t_off_ = std::move(t_offset);
    }
    bool HasFiniteWidth() const { return beta_over_mu_ > 0.0; }
+
+   /// PML design plan rev2, P1 (Section 7.2): the QD band.  Every K and
+   /// Dirichlet right-hand side assembled after this call uses the
+   /// zero-frequency band tensor C0 on band elements and band faces, and the
+   /// shared penalty kappa_gamma P on band faces, so every QD solve uses K0
+   /// (Section 4.3).  Fault paths are untouched (no fault face may lie in a
+   /// band; the caller checks).  IP only, no 2.5D term; before BuildQDGreen;
+   /// a K assembled before (and its factorization) is dropped.  nullptr
+   /// turns it off.  Without this call nothing changes (T0).
+   void SetPmlBand(std::shared_ptr<const PmlBand> band)
+   {
+      MFEM_VERIFY(method_ == DGMethod::IP, "SetPmlBand: IP only");
+      MFEM_VERIFY(!band || band->Dim() == dim_, "SetPmlBand: band dimension "
+                  << band->Dim() << ", mesh " << dim_);
+      MFEM_VERIFY(!band || beta_over_mu_ == 0.0, "SetPmlBand: not with the 2.5D "
+                  "finite-width term");
+#ifdef MFEM_USE_MPI
+      MFEM_VERIFY(!qd_green_, "SetPmlBand after BuildQDGreen: G was built without "
+                  "the band");
+#endif
+      solver_.reset();
+      ReleaseStiffness();
+      pml_band_ = std::move(band);
+   }
+   const PmlBand *GetPmlBand() const { return pml_band_.get(); }
    real_t FiniteWidthBetaOverMu() const { return beta_over_mu_; }
    /// M_beta U_pl1 (vdofs): the substrate load at physical time 1.
    const Vector &SubstrateLoad() const { return substrate_load_; }
@@ -778,6 +805,9 @@ private:
    mutable std::unique_ptr<BilinFormType> cached_a_;
    mutable OperatorHandle cached_Ah_;
    mutable std::unique_ptr<Solver> cached_prec_;
+
+   // PML QD band (SetPmlBand; null = off)
+   std::shared_ptr<const PmlBand> pml_band_;
 
    // 2.5D finite-width model (SetFiniteWidth; 0 = off)
    real_t beta_over_mu_ = 0.0;
