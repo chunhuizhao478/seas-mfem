@@ -35,7 +35,7 @@
 
       // Volume term: ∫_Ω σ(u):ε(v) dV; with the PML QD band (SetPmlBand)
       // ∫ C0 ∇u:∇v on band elements, the same ElasticityIntegrator elsewhere
-      if (pml_band_)
+      if (pml_band_ && !pml_penalty_only_)
       {
          cached_a_->AddDomainIntegrator(
             new PmlBandElasticityIntegrator(*lambda_ptr_, *mu_ptr_, *pml_band_));
@@ -83,14 +83,14 @@
          // recovery all use this same integrator.
          auto *face_integ = new DGElasticityIPCombinedIntegrator(
             *lambda_ptr_, *mu_ptr_, dim_, epsilon_, penalty_factor_);
-         face_integ->SetPmlBand(pml_band_.get());   // PML QD band (null: off)
+         face_integ->SetPmlBand(pml_band_.get(), pml_penalty_only_);   // PML QD band (null: off)
          cached_a_->AddInteriorFaceIntegrator(face_integ);
 
          if (dirichlet_bdr_marker_.Size() > 0)
          {
             auto *bdr_integ = new DGElasticityIPCombinedIntegrator(
                *lambda_ptr_, *mu_ptr_, dim_, epsilon_, penalty_factor_);
-            bdr_integ->SetPmlBand(pml_band_.get());
+            bdr_integ->SetPmlBand(pml_band_.get(), pml_penalty_only_);
             cached_a_->AddBdrFaceIntegrator(bdr_integ, dirichlet_bdr_marker_);
          }
       }
@@ -1188,7 +1188,7 @@
             // (same formula as K's boundary face, Tandem's rhs_boundary)
             DGElasticityIPCombinedIntegrator dir_integ(
                *lambda_ptr_, *mu_ptr_, dim, epsilon_, penalty_factor_);
-            dir_integ.SetPmlBand(pml_band_.get());   // PML QD band (null: off)
+            dir_integ.SetPmlBand(pml_band_.get(), pml_penalty_only_);   // PML QD band (null: off)
 
             int quad_order_dir = 2 * fe->GetOrder() + 1;
             const IntegrationRule &ir_dir = IntRules.Get(
@@ -1411,7 +1411,7 @@
          {
             DGElasticityIPCombinedIntegrator dir_integ(
                *lambda_ptr_, *mu_ptr_, dim, epsilon_, penalty_factor_);
-            dir_integ.SetPmlBand(pml_band_.get());   // PML QD band (null: off)
+            dir_integ.SetPmlBand(pml_band_.get(), pml_penalty_only_);   // PML QD band (null: off)
 
             int quad_order_dir = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;
             const IntegrationRule &ir_dir = IntRules.Get(
@@ -1731,7 +1731,7 @@
             {
                DGElasticityIPCombinedIntegrator dir_integ(
                   *lambda_ptr_, *mu_ptr_, dim, epsilon_, penalty_factor_);
-               dir_integ.SetPmlBand(pml_band_.get());   // PML QD band (null: off)
+               dir_integ.SetPmlBand(pml_band_.get(), pml_penalty_only_);   // PML QD band (null: off)
 
                int quad_order_dir = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;
                const IntegrationRule &ir_dir = IntRules.Get(

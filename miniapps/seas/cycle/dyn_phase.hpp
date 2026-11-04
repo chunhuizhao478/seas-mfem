@@ -161,12 +161,16 @@ public:
    /// FrameField()); null: the Nitsche operator builds the same field
    /// itself from CycleFrameConfig (tests).  `substrate`: with
    /// [cycle.finite_width], the QD regime's U_pl1 (QDPhase::SubstrateShape;
-   /// one u_pl in both regimes), read at t0 + tau.
+   /// one u_pl in both regimes), read at t0 + tau.  `pml`, `pml_wall_factor`:
+   /// with [cycle.pml], the QD regime's band and wall speed factor
+   /// (QDPhase::PmlBandPtr, PmlWallSpeedFactor): the same walls, the same
+   /// loading in both regimes (PML plan rev2, Section 7.3).
    DynPhase(ParMesh &pmesh, const CycleConfig &cfg, const FaultDOFTable &table,
             const FaultParams &par, const Prestress &pre, real_t dt_scale = 1.0,
             const LtsLayout *lts = nullptr,
             std::shared_ptr<const FaultFrameField> frames = nullptr,
-            const Vector *substrate = nullptr)
+            const Vector *substrate = nullptr,
+            std::shared_ptr<const PmlBand> pml = nullptr, real_t pml_wall_factor = 1.0)
       : pmesh_(pmesh), cfg_(cfg), t0_(std::make_shared<real_t>(0.0))
    {
       const spatial::SpatialFrictionConfig &s = cfg.shared;
@@ -183,8 +187,23 @@ public:
       bc_.dirichlet_attrs = {5};
       bc_.natural_attrs = {1};
       bc_.fault_attr = cfg.fault_attr;
+      MFEM_VERIFY(cfg.pml.On() == (pml != nullptr), "DynPhase: [cycle.pml] on = "
+                  << cfg.pml.On() << " but the band was " << (pml ? "" : "not ")
+                  << "given (QDPhase::PmlBandPtr)");
+      MFEM_VERIFY(pml || pml_wall_factor == 1.0, "DynPhase: a wall speed factor without the band");
+      if (pml)
       {
-         const DirichletFunc load = MakeCycleLoading(cfg);   // [cycle.loading], as QD
+         // the [cycle.pml] refusals of the deck reader, repeated for callers
+         // that build the configuration by hand
+         MFEM_VERIFY(!cfg.absorbing.On() && !(lts != nullptr && lts->on) &&
+                     !cfg.finite_width.On(), "DynPhase: [cycle.pml] with "
+                     "[cycle.absorbing], [cycle.lts] or [cycle.finite_width]");
+         MFEM_VERIFY(dc.kv_eta == 0.0, "DynPhase: [cycle.pml] with Kelvin-Voigt "
+                     "([numerics] kv_eta > 0): not implemented");
+      }
+      {
+         // [cycle.loading], as QD (with the band: the same D3 wall factor)
+         const DirichletFunc load = MakeCycleLoading(cfg, pml_wall_factor);
          std::shared_ptr<const real_t> t0 = t0_;
          bc_.default_dirichlet_func = [load, t0](const Vector &x, real_t tau, Vector &u)
          { load(x, *t0 + tau, u); };
@@ -251,6 +270,12 @@ public:
       dcfg.penalty_factor = cfg.penalty_factor;
       dcfg.fault_frames.field = frames;
       W_ = std::make_unique<NitscheWaveOperator>(*wmesh, p, *material_, bc_, dcfg, &fs);
+      if (pml)
+      {
+         // K_p, C_d and the memory terms (before SetTimeStep)
+         pml_ = pml;
+         W_->SetPml(pml);
+      }
       MFEM_VERIFY(W_->Orientation().GetReport().junction_edges == 0,
                   "DynPhase: the fault has " << W_->Orientation().GetReport().junction_edges
                   << " junction edges ([fault_geometry] junction_policy = \"refuse\")");
@@ -282,6 +307,14 @@ public:
 
       ceig_ = NitscheStableConstant(pmesh.Dimension(), p);
       dt_cfl_ = ComputeMaxDt(W_->Sample(), pmesh, p, dc.cfl * ceig_);
+      if (pml_)
+      {
+         // decision D6: the band's SIPG penalty is kappa_gamma P, so the
+         // largest eigenvalue grows by up to kappa_max: dt / sqrt(kappa_max)
+         // (tests/pml/test_pml_dyn.cpp, CFL line, measures it)
+         pml_kappa_max_ = W_->Pml()->KappaMax();
+         dt_cfl_ /= std::sqrt(pml_kappa_max_);
+      }
       if (cfg.finite_width.On())
       {
          // Rule C6: omega_max^2 + beta / rho, with dt_cfl taken as 2 / omega_max
@@ -341,6 +374,9 @@ public:
       MFEM_VERIFY(W_->GetTime() == 0.0, "DynPhase::Enter: the operator's clock is "
                   << W_->GetTime() << ", not 0 (the loads would read t_s + clock)");
       W_->SetFaultState(d, V, psi);
+      // PML (plan rev2, Section 3.1): memory to zero, b_band from u_s and the
+      // wall data at t_s, so the static QD state is an equilibrium of W
+      if (pml_) { W_->PmlEnter(u_s); }
       if (W_->HasPrakashClifton()) { W_->SetPrakashCliftonState(sigma_n); }
       W_->ResetFloorCount();
       if (tags_.dirichlet > 0)
@@ -580,6 +616,10 @@ public:
    real_t DtCFL() const { return dt_cfl_; }
    /// C(p) of the CFL step (NitscheStableConstant of the mesh dimension).
    real_t StableConstant() const { return ceig_; }
+   /// [cycle.pml]: the band's largest penalty factor (the CFL step is
+   /// divided by its square root); 1 without the band.
+   real_t PmlKappaMax() const { return pml_kappa_max_; }
+   bool HasPml() const { return pml_ != nullptr; }
    long Steps() const { return steps_; }
    /// Global max |V| of the last step (0 before the first).
    real_t MaxV() const { return W_->LastStep().max_V; }
@@ -823,6 +863,8 @@ private:
    std::unique_ptr<DieterichRuinaFriction> fr_;
    std::unique_ptr<RateStateClosure> closure_;
    std::unique_ptr<NitscheWaveOperator> W_;
+   std::shared_ptr<const PmlBand> pml_;   ///< [cycle.pml] (null: off)
+   real_t pml_kappa_max_ = 1.0;
    const Vector *relax_r_ = nullptr;   ///< [cycle.relaxation]: the QD regime's r
    std::unique_ptr<FrozenNormalStressReduction> relax_mod_;
    std::unique_ptr<CentralDifferenceSolver> ode_;

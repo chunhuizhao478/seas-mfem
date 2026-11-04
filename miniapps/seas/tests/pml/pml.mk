@@ -6,11 +6,13 @@
 # Run from miniapps/seas:
 #   make -f tests/pml/pml.mk test-pml-band     # P1: PmlBand, C0, band integrators, patch test
 #   make -f tests/pml/pml.mk test-pml-qd       # P1: the QD band on Q0 (T1, D3), 1 and 2 ranks
+#   make -f tests/pml/pml.mk test-pml-dyn      # P2: the dynamic PML (S0, S1, T2-T4), 1 and 2 ranks
+#   make -f tests/pml/pml.mk test-pml-switch   # P2: DynPhase with the band on D0, 1 and 2 ranks
 
 include tests/2d_inplane/2d_inplane.mk
 
 PML_HEADERS = domain/pml_band.hpp integrator/pml_elasticity_integrators.hpp \
-              integrator/dg_elasticity_ip_combined_integrator.hpp
+              integrator/dg_elasticity_ip_combined_integrator.hpp domain/pml_memory.hpp
 
 TEST_PML_BAND_SRC = tests/pml/test_pml_band.cpp
 TEST_PML_BAND_OBJ = $(TEST_PML_BAND_SRC:.cpp=.o)
@@ -39,4 +41,36 @@ test-pml-qd: seas_test_pml_qd
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_pml_qd
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_pml_qd
 
-.PHONY: test-pml-band test-pml-qd
+TEST_PML_DYN_SRC = tests/pml/test_pml_dyn.cpp
+TEST_PML_DYN_OBJ = $(TEST_PML_DYN_SRC:.cpp=.o)
+$(TEST_PML_DYN_OBJ): %.o: $(SRC)%.cpp $(PML_HEADERS) $(SEAS_HEADERS) $(INPLANE_HEADERS) \
+                     $(NITSCHE_2D_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI -c $< -o $@
+
+seas_test_pml_dyn: $(TEST_PML_DYN_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PML_DYN_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# S0, S1, T2 on 1 and 2 ranks; T3/T4 (the pulse runs) on 1 rank
+test-pml-dyn: seas_test_pml_dyn
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_pml_dyn
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_pml_dyn --only S0,S1,T2
+
+TEST_PML_SWITCH_SRC = tests/pml/test_pml_switch.cpp
+TEST_PML_SWITCH_OBJ = $(TEST_PML_SWITCH_SRC:.cpp=.o)
+$(TEST_PML_SWITCH_OBJ): %.o: $(SRC)%.cpp $(PML_HEADERS) $(CYCLE_HEADERS) $(CYCLE_STAMP) \
+                        $(CYCLE_SHARED_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
+
+seas_test_pml_switch: $(TEST_PML_SWITCH_OBJ) $(CYCLE_LINK_OBJS)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PML_SWITCH_OBJ) $(CYCLE_LINK_OBJS) $(CYCLE_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-pml-switch: seas_test_pml_switch
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_pml_switch
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_pml_switch
+
+.PHONY: test-pml-band test-pml-qd test-pml-dyn test-pml-switch

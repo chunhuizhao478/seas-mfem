@@ -76,7 +76,16 @@ public:
    /// multiplied by kappa_gamma, the largest kappa (3.14) on the face.  Faces
    /// with no quadrature point inside a band run the plain code unchanged.
    /// nullptr (the default) turns it off.
-   void SetPmlBand(const PmlBand *band) { band_ = band; }
+   ///
+   /// penalty_only (PML plan rev2, Section 3.5, P2): the dynamic phase's
+   /// instantaneous operator K_p: plain C in every term, only the penalty
+   /// times kappa_gamma on band faces (the same P as K0).
+   void SetPmlBand(const PmlBand *band, bool penalty_only = false)
+   {
+      band_ = band;
+      band_penalty_only_ = penalty_only;
+   }
+   bool PmlPenaltyOnly() const { return band_penalty_only_; }
    const PmlBand *GetPmlBand() const { return band_; }
 
    /// Assemble the full face matrix: consistency + symmetry + penalty.
@@ -155,11 +164,14 @@ public:
          const Vector *nor_tr = &nor;
          if (band_face)
          {
-            const PmlPoint pb = BandPoint_(Trans, ip);
-            StretchRows_(pb, dshape1_adj, dtmp);
-            if (is_interior) { StretchRows_(pb, dshape2_adj, dtmp); }
-            StretchNormal_(pb, nor, nor_t);
-            nor_tr = &nor_t;
+            if (!band_penalty_only_)
+            {
+               const PmlPoint pb = BandPoint_(Trans, ip);
+               StretchRows_(pb, dshape1_adj, dtmp);
+               if (is_interior) { StretchRows_(pb, dshape2_adj, dtmp); }
+               StretchNormal_(pb, nor, nor_t);
+               nor_tr = &nor_t;
+            }
             penalty *= kappa_face;
          }
          // SetSide: keep side 1's (s1) or side 2's (s2) terms; both are 1
@@ -444,10 +456,13 @@ public:
                                           lam1, mu1, lam1, mu1, nl_q, false);
          if (band_face)
          {
-            const PmlPoint pb = BandPoint_(Trans, ip);
-            StretchRows_(pb, dshape1_adj, dtmp);
-            StretchNormal_(pb, nor, nor_t);
-            nor = nor_t;          // the traction normal; nl_q is kept above
+            if (!band_penalty_only_)
+            {
+               const PmlPoint pb = BandPoint_(Trans, ip);
+               StretchRows_(pb, dshape1_adj, dtmp);
+               StretchNormal_(pb, nor, nor_t);
+               nor = nor_t;       // the traction normal; nl_q is kept above
+            }
             penalty *= kappa_face;
          }
 
@@ -901,6 +916,7 @@ private:
    real_t penalty_factor_;
    int side_ = 0;   // SetSide
    const PmlBand *band_ = nullptr;   // SetPmlBand
+   bool band_penalty_only_ = false;  // SetPmlBand: K_p (penalty x kappa only)
 
    /// kappa_gamma: the largest kappa (3.14) over the face's quadrature
    /// points; 0 when there is no band or no point of the face is in one.

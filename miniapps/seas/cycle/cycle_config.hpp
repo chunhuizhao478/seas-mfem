@@ -432,8 +432,10 @@ struct AbsorbingConfig
 /// [cycle.pml]: the PML band (PML design plan rev2, Section 7.2; decisions
 /// D1-D6 at their Section 7.7 defaults, Chunhui Zhao 2026-11-04).  Off by
 /// default.  P1 (this table) builds the QD band: QD uses K0 (C0 on band
-/// elements and faces, the penalty times kappa).  The dynamic PML is P2;
-/// until then [cycle].switching = true is refused with the table on.
+/// elements and faces, the penalty times kappa).  P2: the dynamic phase
+/// keeps the walls Dirichlet and runs the time-domain band (K_p, C_d and the
+/// memory terms of domain/pml_memory.hpp), its CFL step divided by
+/// sqrt(kappa_max).
 struct PmlConfig
 {
    bool on = false;
@@ -1584,9 +1586,9 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
                      "(plan rev2, Section 7.3); use global stepping");
          MFEM_VERIFY(!c.finite_width.On(), "[" << sec << "] with [cycle.finite_width]: "
                      "not implemented");
-         MFEM_VERIFY(!c.switching, "[" << sec << "] with [cycle].switching = true: the "
-                     "dynamic PML is phase P2 of the plan and is not built yet; this "
-                     "build runs the QD band only (switching = false)");
+         MFEM_VERIFY(c.dyn.kv_eta == 0.0 || !c.switching, "[" << sec << "] with "
+                     "Kelvin-Voigt damping ([numerics] kv_eta > 0) in the dynamic phase: "
+                     "not implemented (plan rev2, Section 7.3)");
          MFEM_VERIFY(P.wall_speed_factor == 1.0 || c.loading.Plate(), "[" << sec
                      << "].wall_speed_factor needs [cycle.loading] kind = \"plate\"");
       }

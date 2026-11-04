@@ -372,6 +372,11 @@ void PrintDynamicSetup(const MPIContext &mpi, const cycle::CycleConfig &cfg,
                 << 1.0 - dyn.FiniteWidthDtFactor() << std::defaultfloat << std::setprecision(6)
                 << ") for beta / rho; Kelvin-Voigt on K alone\n";
    }
+   if (dyn.HasPml())
+   {
+      std::cout << "    PML band (dynamic): K_p (penalty x kappa), C_d and the memory terms; "
+                << "the CFL step divided by sqrt(kappa_max = " << dyn.PmlKappaMax() << ")\n";
+   }
    std::cout << "    Kelvin-Voigt: ";
    if (dyn.HasKelvinVoigt())
    {
@@ -1276,7 +1281,8 @@ int main(int argc, char *argv[])
          dyn = std::make_unique<cycle::DynPhase>(pmesh, cfg, qd.Table(), par, pre, 1.0,
                                                  lts.on ? &lts : nullptr,
                                                  qd.Domain().FrameField(),
-                                                 qd.SubstrateShape());
+                                                 qd.SubstrateShape(),
+                                                 qd.PmlBandPtr(), qd.PmlWallSpeedFactor());
          if (cfg.Relaxation()) { dyn->SetNormalStressRelaxation(qd.Relaxation()->R()); }
          PrintDynamicSetup(mpi, cfg, *dyn, MPI_Wtime() - w);
       }

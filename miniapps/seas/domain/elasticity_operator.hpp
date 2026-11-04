@@ -383,7 +383,11 @@ public:
    /// band; the caller checks).  IP only, no 2.5D term; before BuildQDGreen;
    /// a K assembled before (and its factorization) is dropped.  nullptr
    /// turns it off.  Without this call nothing changes (T0).
-   void SetPmlBand(std::shared_ptr<const PmlBand> band)
+   ///
+   /// penalty_only (P2, Section 3.5): K_p of the dynamic phase instead: plain
+   /// C everywhere, the penalty times kappa_gamma on band faces (matrix and
+   /// Dirichlet right-hand side), so K_p and K0 share one penalty.
+   void SetPmlBand(std::shared_ptr<const PmlBand> band, bool penalty_only = false)
    {
       MFEM_VERIFY(method_ == DGMethod::IP, "SetPmlBand: IP only");
       MFEM_VERIFY(!band || band->Dim() == dim_, "SetPmlBand: band dimension "
@@ -397,8 +401,20 @@ public:
       solver_.reset();
       ReleaseStiffness();
       pml_band_ = std::move(band);
+      pml_penalty_only_ = penalty_only;
    }
    const PmlBand *GetPmlBand() const { return pml_band_.get(); }
+   bool PmlPenaltyOnly() const { return pml_penalty_only_; }
+   /// The SIPG sign and the penalty factor of every face term (for the PML
+   /// band force of the dynamic phase, which repeats the face terms).
+   real_t GetEpsilon() const { return epsilon_; }
+   real_t GetPenaltyFactor() const { return penalty_factor_; }
+   /// 1 for the Dirichlet boundary attributes (index attr - 1).
+   const Array<int> &DirichletBdrMarker() const { return dirichlet_bdr_marker_; }
+   /// The Dirichlet value of boundary attribute attr at x and t (public
+   /// form of EvalDirichletFunc).
+   void EvalDirichlet(int attr, const Vector &x, real_t t, Vector &u_D) const
+   { EvalDirichletFunc(attr, x, t, u_D); }
    real_t FiniteWidthBetaOverMu() const { return beta_over_mu_; }
    /// M_beta U_pl1 (vdofs): the substrate load at physical time 1.
    const Vector &SubstrateLoad() const { return substrate_load_; }
@@ -808,6 +824,7 @@ private:
 
    // PML QD band (SetPmlBand; null = off)
    std::shared_ptr<const PmlBand> pml_band_;
+   bool pml_penalty_only_ = false;   ///< SetPmlBand: K_p instead of K0
 
    // 2.5D finite-width model (SetFiniteWidth; 0 = off)
    real_t beta_over_mu_ = 0.0;

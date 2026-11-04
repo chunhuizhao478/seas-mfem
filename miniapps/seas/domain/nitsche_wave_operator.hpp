@@ -134,6 +134,7 @@
 #include "elasticity_operator.hpp"
 #include "fault_stress_projection.hpp"
 #include "fused_stiffness_pair.hpp"
+#include "pml_memory.hpp"
 #include "dense_block_stiffness.hpp"
 #include "../integrator/dg_absorbing_bc_integrator.hpp"
 #include "../fault/fault_orientation.hpp"
@@ -307,6 +308,7 @@ public:
    void SetTimeStep(real_t dt)
    {
       dt_ = dt;
+      if (pml_) { pml_->SetTimeStep(dt); }
       if (has_damping_global_)
       {
          mass_damped_ = std::make_unique<NitscheMass>(
@@ -353,6 +355,9 @@ public:
                   "NitscheWaveOperator::ImplicitSolve called twice at t = "
                   << t << "; exactly one call per time step is allowed.");
       last_solve_time_ = t;
+      // PML memory (plan rev2 Section 3.6): every filter steps once, with
+      // U^{n+1}, before the acceleration that reads it
+      if (pml_) { pml_->Advance(x, t); }
       if (has_fault_) { AdvanceFault_(x, t, &dxdt); }
       if (damping_blocks_.empty())
       {
@@ -377,6 +382,64 @@ public:
    }
 
    const NitscheMaterialSample &Sample() const { return *sample_; }
+
+   /// Dynamic PML (PML design plan rev2, Sections 3 and 7.3).  Before
+   /// SetTimeStep and the first step; collective.  K becomes K_p (SIPG with
+   /// C and the penalty x kappa_gamma), the band damping C_d joins the
+   /// dashpot blocks (so (M + dt/2 C) carries it), and every acceleration
+   /// subtracts b_band + B(w, Phi) + E(w, chi).  Then PmlEnter(u_s) at the
+   /// switch.  Not with local time stepping, Kelvin-Voigt, the dense or
+   /// fused stiffness (they read K without the band force).
+   void SetPml(std::shared_ptr<const PmlBand> band)
+   {
+      MFEM_VERIFY(band, "SetPml: no band");
+      MFEM_VERIFY(!pml_, "SetPml: called twice");
+      MFEM_VERIFY(dt_ == 0.0 && !mass_damped_, "SetPml before SetTimeStep");
+      MFEM_VERIFY(!kv_, "SetPml: not with Kelvin-Voigt damping");
+      MFEM_VERIFY(dense_state_ == 0 && fused_state_ == 0,
+                  "SetPml after the dense or fused stiffness read K");
+      // the dense blocks and the fused sweep copy K once; with the band, K x
+      // goes through the assembled K_p (the band force is added separately)
+      dense_enabled_ = false;
+      fused_enabled_ = false;
+      elast_->SetPmlBand(band, /*penalty_only=*/true);
+      // element and face-neighbour material
+      auto values = [&](const ParGridFunction &src, Vector &own, Vector &nbr)
+      {
+         ParGridFunction g(src);
+         g.ExchangeFaceNbrData();
+         const ParFiniteElementSpace *f = g.ParFESpace();
+         Array<int> d;
+         own.SetSize(f->GetNE());
+         for (int e = 0; e < f->GetNE(); e++) { f->GetElementDofs(e, d); own(e) = g(d[0]); }
+         ParMesh *pm = f->GetParMesh();
+         nbr.SetSize(pm->GetNFaceNeighborElements());
+         for (int e = 0; e < nbr.Size(); e++)
+         {
+            f->GetFaceNbrElementVDofs(e, d);
+            nbr(e) = g.FaceNbrData()(d[0]);
+         }
+      };
+      mesh_.ExchangeFaceNbrData();
+      Vector lam, mu, lamn, mun;
+      values(sample_->LambdaGF(), lam, lamn);
+      values(sample_->MuGF(), mu, mun);
+      pml_ = std::make_unique<PmlDynamicTerms>(*elast_, band, lam, mu, rho_e_, lamn, mun);
+      pml_->AddDampingBlocks(damping_blocks_);
+      int local = damping_blocks_.empty() ? 0 : 1, global = 0;
+      MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_LOR, mesh_.GetComm());
+      has_damping_global_ = (global != 0);
+   }
+   /// The switch into the dynamic phase at the state u_s (memory to zero,
+   /// b_band from u_s and the wall data at GetTime()).  Collective.
+   void PmlEnter(const Vector &u_s)
+   {
+      MFEM_VERIFY(pml_, "PmlEnter without SetPml");
+      MFEM_VERIFY(dt_ > 0.0, "PmlEnter before SetTimeStep");
+      pml_->Enter(u_s, GetTime());
+   }
+   PmlDynamicTerms *Pml() { return pml_.get(); }
+   const PmlDynamicTerms *Pml() const { return pml_.get(); }
    ParMesh &GetMesh() const { return mesh_; }
    /// Mesh dimension D: components per volume node (fault state stays 3).
    int Dimension() const { return dim_; }
@@ -1126,6 +1189,13 @@ private:
       elast_->AssembleDirichletOnlyRHS(F_, GetTime());
       F_ -= Kx_;
       if (b_const_.Size() > 0) { F_ += b_const_; }   // hook H3
+      if (pml_)
+      {
+         pml_f_.SetSize(F_.Size());
+         pml_f_ = 0.0;
+         pml_->AddForce(pml_f_);   // b_band + B + E
+         F_ -= pml_f_;
+      }
       if (d)
       {
          const double tf0 = MPI_Wtime();
@@ -1678,6 +1748,8 @@ private:
    real_t last_solve_time_ = std::numeric_limits<real_t>::quiet_NaN();
    mutable Vector Kx_, F_, Cv_;
    Vector b_const_;            ///< hook H3: the constant load (empty: none)
+   std::unique_ptr<PmlDynamicTerms> pml_;   ///< dynamic PML (null: none)
+   mutable Vector pml_f_;
    mutable Vector zero_v_;     ///< hook H3: zero velocity for StiffnessMult
 
    // Fault (P6)
