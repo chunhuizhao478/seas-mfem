@@ -306,6 +306,19 @@ Design: `/mnt/project-files/2d-inplane/relaxation/relaxation-design-rev0.md`
 - **Expected (estimate):** the CFS-PML cases below the reference's jump,
   the smallest f_alpha lowest; the sponge between.
 
+## PML on D9f (PML design plan rev2, P4, test T6; 2026-11-04)
+
+- **Why:** D9f's hand-backs carry the wall offset (about -0.05 MPa,
+  -(1.1-1.7) mu P / A); with Dirichlet walls and the band in both regimes
+  it should go (Proposition 3).
+- **Case:** `D9f_arc08L2p5_h250_avg_floor10_relax5k_pml0p01` = relaxation
+  V1 (t_r 5 kyr, 10 MPa floor) with the CFS-PML band (150 km, f_alpha
+  0.01 Hz, D3 auto), 12,000 yr (its first two events). Reference: the
+  relax5k run's first two events (absorbing walls).
+- **What to read:** each hand-back's largest |tau_qd - tau_dyn| and the
+  fault median of tau_qd - tau_dyn (the wall offset), QD balance V, event
+  times and slip, floored DOFs, sigma_n' at the arc ends.
+
 ## Setup
 
 All the decks are `config/fd_cycle/mapview_rs_fd.toml` with the edits
@@ -437,7 +450,7 @@ station lies on a fault edge to 3e-13 m (checked in the cloud).
 ## Files
 
 - `mesh/*.msh`: the thirteen meshes (above).
-- `configs/<case>.toml`: the thirty-eight decks.
+- `configs/<case>.toml`: the thirty-nine decks.
 - `scripts/make_decks.py`: makes the decks; `--check` compares.
 - `scripts/run_simple_mac.sh`: the runs on the Mac, one after the other.
   - Checks: the GitHub-first guard; the binary's code equals HEAD

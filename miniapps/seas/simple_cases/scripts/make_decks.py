@@ -68,7 +68,9 @@
 #                      faces = "off" and [cycle.pml] on every outer face
 #                      (attributes 5 and 1), 150 km (30 elements of 5 km),
 #                      N 2, R0 1e-3; kind "cfs" with f_alpha_hz and
-#                      wall_speed_factor = "auto" (D3), or kind "sponge"
+#                      wall_speed_factor = "auto" (D3), or kind "sponge";
+#                      P4 (T6): the relax5k D9f deck with the band at
+#                      f_alpha 0.01 Hz, 12,000 yr (its first two events)
 import argparse
 import math
 import os
@@ -144,6 +146,8 @@ CASES = [
     ("D0_straight_hb_pml0p01", "straight_h500", "D", False, "PML P3 (T5): D0's event 1 and hand-back, CFS-PML band, f_alpha 0.01 Hz"),
     ("D0_straight_hb_pml0p02", "straight_h500", "D", False, "PML P3 (T5): D0's event 1 and hand-back, CFS-PML band, f_alpha 0.02 Hz"),
     ("D0_straight_hb_sponge", "straight_h500", "D", False, "PML P3 (T5) comparator: D0's event 1 and hand-back, sponge band (same profile)"),
+    # PML plan rev2 P4 (T6): the relaxation V1 deck with the CFS-PML band, 12,000 yr
+    ("D9f_arc08L2p5_h250_avg_floor10_relax5k_pml0p01", "arc08L2p5_h250", "D", True, "PML P4 (T6): relaxation V1 (D9f, t_r 5 kyr, 10 MPa floor) with the CFS-PML band, f_alpha 0.01 Hz, 12,000 yr"),
 ]
 SMOOTH = ["D7f_arc08L10_h250_avg_floor", "D9f_arc08L2p5_h250_avg_floor", "D6f_arc03L10_h250_avg_floor",
           "D8f_arc03L2p5_h250_avg_floor", "D10f_sbend03L05_h250_avg_floor"]
@@ -194,6 +198,8 @@ for _c in TIPZONE:
 RELAX = {
     "D9f_arc08L2p5_h250_avg_floor10": dict(floor=10.0e6, years=30000.0, t_relax_yr=None),
     "D9f_arc08L2p5_h250_avg_floor10_relax5k": dict(floor=10.0e6, years=30000.0, t_relax_yr=5000.0),
+    # PML P4: the relax5k deck with the band, its first two events
+    "D9f_arc08L2p5_h250_avg_floor10_relax5k_pml0p01": dict(floor=10.0e6, years=12000.0, t_relax_yr=5000.0),
 }
 for _c in RELAX:
     OPTS[_c] = dict(averaged=True)
@@ -287,11 +293,15 @@ PML = {
     "D0_straight_hb_pml0p01": dict(kind="cfs", f_alpha=0.01),
     "D0_straight_hb_pml0p02": dict(kind="cfs", f_alpha=0.02),
     "D0_straight_hb_sponge": dict(kind="sponge"),
+    # P4 (T6): against D9f_arc08L2p5_h250_avg_floor10_relax5k's first two events
+    "D9f_arc08L2p5_h250_avg_floor10_relax5k_pml0p01": dict(kind="cfs", f_alpha=0.01, years=12000.0),
 }
 PML_YEARS = 900.0
 PML_L_KM = 150.0
 for _c in PML:
     GO_CASE[_c] = "# 2026-11-04: \"start P3\" of the PML design plan rev2, test T5):"
+GO_CASE["D9f_arc08L2p5_h250_avg_floor10_relax5k_pml0p01"] = (
+    "# 2026-11-04: \"yes let's test D9f first, then UCERF\", PML plan rev2 P4):")
 
 
 def header(case, mesh, regime, floor, row):
@@ -306,7 +316,7 @@ def header(case, mesh, regime, floor, row):
         "# config/fd_cycle/mapview_rs_fd.toml; the edits are listed there and in",
         "# simple_cases/README.md.  Plane strain, no 2.5D term, +-240 km box, all",
         (f"# walls Dirichlet with a {PML_L_KM:.0f} km {'sponge' if PML[case]['kind'] == 'sponge' else 'CFS-PML'} band, "
-         f"{PML_YEARS:.0f} yr (event 1, its hand-back)."
+         + (f"{PML[case]['years']:,.0f} yr." if "years" in PML[case] else f"{PML_YEARS:.0f} yr (event 1, its hand-back).")
          if PML.get(case, {}).get("kind")
          else f"# walls absorbing in the dynamic regime, {PML_YEARS:.0f} yr (event 1, its hand-back)."
          if case in PML
@@ -336,7 +346,8 @@ def make(case, mesh, regime, floor, row, base):
         sub("# 500 m on the fault, in m.", f"# {lc:.0f} m on the fault (mapview_rs_fd.toml: 500 m), in m.")
         sub("# Dense G: N_f = 120 at p = 1 on the 500 m mesh.",
             f"# Dense G: N_f = {round(2 * 30e3 / lc)} at p = 1 on this {lc:.0f} m mesh (120 at 500 m).")
-    years = PML_YEARS if case in PML else RELAX.get(case, {}).get("years", T_FINAL_YR)
+    years = (PML[case].get("years", PML_YEARS) if case in PML
+             else RELAX.get(case, {}).get("years", T_FINAL_YR))
     sub("# 1500 yr of 365 days.\n[time]\ntfinal     = 4.7304e10",
         f"# {years:,.0f} yr of 365 days (mapview_rs_fd.toml: 1500 yr).\n[time]\n"
         f"tfinal     = {years * YR:.6e}")
