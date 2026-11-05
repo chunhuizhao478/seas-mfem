@@ -422,9 +422,17 @@ void TestT2T4(MPIContext &mpi, bool do_t2, bool do_t4)
       std::vector<char> flags_k;
       real_t t_k = 0.0, dt_k = 0.0;
       int step_k = 0;
+      long flips_prev = flips0, flip_steps = 0, dt_bad = 0;
       auto mon = [&](int step, real_t tt) -> bool
       {
          const std::vector<char> &O = qd.OpenFlags();
+         if (qd.Opening()->Flips() != flips_prev)
+         {
+            // a step with flips: the next one starts from [time].dt_initial
+            flips_prev = qd.Opening()->Flips();
+            flip_steps++;
+            if (qd.NextDt() != st.cfg.dt_init) { dt_bad++; }
+         }
          worst_res = std::max(worst_res, ShearAt(mpi, qd, O));
          Vector p, vabs;
          qd.Psi(p);
@@ -480,6 +488,13 @@ void TestT2T4(MPIContext &mpi, bool do_t2, bool do_t4)
       Check(mpi, n_still > 0, "T2d: DOFs open in every step", static_cast<real_t>(n_still));
       Check(mpi, vmax_err <= 1e-14, "T2d: max V = the closed DOFs' max (to rounding)",
             vmax_err);
+      if (mpi.IsRoot())
+      {
+         std::printf("  d) %ld steps with flips; next dt after each: [time].dt_initial = %.3e s "
+                     "(%ld not)\n", flip_steps, st.cfg.dt_init, dt_bad);
+      }
+      Check(mpi, flip_steps > 0 && dt_bad == 0, "T2d: after a step with flips the next dt is "
+            "[time].dt_initial", static_cast<real_t>(dt_bad));
 
       // e) restart from step k: the next steps repeat bit for bit
       std::vector<Vector> rec_b;

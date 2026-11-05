@@ -334,6 +334,17 @@ Design: `/mnt/project-files/2d-inplane/relaxation/relaxation-design-rev0.md`
   the hand-back jump at closed DOFs, the elastic sigma_n' at the arc ends
   (does it still ratchet), and whether the open set chatters (settle
   flips per accepted step).
+- **First run (0a2c611a, Mac, 2026-11-05):** events 1 and 2 as the control
+  (857 and 6,496 yr; 2 DOFs open after event 2 at x = -1.25 km); then two
+  tiny events at the patch edge (12,993 yr, 0.014 and 0.001 m over 1 km)
+  and an abort in QD ("Non-finite V from friction solver", x = -2.0 km)
+  after max V jumped from 1.9e-8 to 1.7e-3 m/s within one accepted step
+  of 8,488 s.  Reading: a settle flip at the patch edge (sigma_n' about 0
+  at x = -1.5 km) is a static step no error control sees, and the next
+  step kept its size.  Since then the next step after a flip starts from
+  [time].dt_initial, and the driver log has a "[cycle.opening] flip" line
+  per flipped DOF (position, sigma_n', the shear it held) and a "settle"
+  line per settle (passes, largest static slip, max V before and after).
 
 ## Setup
 

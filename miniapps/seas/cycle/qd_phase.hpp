@@ -98,9 +98,13 @@
 // until nothing flips): after each accepted step (post-step hook, after the
 // relaxation accepted the step, whose dsig is then reset to the new
 // evaluation's, and before the monitor; a change restarts the RK stage,
-// TSRestartStep), in Reenter with the dynamic regime's flags as the start,
-// and at the start of a run (SettleOpening).  Off (the default): no mask, no
-// hook, every bit unchanged.
+// TSRestartStep, and the next step starts from [time].dt_initial, because
+// the static step was not error-controlled: T5 on D9f, 0a2c611a, stepped
+// 8,488 s into such a state and aborted), in Reenter with the dynamic
+// regime's flags as the start, and at the start of a run (SettleOpening).
+// Rank 0 logs every flip and every settle with flips ("[cycle.opening]
+// flip", "settle", "next dt").  Off (the default): no mask, no hook, every
+// bit unchanged.
 //
 // This file and dyn_phase.hpp are the only cycle files that include solver
 // headers (rule M4).
@@ -435,7 +439,7 @@ public:
    {
       MFEM_VERIFY(open_, "QDPhase::SettleOpening: [cycle.opening] is off");
       Solve(t);
-      return SettleOpenSet_(t, state_);
+      return SettleOpenSet_(t, state_, "start at step", 0);
    }
    /// [cycle.opening]: DOFs that flipped in the last Reenter's settle.
    long ReenterFlips() const { return reenter_flips_; }
@@ -829,7 +833,7 @@ public:
       real_t Vmax = Solve(t);
       if (open_)
       {
-         reenter_flips_ = SettleOpenSet_(t, state_);
+         reenter_flips_ = SettleOpenSet_(t, state_, "switch back at step", step);
          Vmax = op_->GetMaxSlipRate();
       }
       InitTS(dt0);
@@ -923,13 +927,19 @@ private:
    /// evaluation is at (t, x)): write the solved open slip into x, flip the
    /// DOFs whose true sigma (SigmaN: sigma0 + T_n, no r, no floor) crossed
    /// 0, evaluate again, until nothing flips.  After a change dsig of the
-   /// relaxation is the new evaluation's.  Returns the DOFs flipped.
-   /// Collective.
-   long SettleOpenSet_(real_t t, Vector &x)
+   /// relaxation is the new evaluation's.  Rank 0 logs each flip (DOF,
+   /// position, sigma_n', the in-plane shear tau_pre + T it held) and, for a
+   /// settle with flips, the passes, the largest static slip |Delta| of the
+   /// open-set solves and max V before and after (`where`, `step`: the log's
+   /// context).  Returns the DOFs flipped.  Collective.
+   long SettleOpenSet_(real_t t, Vector &x, const char *where, long step)
    {
       const int N = fault_->NumNodes();
       const int spn = FaultOp::StatePerNode, slot = open_->Slot();
+      const real_t V_before = op_->GetMaxSlipRate();   // global: collective
+      real_t delta_max = 0.0;
       long flipped = 0;
+      int passes = 0;
       for (int pass = 0;; pass++)
       {
          {
@@ -943,9 +953,19 @@ private:
          }
          Vector sn;
          SigmaN(sn);
+         Vector tau(N);   // in-plane shear of this evaluation (kernel frame)
+         {
+            const Vector &T = op_->GetTraction();
+            const Vector &tp = geom_->GetTauPre();
+            T.HostRead();
+            tp.HostRead();
+            for (int j = 0; j < N; j++) { tau(j) = tp(2 * j + slot) + T(2 * j + slot); }
+         }
          const long n = open_->Update(sn);
          if (n == 0) { break; }
          flipped += n;
+         passes = pass + 1;
+         LogFlips_(t, where, step, pass + 1, n, sn, tau, x);
          MFEM_VERIFY(pass < cfg_.opening.max_passes, "[cycle.opening]: the open set "
                      "did not settle at t = " << t << " s: " << n << " DOFs still flipped "
                      "after " << cfg_.opening.max_passes << " passes ([cycle.opening]."
@@ -953,9 +973,72 @@ private:
          op_->SetTime(t);
          Vector rate(x.Size());
          op_->Mult(x, rate);
+         delta_max = std::max(delta_max, open_->LastStepMax());
+      }
+      if (flipped > 0)
+      {
+         const real_t V_after = op_->GetMaxSlipRate();   // collective
+         if (mpi_.Rank() == 0)
+         {
+            std::cout << "  [cycle.opening] settle (" << where << " " << step << ", t = " << t
+                      << " s): " << flipped << " flips in " << passes << " passes, "
+                      << open_->NumOpenGlobal() << " open; largest static slip |Delta| "
+                      << delta_max << " m; max V " << V_before << " -> " << V_after
+                      << " m/s\n";
+         }
       }
       if (flipped > 0 && relax_) { relax_->SetDelta(RelaxDelta_()); }
       return flipped;
+   }
+
+   /// [cycle.opening]: rank 0 prints the DOFs the last OpenSetQD::Update
+   /// flipped (at most 8 per pass, then a count), with the state x's psi
+   /// there (frozen while open).  Collective.
+   void LogFlips_(real_t t, const char *where, long step, int pass, long n,
+                  const Vector &sn, const Vector &tau, const Vector &x) const
+   {
+      constexpr int kFields = 7;   // global DOF, x, y, sigma_n', tau, now open, psi
+      x.HostRead();
+      const std::vector<int> &fl = open_->LastFlipped();
+      std::vector<double> mine(kFields * fl.size());
+      for (size_t k = 0; k < fl.size(); k++)
+      {
+         const int j = fl[k];
+         double *r = mine.data() + kFields * k;
+         r[0] = static_cast<double>(open_->GlobalIndex(j));
+         r[1] = table_.coords(3 * j);
+         r[2] = table_.coords(3 * j + 1);
+         r[3] = sn(j);
+         r[4] = tau(j);
+         r[5] = open_->IsOpen(j) ? 1.0 : 0.0;
+         r[6] = x(FaultOp::StatePerNode * j + FaultOp::PsiIndex);
+      }
+      const MPI_Comm comm = mpi_.GetComm();
+      const int nranks = mpi_.Size();
+      int cnt = static_cast<int>(mine.size());
+      std::vector<int> counts(nranks), displs(nranks);
+      MPI_Gather(&cnt, 1, MPI_INT, counts.data(), 1, MPI_INT, 0, comm);
+      int total = 0;
+      if (mpi_.Rank() == 0)
+      {
+         for (int r = 0; r < nranks; r++) { displs[r] = total; total += counts[r]; }
+      }
+      std::vector<double> all(std::max(total, 1));
+      MPI_Gatherv(mine.data(), cnt, MPI_DOUBLE, all.data(), counts.data(), displs.data(),
+                  MPI_DOUBLE, 0, comm);
+      if (mpi_.Rank() != 0) { return; }
+      const int m = total / kFields;
+      for (int k = 0; k < std::min(m, 8); k++)
+      {
+         const double *r = all.data() + kFields * k;
+         std::cout << "  [cycle.opening] flip (" << where << " " << step << ", t = " << t
+                   << " s, pass " << pass << "): DOF " << static_cast<long long>(r[0])
+                   << " at (" << r[1] / 1e3 << ", " << r[2] / 1e3 << ") km "
+                   << (r[5] != 0.0 ? "closed -> open" : "open -> closed") << ", sigma_n' "
+                   << r[3] / 1e6 << " MPa, shear " << r[4] / 1e6 << " MPa, psi " << r[6]
+                   << "\n";
+      }
+      if (n > 8) { std::cout << "  [cycle.opening] ... and " << n - 8 << " more flips\n"; }
    }
 
    /// [cycle.opening]: the open flags into the station fields (empty when off).
@@ -1209,10 +1292,25 @@ private:
          long flips = 0;
          {
             Vector x(reinterpret_cast<real_t *>(a), static_cast<int>(n));
-            flips = self->SettleOpenSet_(static_cast<real_t>(t), x);
+            flips = self->SettleOpenSet_(static_cast<real_t>(t), x, "after step",
+                                         static_cast<long>(step));
          }
          PetscCall(VecRestoreArray(U, &a));
-         if (flips > 0) { PetscCall(TSRestartStep(ts)); }
+         if (flips > 0)
+         {
+            // The flip changed the state by a static step that no error
+            // control saw (V can jump by orders of magnitude), so the next
+            // step starts again from [time].dt_initial, as after a switch back.
+            PetscReal dt_old = 0.0;
+            PetscCall(TSGetTimeStep(ts, &dt_old));
+            PetscCall(TSRestartStep(ts));
+            PetscCall(TSSetTimeStep(ts, self->cfg_.dt_init));
+            if (self->mpi_.Rank() == 0)
+            {
+               std::cout << "  [cycle.opening] next dt " << dt_old << " -> " << self->cfg_.dt_init
+                         << " s ([time].dt_initial) after the flips at step " << step << "\n";
+            }
+         }
       }
       if (!self->CallMonitor_(static_cast<int>(step), static_cast<real_t>(t)))
       {

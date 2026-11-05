@@ -133,6 +133,7 @@ public:
       MFEM_VERIFY(sigma.Size() == nown_, "OpenSetQD::Update: " << sigma.Size()
                   << " values for " << nown_ << " DOFs");
       long n = 0;
+      last_flipped_.clear();
       for (int j = 0; j < nown_; j++)
       {
          MFEM_VERIFY(std::isfinite(sigma(j)), "OpenSetQD::Update: sigma_n' at owned DOF "
@@ -141,6 +142,7 @@ public:
          if (want != open_[j])
          {
             open_[j] = want;
+            last_flipped_.push_back(j);
             n++;
          }
       }
@@ -196,11 +198,17 @@ public:
 
    /// The last stage's |Delta| max (the static step size of the open set).
    real_t LastStepMax() const { return delta_.Size() ? delta_.Normlinf() : 0.0; }
+   /// The owned DOFs the last Update flipped (this rank's; their new state
+   /// is IsOpen).  For the settle log.
+   const std::vector<int> &LastFlipped() const { return last_flipped_; }
+   /// Global index of owned DOF @a j (the open list's numbering).
+   long long GlobalIndex(int j) const { return first_ + j; }
 
 private:
    /// The global open list, its columns and the factored G_OO.  Collective.
    void Rebuild_()
    {
+      delta_.SetSize(0);   // LastStepMax: no stale solve after a change
       real_t *mk = mask_.HostWrite();   // the kernel reads it with Read(use_dev)
       for (int j = 0; j < nown_; j++) { mk[j] = open_[j] ? 1.0 : 0.0; }
       // own_: the owned open DOFs in owned order (= global order)
@@ -298,6 +306,7 @@ private:
    DenseMatrix A_;
    std::unique_ptr<DenseMatrixInverse> inv_;
    std::vector<real_t> r_own_;
+   std::vector<int> last_flipped_;   ///< owned DOFs flipped by the last Update
    Vector r_, delta_;
    long unit_products_ = 0, set_changes_ = 0, flips_ = 0, stages_ = 0;
 };
