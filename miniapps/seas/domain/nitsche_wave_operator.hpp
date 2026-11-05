@@ -388,8 +388,10 @@ public:
    /// C and the penalty x kappa_gamma), the band damping C_d joins the
    /// dashpot blocks (so (M + dt/2 C) carries it), and every acceleration
    /// subtracts b_band + B(w, Phi) + E(w, chi).  Then PmlEnter(u_s) at the
-   /// switch.  Not with local time stepping, Kelvin-Voigt, the dense or
-   /// fused stiffness (they read K without the band force).
+   /// switch.  Not with local time stepping.  The dense blocks and the fused
+   /// K/K_eta sweep stay on: they read the assembled K lazily, at the first
+   /// acceleration, which is after this call, so they copy K_p (the band
+   /// force is added separately in every acceleration, on every path).
    void SetPml(std::shared_ptr<const PmlBand> band)
    {
       MFEM_VERIFY(band, "SetPml: no band");
@@ -397,10 +399,6 @@ public:
       MFEM_VERIFY(dt_ == 0.0 && !mass_damped_, "SetPml before SetTimeStep");
       MFEM_VERIFY(dense_state_ == 0 && fused_state_ == 0,
                   "SetPml after the dense or fused stiffness read K");
-      // the dense blocks and the fused sweep copy K once; with the band, K x
-      // goes through the assembled K_p (the band force is added separately)
-      dense_enabled_ = false;
-      fused_enabled_ = false;
       elast_->SetPmlBand(band, /*penalty_only=*/true);
       // element and face-neighbour material
       auto values = [&](const ParGridFunction &src, Vector &own, Vector &nbr)

@@ -73,6 +73,7 @@ public:
       : elast_(elast), band_(std::move(band)), D_(band_->Dim())
    {
       MFEM_VERIFY(elast_.GetMesh().Dimension() == D_, "PmlDynamicTerms: dimension");
+      MFEM_VERIFY(D_ == 2 || D_ == 3, "PmlDynamicTerms: 2-D or 3-D, not " << D_);
       eps_ = elast_.GetEpsilon();
       Build_(lam_e, mu_e, rho_e, lam_nbr, mu_nbr);
    }
@@ -160,6 +161,9 @@ public:
       b_band_ = 0.0;
       Gather_(u_s);
       Terms_(b_band_, /*static_mode=*/true, t, /*jump_from_gs=*/true);
+      fcache_.SetSize(u_s.Size());
+      fcache_ = 0.0;
+      ForceFromState_(fcache_);
       entered_ = true;
    }
 
@@ -171,19 +175,19 @@ public:
       w_ = x;
       w_ -= us_;
       Gather_(w_);
-      UpdateAll_(t);
+      if (D_ == 2) { UpdateAll_<2>(t); }
+      else { UpdateAll_<3>(t); }
       t_last_ = t;
    }
 
-   /// F_int += b_band + B(w, Phi) + E(w, chi), from the stored state.
+   /// F_int += b_band + B(w, Phi) + E(w, chi), from the stored state (the
+   /// B + E vector is formed once per step, in Advance, and at Enter).
    void AddForce(Vector &F) const
    {
       MFEM_VERIFY(entered_, "PmlDynamicTerms::AddForce before Enter");
+      MFEM_VERIFY(fcache_.Size() == F.Size(), "PmlDynamicTerms::AddForce: size");
       F += b_band_;
-      tmp_.SetSize(F.Size());
-      tmp_ = 0.0;
-      const_cast<PmlDynamicTerms *>(this)->ForceFromState_(tmp_);
-      F += tmp_;
+      F += fcache_;   // B + E of the stored state (UpdateAll_ / Enter)
    }
 
    const Vector &BandLoad() const { return b_band_; }
@@ -240,6 +244,7 @@ private:
    struct VolElem
    {
       int e = -1, nq = 0, p0 = 0;
+      int nd = 0, vd = 0;  // dofs per component; offset into vdofs_ (D nd entries)
       real_t lam = 0, mu = 0, rho = 0;
    };
    struct FacePt
@@ -260,6 +265,7 @@ private:
       bool wall = false;
       int attr = 0;
       int nq = 0, p0 = 0;
+      int vd1 = 0, vd2 = 0;   // offsets into vdofs_ (e1, local e2) or nbr_vdofs_ (shared e2)
       real_t lam[2] = {0, 0}, mu[2] = {0, 0};
    };
 
@@ -279,9 +285,11 @@ private:
    std::vector<Face> faces_;
    std::vector<real_t> vshape_, vdshape_, fshape_, fdshape_;
    std::vector<real_t> state_;
+   std::vector<int> vdofs_, nbr_vdofs_;   // element vdofs, cached by Build_
 
    Vector us_, w_, b_band_;
-   mutable Vector tmp_;
+   Vector fcache_;   // B(w, Phi) + E(w, chi) of the stored state
+   mutable Vector ue_, u1_, u2_, r_, r1_, r2_;   // scratch (per element / face)
    std::unique_ptr<ParGridFunction> gf_;   // values with face-neighbour data
 
    // ---------------- the pipeline at one point
@@ -303,20 +311,33 @@ private:
       return off;
    }
 
+   // The per-point kernels take the dimension D as a template argument (the
+   // loops unroll; the same operations in the same order as with a run-time
+   // D, so the same bits); the ...R_ forms dispatch on D_ for the cold paths.
+   template <int D>
    void Hooke_(real_t lam, real_t mu, const real_t H[3][3], real_t s[3][3]) const
    {
       real_t tr = 0.0;
-      for (int k = 0; k < D_; k++) { tr += H[k][k]; }
-      for (int i = 0; i < D_; i++)
-         for (int j = 0; j < D_; j++)
+      for (int k = 0; k < D; k++) { tr += H[k][k]; }
+      for (int i = 0; i < D; i++)
+         for (int j = 0; j < D; j++)
          { s[i][j] = mu * (H[i][j] + H[j][i]) + (i == j ? lam * tr : 0.0); }
    }
 
-   /// Steps the stress pipeline at one point with the new input G (3.16).
-   void StepPipe_(const BandPt &bp, real_t lam, real_t mu, const real_t G[3][3],
-                  real_t *st) const
+   void HookeR_(real_t lam, real_t mu, const real_t H[3][3], real_t s[3][3]) const
    {
-      const int D = D_, na = bp.nact;
+      if (D_ == 2) { Hooke_<2>(lam, mu, H, s); }
+      else { Hooke_<3>(lam, mu, H, s); }
+   }
+
+   /// Steps the stress pipeline at one point with the new input G (3.16).
+   /// With ds, also Delta sigma of the new state (PipeDelta_'s value, the
+   /// same operations: the cascade outputs y_b are the z it forms here).
+   template <int D>
+   void StepPipe_(const BandPt &bp, real_t lam, real_t mu, const real_t G[3][3],
+                  real_t *st, real_t (*ds)[3] = nullptr) const
+   {
+      const int na = bp.nact;
       const Coef &c = coefs_[bp.coef];
       real_t *Gp = st;
       real_t *phi = st + D * D;
@@ -334,8 +355,9 @@ private:
       for (int i = 0; i < D * D; i++) { Gp[i] = G[i / D][i % D]; }
       // stage 2 and 3 with the updated phi: the cascades' new inputs
       real_t st2[3][3];
-      Stage12_(bp, lam, mu, st, st2);
+      Stage12_<D>(bp, lam, mu, st, st2);
       real_t *f = phi + na * D;
+      real_t sig[3][3] = {{0}};
       for (int b = 0; b < D; b++)
       {
          real_t z[3];
@@ -356,14 +378,28 @@ private:
             }
             f += 2 * D;
          }
+         if (ds)
+         {
+            for (int i = 0; i < D; i++)
+               for (int j = 0; j < D; j++) { sig[i][j] += z[i] * bp.n[b][j]; }
+         }
+      }
+      if (ds)
+      {
+         real_t Gn[3][3], s0[3][3];
+         for (int i = 0; i < D; i++)
+            for (int l = 0; l < D; l++) { Gn[i][l] = Gp[i * D + l]; }
+         Hooke_<D>(lam, mu, Gn, s0);
+         for (int i = 0; i < D; i++)
+            for (int j = 0; j < D; j++) { ds[i][j] = sig[i][j] - s0[i][j]; }
       }
    }
 
    /// G~ from the stored state, then sigma~ (stages 1 and 2).
+   template <int D>
    void Stage12_(const BandPt &bp, real_t lam, real_t mu, const real_t *st,
                  real_t s2[3][3]) const
    {
-      const int D = D_;
       const real_t *Gp = st, *phi = st + D * D;
       real_t Gt[3][3];
       for (int i = 0; i < D; i++)
@@ -373,7 +409,13 @@ private:
             for (int k = 0; k < bp.nact; k++) { v -= phi[k * D + i] * bp.n[k][l]; }
             Gt[i][l] = v;
          }
-      Hooke_(lam, mu, Gt, s2);
+      Hooke_<D>(lam, mu, Gt, s2);
+   }
+   void Stage12R_(const BandPt &bp, real_t lam, real_t mu, const real_t *st,
+                  real_t s2[3][3]) const
+   {
+      if (D_ == 2) { Stage12_<2>(bp, lam, mu, st, s2); }
+      else { Stage12_<3>(bp, lam, mu, st, s2); }
    }
 
    /// Delta sigma = sigma_pml - C : Gprev from the stored state.
@@ -382,7 +424,7 @@ private:
    {
       const int D = D_, na = bp.nact;
       real_t s2[3][3];
-      Stage12_(bp, lam, mu, st, s2);
+      Stage12R_(bp, lam, mu, st, s2);
       real_t sig[3][3] = {{0}};
       const real_t *f = st + D * D + na * D;
       for (int b = 0; b < D; b++)
@@ -405,7 +447,7 @@ private:
       real_t G[3][3], s0[3][3];
       for (int i = 0; i < D; i++)
          for (int l = 0; l < D; l++) { G[i][l] = st[i * D + l]; }
-      Hooke_(lam, mu, G, s0);
+      HookeR_(lam, mu, G, s0);
       for (int i = 0; i < D; i++)
          for (int j = 0; j < D; j++) { ds[i][j] = sig[i][j] - s0[i][j]; }
    }
@@ -416,15 +458,15 @@ private:
    {
       real_t s0[3][3], s[3][3];
       band_->ApplyC0(bp.pp, lam, mu, G, s0);
-      Hooke_(lam, mu, G, s);
+      HookeR_(lam, mu, G, s);
       for (int i = 0; i < D_; i++)
          for (int j = 0; j < D_; j++) { ds[i][j] = s0[i][j] - s[i][j]; }
    }
 
    /// Mass side: steps chi with the new w at the point.
+   template <int D>
    void StepMass_(const BandPt &bp, const real_t *w, real_t *st) const
    {
-      const int D = D_;
       const Coef &c = coefs_[bp.coef];
       real_t *wp = st;
       real_t y[3];
@@ -447,9 +489,9 @@ private:
    /// E_J (3.9) from the stored mass state:
    ///   Yd_a = Yd_(a-1) + d_a y_(a-1) - alpha chi_a   (Yd = y' - w')
    ///   E_a  = E_(a-1) + d_a Yd_(a-1) - alpha (d_a y_(a-1) - alpha chi_a)
+   template <int D>
    void MassE_(const BandPt &bp, const real_t *st, real_t E[3]) const
    {
-      const int D = D_;
       const Coef &c = coefs_[bp.coef];
       const real_t al = band_->Alpha();
       real_t y[3], Yd[3];
@@ -649,6 +691,31 @@ private:
          add_face(*Tr, 2, attr, lam_e(Tr->Elem1No), mu_e(Tr->Elem1No), 0.0, 0.0);
       }
       gf_ = std::make_unique<ParGridFunction>(&fes);
+      // element vdofs, once (the per-step loops read them from here)
+      Array<int> vd;
+      auto own = [&](int e)
+      {
+         fes.GetElementVDofs(e, vd);
+         const int off = static_cast<int>(vdofs_.size());
+         for (int i = 0; i < vd.Size(); i++) { vdofs_.push_back(vd[i]); }
+         return off;
+      };
+      for (VolElem &ve : vol_)
+      {
+         ve.nd = fes.GetFE(ve.e)->GetDof();
+         ve.vd = own(ve.e);
+      }
+      for (Face &f : faces_)
+      {
+         f.vd1 = own(f.e1);
+         if (f.kind == 0) { f.vd2 = own(f.e2); }
+         if (f.kind == 1)
+         {
+            fes.GetFaceNbrElementVDofs(f.e2, vd);
+            f.vd2 = static_cast<int>(nbr_vdofs_.size());
+            for (int i = 0; i < vd.Size(); i++) { nbr_vdofs_.push_back(vd[i]); }
+         }
+      }
    }
 
    // ---------------- values at the points
@@ -658,21 +725,26 @@ private:
       gf_->ExchangeFaceNbrData();
    }
 
-   // element values (byNODES) of side s of face f, or of element e
-   void ElemValues_(int e, bool nbr, Vector &ue) const
+   // element values (byNODES) from the cached vdofs (as GetSubVector:
+   // a negative index -1-j reads -data[j]), and the element-vector add
+   static void Take_(const std::vector<int> &map, int off, int n, const real_t *d, Vector &ue)
    {
-      Array<int> vd;
-      auto &fes = const_cast<ParFiniteElementSpace &>(elast_.GetFESpace());
-      if (!nbr)
+      ue.SetSize(n);
+      for (int i = 0; i < n; i++)
       {
-         fes.GetElementVDofs(e, vd);
-         gf_->GetSubVector(vd, ue);
+         const int j = map[off + i];
+         ue(i) = (j >= 0) ? d[j] : -d[-1 - j];
       }
-      else
-      {
-         fes.GetFaceNbrElementVDofs(e, vd);
-         const_cast<ParGridFunction &>(*gf_).FaceNbrData().GetSubVector(vd, ue);
-      }
+   }
+   void OwnValues_(int off, int n, Vector &ue) const { Take_(vdofs_, off, n, gf_->GetData(), ue); }
+   void NbrValues_(int off, int n, Vector &ue) const
+   {
+      Take_(nbr_vdofs_, off, n, const_cast<ParGridFunction &>(*gf_).FaceNbrData().GetData(), ue);
+   }
+   void AddElem_(int off, int n, const Vector &r, Vector &out) const
+   {
+      Array<int> vd(const_cast<int *>(vdofs_.data()) + off, n);
+      out.AddElementVector(vd, r);
    }
 
    static void GradAt_(int D, int nd, const Vector &ue, const real_t *ds, real_t G[3][3])
@@ -701,15 +773,13 @@ private:
    {
       MFEM_VERIFY(static_mode, "PmlDynamicTerms::Terms_: static mode only");
       const int D = D_;
-      auto &fes = const_cast<ParFiniteElementSpace &>(elast_.GetFESpace());
-      Vector ue, ue2;
-      Array<int> vd;
+      Vector &ue = ue_, &r = r_;
       real_t G[3][3], ds[3][3];
       for (const VolElem &ve : vol_)
       {
-         const int nd = fes.GetFE(ve.e)->GetDof();
-         ElemValues_(ve.e, false, ue);
-         Vector r(D * nd);
+         const int nd = ve.nd;
+         OwnValues_(ve.vd, D * nd, ue);
+         r.SetSize(D * nd);
          r = 0.0;
          for (int q = 0; q < ve.nq; q++)
          {
@@ -719,14 +789,12 @@ private:
             StaticDelta_(bpt_[p.band], ve.lam, ve.mu, G, ds);
             AddVol_(D, nd, &vdshape_[p.dshape], p.wdet, ds, r);
          }
-         fes.GetElementVDofs(ve.e, vd);
-         out.AddElementVector(vd, r);
+         AddElem_(ve.vd, D * nd, r, out);
       }
       for (const Face &f : faces_)
       {
-         FaceInputs_(f, t, jump_from_gs, [&](const FacePt &fp, int s, const real_t Gs[3][3],
-                                             const real_t J[3][3], real_t dc[3][3],
-                                             real_t dsym[3][3])
+         auto delta = [&](const FacePt &fp, int s, const real_t Gs[3][3], const real_t J[3][3],
+                          real_t dc[3][3], real_t dsym[3][3])
          {
             const BandPt &bp = bpt_[fp.band];
             if (bp.nact == 0)
@@ -737,7 +805,9 @@ private:
             }
             StaticDelta_(bp, f.lam[s], f.mu[s], Gs, dc);
             StaticDelta_(bp, f.lam[s], f.mu[s], J, dsym);
-         }, out);
+         };
+         if (D == 2) { FaceInputs_<2>(f, t, jump_from_gs, delta, out); }
+         else { FaceInputs_<3>(f, t, jump_from_gs, delta, out); }
       }
    }
 
@@ -756,17 +826,16 @@ private:
    /// For every face point: the inputs of each side (grad w_s, J = [w] x nor),
    /// `delta` gives (Delta sigma of the consistency input, of the symmetry
    /// input) for side s, and the test terms of the local sides go to `out`.
-   template <typename DeltaF>
+   template <int D, typename DeltaF>
    void FaceInputs_(const Face &f, real_t t, bool jump_from_gs, DeltaF delta, Vector &out)
    {
-      const int D = D_;
-      auto &fes = const_cast<ParFiniteElementSpace &>(elast_.GetFESpace());
-      Vector u1, u2;
-      ElemValues_(f.e1, false, u1);
-      if (f.kind == 0) { ElemValues_(f.e2, false, u2); }
-      if (f.kind == 1) { ElemValues_(f.e2, true, u2); }
+      Vector &u1 = u1_, &u2 = u2_, &r1 = r1_, &r2 = r2_;
+      OwnValues_(f.vd1, D * f.nd1, u1);
+      if (f.kind == 0) { OwnValues_(f.vd2, D * f.nd2, u2); }
+      if (f.kind == 1) { NbrValues_(f.vd2, D * f.nd2, u2); }
       const int nsides = (f.kind == 2) ? 1 : 2;
-      Vector r1(D * f.nd1), r2(D * std::max(f.nd2, 1));
+      r1.SetSize(D * f.nd1);
+      r2.SetSize(D * std::max(f.nd2, 1));
       r1 = 0.0;
       r2 = 0.0;
       for (int q = 0; q < f.nq; q++)
@@ -833,83 +902,100 @@ private:
                }
          }
       }
-      Array<int> vd;
-      fes.GetElementVDofs(f.e1, vd);
-      out.AddElementVector(vd, r1);
-      if (f.kind == 0)
-      {
-         fes.GetElementVDofs(f.e2, vd);
-         out.AddElementVector(vd, r2);
-      }
+      AddElem_(f.vd1, D * f.nd1, r1, out);
+      if (f.kind == 0) { AddElem_(f.vd2, D * f.nd2, r2, out); }
    }
 
    bool dyn_jump_ = false;   // FaceInputs_: subtract g(t_s) from g(t)
 
-   /// Every pipeline steps with the gathered w at time t.
+   /// Every pipeline steps with the gathered w at time t, and fcache_ =
+   /// B + E of the new state (the work of ForceFromState_, in the same
+   /// order: each volume point's force right after its step, then each
+   /// face's force after the face's step; bitwise the same vector).
+   template <int D>
    void UpdateAll_(real_t t)
    {
-      const int D = D_;
-      auto &fes = const_cast<ParFiniteElementSpace &>(elast_.GetFESpace());
-      Vector ue;
-      real_t G[3][3], wv[3];
+      Vector &ue = ue_, &r = r_;
+      real_t G[3][3], wv[3], ds[3][3], E[3];
+      fcache_.SetSize(us_.Size());
+      fcache_ = 0.0;
       for (const VolElem &ve : vol_)
       {
-         const int nd = fes.GetFE(ve.e)->GetDof();
-         ElemValues_(ve.e, false, ue);
-         for (int q = 0; q < ve.nq; q++)
-         {
-            const VolPt &p = vpt_[ve.p0 + q];
-            if (p.nact == 0) { continue; }
-            GradAt_(D, nd, ue, &vdshape_[p.dshape], G);
-            StepPipe_(bpt_[p.band], ve.lam, ve.mu, G, &state_[p.st_g]);
-            ValAt_(D, nd, ue, &vshape_[p.shape], wv);
-            StepMass_(bpt_[p.band], wv, &state_[p.st_m]);
-         }
-      }
-      // faces: step both pipelines of each side (no output here)
-      Vector dummy(elast_.GetFESpace().GetVSize());
-      dyn_jump_ = true;
-      for (const Face &f : faces_)
-      {
-         FaceInputs_(f, t, false, [&](const FacePt &fp, int s, const real_t Gs[3][3],
-                                      const real_t J[3][3], real_t dc[3][3], real_t dsym[3][3])
-         {
-            const BandPt &bp = bpt_[fp.band];
-            for (int i = 0; i < 3; i++)
-               for (int j = 0; j < 3; j++) { dc[i][j] = dsym[i][j] = 0.0; }
-            if (bp.nact == 0) { return; }
-            StepPipe_(bp, f.lam[s], f.mu[s], Gs, &state_[fp.st_c[s]]);
-            StepPipe_(bp, f.lam[s], f.mu[s], J, &state_[fp.st_s[s]]);
-         }, dummy);
-      }
-      dyn_jump_ = false;
-   }
-
-   /// B + E from the stored state into out.
-   void ForceFromState_(Vector &out)
-   {
-      const int D = D_;
-      auto &fes = const_cast<ParFiniteElementSpace &>(elast_.GetFESpace());
-      Array<int> vd;
-      real_t ds[3][3], E[3];
-      for (const VolElem &ve : vol_)
-      {
-         const int nd = fes.GetFE(ve.e)->GetDof();
-         Vector r(D * nd);
+         const int nd = ve.nd;
+         OwnValues_(ve.vd, D * nd, ue);
+         r.SetSize(D * nd);
          r = 0.0;
          for (int q = 0; q < ve.nq; q++)
          {
             const VolPt &p = vpt_[ve.p0 + q];
             if (p.nact == 0) { continue; }
-            PipeDelta_(bpt_[p.band], ve.lam, ve.mu, &state_[p.st_g], ds);
+            const BandPt &bp = bpt_[p.band];
+            GradAt_(D, nd, ue, &vdshape_[p.dshape], G);
+            StepPipe_<D>(bp, ve.lam, ve.mu, G, &state_[p.st_g], ds);
+            ValAt_(D, nd, ue, &vshape_[p.shape], wv);
+            StepMass_<D>(bp, wv, &state_[p.st_m]);
             AddVol_(D, nd, &vdshape_[p.dshape], p.wdet, ds, r);
-            MassE_(bpt_[p.band], &state_[p.st_m], E);
+            MassE_<D>(bp, &state_[p.st_m], E);
             const real_t *sh = &vshape_[p.shape];
             for (int k = 0; k < nd; k++)
                for (int c = 0; c < D; c++) { r(c * nd + k) += p.wdet * ve.rho * E[c] * sh[k]; }
          }
-         fes.GetElementVDofs(ve.e, vd);
-         out.AddElementVector(vd, r);
+         AddElem_(ve.vd, D * nd, r, fcache_);
+      }
+      // faces: step both pipelines of each side; their Delta sigma of the
+      // new state go straight into the face's test terms (ForceFace_'s
+      // assembly, the same loop in FaceInputs_)
+      dyn_jump_ = true;
+      for (const Face &f : faces_)
+      {
+         FaceInputs_<D>(f, t, false, [&](const FacePt &fp, int s, const real_t Gs[3][3],
+                                            const real_t J[3][3], real_t dc[3][3],
+                                            real_t dsym[3][3])
+         {
+            const BandPt &bp = bpt_[fp.band];
+            for (int i = 0; i < 3; i++)
+               for (int j = 0; j < 3; j++) { dc[i][j] = dsym[i][j] = 0.0; }
+            if (bp.nact == 0) { return; }
+            StepPipe_<D>(bp, f.lam[s], f.mu[s], Gs, &state_[fp.st_c[s]], dc);
+            StepPipe_<D>(bp, f.lam[s], f.mu[s], J, &state_[fp.st_s[s]], dsym);
+         }, fcache_);
+      }
+      dyn_jump_ = false;
+   }
+
+   /// The force of one volume point from its stored state into r.
+   void VolForce_(const VolElem &ve, const VolPt &p, int nd, real_t ds[3][3], real_t E[3],
+                  Vector &r) const
+   {
+      const int D = D_;
+      PipeDelta_(bpt_[p.band], ve.lam, ve.mu, &state_[p.st_g], ds);
+      AddVol_(D, nd, &vdshape_[p.dshape], p.wdet, ds, r);
+      if (D_ == 2) { MassE_<2>(bpt_[p.band], &state_[p.st_m], E); }
+      else { MassE_<3>(bpt_[p.band], &state_[p.st_m], E); }
+      const real_t *sh = &vshape_[p.shape];
+      for (int k = 0; k < nd; k++)
+         for (int c = 0; c < D; c++) { r(c * nd + k) += p.wdet * ve.rho * E[c] * sh[k]; }
+   }
+
+   /// B + E from the stored state into out (at Enter; UpdateAll_ forms the
+   /// same vector each step).
+   void ForceFromState_(Vector &out)
+   {
+      const int D = D_;
+      Vector &r = r_;
+      real_t ds[3][3], E[3];
+      for (const VolElem &ve : vol_)
+      {
+         const int nd = ve.nd;
+         r.SetSize(D * nd);
+         r = 0.0;
+         for (int q = 0; q < ve.nq; q++)
+         {
+            const VolPt &p = vpt_[ve.p0 + q];
+            if (p.nact == 0) { continue; }
+            VolForce_(ve, p, nd, ds, E, r);
+         }
+         AddElem_(ve.vd, D * nd, r, out);
       }
       // faces: Delta sigma from the stored pipelines; the inputs are not
       // needed (zero field), only the test functions
@@ -922,9 +1008,10 @@ private:
    void ForceFace_(const Face &f, Vector &out) const
    {
       const int D = D_;
-      auto &fes = const_cast<ParFiniteElementSpace &>(elast_.GetFESpace());
       const int nsides = (f.kind == 2) ? 1 : 2;
-      Vector r1(D * f.nd1), r2(D * std::max(f.nd2, 1));
+      Vector &r1 = r1_, &r2 = r2_;
+      r1.SetSize(D * f.nd1);
+      r2.SetSize(D * std::max(f.nd2, 1));
       r1 = 0.0;
       r2 = 0.0;
       for (int q = 0; q < f.nq; q++)
@@ -969,14 +1056,8 @@ private:
                }
          }
       }
-      Array<int> vd;
-      fes.GetElementVDofs(f.e1, vd);
-      out.AddElementVector(vd, r1);
-      if (f.kind == 0)
-      {
-         fes.GetElementVDofs(f.e2, vd);
-         out.AddElementVector(vd, r2);
-      }
+      AddElem_(f.vd1, D * f.nd1, r1, out);
+      if (f.kind == 0) { AddElem_(f.vd2, D * f.nd2, r2, out); }
    }
 };
 
