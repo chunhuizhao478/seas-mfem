@@ -44,7 +44,8 @@ void ElasticityDomainOperator<MeshType>::ComputeIPFaceTraction(
    int fi, FaceElementTransformations &FTr,
    const FiniteElement &fe1, const FiniteElement &fe2,
    const Vector &u1_all, const Vector &u2_all,
-   const real_t *face_slip, bool with_normal, Vector &trac_local) const
+   const real_t *face_slip, bool with_normal, Vector &trac_local,
+   int scomp) const
 {
    const int dim = dim_;
    const int nbf = nbf_per_face_;
@@ -52,7 +53,7 @@ void ElasticityDomainOperator<MeshType>::ComputeIPFaceTraction(
 
    // Sign-corrected slip at quad points (Tandem evaluate_slip)
    Vector delta_u_quad;
-   BuildSlipAtQuadPointsFace(fi, face_slip, delta_u_quad);
+   BuildSlipAtQuadPointsFace(fi, face_slip, delta_u_quad, scomp);
 
    // Traction at quad points (Tandem compute_traction)
    DGElasticityIPCombinedIntegrator trac_integ(
@@ -97,18 +98,28 @@ void ElasticityDomainOperator<MeshType>::ComputeIPFaceTraction(
 
 template <typename MeshType>
 void ElasticityDomainOperator<MeshType>::BuildQDStageOperators(
-   bool with_normal)
+   bool with_normal, int slip_comps)
 {
    if constexpr (!IsParallelMesh<MeshType>::value)
    {
       MFEM_ABORT("--qd-operators matrix needs a parallel mesh (with_normal = "
-                 << with_normal << ")");
+                 << with_normal << ", slip_comps = " << slip_comps << ")");
    }
    else
    {
       MFEM_VERIFY(method_ == DGMethod::IP,
                   "--qd-operators matrix: IP method only (BR2 is not "
                   "supported)");
+      // Fault opening version B, B1: the opening as the third kernel slip
+      // component.  Its traction response has a normal row, so the stage
+      // needs N_u, N_delta.
+      MFEM_VERIFY(slip_comps == 2 || slip_comps == 3,
+                  "BuildQDStageOperators: slip_comps = " << slip_comps
+                  << " (2, or 3 with the opening component)");
+      MFEM_VERIFY(slip_comps == 2 || with_normal,
+                  "BuildQDStageOperators: the opening component (slip_comps "
+                  "= 3) needs with_normal (the open set reads elastic "
+                  "sigma_n)");
       MPI_Comm comm = mesh_.GetComm();
       const double t_start = MPI_Wtime();
 
@@ -128,14 +139,21 @@ void ElasticityDomainOperator<MeshType>::BuildQDStageOperators(
       const int nown = num_owned_fault_dofs_;
 
       // ---- Index spaces ----
-      Array<HYPRE_BigInt> vol_part, slip_part, norm_part, g_part;
-      HYPRE_BigInt vol_first, fault_first, slip_first, g_first;
+      // sc: kernel slip components per fault DOF (columns of B, C_δ, N_δ).
+      // The traction ROWS stay [dip, strike] (2 per DOF) and normal (1),
+      // whatever sc is; with sc = 2 shear_part equals slip_part, so the
+      // build is today's, unchanged.
+      const int sc = slip_comps;
+      Array<HYPRE_BigInt> vol_part, slip_part, shear_part, norm_part, g_part;
+      HYPRE_BigInt vol_first, fault_first, slip_first, shear_first, g_first;
       const HYPRE_BigInt nvol_glob =
          MakeQDPartition(comm, nvol, vol_part, vol_first);
       const HYPRE_BigInt nfault_glob =
          MakeQDPartition(comm, nown, norm_part, fault_first);
       const HYPRE_BigInt nslip_glob =
-         MakeQDPartition(comm, 2 * nown, slip_part, slip_first);
+         MakeQDPartition(comm, sc * nown, slip_part, slip_first);
+      const HYPRE_BigInt nshear_glob =
+         MakeQDPartition(comm, 2 * nown, shear_part, shear_first);
       MFEM_VERIFY(vol_first == pfes->GetMyTDofOffset() &&
                   nvol_glob == pfes->GlobalTrueVSize(),
                   "QD stage operators: volume partition differs from the "
@@ -177,7 +195,7 @@ void ElasticityDomainOperator<MeshType>::BuildQDStageOperators(
       integ.SetPmlBand(pml_band_.get(), pml_penalty_only_);
       QDTriplets tB, tD, tCu, tCd, tNu, tNd;
       Array<int> vdofs1, vdofs2;
-      Vector face_slip(2 * nbf), delta, elvec1, elvec2, trac_local;
+      Vector face_slip(sc * nbf), delta, elvec1, elvec2, trac_local;
 
       // Row (or column) of a local vdof, with the sign of a negative vdof
       auto vdof_index = [](int v, real_t &sign)
@@ -222,17 +240,18 @@ void ElasticityDomainOperator<MeshType>::BuildQDStageOperators(
          }
 
          // B: unit slip -> right-hand side of this rank's elements (shared
-         // faces: Elem1 only, as AssembleSlipContributionIPShared)
+         // faces: Elem1 only, as AssembleSlipContributionIPShared).  With
+         // sc = 3 the third column per DOF is the unit opening (B1).
          for (int kk = 0; kk < nbf; kk++)
          {
-            for (int c = 0; c < 2; c++)
+            for (int c = 0; c < sc; c++)
             {
                face_slip = 0.0;
-               face_slip(2 * kk + c) = 1.0;
-               BuildSlipAtQuadPointsFace(s, face_slip.GetData(), delta);
+               face_slip(sc * kk + c) = 1.0;
+               BuildSlipAtQuadPointsFace(s, face_slip.GetData(), delta, sc);
                integ.AssembleSlipFaceRHS(*fe1, *fe2, *FTr, delta,
                                          elvec1, elvec2);
-               const HYPRE_BigInt col = 2 * fault_gid[s * nbf + kk] + c;
+               const HYPRE_BigInt col = sc * fault_gid[s * nbf + kk] + c;
                add_rhs(tB, vdofs1, elvec1, col);
                if (!shared) { add_rhs(tB, vdofs2, elvec2, col); }
             }
@@ -276,7 +295,7 @@ void ElasticityDomainOperator<MeshType>::BuildQDStageOperators(
             u1(j) = 1.0;
             ComputeIPFaceTraction(s, *FTr, *fe1, *fe2, u1, u2,
                                   face_slip.GetData(), with_normal,
-                                  trac_local);
+                                  trac_local, sc);
             real_t sign;
             const int ld = vdof_index(vdofs1[j], sign);
             add_traction(tCu, tNu, pfes->GetGlobalTDofNumber(ld), sign);
@@ -288,7 +307,7 @@ void ElasticityDomainOperator<MeshType>::BuildQDStageOperators(
             u2(j) = 1.0;
             ComputeIPFaceTraction(s, *FTr, *fe1, *fe2, u1, u2,
                                   face_slip.GetData(), with_normal,
-                                  trac_local);
+                                  trac_local, sc);
             if (shared)
             {
                // The loops read FaceNbrData(vdofs2[j]) directly.
@@ -305,14 +324,14 @@ void ElasticityDomainOperator<MeshType>::BuildQDStageOperators(
          u2 = 0.0;
          for (int kk = 0; kk < nbf; kk++)
          {
-            for (int c = 0; c < 2; c++)
+            for (int c = 0; c < sc; c++)
             {
                face_slip = 0.0;
-               face_slip(2 * kk + c) = 1.0;
+               face_slip(sc * kk + c) = 1.0;
                ComputeIPFaceTraction(s, *FTr, *fe1, *fe2, u1, u2,
                                      face_slip.GetData(), with_normal,
-                                     trac_local);
-               add_traction(tCd, tNd, 2 * fault_gid[s * nbf + kk] + c, 1.0);
+                                     trac_local, sc);
+               add_traction(tCd, tNd, sc * fault_gid[s * nbf + kk] + c, 1.0);
             }
          }
       }
@@ -423,14 +442,17 @@ void ElasticityDomainOperator<MeshType>::BuildQDStageOperators(
       tD.OffsetColumns(g_first);
 
       // ---- Matrices ----
+      // Traction rows: shear 2 per DOF (shear_part), normal 1 (norm_part);
+      // slip columns: sc per DOF (slip_part).
       auto ops = std::unique_ptr<QDStageOperators>(new QDStageOperators);
       ops->with_normal = with_normal;
+      ops->slip_comps = sc;
       ops->dim = dim;
       ops->B = tB.Build(comm, nvol, nvol_glob, vol_part, nslip_glob, slip_part);
       ops->D = tD.Build(comm, nvol, nvol_glob, vol_part, ng_glob, g_part);
-      ops->Cu = tCu.Build(comm, 2 * nown, nslip_glob, slip_part,
+      ops->Cu = tCu.Build(comm, 2 * nown, nshear_glob, shear_part,
                           nvol_glob, vol_part);
-      ops->Cd = tCd.Build(comm, 2 * nown, nslip_glob, slip_part,
+      ops->Cd = tCd.Build(comm, 2 * nown, nshear_glob, shear_part,
                           nslip_glob, slip_part);
       if (with_normal)
       {
@@ -661,6 +683,17 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
       MPI_Comm_size(comm, &nranks);
       QDStageOperators &ops = *qd_ops_;
       const bool with_normal = ops.with_normal;
+      // Fault opening version B, B1 (D-B6, lazy): the dense G keeps the
+      // tangential columns only (2 per DOF), whatever the stage operators'
+      // slip_comps is.  The opening columns are never built here; the open
+      // set fetches them per DOF through the solve path when a DOF first
+      // opens (cycle/fault_opening.hpp).  sc maps a dense column index
+      // (2 per DOF) to the stage operators' slip entry (sc per DOF).
+      const int sc = ops.slip_comps;
+      MFEM_VERIFY(config.compress == 0.0 || sc == 2,
+                  "--qd-green-compress is refused with the opening slip "
+                  "component (slip_comps = " << sc << "): the H-matrix "
+                  "path has no opening columns");
       const int nown = num_owned_fault_dofs_;
       Array<HYPRE_BigInt> part;
       HYPRE_BigInt fault_first = 0;
@@ -786,7 +819,7 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
              Tn(with_normal ? m_max : 0);
          for (int i = 0; i < m_max; i++)
          {
-            E[i].SetSize(2 * nown);
+            E[i].SetSize(sc * nown);
             R[i].SetSize(ops.B->Height());
             X[i].SetSize(ops.B->Height());
          }
@@ -804,7 +837,13 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
             {
                E[i] = 0.0;
                const HYPRE_BigInt jl = j0 + i - slip_first;
-               if (jl >= 0 && jl < 2 * nown) { E[i](static_cast<int>(jl)) = 1.0; }
+               if (jl >= 0 && jl < 2 * nown)
+               {
+                  // Dense column 2·go + c -> stage slip entry sc·go + c.
+                  const int go = static_cast<int>(jl) / 2;
+                  const int c = static_cast<int>(jl) % 2;
+                  E[i](sc * go + c) = 1.0;
+               }
                ops.B->Mult(E[i], R[i]);
                X[i] = 0.0;
                if (dim_ == 2 && (j0 + i) % 2 == 1 - slot)
@@ -831,7 +870,7 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
             t_cols += MPI_Wtime() - t1;
          }
          // T_D: the loading ĝ with zero slip
-         Vector zero(2 * nown), b(ops.B->Height()), x(ops.B->Height());
+         Vector zero(sc * nown), b(ops.B->Height()), x(ops.B->Height());
          zero = 0.0;
          ops.D->Mult(g_hat, b);
          if (beta_over_mu_ > 0.0) { b += substrate_load_; }   // 2.5D: f_pl = t M_beta U_pl1
@@ -893,9 +932,18 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
          const real_t j = static_cast<real_t>(slip_first + i);
          dv(i) = std::sin(0.37 * j + 0.1) + 0.5 * std::cos(0.011 * j);
       }
+      // The solve path reads the stage operators' slip layout (sc per DOF);
+      // the same tangential slip, opening 0.  With sc = 2 this is dv.
+      Vector dvs(sc * nown);
+      dvs = 0.0;
+      for (int o = 0; o < nown; o++)
+      {
+         dvs(sc * o) = dv(2 * o);
+         dvs(sc * o + 1) = dv(2 * o + 1);
+      }
       Vector Tg, Tng, Ts_, Tns;
       qd_green_->Apply(t_v, dv, Tg, with_normal ? &Tng : nullptr, nullptr);
-      QDSolvePathTraction(t_v, dv, Ts_, with_normal ? &Tns : nullptr);
+      QDSolvePathTraction(t_v, dvs, Ts_, with_normal ? &Tns : nullptr);
       auto rel = [&](const Vector &a, const Vector &b)
       {
          real_t loc[2] = {0.0, 0.0}, glob[2];

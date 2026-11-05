@@ -436,7 +436,11 @@ public:
 #ifdef MFEM_USE_MPI
    // GPU plan G2: a stage through prebuilt operators (qd_stage_operators.hpp,
    // elasticity_operator_qd.inl).  Parallel mesh and IP only.
-   void BuildQDStageOperators(bool with_normal) override;
+   // Fault opening version B, B1: slip_comps = 3 adds the opening as the
+   // third kernel slip component — B, C_delta and N_delta gain the response
+   // columns of a unit opening (slip index space 3 per fault DOF); needs
+   // with_normal.  2 (the default) is today's build, unchanged.
+   void BuildQDStageOperators(bool with_normal, int slip_comps = 2) override;
    void SolveStage(real_t time, const Vector &slip_owned,
                    GridFuncType &displacement, Vector &traction_owned,
                    Vector *normal_owned) override;
@@ -739,12 +743,15 @@ private:
    /// trac_local: [ncomp*nbf], ncomp = 3 (normal, dip, strike) with
    /// @a with_normal, else 2 (dip, strike).  ComputeTraction and the QD
    /// stage operators (GPU plan G2) both call it.
+   /// Fault opening version B, B1: @a scomp = 3 reads face_slip as
+   /// [dip, strike, opening] per face DOF [3*nbf] (the opening embeds
+   /// along the face normal); 2 is today's layout.
    void ComputeIPFaceTraction(int fi, FaceElementTransformations &FTr,
                               const FiniteElement &fe1,
                               const FiniteElement &fe2,
                               const Vector &u1_all, const Vector &u2_all,
                               const real_t *face_slip, bool with_normal,
-                              Vector &trac_local) const;
+                              Vector &trac_local, int scomp = 2) const;
 
 #ifdef MFEM_USE_MPI
    /// Fill qd_ops_->g with g(t) at the stored Dirichlet points.

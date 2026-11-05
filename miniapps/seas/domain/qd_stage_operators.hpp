@@ -162,6 +162,10 @@ private:
 struct QDStageOperators
 {
    bool with_normal = false;       ///< N_u, N_δ built (elastic sigma_n)
+   /// Kernel slip components per fault DOF: 2 ([dip, strike]), or 3 with
+   /// the opening as the third component (fault opening version B, B1).
+   /// The slip index space of B, C_δ, N_δ is slip_comps per DOF.
+   int slip_comps = 2;
    std::unique_ptr<HypreParMatrix> B;    ///< volume DOFs × owned slip
    std::unique_ptr<HypreParMatrix> D;    ///< volume DOFs × g(t) values
    std::unique_ptr<HypreParMatrix> Cu;   ///< owned shear traction × volume

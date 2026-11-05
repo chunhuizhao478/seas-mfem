@@ -815,33 +815,48 @@
    /// Face-local form of BuildSlipAtQuadPoints: @a face_slip holds this
    /// face's slip only, [dip, strike] per face DOF [2 * nbf].  The QD stage
    /// operators (GPU plan G2) probe it with unit slip.
+   ///
+   /// Fault opening version B, B1 (plan 2026-11-05, Section 5.2): with
+   /// @a scomp = 3 the face slip is [dip, strike, opening] per face DOF
+   /// [3 * nbf]; the third component embeds along the face normal
+   /// (FaultBasis::EmbedOpening(QP)).  scomp = 2 (the default) is the
+   /// path above, unchanged.
    void BuildSlipAtQuadPointsFace(int logical_fault_idx,
                                   const real_t *face_slip,
-                                  Vector &delta_u_quad) const
+                                  Vector &delta_u_quad, int scomp = 2) const
    {
       const int dim = dim_;
       const int nbf = nbf_per_face_;
       const auto &basis = fault_basis_.GetBasis(logical_fault_idx);
       // Tandem convention: sign is baked into the basis vectors.
       // No separate sign factor needed.
+      MFEM_ASSERT(scomp == 2 || scomp == 3,
+                  "BuildSlipAtQuadPointsFace: scomp = " << scomp);
 
       if (!basis.qp_data.empty())
       {
-         Vector slip_tang(2 * nbf);
+         Vector slip_tang(scomp * nbf);
          for (int kk = 0; kk < nbf; kk++)
          {
-            slip_tang(0 * nbf + kk) = face_slip[2 * kk];
-            slip_tang(1 * nbf + kk) = face_slip[2 * kk + 1];
+            for (int c = 0; c < scomp; c++)
+            {
+               slip_tang(c * nbf + kk) = face_slip[scomp * kk + c];
+            }
          }
          Vector slip_tang_q;
-         face_quad_->InterpolateToQuadPoints(2, slip_tang, slip_tang_q);
-         int nqp = slip_tang_q.Size() / 2;
+         face_quad_->InterpolateToQuadPoints(scomp, slip_tang, slip_tang_q);
+         int nqp = slip_tang_q.Size() / scomp;
          delta_u_quad.SetSize(dim * nqp);
          for (int q = 0; q < nqp; q++)
          {
             real_t sl_q[2] = {slip_tang_q(q), slip_tang_q(nqp + q)};
             real_t du[3];
             fault_basis_.EmbedSlipQP(logical_fault_idx, q, sl_q, du);
+            if (scomp == 3)
+            {
+               fault_basis_.EmbedOpeningQP(logical_fault_idx, q,
+                                           slip_tang_q(2 * nqp + q), du);
+            }
             for (int c = 0; c < dim; c++)
                delta_u_quad(c * nqp + q) = du[c];
          }
@@ -851,10 +866,15 @@
          Vector delta_u_nodal(dim * nbf);
          for (int kk = 0; kk < nbf; kk++)
          {
-            real_t slip_local[2] = {face_slip[2 * kk],
-                                    face_slip[2 * kk + 1]};
+            real_t slip_local[2] = {face_slip[scomp * kk],
+                                    face_slip[scomp * kk + 1]};
             real_t du[3];
             fault_basis_.EmbedSlip(logical_fault_idx, slip_local, du);
+            if (scomp == 3)
+            {
+               fault_basis_.EmbedOpening(logical_fault_idx,
+                                         face_slip[scomp * kk + 2], du);
+            }
             for (int c = 0; c < dim; c++)
                delta_u_nodal(c * nbf + kk) = du[c];
          }

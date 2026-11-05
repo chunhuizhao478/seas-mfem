@@ -866,13 +866,36 @@ test-fault-opening: seas_test_fault_opening
 	      else echo "deck $$d: FAIL (rc $$rc)"; printf '%s\n' "$$out" | tail -5; fail=1; fi; done; \
 	   exit $$fail
 
+# Fault opening version B, B1 (plan 2026-11-05, Section 9): the opening as
+# the third kernel slip component of the stage operators, operator-level
+# checks on the miniature BP3 layout (g = 0 equivalence is exact; the
+# opening column's sign, reciprocity and a uniform opening), on 1 and 2
+# ranks.  No cycle objects: links like the layout test.
+TEST_FAULT_CONTACT_SRC = tests/2d_inplane/test_fault_contact.cpp
+TEST_FAULT_CONTACT_OBJ = $(TEST_FAULT_CONTACT_SRC:.cpp=.o)
+$(TEST_FAULT_CONTACT_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(INPLANE_HEADERS) \
+                              $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_fault_contact: $(TEST_FAULT_CONTACT_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_CONTACT_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-fault-contact: seas_test_fault_contact
+	@for n in 1 2; do \
+	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_fault_contact < /dev/null || exit 1; \
+	done
+
 2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
                 test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
                 test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
                 test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
                 test-handback-table test-tip-zone test-sigma-floor test-relaxation test-2d5-width test-2d5-dyn-driver \
                 test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle \
-                test-fault-opening
+                test-fault-opening test-fault-contact
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \

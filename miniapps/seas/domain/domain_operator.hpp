@@ -283,13 +283,17 @@ public:
 
    /// @brief GPU plan G2: build the per-stage operators B, D, C_u, C_δ
    /// (and N_u, N_δ with @a with_normal) once, for SolveStage().
+   /// Fault opening version B, B1: @a slip_comps = 3 adds the opening as
+   /// the third kernel slip component (needs with_normal); 2 is today's
+   /// build, unchanged.
    ///
    /// Default: not supported.  ElasticityDomainOperator overrides it for a
    /// parallel mesh with the IP method.
-   virtual void BuildQDStageOperators(bool with_normal)
+   virtual void BuildQDStageOperators(bool with_normal, int slip_comps = 2)
    {
       MFEM_ABORT("This domain operator has no QD stage operators "
-                 "(--qd-operators matrix); with_normal = " << with_normal);
+                 "(--qd-operators matrix); with_normal = " << with_normal
+                 << ", slip_comps = " << slip_comps);
    }
 
    /// @brief GPU plan G2: one quasi-dynamic stage through the operators of

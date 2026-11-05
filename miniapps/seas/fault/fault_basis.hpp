@@ -367,6 +367,44 @@ public:
       }
    }
 
+   /// Fault opening version B, B1 (plan 2026-11-05, Section 5.2): add the
+   /// opening @a g to an embedded jump, along the face's stored unit normal
+   /// (sign baked in, like the tangents): delta_u += g * normal.  The
+   /// adjoint of NormalStress up to its compression-positive minus sign,
+   /// which the version B unit tests pin against the assembled operator.
+   void EmbedOpening(int fi, real_t g, real_t *delta_u_global) const
+   {
+      MFEM_ASSERT(fi >= 0 && fi < num_faces_,
+                  "FaultBasis::EmbedOpening: face index " << fi
+                  << " out of range [0, " << num_faces_ << ")");
+      const auto &b = basis_[fi];
+      for (int d = 0; d < dim_; d++)
+      {
+         delta_u_global[d] += g * b.normal[d];
+      }
+   }
+
+   /// Per-quad-point form of EmbedOpening (varying frames use qp_data's
+   /// normal, as EmbedSlipQP uses its tangents).
+   void EmbedOpeningQP(int fi, int q, real_t g, real_t *delta_u_global) const
+   {
+      MFEM_ASSERT(fi >= 0 && fi < num_faces_,
+                  "FaultBasis::EmbedOpeningQP: face index out of range");
+      const auto &b = basis_[fi];
+      if (q >= 0 && q < static_cast<int>(b.qp_data.size()))
+      {
+         const auto &qd = b.qp_data[q];
+         for (int d = 0; d < dim_; d++)
+         {
+            delta_u_global[d] += g * qd.normal[d];
+         }
+      }
+      else
+      {
+         EmbedOpening(fi, g, delta_u_global);
+      }
+   }
+
    /// Get the normal stress component: sigma_n = -traction . normal.
    /// Positive in compression.
    real_t NormalStress(int fi, const real_t *traction_global) const
