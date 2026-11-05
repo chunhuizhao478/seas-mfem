@@ -50,6 +50,13 @@ namespace seas
 /// sigma_red[i], before the floor.  Null (the default) leaves every bit
 /// unchanged.
 ///
+/// Opt-in frozen nodes (Chunhui Zhao, 2026-11-04: "start version A", fault
+/// opening design rev 1.1, cycle/fault_opening.hpp): with
+/// RSFaultInputs::frozen non-null, a node with frozen[i] != 0 (an open,
+/// shear-free point) is not solved: V = 0 and dpsi/dt = 0 there, no status
+/// bit and |V| = 0 in the max.  Its slip is set by the open-set solve, not
+/// by the friction law.  Null (the default) leaves every bit unchanged.
+///
 /// A kernel cannot print or abort.  Where the host code prints or aborts, a
 /// node sets a bit in its status word instead (RSStatus), and the caller
 /// reruns the host code, which prints today's lines and aborts as before.
@@ -368,6 +375,9 @@ struct RSFaultInputs
    /// per-node amount taken off sigma_n_eff before the floor (Pa,
    /// compression positive), or nullptr (the default: nothing)
    const Vector *sigma_red = nullptr;
+   /// per-node flag, != 0: the node is open (V = 0, dpsi/dt = 0, not
+   /// solved), or nullptr (the default: every node solved)
+   const Vector *frozen = nullptr;
 };
 
 /// The normal stress the law sees: sigma_n_eff, or the floor where
@@ -407,12 +417,23 @@ inline RSReduceValue RSFaultRHS(int N, bool use_dev, const RSDeviceParams &prm,
    const RSDeviceParams p = prm;
    const real_t fl = in.sigma_floor;
    const real_t *RED = in.sigma_red ? in.sigma_red->Read(use_dev) : nullptr;
+   const real_t *FZ = in.frozen ? in.frozen->Read(use_dev) : nullptr;
 
    RSReduceValue res;
    res.first = 0.0;
    res.second = 0;
    reduce(N, res, [=] MFEM_HOST_DEVICE (int i, RSReduceValue &r)
    {
+      if (FZ && FZ[i] != 0.0)
+      {
+         // an open point (file comment): not solved, nothing evolves
+         R[3*i] = 0.0;
+         R[3*i + 1] = 0.0;
+         R[3*i + 2] = 0.0;
+         VS[2*i] = 0.0;
+         VS[2*i + 1] = 0.0;
+         return;
+      }
       const real_t psi = X[3*i + 2];
       const real_t tau0 = TP[2*i] + T[2*i];
       const real_t tau1 = TP[2*i + 1] + T[2*i + 1];
@@ -454,12 +475,19 @@ inline int RSFaultSlipRate(int N, bool use_dev, real_t V0,
    real_t *VO = V.Write(use_dev);
    const real_t fl = in.sigma_floor;
    const real_t *RED = in.sigma_red ? in.sigma_red->Read(use_dev) : nullptr;
+   const real_t *FZ = in.frozen ? in.frozen->Read(use_dev) : nullptr;
 
    RSReduceValue res;
    res.first = 0.0;
    res.second = 0;
    reduce(N, res, [=] MFEM_HOST_DEVICE (int i, RSReduceValue &r)
    {
+      if (FZ && FZ[i] != 0.0)
+      {
+         VO[2*i] = 0.0;   // an open point: not solved
+         VO[2*i + 1] = 0.0;
+         return;
+      }
       const real_t psi = X[3*i + 2];
       const real_t tau0 = TP[2*i] + T[2*i];
       const real_t tau1 = TP[2*i + 1] + T[2*i + 1];

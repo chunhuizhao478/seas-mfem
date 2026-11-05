@@ -8,7 +8,9 @@
 //       state (theta) [s], normal_stress (sigma_n_eff, compression
 //       positive) [MPa], shear_stress_strike, shear_stress_dip [MPa], and
 //       with [cycle.relaxation] normal_stress_relaxation (r [MPa]: the law
-//       sees normal_stress - r, then the floor; Chunhui Zhao, 2026-11-02)
+//       sees normal_stress - r, then the floor; Chunhui Zhao, 2026-11-02),
+//       and with [cycle.opening] fault_open (1 open, 0 closed;
+//       cycle/fault_opening.hpp, Chunhui Zhao, 2026-11-04)
 //   <dir>/<prefix>_surface_snapshots.vtkhdf   on the free surface:
 //       displacement, velocity (global XYZ) [m, m/s]
 //   <dir>/<prefix>_volume_snapshots.vtkhdf    on the elements (all, or those
@@ -481,6 +483,9 @@ public:
                           {"slip_rate_dip", 1}, {"state", 1}, {"normal_stress", 1},
                           {"shear_stress_strike", 1}, {"shear_stress_dip", 1}};
          if (cfg.Relaxation()) { fault_.fields.push_back({"normal_stress_relaxation", 1}); }
+         if (cfg.opening.On()) { fault_.fields.push_back({"fault_open", 1}); }
+         fault_relax_ = cfg.Relaxation();
+         fault_open_ = cfg.opening.On();
          Open_(fault_, "fault", restart, commit,
                "fd_cycle fault snapshots: slip [m], slip rate [m/s] (kernel strike and dip "
                "components, as the station files), state theta [s], normal stress "
@@ -972,10 +977,15 @@ private:
                   "snapshots: the regime filled " << f.slip_strike.Size() << " fault values "
                   "(sigma_n " << f.sigma_n.Size() << ") for " << N << " owned DOFs");
       // kFaultFields, plus normal_stress_relaxation with [cycle.relaxation]
+      // and fault_open with [cycle.opening]
       const int nf = static_cast<int>(fault_.fields.size());
-      const bool relax = (nf == kFaultFields + 1);
+      const bool relax = fault_relax_, open = fault_open_;
+      MFEM_VERIFY(nf == kFaultFields + (relax ? 1 : 0) + (open ? 1 : 0), "snapshots: "
+                  << nf << " fault fields");
       MFEM_VERIFY(!relax || f.sigma_red.Size() == N, "snapshots: the regime filled "
                   << f.sigma_red.Size() << " relaxation values for " << N << " owned DOFs");
+      MFEM_VERIFY(!open || f.open.Size() == N, "snapshots: the regime filled "
+                  << f.open.Size() << " open flags for " << N << " owned DOFs");
       std::vector<double> loc(static_cast<size_t>(nf * N));
       for (int j = 0; j < N; j++)
       {
@@ -989,6 +999,7 @@ private:
          r[6] = -(f.tau_a_strike(j) + f.tau_b_strike(j) + f.eta * f.V_strike(j)) / 1e6;
          r[7] = -(f.tau_a_dip(j) + f.tau_b_dip(j) + f.eta * f.V_dip(j)) / 1e6;
          if (relax) { r[8] = f.sigma_red(j) / 1e6; }
+         if (open) { r[relax ? 9 : 8] = f.open(j); }
       }
       std::vector<std::vector<double>> all;
       GatherFields_(fault_, loc, std::vector<int>(nf, 1), all);
@@ -1046,6 +1057,8 @@ private:
    int order_ = 1;
    int dim_ = 3;   ///< mesh dimension
    int rank_ = 0, size_ = 1;
+   bool fault_relax_ = false;   ///< [cycle.relaxation]: normal_stress_relaxation
+   bool fault_open_ = false;    ///< [cycle.opening]: fault_open
    Kind fault_, surf_, vol_;
    // The surface and volume points: local element and its reference point.
    Points surf_pts_, vol_pts_;

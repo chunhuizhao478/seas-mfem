@@ -591,6 +591,7 @@ public:
       MFEM_VERIFY(has_fault_, "SetPrakashClifton: the operator has no fault");
       MFEM_VERIFY(v_star > 0.0 && length > 0.0, "SetPrakashClifton: v_star = "
                   << v_star << ", length = " << length << "; both must be > 0");
+      MFEM_VERIFY(!opening_, "SetPrakashClifton: not with SetShearFreeOpening");
       pc_ = true;
       pc_vstar_ = v_star;
       pc_len_ = length;
@@ -690,6 +691,34 @@ public:
       floor_hits_ = 0;
       std::fill(floored_.begin(), floored_.end(), char(0));
    }
+   /// [cycle.opening] mode = "shear_free" (Chunhui Zhao, 2026-11-04: "start
+   /// version A"; fault opening design rev 1.1, Section 3.1): at an owned DOF
+   /// whose trial sigma_eff (box 8, the bulk's: no modifier, no floor) is
+   /// below 0 the closure is replaced by the open rule X* + gamma V = 0, V =
+   /// -X*/gamma (eq. 3.2); psi is frozen there (D3: no state rate in boxes 4
+   /// and 10 while open, also in the predictor of the step after), the floor
+   /// and the range checks do not act, the predictor-stability check is
+   /// skipped (psi does not move), and the DOF is left out of the record's
+   /// max V and max |V| dt / Dc.  Off (the default): every bit unchanged.
+   void SetShearFreeOpening(bool on)
+   {
+      MFEM_VERIFY(!on || !pc_, "SetShearFreeOpening: not with Prakash-Clifton");
+      opening_ = on;
+      open_.assign(no_, char(0));
+   }
+   bool ShearFreeOpening() const { return opening_; }
+   /// Per owned DOF: 1 where the last step was open (or SetOpenFlags set it).
+   const std::vector<char> &OpenFlags() const { return open_; }
+   /// The open flags the next step's predictor sees (the switch from QD).
+   void SetOpenFlags(const std::vector<char> &f)
+   {
+      MFEM_VERIFY(opening_, "SetOpenFlags: SetShearFreeOpening is off");
+      MFEM_VERIFY(static_cast<int>(f.size()) == no_, "SetOpenFlags: " << f.size()
+                  << " flags for " << no_ << " owned DOFs");
+      for (int j = 0; j < no_; j++) { open_[j] = f[j] ? 1 : 0; }
+   }
+   int OpenDOFs() const
+   { return static_cast<int>(std::count(open_.begin(), open_.end(), char(1))); }
    /// Global number of shared (cross-rank) fault faces, each counted once.
    int NumSharedFaultFacesGlobal() const { return n_shared_global_; }
    /// Fault-face penalty mean and relative spread, in local face order.
@@ -754,13 +783,25 @@ public:
    /// slip_abs = |d^n| of DOF j, passed to the closure as st.slip_abs.
    /// With the normal-stress hook the closure sees that value less
    /// NormalStressReduction(j); sigma_eff on return stays the bulk's.
+   /// With SetShearFreeOpening, *open (when given) says whether the DOF was
+   /// open: sigma_eff < 0, V = -X/gamma.
    void CloseDOF(int j, const real_t TS[3], real_t psi, real_t V[3],
                  real_t &sigma_eff, real_t X[2], real_t *sigma_pc = nullptr,
-                 real_t E = 0.0, real_t omE = 1.0, real_t slip_abs = 0.0) const
+                 real_t E = 0.0, real_t omE = 1.0, real_t slip_abs = 0.0,
+                 bool *open = nullptr) const
    {
       const real_t *n = &frame_own_(9 * j), *dv = &frame_own_(9 * j + 3),
                     *sv = &frame_own_(9 * j + 6);
       fault_frame::ToLocal(TS, 0.0, n, dv, sv, X[0], X[1], sigma_eff);
+      if (open) { *open = false; }
+      if (opening_ && sigma_eff < 0.0)
+      {
+         // [cycle.opening] open: the end-of-step shear X + gamma V is 0
+         const real_t gamma = ClosureGamma(j);
+         fault_frame::Embed(-X[0] / gamma, -X[1] / gamma, dv, sv, V);
+         if (open) { *open = true; }
+         return;
+      }
       if (sigma_floor_ > 0.0)
       {
          MFEM_VERIFY(std::isfinite(sigma_eff), "NitscheWaveOperator: sigma_n_eff is not "
@@ -1399,7 +1440,8 @@ private:
          const real_t *V = &V_(3 * j);
          for (int c = 0; c < 3; c++) { dstar_(3 * j + c) = d_(3 * j + c) + 0.5 * dt * V[c]; }
          const real_t Vabs = std::sqrt(V[0] * V[0] + V[1] * V[1] + V[2] * V[2]);
-         r0_(j) = StateRate(j, Vabs, psi_(j));
+         // [cycle.opening] D3: no state rate at a DOF open at step n
+         r0_(j) = (opening_ && open_[j]) ? 0.0 : StateRate(j, Vabs, psi_(j));
          psistar_(j) = psi_(j) + dt * r0_(j);
       }
       // 5-8
@@ -1435,6 +1477,7 @@ private:
          // |d^n|: d_ still holds d^n here (box 11 writes d^{n+1} below)
          const real_t *dn = &d_(3 * j);
          const real_t dn_abs = std::sqrt(dn[0] * dn[0] + dn[1] * dn[1] + dn[2] * dn[2]);
+         bool is_open = false;   // [cycle.opening] (never with Prakash-Clifton)
          if (pc_)
          {
             // previous step's slip rate (SeisSol: slipRateMagnitude before the solve)
@@ -1446,7 +1489,7 @@ private:
             min_pc = std::min(min_pc, sigpc_(j));
             max_pc = std::max(max_pc, sigpc_(j));
          }
-         else { CloseDOF(j, TS, psistar_(j), Vn, sig, X, nullptr, 0.0, 1.0, dn_abs); }
+         else { CloseDOF(j, TS, psistar_(j), Vn, sig, X, nullptr, 0.0, 1.0, dn_abs, &is_open); }
          const real_t Vabs = std::sqrt(Vn[0] * Vn[0] + Vn[1] * Vn[1] + Vn[2] * Vn[2]);
          // C-07 anti-parallel: V . X_tan < 0 wherever |V| > 0.
          const real_t *dv = &frame_own_(9 * j + 3), *sv = &frame_own_(9 * j + 6);
@@ -1464,13 +1507,18 @@ private:
             nsm_V_(j) = Vabs;
          }
          const real_t ratio = Vabs * dt / Dc_own_(j);
-         MFEM_VERIFY(ratio <= 2.0,
-                     "NitscheWaveOperator: predictor stability |V| dt / Dc = "
-                     << ratio << " > 2 on rank " << Mpi::WorldRank()
-                     << ", owned fault DOF " << j << " at (" << x_own_(3 * j)
-                     << ", " << x_own_(3 * j + 1) << ", " << x_own_(3 * j + 2)
-                     << "), step " << steps_ << ", t = " << t);
-         psi_(j) = psi_(j) + 0.5 * dt * (r0_(j) + StateRate(j, Vabs, psistar_(j)));
+         if (!is_open)
+         {
+            MFEM_VERIFY(ratio <= 2.0,
+                        "NitscheWaveOperator: predictor stability |V| dt / Dc = "
+                        << ratio << " > 2 on rank " << Mpi::WorldRank()
+                        << ", owned fault DOF " << j << " at (" << x_own_(3 * j)
+                        << ", " << x_own_(3 * j + 1) << ", " << x_own_(3 * j + 2)
+                        << "), step " << steps_ << ", t = " << t);
+            psi_(j) = psi_(j) + 0.5 * dt * (r0_(j) + StateRate(j, Vabs, psistar_(j)));
+         }
+         // [cycle.opening] D3: psi frozen while open
+         if (opening_) { open_[j] = is_open ? 1 : 0; }
          for (int c = 0; c < 3; c++)
          {
             V_(3 * j + c) = Vn[c];
@@ -1481,8 +1529,12 @@ private:
          siglast_(j) = sig;
          min_sig = std::min(min_sig, sig);
          max_sig = std::max(max_sig, sig);
-         max_V = std::max(max_V, Vabs);
-         max_ratio = std::max(max_ratio, ratio);
+         if (!is_open)
+         {
+            // [cycle.opening]: max V over the closed DOFs
+            max_V = std::max(max_V, Vabs);
+            max_ratio = std::max(max_ratio, ratio);
+         }
       }
       if (nsm_) { nsm_->Advance(dt, nsm_tau_.GetData(), nsm_V_.GetData()); }
       fault_sec_ += MPI_Wtime() - tf0;
@@ -1812,6 +1864,8 @@ private:
    real_t sigma_floor_ = 0.0;            ///< NitscheFaultSetup::sigma_floor
    mutable long floor_hits_ = 0;         ///< DOF-steps at the floor
    mutable std::vector<char> floored_;   ///< per owned DOF: the floor acted
+   bool opening_ = false;                ///< SetShearFreeOpening
+   std::vector<char> open_;              ///< per owned DOF: open at the last step
    std::function<real_t(real_t)> nuc_temporal_;
    std::shared_ptr<const FaultFrameField> frames_;   ///< census + N-09 frames (phase A)
    int nd_ = 0, no_ = 0, nbf_ = 1, nloc_faces_ = 0, n_shared_global_ = 0;

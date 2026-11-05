@@ -28,7 +28,10 @@
 # relaxation, t_r 5 kyr (RELAX below); five more (P3 of the PML design plan
 # rev2, test T5, 2026-11-04: "start P3") are D0 to the end of event 1 and its
 # hand-back, 900 yr: the absorbing walls (the reference), the CFS-PML band at
-# f_alpha = 0.005, 0.01 and 0.02 Hz, and the sponge comparator (PML below).
+# f_alpha = 0.005, 0.01 and 0.02 Hz, and the sponge comparator (PML below);
+# one more (fault opening design rev 1.1, version A, test T5, 2026-11-04:
+# "start version A") is the 10 MPa floor D9f deck with [cycle.opening] mode =
+# "shear_free" (OPEN below).
 # Run from miniapps/seas:
 #   python3 simple_cases/scripts/make_decks.py [--check]
 # --check: write nothing, exit 1 if a committed deck differs from what this
@@ -71,6 +74,10 @@
 #                      wall_speed_factor = "auto" (D3), or kind "sponge";
 #                      P4 (T6): the relax5k D9f deck with the band at
 #                      f_alpha 0.01 Hz, 12,000 yr (its first two events)
+# fault opening A (OPEN): the 10 MPa floor D9f deck (RELAX, no relaxation,
+#                      30,000 yr) with [cycle.opening] mode = "shear_free":
+#                      a DOF whose elastic sigma_n' is tensile is open
+#                      (shear-free in both regimes, psi frozen, out of max V)
 import argparse
 import math
 import os
@@ -148,6 +155,8 @@ CASES = [
     ("D0_straight_hb_sponge", "straight_h500", "D", False, "PML P3 (T5) comparator: D0's event 1 and hand-back, sponge band (same profile)"),
     # PML plan rev2 P4 (T6): the relaxation V1 deck with the CFS-PML band, 12,000 yr
     ("D9f_arc08L2p5_h250_avg_floor10_relax5k_pml0p01", "arc08L2p5_h250", "D", True, "PML P4 (T6): relaxation V1 (D9f, t_r 5 kyr, 10 MPa floor) with the CFS-PML band, f_alpha 0.01 Hz, 12,000 yr"),
+    # fault opening design rev 1.1, version A (T5): the floor control with open points
+    ("D9f_arc08L2p5_h250_avg_floor10_open", "arc08L2p5_h250", "D", True, "fault opening A (T5): D9f with the sigma_n' floor at 10 MPa and shear-free open points ([cycle.opening]), 30,000 yr"),
 ]
 SMOOTH = ["D7f_arc08L10_h250_avg_floor", "D9f_arc08L2p5_h250_avg_floor", "D6f_arc03L10_h250_avg_floor",
           "D8f_arc03L2p5_h250_avg_floor", "D10f_sbend03L05_h250_avg_floor"]
@@ -200,6 +209,8 @@ RELAX = {
     "D9f_arc08L2p5_h250_avg_floor10_relax5k": dict(floor=10.0e6, years=30000.0, t_relax_yr=5000.0),
     # PML P4: the relax5k deck with the band, its first two events
     "D9f_arc08L2p5_h250_avg_floor10_relax5k_pml0p01": dict(floor=10.0e6, years=12000.0, t_relax_yr=5000.0),
+    # fault opening A (T5): the floor control with [cycle.opening]
+    "D9f_arc08L2p5_h250_avg_floor10_open": dict(floor=10.0e6, years=30000.0, t_relax_yr=None),
 }
 for _c in RELAX:
     OPTS[_c] = dict(averaged=True)
@@ -303,6 +314,11 @@ for _c in PML:
 GO_CASE["D9f_arc08L2p5_h250_avg_floor10_relax5k_pml0p01"] = (
     "# 2026-11-04: \"yes let's test D9f first, then UCERF\", PML plan rev2 P4):")
 
+# fault opening design rev 1.1, version A (test T5; cycle/fault_opening.hpp)
+OPEN = ["D9f_arc08L2p5_h250_avg_floor10_open"]
+for _c in OPEN:
+    GO_CASE[_c] = "# 2026-11-04: \"start version A\", fault opening design rev 1.1, T5):"
+
 
 def header(case, mesh, regime, floor, row):
     lines = [
@@ -369,6 +385,16 @@ def make(case, mesh, regime, floor, row, base):
             "# regime, r frozen in the dynamic regime; the outputs keep the elastic sigma_n'.\n"
             "[cycle.relaxation]\n"
             f"t_relax_yr = {RELAX[case]['t_relax_yr']:.1f}\n\n"
+            "# The BP5-FD switch.\n[cycle.switch]\n")
+    if case in OPEN:
+        sub("# The BP5-FD switch.\n[cycle.switch]\n",
+            "# Fault opening, version A (make_decks.py OPEN; cycle/fault_opening.hpp): a\n"
+            "# DOF whose elastic sigma_n' (no floor) is tensile is open: shear-free in both\n"
+            "# regimes (QD: the open-set solve on G; dynamic: V = -X/gamma), psi frozen,\n"
+            "# out of max V and the hand-back guard; the faces stay glued, the floor acts\n"
+            "# on closed DOFs only.\n"
+            "[cycle.opening]\n"
+            "mode = \"shear_free\"\n\n"
             "# The BP5-FD switch.\n[cycle.switch]\n")
     pk = PML.get(case, {}).get("kind")
     if pk:

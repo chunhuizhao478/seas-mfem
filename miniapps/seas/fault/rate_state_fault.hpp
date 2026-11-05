@@ -296,6 +296,33 @@ public:
    }
    const Vector *SigmaNReduction() const { return sigma_red_; }
 
+   /// Opt-in frozen nodes (Chunhui Zhao, 2026-11-04: "start version A",
+   /// cycle/fault_opening.hpp): with `mask` non-null (NumNodes() values), a
+   /// node with mask(i) != 0 is an open, shear-free point: the BP5 vector
+   /// path does not solve it (ComputeRHS, RecomputeSlipRate, their kernels
+   /// and host reruns): V = 0, dpsi/dt = 0, left out of the max V and of the
+   /// floor counts.  Its slip is the open-set solve's.  The caller owns
+   /// `mask` and may change its values between calls.  Null (the default)
+   /// is off: every bit unchanged.
+   void SetFrozenNodes(const Vector *mask)
+   {
+      MFEM_VERIFY(SlipComponents == 2 || mask == nullptr,
+                  "SetFrozenNodes: the BP5 vector path only");
+      MFEM_VERIFY(mask == nullptr || mask->Size() == num_nodes_,
+                  "SetFrozenNodes: " << mask->Size() << " values for "
+                  << num_nodes_ << " fault nodes");
+      frozen_ = mask;
+   }
+   const Vector *FrozenNodes() const { return frozen_; }
+
+   /// The shear pre-stress the BP5 kernels add to the traction (kernel
+   /// pairs, 2 NumNodes()): the per-DOF copy in SAFS mode, else the
+   /// operator's own.
+   const Vector &TauPre() const
+   {
+      return safs_mode_ ? *tau_pre_per_dof_ : tau_pre_;
+   }
+
    /// Where the floor acted on this rank since the last ResetFloorStats:
    /// ComputeRHS calls with a floored node, the most nodes floored in one
    /// call, and the lowest true sigma_n_eff below the floor with its node.
@@ -1242,6 +1269,7 @@ private:
       in.eta = &eta_values_;
       in.sigma_floor = sigma_floor_;
       in.sigma_red = sigma_red_;
+      in.frozen = frozen_;
       return in;
    }
 
@@ -1251,10 +1279,12 @@ private:
    {
       if (normal_traction) { normal_traction->HostRead(); }
       if (sigma_red_) { sigma_red_->HostRead(); }
+      if (frozen_) { frozen_->HostRead(); }
       HostReadParams_();
       int n = 0;
       for (int i = 0; i < num_nodes_; i++)
       {
+         if (frozen_ && (*frozen_)(i) != 0.0) { continue; }   // open: not floored
          const real_t sigma_n_pre = SigmaNAt_(i);
          real_t s = normal_traction ? sigma_n_pre + (*normal_traction)(i) : sigma_n_pre;
          if (sigma_red_) { s -= (*sigma_red_)(i); }
@@ -1302,9 +1332,11 @@ private:
       HostReadParams_();
       const Vector &a_values = geom_->GetAValues();
       const Vector &eta_values = geom_->GetEtaValues();
+      if (frozen_) { frozen_->HostRead(); }
 
       for (int i = 0; i < num_nodes_; i++)
       {
+            if (frozen_ && (*frozen_)(i) != 0.0) { continue; }   // open: not solved
             real_t psi = state(i * StatePerNode + PsiIndex);
             real_t tau_vec[2] = {TauPreAt_(2*i) + traction(2*i),
                                  TauPreAt_(2*i+1) + traction(2*i+1)};
@@ -1425,9 +1457,16 @@ private:
       V_out.HostWrite();
       const Vector &a_values = geom_->GetAValues();
       const Vector &eta_values = geom_->GetEtaValues();
+      if (frozen_) { frozen_->HostRead(); }
 
       for (int i = 0; i < num_nodes_; i++)
       {
+            if (frozen_ && (*frozen_)(i) != 0.0)
+            {
+               V_out(2*i) = 0.0;   // open: not solved
+               V_out(2*i+1) = 0.0;
+               continue;
+            }
             real_t psi = state(i * StatePerNode + PsiIndex);
             real_t tau_vec[2] = {TauPreAt_(2*i) + traction(2*i),
                                  TauPreAt_(2*i+1) + traction(2*i+1)};
@@ -1459,6 +1498,8 @@ private:
    real_t sigma_floor_ = 0.0;
    /// SetSigmaNReduction (null = off; not owned).
    const Vector *sigma_red_ = nullptr;
+   /// SetFrozenNodes (null = off; not owned).
+   const Vector *frozen_ = nullptr;
    mutable FloorStats floor_stats_;
 
    /// GPU plan G4: the aging law in psi form behind evolution_, or null.

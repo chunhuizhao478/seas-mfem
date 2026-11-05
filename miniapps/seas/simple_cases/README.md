@@ -319,6 +319,22 @@ Design: `/mnt/project-files/2d-inplane/relaxation/relaxation-design-rev0.md`
   fault median of tau_qd - tau_dyn (the wall offset), QD balance V, event
   times and slip, floored DOFs, sigma_n' at the arc ends.
 
+## Fault opening A on D9f (fault opening design rev 1.1, test T5; 2026-11-04)
+
+- **Why:** the 10 MPa floor control (`D9f_arc08L2p5_h250_avg_floor10`)
+  ratchets the elastic sigma_n' at the arc ends to tension event by event;
+  the floor then holds strength there that a tensile point does not have.
+- **Case:** `D9f_arc08L2p5_h250_avg_floor10_open` = that control with
+  `[cycle.opening] mode = "shear_free"` (version A, cycle/fault_opening.hpp):
+  a DOF whose elastic sigma_n' is tensile is open, shear-free in both
+  regimes, psi frozen, left out of max V and the hand-back guard; the faces
+  stay glued; 30,000 yr. Reference: the control's run.
+- **What to read:** the open DOFs per hand-back (driver log, hand-back
+  table columns open_dyn and open_qd), exit code, events and their slip,
+  the hand-back jump at closed DOFs, the elastic sigma_n' at the arc ends
+  (does it still ratchet), and whether the open set chatters (settle
+  flips per accepted step).
+
 ## Setup
 
 All the decks are `config/fd_cycle/mapview_rs_fd.toml` with the edits
@@ -450,7 +466,7 @@ station lies on a fault edge to 3e-13 m (checked in the cloud).
 ## Files
 
 - `mesh/*.msh`: the thirteen meshes (above).
-- `configs/<case>.toml`: the thirty-nine decks.
+- `configs/<case>.toml`: the forty decks.
 - `scripts/make_decks.py`: makes the decks; `--check` compares.
 - `scripts/run_simple_mac.sh`: the runs on the Mac, one after the other.
   - Checks: the GitHub-first guard; the binary's code equals HEAD

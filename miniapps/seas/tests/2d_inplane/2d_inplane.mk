@@ -30,6 +30,7 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-vertex-normals      # vertex-normal plan P1 (T2, T3)
 #   make -f tests/2d_inplane/2d_inplane.mk test-vertex-normal-kernels # vertex-normal plan P2 (T1, T4)
 #   make -f tests/2d_inplane/2d_inplane.mk test-vertex-normal-cycle # vertex-normal plan P3 (the cycle)
+#   make -f tests/2d_inplane/2d_inplane.mk test-fault-opening       # [cycle.opening] version A (shear-free)
 #   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
 # The 3D parity set (every phase must leave it bit for bit unchanged) is the
 # script tests/2d_inplane/parity_3d.sh (see its header).  The tensor
@@ -826,16 +827,57 @@ test-vertex-normal-cycle: seas_test_vertex_normal_cycle
 	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_vertex_normal_cycle < /dev/null || exit 1; \
 	done
 
+# [cycle.opening] mode = "shear_free", version A of the fault opening design
+# rev 1.1 (Chunhui Zhao, 2026-11-04: "start version A", "build and test
+# here"; cycle/fault_opening.hpp): T1 the static mode II crack (D0), T2 open,
+# re-close, a QD run and its restart, T4 the switch both ways (D9f), C1 the
+# checkpoint V6 round trip, on 1 and 2 ranks; then the refusals 1-7 and a
+# read of the two opening decks (T5 D9f, T6 UCERF; no solve).
+TEST_FAULT_OPENING_SRC = tests/2d_inplane/test_fault_opening.cpp
+TEST_FAULT_OPENING_OBJ = $(TEST_FAULT_OPENING_SRC:.cpp=.o)
+$(TEST_FAULT_OPENING_OBJ): %.o: $(SRC)%.cpp $(CYCLE_HEADERS) $(CYCLE_STAMP) \
+                              $(CYCLE_SHARED_HEADERS) $(INPLANE_HEADERS) $(NITSCHE_2D_HEADERS) \
+                              $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
+
+seas_test_fault_opening: $(TEST_FAULT_OPENING_OBJ) $(CYCLE_LINK_OBJS)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_OPENING_OBJ) $(CYCLE_LINK_OBJS) \
+	    $(CYCLE_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+FAULT_OPENING_DECKS = simple_cases/configs/D9f_arc08L2p5_h250_avg_floor10_open.toml \
+                      config/fd_cycle/ucerf2d_saf_sjf_500m_R70_avg_tip_relax_open_fd.toml
+FAULT_OPENING_REFUSALS = 1:is version B|2:use "shear_free"|3:max_passes = 0 must be >= 1|4:[cycle.opening] needs [cycle.qd.green]|5:[cycle.opening] is built and tested on 2-D meshes only|6:[cycle.opening] with [friction.prakash_clifton]|7:[cycle.probe] with [cycle.opening]
+test-fault-opening: seas_test_fault_opening
+	@for n in 1 2; do \
+	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_fault_opening < /dev/null || exit 1; \
+	done
+	@list='$(FAULT_OPENING_REFUSALS)'; set -f; IFS='|'; fail=0; for r in $$list; do n=$${r%%:*}; msg=$${r#*:}; \
+	   out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_fault_opening --refuse $$n 2>&1); rc=$$?; \
+	   if [ $$rc -eq 0 ] || ! printf '%s' "$$out" | grep -qF -- "$$msg"; then \
+	      echo "refusal $$n: FAIL (rc $$rc)"; printf '%s\n' "$$out" | tail -5; fail=1; \
+	   else echo "refusal $$n: PASS ($$msg)"; fi; done; \
+	   ./seas_test_fault_opening --clean; \
+	   for d in $(FAULT_OPENING_DECKS); do \
+	      out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_fault_opening --load-deck $$d 2>&1); rc=$$?; \
+	      if [ $$rc -eq 0 ] && printf '%s' "$$out" | grep -qF '[cycle.opening] mode shear_free, max_passes 20; [cycle.qd.green] 1, switching 1'; then \
+	         echo "deck $$d: PASS (loads, opening on)"; \
+	      else echo "deck $$d: FAIL (rc $$rc)"; printf '%s\n' "$$out" | tail -5; fail=1; fi; done; \
+	   exit $$fail
+
 2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
                 test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
                 test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
                 test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
                 test-handback-table test-tip-zone test-sigma-floor test-relaxation test-2d5-width test-2d5-dyn-driver \
-                test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle
+                test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle \
+                test-fault-opening
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
         test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
         test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
         test-handback-table test-tip-zone test-sigma-floor test-relaxation test-2d5-width test-2d5-dyn-driver \
-        test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle 2d-inplane-all
+        test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle \
+        test-fault-opening 2d-inplane-all

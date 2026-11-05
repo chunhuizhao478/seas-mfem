@@ -297,6 +297,8 @@ struct StationFields
    /// [cycle.relaxation]: r per DOF [Pa] (the law sees sigma_n - r, then the
    /// floor); empty when off
    Vector sigma_red;
+   /// [cycle.opening]: 1 at an open DOF, 0 closed; empty when off
+   Vector open;
 };
 
 /// The regime's displacement u and velocity v, vectors of the QD regime's

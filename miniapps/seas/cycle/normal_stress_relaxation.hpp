@@ -100,6 +100,24 @@ public:
       const real_t *d = d_.HostRead();
       real_t *red = red_.HostWrite();
       for (int i = 0; i < n; i++) { red[i] = r[i] + (d[i] - r[i]) * E; }
+      if (frozen_)
+      {
+         // [cycle.opening] decision D5: r frozen at open points
+         const real_t *f = frozen_->HostRead();
+         for (int i = 0; i < n; i++) { if (f[i] != 0.0) { red[i] = r[i]; } }
+      }
+   }
+
+   /// [cycle.opening] (fault opening design rev 1.1, decision D5): r does not
+   /// change at a DOF with mask(i) != 0 (an open point), so the law resumes
+   /// with the r it had when the point opened.  The caller owns the mask.
+   /// Null (the default): every bit unchanged.
+   void SetFrozen(const Vector *mask)
+   {
+      MFEM_VERIFY(mask == nullptr || mask->Size() == r_.Size(),
+                  "NormalStressRelaxation::SetFrozen: " << mask->Size() << " values for "
+                  << r_.Size() << " DOFs");
+      frozen_ = mask;
    }
 
    /// After an accepted QD step at t: r = red(t), dsig = `dsig` (the
@@ -146,6 +164,7 @@ private:
    real_t t_r_;
    real_t t_n_ = 0.0;
    Vector r_, d_, red_;
+   const Vector *frozen_ = nullptr;   ///< SetFrozen
 };
 
 /// The dynamic regime's view: the hook H-2D1 takes r off sigma_eff at every

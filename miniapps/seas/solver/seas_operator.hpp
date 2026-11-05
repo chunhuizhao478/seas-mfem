@@ -192,6 +192,21 @@ public:
       friction_stage_hook_ = std::move(hook);
    }
 
+   /// Called in Mult() right after each Green's-function stage, with the
+   /// stage time, the slip it used and the traction (and normal traction,
+   /// or nullptr) it produced, all on owned fault DOFs; the hook may change
+   /// all three (Chunhui Zhao, 2026-11-04: "start version A", fault opening
+   /// design rev 1.1: the open-set solve of cycle/fault_opening.hpp).  The
+   /// check against the solve path, RefreshDisplacement() and the friction
+   /// see what the hook left.  Empty (the default): nothing is called, every
+   /// bit unchanged.
+   using GreenStageHook = std::function<void(real_t, Vector &, Vector &, Vector *)>;
+   void SetGreenStageHook(GreenStageHook hook) { green_stage_hook_ = std::move(hook); }
+
+   /// The slip of the last Mult() (owned fault DOFs), after the
+   /// Green's-function stage hook.
+   const Vector &GetStageSlip() const { return slip_; }
+
    /// Set face tracer (non-owning pointer, caller manages lifetime).
    void SetFaceTracer(FaceTraceLogger<MeshType> *tracer)
    {
@@ -261,6 +276,7 @@ private:
 
    StageTimers *stage_timers_ = nullptr;
    std::function<void(real_t)> friction_stage_hook_;   ///< SetFrictionStageHook
+   GreenStageHook green_stage_hook_;                    ///< SetGreenStageHook
 
    // Face tracer decomposition vectors (allocated only when tracer is active)
    FaceTraceLogger<MeshType> *face_tracer_ = nullptr;
@@ -508,6 +524,11 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
       if (stage_timers_) { stage_timers_->Stop(StageTimers::SlipExpand); }
       domain_->GreenStage(t, slip_, traction_,
                           elastic_sigma_n_ ? &normal_traction_ : nullptr);
+      if (green_stage_hook_)
+      {
+         green_stage_hook_(t, slip_, traction_,
+                           elastic_sigma_n_ ? &normal_traction_ : nullptr);
+      }
       green_last_t_ = t;
       u_stale_ = true;
       green_stages_++;

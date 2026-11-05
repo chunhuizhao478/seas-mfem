@@ -227,7 +227,11 @@ void WriteHandbackTable(const MPIContext &mpi, const cycle::CycleConfig &cfg,
       return strike ? -(f.tau_a_strike(j) + f.tau_b_strike(j) + f.eta * f.V_strike(j))
                     : -(f.tau_a_dip(j) + f.tau_b_dip(j) + f.eta * f.V_dip(j));
    };
-   const int nc = 15;
+   // [cycle.opening]: two more columns, the open flags of both regimes
+   const bool opening = cfg.opening.On();
+   MFEM_VERIFY(!opening || (fd.open.Size() == N && fq.open.Size() == N),
+               "handback table: [cycle.opening] without open flags");
+   const int nc = opening ? 17 : 15;
    std::vector<double> rows(static_cast<size_t>(nc) * N);
    for (int j = 0; j < N; j++)
    {
@@ -247,6 +251,11 @@ void WriteHandbackTable(const MPIContext &mpi, const cycle::CycleConfig &cfg,
       r[12] = tau(fq, j, false) / 1e6;
       r[13] = fd.sigma_n(j) / 1e6;
       r[14] = fq.sigma_n(j) / 1e6;
+      if (opening)
+      {
+         r[15] = fd.open(j);
+         r[16] = fq.open(j);
+      }
    }
    const int np = mpi.Size(), n_loc = nc * N;
    std::vector<int> counts(np), displs(np);
@@ -278,7 +287,8 @@ void WriteHandbackTable(const MPIContext &mpi, const cycle::CycleConfig &cfg,
      "the owned fault DOFs of rank 0, then rank 1, ...\n# Columns: x(m), y(m), z(m), "
      "slip_strike(m), slip_dip(m), V_strike_dyn(m/s), V_strike_qd(m/s), V_dip_dyn(m/s), "
      "V_dip_qd(m/s), tau_strike_dyn(MPa), tau_strike_qd(MPa), tau_dip_dyn(MPa), "
-     "tau_dip_qd(MPa), sigma_n_dyn(MPa), sigma_n_qd(MPa)\n"
+     "tau_dip_qd(MPa), sigma_n_dyn(MPa), sigma_n_qd(MPa)"
+     << (opening ? ", open_dyn, open_qd ([cycle.opening]: 1 open, shear-free)" : "") << "\n"
      << std::scientific << std::uppercase << std::setprecision(12);
    const size_t n = all.size() / nc;
    size_t jt = 0, js = 0, jv = 0;
@@ -464,6 +474,16 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
       qd.SigmaN(sn);
       cycle::bridge::ToNitsche(dyn.Frames(), sk, qd.SlipRate(), psi_qd, d, V, psi);
       dyn.Enter(qd.Displacement(), d, V, psi, sn, t);
+      if (cfg.opening.On()) { dyn.SetOpenFlags(qd.OpenFlags()); }   // [cycle.opening]
+   }
+   if (cfg.opening.On())
+   {
+      const int n_open = qd.Opening()->NumOpenGlobal();
+      if (root)
+      {
+         std::cout << "  [cycle.opening] " << n_open << " open DOFs at the switch to the "
+                   << "dynamic regime (shear-free, left out of max V)\n";
+      }
    }
    ctl.EnterDynamic(t);
    const int phase = ctl.Phases();
@@ -584,6 +604,7 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
    real_t Vmax = Vstart;
    // The deck pair's switch state (plan 6.3 hands over slip and psi only).
    Vector snap_sk, snap_psi;
+   std::vector<char> snap_open;   // [cycle.opening]: the open flags there
    real_t snap_Vmax = 0.0;
    cycle::StationFields snap_fd;   // [cycle.output].handback_table
 
@@ -638,6 +659,7 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
       const real_t step_max = mpi.GlobalMax(step_avg);
       long floor_hits = 0, floor_dofs = 0;
       if (cfg.sigma_n_floor > 0.0) { dyn.FloorCount(floor_hits, floor_dofs); }
+      const long open_end = cfg.opening.On() ? dyn.OpenCount() : 0;   // collective
       if (root)
       {
          std::cout << std::setprecision(6) << "\n=== fd_cycle dynamic phase " << phase
@@ -664,6 +686,11 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
          {
             std::cout << "\n  sigma_n' floor " << cfg.sigma_n_floor / 1e6 << " MPa: the law saw it "
                       << "at " << floor_hits << " DOF-steps on " << floor_dofs << " DOFs";
+         }
+         if (cfg.opening.On())
+         {
+            std::cout << "\n  [cycle.opening] open DOFs at the last step: " << open_end
+                      << " (max V above is over the closed DOFs)";
          }
          std::cout << "\n  time per dynamic step: " << step_avg << " s (rank 0), " << step_max
                    << " s (slowest rank), on " << mpi.Size() << " ranks; loop with output "
@@ -727,6 +754,7 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
          verdict = cycle::DynVerdict::EndOfPhase;
          finish_phase(forced ? "end_phase_after" : "end_of_phase", to_qd);
          cycle::bridge::ToQD(dyn.Frames(), dyn.Slip(), dyn.Psi(), snap_sk, snap_psi);
+         if (cfg.opening.On()) { snap_open = dyn.OpenFlags(); }
          if (cfg.output.handback_table && to_qd) { dyn.FillStationFields(snap_fd); }
          snap_Vmax = Vmax;
          end.t = t;
@@ -792,13 +820,30 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
    // ---- switch back (plan 6.3): (s, psi) at t = t0 + tau, one QD solve, new TS ----
    const int step0 = qd.StepNumber();
    rejections_before += qd.Rejections();
-   const real_t Vqd = qd.Reenter(snap_sk, snap_psi, end.t, step0, cfg.dt_init);
+   long open_dyn = 0;
+   if (cfg.opening.On())
+   {
+      open_dyn = std::count(snap_open.begin(), snap_open.end(), char(1));
+      MPI_Allreduce(MPI_IN_PLACE, &open_dyn, 1, MPI_LONG, MPI_SUM, mpi.GetComm());
+   }
+   const real_t Vqd = qd.Reenter(snap_sk, snap_psi, end.t, step0, cfg.dt_init,
+                                 cfg.opening.On() ? &snap_open : nullptr);
+   real_t open_res = 0.0;
+   if (cfg.opening.On()) { open_res = qd.OpenShearResidual(); }   // collective
    if (root)
    {
       std::cout << std::setprecision(6) << "\n  back to QD at t = " << end.t
                 << " s (TS step " << step0 << ", first dt " << cfg.dt_init
                 << " s): max V dynamic " << snap_Vmax << " m/s, QD balance " << Vqd
-                << " m/s\n" << std::flush;
+                << " m/s" << (cfg.opening.On() ? " (closed DOFs)" : "") << "\n";
+      if (cfg.opening.On())
+      {
+         std::cout << "  [cycle.opening] open DOFs: " << open_dyn << " at the dynamic "
+                   << "switch, " << qd.Opening()->NumOpenGlobal() << " after the QD settle ("
+                   << qd.ReenterFlips() << " flips); max |tau| at open DOFs "
+                   << open_res / 1e6 << " MPa\n";
+      }
+      std::cout << std::flush;
    }
    if (cfg.output.handback_table)
    {
@@ -1156,6 +1201,16 @@ int main(int argc, char *argv[])
                         << info.t << " s");
             qd.SetRelaxationState(info.relax_t_n, info.relax_r, info.relax_d);
          }
+         MFEM_VERIFY(info.opening == cfg.opening.On(), "restart: the checkpoint was written "
+                     "with [cycle.opening] " << (info.opening ? "on" : "off") << ", the deck "
+                     "has it " << (cfg.opening.On() ? "on" : "off"));
+         if (info.opening)
+         {
+            MFEM_VERIFY(static_cast<int>(info.open.size()) == qd.Table().Size(),
+                        "restart: " << info.open.size() << " open flags for "
+                        << qd.Table().Size() << " owned fault DOFs");
+            qd.SetOpenFlags(info.open);
+         }
          qd.RestoreTS(info.step);
          MFEM_VERIFY(info.bench == cfg.bench.enabled, "restart: the checkpoint was written "
                      "with [cycle.benchmark] " << (info.bench ? "on" : "off") << ", the deck "
@@ -1268,6 +1323,11 @@ int main(int argc, char *argv[])
             info.relax_r = rx->R();
             info.relax_d = rx->Delta();
          }
+         if (cfg.opening.On())
+         {
+            info.opening = true;
+            info.open = qd.OpenFlags();
+         }
          cycle::CheckpointData d;
          d.state = qd.State();
          d.displacement = qd.Displacement();   // solved here with the Green's function
@@ -1318,6 +1378,19 @@ int main(int argc, char *argv[])
       // A fresh switched run starts from the QD balance at t = 0: dynamic if
       // its max V is above V_on (the BP5-FD first event), else in QD.  P1
       // and a restart start in QD.
+      // [cycle.opening]: the open set of the start state (a restart has the
+      // checkpoint's)
+      if (cfg.opening.On() && restart_prefix.empty())
+      {
+         const long flips = qd.SettleOpening(t);
+         if (root)
+         {
+            std::cout << "  [cycle.opening] mode \"" << cfg.opening.mode << "\": "
+                      << qd.Opening()->NumOpenGlobal() << " open DOFs at t = " << t
+                      << " s (" << flips << " flips; " << qd.Opening()->UnitProducts()
+                      << " Green's-function columns)\n";
+         }
+      }
       bool run_qd = true;
       if (cfg.switching && restart_prefix.empty())
       {

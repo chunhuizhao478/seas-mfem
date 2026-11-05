@@ -23,7 +23,11 @@
 //      block is FD_CYCLE_V5: V4 and the relaxation record (t_relax, t_n, and
 //      r_n and dsig_n per owned fault DOF, cycle/normal_stress_relaxation.hpp;
 //      Chunhui Zhao, 2026-11-02).  Without it the block stays V4, byte for
-//      byte as before.
+//      byte as before.  With [cycle.opening] the block is FD_CYCLE_V6: V4,
+//      then "relax_on 0|1" and the V5 relaxation record when 1, then the
+//      open flags per owned fault DOF ("opening n" and n values 0/1;
+//      cycle/fault_opening.hpp; Chunhui Zhao, 2026-11-04).  Without it the
+//      block stays V4 or V5, byte for byte as before.
 // Blocks 1 and 2 are written by the existing functions unchanged, so the
 // readers of seas_bp5_full can read the first two blocks.
 //
@@ -81,6 +85,9 @@ struct CheckpointInfo
    bool relax = false;
    real_t relax_t_relax = 0.0, relax_t_n = 0.0;
    Vector relax_r, relax_d;
+   /// V6: [cycle.opening] was on; then the open flags per owned fault DOF.
+   bool opening = false;
+   std::vector<char> open;
 };
 
 /// A number that changes when this rank's owned fault DOFs (positions, 3 N)
@@ -120,7 +127,7 @@ inline void WriteCycleCheckpoint(const std::string &prefix, const CheckpointInfo
       MFEM_VERIFY(out.good(), "WriteCycleCheckpoint: cannot append to " << fn);
       const FdCycleOutput::State &o = info.out;
       out << std::setprecision(17) << std::scientific;
-      out << (info.relax ? "FD_CYCLE_V5\n" : "FD_CYCLE_V4\n");
+      out << (info.opening ? "FD_CYCLE_V6\n" : info.relax ? "FD_CYCLE_V5\n" : "FD_CYCLE_V4\n");
       out << "commit " << info.commit << "\n";
       out << "ic " << info.ic << "\n";
       out << "regime " << info.regime << "\n";
@@ -164,6 +171,7 @@ inline void WriteCycleCheckpoint(const std::string &prefix, const CheckpointInfo
             out << "\n";
          }
       }
+      if (info.opening) { out << "relax_on " << (info.relax ? 1 : 0) << "\n"; }
       if (info.relax)
       {
          MFEM_VERIFY(info.relax_r.Size() == info.relax_d.Size(),
@@ -175,6 +183,15 @@ inline void WriteCycleCheckpoint(const std::string &prefix, const CheckpointInfo
             for (int i = 0; i < v->Size(); i++) { out << (i ? " " : "") << (*v)(i); }
             out << "\n";
          }
+      }
+      if (info.opening)
+      {
+         out << "opening " << info.open.size() << "\n";
+         for (size_t i = 0; i < info.open.size(); i++)
+         {
+            out << (i ? " " : "") << (info.open[i] ? 1 : 0);
+         }
+         out << "\n";
       }
       out << "FD_CYCLE_END\n";
       out.close();
@@ -222,8 +239,9 @@ inline void ReadCycleCheckpoint(const std::string &prefix, const std::string &co
       if (tok == "FD_CYCLE_V3") { version = 3; break; }
       if (tok == "FD_CYCLE_V4") { version = 4; break; }
       if (tok == "FD_CYCLE_V5") { version = 5; break; }
+      if (tok == "FD_CYCLE_V6") { version = 6; break; }
    }
-   MFEM_VERIFY(version > 0, "ReadCycleCheckpoint: " << fn << " has no FD_CYCLE_V1-V5 "
+   MFEM_VERIFY(version > 0, "ReadCycleCheckpoint: " << fn << " has no FD_CYCLE_V1-V6 "
                "block (not written by seas_fd_cycle_driver)");
    auto tag = [&](const char *want)
    {
@@ -308,7 +326,15 @@ inline void ReadCycleCheckpoint(const std::string &prefix, const std::string &co
       }
    }
    info.relax = false;
-   if (version >= 5)
+   bool relax_rec = (version == 5);
+   if (version >= 6)
+   {
+      int on = -1;
+      tag("relax_on"); in >> on;
+      MFEM_VERIFY(on == 0 || on == 1, "ReadCycleCheckpoint: " << fn << ": relax_on " << on);
+      relax_rec = (on == 1);
+   }
+   if (relax_rec)
    {
       int n = -1;
       tag("relax"); in >> info.relax_t_relax >> info.relax_t_n >> n;
@@ -318,6 +344,23 @@ inline void ReadCycleCheckpoint(const std::string &prefix, const std::string &co
       {
          v->SetSize(n);
          for (int i = 0; i < n; i++) { in >> (*v)(i); }
+      }
+   }
+   info.opening = false;
+   info.open.clear();
+   if (version >= 6)
+   {
+      long n = -1;
+      tag("opening"); in >> n;
+      MFEM_VERIFY(n >= 0, "ReadCycleCheckpoint: " << fn << ": opening size " << n);
+      info.opening = true;
+      info.open.resize(static_cast<size_t>(n));
+      for (long i = 0; i < n; i++)
+      {
+         int v = -1;
+         in >> v;
+         MFEM_VERIFY(v == 0 || v == 1, "ReadCycleCheckpoint: " << fn << ": open flag " << v);
+         info.open[static_cast<size_t>(i)] = static_cast<char>(v);
       }
    }
    MFEM_VERIFY(!in.fail(), "ReadCycleCheckpoint: " << fn << ": cannot read the cycle block");

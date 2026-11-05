@@ -87,6 +87,21 @@
 // sets dsig from its evaluation; Reenter restarts the clock with r kept.
 // Off (the default): no hook, no reduction, every bit unchanged.
 //
+// [cycle.opening] mode = "shear_free" (Chunhui Zhao, 2026-11-04: "start
+// version A"; fault opening design rev 1.1, cycle/fault_opening.hpp): Setup
+// makes the open set (OpenSetQD) on the Green's function, hands its mask to
+// the kernel (SetFrozenNodes: open DOFs V = 0, dpsi/dt = 0) and to the
+// relaxation (SetFrozen: r frozen), and its stage solve to the operator's
+// Green's-function stage hook (tau = 0 at open DOFs).  SettleOpenSet_
+// applies the rule at an evaluated state (write the solved open slip into
+// the state, flip the DOFs whose sigma0 + T_n crossed 0, evaluate again,
+// until nothing flips): after each accepted step (post-step hook, after the
+// relaxation accepted the step, whose dsig is then reset to the new
+// evaluation's, and before the monitor; a change restarts the RK stage,
+// TSRestartStep), in Reenter with the dynamic regime's flags as the start,
+// and at the start of a run (SettleOpening).  Off (the default): no mask, no
+// hook, every bit unchanged.
+//
 // This file and dyn_phase.hpp are the only cycle files that include solver
 // headers (rule M4).
 
@@ -103,6 +118,7 @@
 #include "fd_cycle_output.hpp"
 #include "bench_output.hpp"
 #include "normal_stress_relaxation.hpp"
+#include "fault_opening.hpp"
 
 #include "../solver/seas_operator.hpp"
 #include "../domain/elasticity_operator.hpp"
@@ -295,6 +311,7 @@ public:
          gc.compress_mem_gib = g.compress_mem_gib;
          op_->SetQDGreen(gc, g.check_every);
       }
+      if (cfg_.opening.On()) { SetupOpening_(); }   // [cycle.opening]
 
       // R-003 of seas_bp5_full: allocate at least one entry so PETSc's
       // PlaceMemory/ResetMemory never sees an empty Memory on a rank without
@@ -395,6 +412,50 @@ public:
 
    /// [cycle.relaxation], or null when off.
    const NormalStressRelaxation *Relaxation() const { return relax_.get(); }
+
+   /// [cycle.opening], or null when off.
+   const OpenSetQD *Opening() const { return open_.get(); }
+   /// [cycle.opening]: the open flags per owned DOF (1 open).
+   const std::vector<char> &OpenFlags() const
+   {
+      MFEM_VERIFY(open_, "QDPhase::OpenFlags: [cycle.opening] is off");
+      return open_->Flags();
+   }
+   /// [cycle.opening]: set the open flags (a restart: before the first
+   /// stage).  Collective.
+   void SetOpenFlags(const std::vector<char> &f)
+   {
+      MFEM_VERIFY(open_, "QDPhase::SetOpenFlags: [cycle.opening] is off");
+      open_->SetFlags(f);
+   }
+   /// [cycle.opening]: one Solve(t) and the rule at (t, State()) until
+   /// nothing flips (the start of a run).  Returns the DOFs that flipped.
+   /// Collective.
+   long SettleOpening(real_t t)
+   {
+      MFEM_VERIFY(open_, "QDPhase::SettleOpening: [cycle.opening] is off");
+      Solve(t);
+      return SettleOpenSet_(t, state_);
+   }
+   /// [cycle.opening]: DOFs that flipped in the last Reenter's settle.
+   long ReenterFlips() const { return reenter_flips_; }
+   /// [cycle.opening]: largest |tau_pre + T| of the last evaluation at the
+   /// open DOFs [Pa] over all ranks (0 when none: the stage solve's residual).
+   real_t OpenShearResidual() const
+   {
+      real_t m = 0.0;
+      if (open_)
+      {
+         const Vector &T = op_->GetTraction();
+         const Vector &tp = fault_->TauPre();
+         for (int j = 0; j < open_->NumOwned(); j++)
+         {
+            if (!open_->IsOpen(j)) { continue; }
+            m = std::max(m, std::hypot(tp(2 * j) + T(2 * j), tp(2 * j + 1) + T(2 * j + 1)));
+         }
+      }
+      return mpi_.GlobalMax(m);
+   }
    /// A checkpoint's relaxation state (restart), before the first stage.
    void SetRelaxationState(real_t t_n, const Vector &r, const Vector &dsig)
    {
@@ -545,6 +606,7 @@ public:
       // the accepted step, where the monitor reads it)
       if (relax_) { f.sigma_red = relax_->Reduction(); }
       else { f.sigma_red.SetSize(0); }
+      OpenToStation_(f);
    }
 
    /// Stations on this rank's owned fault DOFs, in the plane frame of the
@@ -751,11 +813,25 @@ public:
    /// Plan 6.3, the switch back: SetFaultState, Solve(t), and a new TS at t
    /// (first step dt0, step counter `step`).  Returns the global max V of
    /// the solve.  Collective.
-   real_t Reenter(const Vector &slip_k, const Vector &psi, real_t t, int step, real_t dt0)
+   real_t Reenter(const Vector &slip_k, const Vector &psi, real_t t, int step, real_t dt0,
+                  const std::vector<char> *open_flags = nullptr)
    {
       SetFaultState(slip_k, psi);
       if (relax_) { relax_->Restart(t); }   // r kept from the switch; the clock at t
-      const real_t Vmax = Solve(t);
+      if (open_)
+      {
+         // [cycle.opening]: the dynamic regime's open DOFs start the set;
+         // the solve releases their shear (a static step), then the rule
+         MFEM_VERIFY(open_flags, "QDPhase::Reenter: [cycle.opening] needs the dynamic "
+                     "regime's open flags");
+         open_->SetFlags(*open_flags);
+      }
+      real_t Vmax = Solve(t);
+      if (open_)
+      {
+         reenter_flips_ = SettleOpenSet_(t, state_);
+         Vmax = op_->GetMaxSlipRate();
+      }
       InitTS(dt0);
       TS ts = *ode_;
       MFEM_VERIFY(TSSetStepNumber(ts, step) == PETSC_SUCCESS, "TSSetStepNumber failed");
@@ -823,6 +899,72 @@ public:
 #endif
 
 private:
+   /// [cycle.opening]: the open set on the Green's function (file comment).
+   void SetupOpening_()
+   {
+      MFEM_VERIFY(op_->QDGreenActive(), "[cycle.opening] needs [cycle.qd.green] "
+                  "(decision D6)");
+      const QDGreenOperator *G = dom_->GetQDGreen();
+      MFEM_VERIFY(G && pmesh_.Dimension() == 2 && G->Planar(), "[cycle.opening]: a 2-D "
+                  "mesh with the planar Green's function only (design rev 1.1, Section 6)");
+      DomainOp *dom = dom_.get();
+      open_ = std::make_unique<OpenSetQD>(
+         mpi_.GetComm(), fault_->NumNodes(), G->PlanarSlot(),
+         [dom](const Vector &e, Vector &T, Vector &Tn) { dom->GreenStage(0.0, e, T, &Tn); },
+         fault_->TauPre());
+      fault_->SetFrozenNodes(&open_->Mask());
+      if (relax_) { relax_->SetFrozen(&open_->Mask()); }
+      OpenSetQD *os = open_.get();
+      op_->SetGreenStageHook([os](real_t, Vector &slip, Vector &T, Vector *Tn)
+      { os->Stage(slip, T, Tn); });
+   }
+
+   /// [cycle.opening]: the rule at an evaluated state x at t (the last
+   /// evaluation is at (t, x)): write the solved open slip into x, flip the
+   /// DOFs whose true sigma (SigmaN: sigma0 + T_n, no r, no floor) crossed
+   /// 0, evaluate again, until nothing flips.  After a change dsig of the
+   /// relaxation is the new evaluation's.  Returns the DOFs flipped.
+   /// Collective.
+   long SettleOpenSet_(real_t t, Vector &x)
+   {
+      const int N = fault_->NumNodes();
+      const int spn = FaultOp::StatePerNode, slot = open_->Slot();
+      long flipped = 0;
+      for (int pass = 0;; pass++)
+      {
+         {
+            const Vector &s = op_->GetStageSlip();
+            s.HostRead();
+            x.HostReadWrite();
+            for (int j = 0; j < N; j++)
+            {
+               if (open_->IsOpen(j)) { x(spn * j + FaultOp::SlipIndex + slot) = s(2 * j + slot); }
+            }
+         }
+         Vector sn;
+         SigmaN(sn);
+         const long n = open_->Update(sn);
+         if (n == 0) { break; }
+         flipped += n;
+         MFEM_VERIFY(pass < cfg_.opening.max_passes, "[cycle.opening]: the open set "
+                     "did not settle at t = " << t << " s: " << n << " DOFs still flipped "
+                     "after " << cfg_.opening.max_passes << " passes ([cycle.opening]."
+                     "max_passes); " << open_->NumOpenGlobal() << " open now");
+         op_->SetTime(t);
+         Vector rate(x.Size());
+         op_->Mult(x, rate);
+      }
+      if (flipped > 0 && relax_) { relax_->SetDelta(RelaxDelta_()); }
+      return flipped;
+   }
+
+   /// [cycle.opening]: the open flags into the station fields (empty when off).
+   void OpenToStation_(StationFields &f) const
+   {
+      if (!open_) { f.open.SetSize(0); return; }
+      f.open = open_->Mask();
+   }
+
    void BuildTable_()
    {
       // Owned XYZ from the geometry (GetFaultDOFCoords3D restricted to owned).
@@ -1054,6 +1196,24 @@ private:
          // [cycle.relaxation]: accept the step (the file comment)
          self->relax_->Accept(static_cast<real_t>(t), self->RelaxDelta_());
       }
+      if (self->open_)
+      {
+         // [cycle.opening]: the solved open slip into the TS solution, then
+         // the rule; a change is a static step, so the next step restarts
+         Vec U;
+         PetscCall(TSGetSolution(ts, &U));
+         PetscInt n = 0;
+         PetscCall(VecGetLocalSize(U, &n));
+         PetscScalar *a = nullptr;
+         PetscCall(VecGetArray(U, &a));
+         long flips = 0;
+         {
+            Vector x(reinterpret_cast<real_t *>(a), static_cast<int>(n));
+            flips = self->SettleOpenSet_(static_cast<real_t>(t), x);
+         }
+         PetscCall(VecRestoreArray(U, &a));
+         if (flips > 0) { PetscCall(TSRestartStep(ts)); }
+      }
       if (!self->CallMonitor_(static_cast<int>(step), static_cast<real_t>(t)))
       {
          PetscCall(TSSetConvergedReason(ts, TS_CONVERGED_USER));
@@ -1081,6 +1241,8 @@ private:
    Vector state_;
    Vector sigma0_;   ///< sigma0 per owned fault DOF (Setup), for SigmaN
    std::unique_ptr<NormalStressRelaxation> relax_;   ///< [cycle.relaxation] or null
+   std::unique_ptr<OpenSetQD> open_;                ///< [cycle.opening] or null
+   long reenter_flips_ = 0;
    real_t eta_ = 0.0;
    bool matrix_ = false;
    bool loading_checked_ = false;

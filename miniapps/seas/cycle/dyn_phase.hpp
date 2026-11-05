@@ -350,6 +350,8 @@ public:
                                                    : NitscheWaveOperator::KVLength::Inscribed);
       }
       if (dc.pc) { W_->SetPrakashClifton(dc.pc_v_star, dc.pc_length); }
+      // [cycle.opening] mode = "shear_free": the open rule of CloseDOF
+      if (cfg.opening.On()) { W_->SetShearFreeOpening(true); }
       if (lts_on)
       {
          // After Kelvin-Voigt: its blocks hold K_eta (collective).
@@ -378,6 +380,8 @@ public:
       MFEM_VERIFY(W_->GetTime() == 0.0, "DynPhase::Enter: the operator's clock is "
                   << W_->GetTime() << ", not 0 (the loads would read t_s + clock)");
       W_->SetFaultState(d, V, psi);
+      // [cycle.opening]: no DOF open until SetOpenFlags hands the QD set over
+      if (W_->ShearFreeOpening()) { W_->SetOpenFlags(std::vector<char>(W_->NumOwnedFaultDOFs(), 0)); }
       // PML (plan rev2, Section 3.1): memory to zero, b_band from u_s and the
       // wall data at t_s, so the static QD state is an equilibrium of W
       if (pml_) { W_->PmlEnter(u_s); }
@@ -452,6 +456,19 @@ public:
       relax_r_ = &r;
       relax_mod_ = std::make_unique<FrozenNormalStressReduction>(r);
       W_->SetNormalStressModifier(relax_mod_.get());
+   }
+
+   /// [cycle.opening]: the open flags per owned DOF (1 open; the last step's,
+   /// or the QD regime's handed over by SetOpenFlags after Enter).
+   bool Opening() const { return W_->ShearFreeOpening(); }
+   const std::vector<char> &OpenFlags() const { return W_->OpenFlags(); }
+   void SetOpenFlags(const std::vector<char> &f) { W_->SetOpenFlags(f); }
+   /// Open DOFs over all ranks.  Collective.
+   long OpenCount() const
+   {
+      long n = W_->OpenDOFs();
+      MPI_Allreduce(MPI_IN_PLACE, &n, 1, MPI_LONG, MPI_SUM, pmesh_.GetComm());
+      return n;
    }
 
    bool Lts() const { return lts_ != nullptr; }
@@ -759,6 +776,13 @@ public:
       f.eta = 0.0;
       if (relax_r_) { f.sigma_red = *relax_r_; }   // [cycle.relaxation]: frozen r
       else { f.sigma_red.SetSize(0); }
+      if (W_->ShearFreeOpening())
+      {
+         // [cycle.opening]: the last step's open flags
+         f.open.SetSize(N);
+         for (int j = 0; j < N; j++) { f.open(j) = W_->OpenFlags()[j] ? 1.0 : 0.0; }
+      }
+      else { f.open.SetSize(0); }
    }
 
    /// Plan R8: max over local fault DOFs of |eps_f t_k (this copy) - eps_f

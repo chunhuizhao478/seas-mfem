@@ -64,6 +64,20 @@
 //                   dynamic one.  t_relax_yr > 0 (years of 365.25 days).
 //                   Refused with [friction.prakash_clifton]; outputs keep
 //                   the elastic sigma_n' (the fault snapshots add r).
+//   [cycle.opening] mode: opt-in fault opening at tensile points [absent =
+//                   off] (Chunhui Zhao, 2026-11-04: "start version A"; fault
+//                   opening design rev 1.1, cycle/fault_opening.hpp).  mode =
+//                   "shear_free" (version A): a fault DOF whose true elastic
+//                   sigma_n' (no relaxation, no floor) is below 0 is open: in
+//                   both regimes its shear traction is 0 (the dynamic closure
+//                   V = X/gamma, the QD open-set solve on G), psi and the
+//                   relaxation r are frozen, and the switch thresholds and the
+//                   exit-7 guard take max V over the closed DOFs only.  The
+//                   faces stay glued (sigma_n' stays tensile).  max_passes
+//                   [20]: set updates per accepted QD state before the run
+//                   stops.  Needs [cycle.qd.green] (decision D6) and a 2-D
+//                   mesh; refused with [friction.prakash_clifton] and
+//                   [cycle.probe].  "contact" (version B) is not built.
 //   [cycle.qd]      solver ("mumps" | "mumps_blr"), blr_tol,
 //                   petsc_options (PETSc TS options file; it must pick an RK
 //                   tableau with the FSAL property, see qd_phase.hpp),
@@ -530,6 +544,14 @@ struct DynamicConfig
    real_t sigma_min = 0.0;         ///< [Pa]
 };
 
+/// [cycle.opening] (fault opening design rev 1.1, cycle/fault_opening.hpp).
+struct OpeningConfig
+{
+   std::string mode = "off";   ///< "off" | "shear_free" (version A)
+   int max_passes = 20;        ///< set updates per accepted QD state
+   bool On() const { return mode != "off"; }
+};
+
 /// A vector key the deck gave and its number of entries (2 or 3).
 /// CycleConfig::CheckDimension matches it to the mesh (2D in-plane design
 /// rev 3, section 5.5).
@@ -553,6 +575,7 @@ struct CycleConfig
    real_t sigma_n_floor = 0.0;    ///< [cycle].sigma_n_floor_pa [Pa]; 0 = off
    real_t relax_t = 0.0;          ///< [cycle.relaxation].t_relax_yr [s]; 0 = off
    bool Relaxation() const { return relax_t > 0.0; }
+   OpeningConfig opening;         ///< [cycle.opening] (default: off)
 
    QDConfig qd;
    SwitchConfig switch_cfg;
@@ -614,6 +637,9 @@ struct CycleConfig
       MFEM_VERIFY(dim == 2 || !dyn.averaged_vertex_normals, "[fault_geometry] "
                   "vertex_normals = \"averaged\" is implemented for 2-D meshes only "
                   "(vertex-normal plan rev1, D3); the mesh is 3-D");
+      MFEM_VERIFY(dim == 2 || !opening.On(), "[cycle.opening] is built and tested on "
+                  "2-D meshes only (fault opening design rev 1.1, Section 6: 2-D first); "
+                  "the mesh is 3-D");
       // [cycle.fields]: two axes on a fault plane, one on a fault line.
       const std::pair<const char *, const RectTaperSpec *> fl[] =
       {{"a", &fields.a}, {"Dc", &fields.Dc}, {"V_init", &fields.V_init}};
@@ -921,7 +947,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
    }
    OnlyKeys(cy, "cycle", {"ic", "switching", "qd_radiation_damping", "mesh_scale",
                           "plate_rate", "penalty_factor", "sigma_n_floor_pa", "qd", "switch",
-                          "probe", "relaxation",
+                          "probe", "relaxation", "opening",
                           "prestress", "fields", "output", "checkpoint", "snapshots",
                           "benchmark", "lts", "loading", "absorbing", "finite_width",
                           "pml"});
@@ -962,6 +988,22 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
                   "[" << sec << "].t_relax_yr = " << ty << " must be > 0 (leave the "
                   "section out for no relaxation)");
       c.relax_t = ty * 365.25 * 24.0 * 3600.0;   // BP5Params::seconds_per_year
+   }
+   if (cy.contains("opening"))
+   {
+      const std::string sec = "cycle.opening";
+      const toml::value &op = cy.at("opening");
+      OnlyKeys(op, sec, {"mode", "max_passes"});
+      OpeningConfig &o = c.opening;
+      o.mode = Str(op, sec, "mode", "", true);
+      MFEM_VERIFY(o.mode != "contact", "[" << sec << "].mode = \"contact\" is version B "
+                  "(fault opening design rev 1.1, Section 4), not built yet; use "
+                  "\"shear_free\" (version A)");
+      MFEM_VERIFY(o.mode == "shear_free", "[" << sec << "].mode = \"" << o.mode
+                  << "\"; use \"shear_free\" (or leave the section out)");
+      o.max_passes = Int(op, sec, "max_passes", o.max_passes);
+      MFEM_VERIFY(o.max_passes >= 1, "[" << sec << "].max_passes = " << o.max_passes
+                  << " must be >= 1");
    }
 
    if (cy.contains("qd"))
@@ -1047,6 +1089,8 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       MFEM_VERIFY(!c.Relaxation(), "[cycle.probe] with [cycle.relaxation]: the switch "
                   "probe's QD solves would move the relaxation clock (relaxation design "
                   "rev 0); run the probe without it");
+      MFEM_VERIFY(!c.opening.On(), "[cycle.probe] with [cycle.opening]: the switch "
+                  "probe's QD solves do not carry the open set; run the probe without it");
       MFEM_VERIFY(c.switching, "[cycle.probe] needs [cycle].switching = true");
    }
 
@@ -1396,6 +1440,9 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
          MFEM_VERIFY(!c.Relaxation(), "[cycle.relaxation] with [" << sec << "]: the "
                      "relaxation is not combined with Prakash-Clifton (relaxation design "
                      "rev 0)");
+         MFEM_VERIFY(!c.opening.On(), "[cycle.opening] with [" << sec << "]: fault "
+                     "opening is not combined with Prakash-Clifton (its sigma* would "
+                     "lag the open set)");
          d.pc_v_star = Real(p, sec, "v_star", 0.0, true);
          d.pc_length = Real(p, sec, "length", 0.0, true);
          MFEM_VERIFY(d.pc_v_star > 0.0 && d.pc_length > 0.0, "[" << sec << "] v_star = "
@@ -1608,6 +1655,14 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
          MFEM_VERIFY(P.wall_speed_factor == 1.0 || c.loading.Plate(), "[" << sec
                      << "].wall_speed_factor needs [cycle.loading] kind = \"plate\"");
       }
+   }
+
+   if (c.opening.On())
+   {
+      // fault opening design rev 1.1, decision D6
+      MFEM_VERIFY(c.qd.green.enabled, "[cycle.opening] needs [cycle.qd.green]: the QD "
+                  "open-set solve works on the Green's function (decision D6); the "
+                  "direct-solve path refuses the deck");
    }
 
    if (c.lts.On())
