@@ -704,9 +704,39 @@ public:
    {
       MFEM_VERIFY(!on || !pc_, "SetShearFreeOpening: not with Prakash-Clifton");
       opening_ = on;
+      contact_ = false;
       open_.assign(no_, char(0));
    }
-   bool ShearFreeOpening() const { return opening_; }
+   bool ShearFreeOpening() const { return opening_ && !contact_; }
+
+   /// Fault opening version B, B2 (plan fault-opening-b-plan-rev1, Section 4):
+   /// full unilateral (Signorini) contact.  The fault state d carries a gap
+   /// g = d . n (the oriented frame normal) as its normal component; the
+   /// kernel slip carries it as a third component (the elasticity operator's
+   /// traction and slip-load paths run with slip_comps = 3), and CloseDOF
+   /// applies the per-point projection (eq. 4.4):
+   ///   g^{n+1} = max(0, g* - (dt/2) sigma^X / gamma),
+   /// open (g^{n+1} > 0): sigma = 0, zero shear strength (X + gamma V_t = 0);
+   /// closed: V_g returns the gap to zero and the friction law sees the
+   /// projected sigma^{n+1} = sigma^X + gamma V_g >= 0.  gamma is
+   /// ClosureGamma (the same end-of-step slope as the shear closure; the
+   /// plan's eq. 4.3 cross-check).  psi freezes while open, and the record
+   /// reductions run over the closed DOFs, as version A (shared machinery).
+   /// Off (the default): every bit unchanged.  Must be set BEFORE the first
+   /// call that builds the fast fault operators.
+   void SetContactOpening(bool on)
+   {
+      MFEM_VERIFY(!on || !pc_, "SetContactOpening: not with Prakash-Clifton");
+      MFEM_VERIFY(!on || !elast_->HasFaultFaceOps() ||
+                  elast_->FaultFaceOpsSlipComps() == 3,
+                  "SetContactOpening: the fast fault operators are already "
+                  "built with slip_comps = 2; set the mode before the first "
+                  "step");
+      opening_ = on;
+      contact_ = on;
+      open_.assign(no_, char(0));
+   }
+   bool ContactOpening() const { return contact_; }
    /// Per owned DOF: 1 where the last step was open (or SetOpenFlags set it).
    const std::vector<char> &OpenFlags() const { return open_; }
    /// The open flags the next step's predictor sees (the switch from QD).
@@ -785,16 +815,49 @@ public:
    /// NormalStressReduction(j); sigma_eff on return stays the bulk's.
    /// With SetShearFreeOpening, *open (when given) says whether the DOF was
    /// open: sigma_eff < 0, V = -X/gamma.
+   /// With SetContactOpening (B2), `gap` is g* = dstar . n at this DOF and
+   /// the projection (plan eq. 4.4) picks the branch; sigma_eff returns the
+   /// end-of-step enforced value (0 when open, the projected sigma when the
+   /// gap closes this step, the trial value when there was no gap).
    void CloseDOF(int j, const real_t TS[3], real_t psi, real_t V[3],
                  real_t &sigma_eff, real_t X[2], real_t *sigma_pc = nullptr,
                  real_t E = 0.0, real_t omE = 1.0, real_t slip_abs = 0.0,
-                 bool *open = nullptr) const
+                 bool *open = nullptr, real_t gap = 0.0) const
    {
       const real_t *n = &frame_own_(9 * j), *dv = &frame_own_(9 * j + 3),
                     *sv = &frame_own_(9 * j + 6);
       fault_frame::ToLocal(TS, 0.0, n, dv, sv, X[0], X[1], sigma_eff);
       if (open) { *open = false; }
-      if (opening_ && sigma_eff < 0.0)
+      real_t Vg = 0.0;   // contact: the gap rate, embedded along n at the end
+      if (contact_)
+      {
+         // [cycle.opening] mode = "contact" (B2, plan eq. 4.3-4.4).  The
+         // end-of-step normal traction is sigma^X + gamma V_g (sigma^X the
+         // trial at d*, u^{n+1} fixed; gamma = ClosureGamma, the same slope
+         // as the shear closure).  Complementarity g >= 0, sigma >= 0,
+         // g sigma = 0 at t^{n+1} gives
+         //   g^{n+1} = max(0, g* - (dt/2) sigma^X / gamma).
+         const real_t gamma = ClosureGamma(j);
+         const real_t gnew = std::max(real_t(0),
+                                      gap - 0.5 * dt_ * sigma_eff / gamma);
+         Vg = 2.0 * (gnew - gap) / dt_;
+         if (gnew > 0.0)
+         {
+            // open: sigma^{n+1} = 0 and zero shear strength,
+            // X + gamma V_t = 0 (as version A's open rule)
+            fault_frame::Embed(-X[0] / gamma, -X[1] / gamma, dv, sv, V);
+            for (int c = 0; c < 3; c++) { V[c] += Vg * n[c]; }
+            sigma_eff = 0.0;
+            if (open) { *open = true; }
+            return;
+         }
+         // closed: V_g returns the gap to zero (V_g = -2 g*/dt, or 0.0 when
+         // there was no gap) and the friction law sees the projected
+         // sigma^{n+1} = sigma^X + gamma V_g >= 0 at the branch point.
+         // g* = 0 keeps sigma_eff = sigma^X + gamma * 0.0 and V_g = 0.0.
+         sigma_eff = sigma_eff + gamma * Vg;
+      }
+      else if (opening_ && sigma_eff < 0.0)
       {
          // [cycle.opening] open: the end-of-step shear X + gamma V is 0
          const real_t gamma = ClosureGamma(j);
@@ -852,6 +915,12 @@ public:
       const real_t gamma = ClosureGamma(j);
       closure_->SolveSlipRate(X, gamma, sig_law, st, Vl);
       fault_frame::Embed(Vl[0], Vl[1], dv, sv, V);
+      if (contact_)
+      {
+         // closed with a gap: V_g returns g to exactly zero (V_g = 0.0 when
+         // there was no gap, an exact no-op)
+         for (int c = 0; c < 3; c++) { V[c] += Vg * n[c]; }
+      }
    }
 
    /// r(|V|, psi) at owned DOF j (box 4, 10).
@@ -1352,13 +1421,17 @@ private:
          fast_fault_state_ = -1;
          if (fast_fault_enabled_ && has_fault_)
          {
-            elast_->BuildFaultFaceOps();
-            if (kv_) { kv_->BuildFaultFaceOps(); }
+            // contact (B2): the slip columns carry the opening too
+            elast_->BuildFaultFaceOps(contact_ ? 3 : 2);
+            if (kv_) { kv_->BuildFaultFaceOps(contact_ ? 3 : 2); }
             fast_fault_state_ = 1;
          }
       }
       // SetKelvinVoigt after the first build (kv_ is a global property)
-      if (fast_fault_state_ == 1 && kv_ && !kv_->HasFaultFaceOps()) { kv_->BuildFaultFaceOps(); }
+      if (fast_fault_state_ == 1 && kv_ && !kv_->HasFaultFaceOps())
+      {
+         kv_->BuildFaultFaceOps(contact_ ? 3 : 2);
+      }
       return fast_fault_state_ == 1;
    }
 
@@ -1439,7 +1512,12 @@ private:
       {
          const real_t *V = &V_(3 * j);
          for (int c = 0; c < 3; c++) { dstar_(3 * j + c) = d_(3 * j + c) + 0.5 * dt * V[c]; }
-         const real_t Vabs = std::sqrt(V[0] * V[0] + V[1] * V[1] + V[2] * V[2]);
+         // contact (B2): V carries a gap rate along n; the state evolves
+         // with the slip (tangential) rate only
+         const real_t Vabs = contact_
+            ? std::hypot(fault_frame::Dot(V, &frame_own_(9 * j + 3)),
+                         fault_frame::Dot(V, &frame_own_(9 * j + 6)))
+            : std::sqrt(V[0] * V[0] + V[1] * V[1] + V[2] * V[2]);
          // [cycle.opening] D3: no state rate at a DOF open at step n
          r0_(j) = (opening_ && open_[j]) ? 0.0 : StateRate(j, Vabs, psi_(j));
          psistar_(j) = psi_(j) + dt * r0_(j);
@@ -1474,9 +1552,13 @@ private:
       {
          real_t TS[3], Vn[3], X[2], sig;
          for (int c = 0; c < 3; c++) { TS[c] = Town_(3 * j + c) + S_(3 * j + c); }
-         // |d^n|: d_ still holds d^n here (box 11 writes d^{n+1} below)
+         const real_t *dv = &frame_own_(9 * j + 3), *sv = &frame_own_(9 * j + 6);
+         // |d^n|: d_ still holds d^n here (box 11 writes d^{n+1} below);
+         // contact: the slip magnitude is tangential (the normal part is g)
          const real_t *dn = &d_(3 * j);
-         const real_t dn_abs = std::sqrt(dn[0] * dn[0] + dn[1] * dn[1] + dn[2] * dn[2]);
+         const real_t dn_abs = contact_
+            ? std::hypot(fault_frame::Dot(dn, dv), fault_frame::Dot(dn, sv))
+            : std::sqrt(dn[0] * dn[0] + dn[1] * dn[1] + dn[2] * dn[2]);
          bool is_open = false;   // [cycle.opening] (never with Prakash-Clifton)
          if (pc_)
          {
@@ -1489,10 +1571,21 @@ private:
             min_pc = std::min(min_pc, sigpc_(j));
             max_pc = std::max(max_pc, sigpc_(j));
          }
-         else { CloseDOF(j, TS, psistar_(j), Vn, sig, X, nullptr, 0.0, 1.0, dn_abs, &is_open); }
-         const real_t Vabs = std::sqrt(Vn[0] * Vn[0] + Vn[1] * Vn[1] + Vn[2] * Vn[2]);
-         // C-07 anti-parallel: V . X_tan < 0 wherever |V| > 0.
-         const real_t *dv = &frame_own_(9 * j + 3), *sv = &frame_own_(9 * j + 6);
+         else
+         {
+            // contact (B2): g* = dstar . n goes into the projection (4.4)
+            const real_t gap = contact_
+               ? fault_frame::Dot(&dstar_(3 * j), &frame_own_(9 * j)) : 0.0;
+            CloseDOF(j, TS, psistar_(j), Vn, sig, X, nullptr, 0.0, 1.0, dn_abs,
+                     &is_open, gap);
+         }
+         // contact: the slip rate is tangential; the gap rate along n is not
+         // a slip and stays out of the state, the stability ratio and the
+         // records
+         const real_t Vabs = contact_
+            ? std::hypot(fault_frame::Dot(Vn, dv), fault_frame::Dot(Vn, sv))
+            : std::sqrt(Vn[0] * Vn[0] + Vn[1] * Vn[1] + Vn[2] * Vn[2]);
+         // C-07 anti-parallel: V . X_tan < 0 wherever the slip rate > 0.
          const real_t VX = X[0] * fault_frame::Dot(Vn, dv) + X[1] * fault_frame::Dot(Vn, sv);
          MFEM_VERIFY(Vabs == 0.0 || VX < 0.0,
                      "NitscheWaveOperator: slip rate not anti-parallel to the "
@@ -1585,17 +1678,27 @@ private:
       }
    }
 
-   /// Owned global three-vectors -> local kernel (dip, strike) pairs.
+   /// Owned global three-vectors -> local kernel (dip, strike) pairs; in
+   /// contact mode (B2) + the opening as a third component, the normal part
+   /// of d through the same eps_f chain: g_k = eps_f (d . n_k), so the
+   /// embedding (+ g_k x basis normal, FaultBasis::EmbedOpening) returns
+   /// the jump d . n_frame along the oriented normal, exactly as the
+   /// tangential components do.
    void ToKernelLocal_(const Vector &d, Vector &slip_k) const
    {
       elast_->ExpandOwnedToLocalFault(d, dloc_, 3);
-      slip_k.SetSize(2 * nd_);
+      const int sck = contact_ ? 3 : 2;
+      slip_k.SetSize(sck * nd_);
       for (int k = 0; k < nd_; k++)
       {
          real_t nk[3], t1k[3], t2k[3];
          KernelTriad_(k, nk, t1k, t2k);
          fault_frame::ToKernel(&dloc_(3 * k), eps_loc_[k], t1k, t2k,
-                               slip_k(2 * k), slip_k(2 * k + 1));
+                               slip_k(sck * k), slip_k(sck * k + 1));
+         if (sck == 3)
+         {
+            slip_k(3 * k + 2) = eps_loc_[k] * fault_frame::Dot(&dloc_(3 * k), nk);
+         }
       }
    }
 
@@ -1864,7 +1967,8 @@ private:
    real_t sigma_floor_ = 0.0;            ///< NitscheFaultSetup::sigma_floor
    mutable long floor_hits_ = 0;         ///< DOF-steps at the floor
    mutable std::vector<char> floored_;   ///< per owned DOF: the floor acted
-   bool opening_ = false;                ///< SetShearFreeOpening
+   bool opening_ = false;                ///< SetShearFreeOpening or SetContactOpening
+   bool contact_ = false;                ///< SetContactOpening (version B, B2)
    std::vector<char> open_;              ///< per owned DOF: open at the last step
    std::function<real_t(real_t)> nuc_temporal_;
    std::shared_ptr<const FaultFrameField> frames_;   ///< census + N-09 frames (phase A)

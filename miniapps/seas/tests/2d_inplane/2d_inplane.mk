@@ -889,13 +889,34 @@ test-fault-contact: seas_test_fault_contact
 	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_fault_contact < /dev/null || exit 1; \
 	done
 
+# Fault opening version B, phase B2 (plan Section 4): the dynamic contact
+# projection in CloseDOF, the kernel widening (slip_comps = 3) and the sign
+# of eq. 4.3 pinned through the assembled operator.
+TEST_FAULT_CONTACT_DYN_SRC = tests/2d_inplane/test_fault_contact_dyn.cpp
+TEST_FAULT_CONTACT_DYN_OBJ = $(TEST_FAULT_CONTACT_DYN_SRC:.cpp=.o)
+$(TEST_FAULT_CONTACT_DYN_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(INPLANE_HEADERS) \
+                              $(NITSCHE_2D_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_fault_contact_dyn: $(TEST_FAULT_CONTACT_DYN_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_CONTACT_DYN_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-fault-contact-dyn: seas_test_fault_contact_dyn
+	@for n in 1 2; do \
+	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_fault_contact_dyn < /dev/null || exit 1; \
+	done
+
 2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
                 test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
                 test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
                 test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
                 test-handback-table test-tip-zone test-sigma-floor test-relaxation test-2d5-width test-2d5-dyn-driver \
                 test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle \
-                test-fault-opening test-fault-contact
+                test-fault-opening test-fault-contact test-fault-contact-dyn
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \

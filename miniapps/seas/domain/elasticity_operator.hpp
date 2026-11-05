@@ -547,9 +547,13 @@ public:
    /// Profiling plan item 3: precompute, per fault face, the dense operators
    /// of the IP traction recovery (A_f) and of the slip load (G_f) from the
    /// production per-face kernels.  Collective.  IP only.
+   /// Fault opening version B, B2: with slip_comps = 3 the slip columns are
+   /// [dip, strike, opening] per DOF (contact mode); ComputeTractionFast and
+   /// AddSlipLoadFast then take 3-component kernel slip vectors.
    /// Implementation: elasticity_operator_fault_ops.inl.
-   void BuildFaultFaceOps();
+   void BuildFaultFaceOps(int slip_comps = 2);
    bool HasFaultFaceOps() const { return ffo_.built; }
+   int FaultFaceOpsSlipComps() const { return ffo_.slip_comps; }
    /// Local fault faces in the per-face operators: interior, shared.
    int FaultFaceOpsInterior() const { return ffo_.nfi; }
    int FaultFaceOpsShared() const { return ffo_.nf - ffo_.nfi; }
@@ -865,6 +869,7 @@ private:
    {
       bool built = false;
       int nf = 0, nfi = 0;
+      int slip_comps = 2;                   ///< 3: + opening column per DOF (B2)
       std::vector<int> n1, n2;              ///< element vdofs per side
       std::vector<int> off_vd, vd;          ///< local vdofs (side 2 of a shared face: -1)
       std::vector<int> off_A, off_G;
@@ -881,7 +886,8 @@ private:
    void FaultFaceTractionKernel_(int idx, FaceElementTransformations &FTr,
                                  const FiniteElement &fe1, const FiniteElement &fe2,
                                  const Vector &u1, const Vector &u2,
-                                 const Vector &slip_bc, Vector &out) const;
+                                 const Vector &slip_bc, Vector &out,
+                                 int scomp = 2) const;
    void BuildFaultNbrExchange_();
    void FaultNbrExchange_(const Vector &u) const;
    int nbf_per_face_ = 1;   // BR2: 1, IP: (p+1)(p+2)/2 on triangle faces

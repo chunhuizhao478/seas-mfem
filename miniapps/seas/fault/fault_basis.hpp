@@ -368,10 +368,15 @@ public:
    }
 
    /// Fault opening version B, B1 (plan 2026-11-05, Section 5.2): add the
-   /// opening @a g to an embedded jump, along the face's stored unit normal
-   /// (sign baked in, like the tangents): delta_u += g * normal.  The
-   /// adjoint of NormalStress up to its compression-positive minus sign,
-   /// which the version B unit tests pin against the assembled operator.
+   /// PHYSICAL gap @a g (faces apart for g > 0) to an embedded jump:
+   /// delta_u -= g * normal (the face's stored unit normal, sign baked in
+   /// like the tangents).  The sign is MEASURED, not assumed (plan Section 4
+   /// doctrine): a jump of +normal moves the two sides TOGETHER (the B1f
+   /// kinematic check: (u_A - u_B) . n per +1 mm of +normal jump = -1 mm,
+   /// side A along +n), so the separation is the -normal direction.  With
+   /// this orientation the one-step frozen-u slope of sigma_n_eff in g is
+   /// +sigma_F = +2 gamma / dt (test_fault_contact_dyn D1), the plan's
+   /// eq. 4.3 with s = +1, and the projection (4.4) is a well-posed LCP.
    void EmbedOpening(int fi, real_t g, real_t *delta_u_global) const
    {
       MFEM_ASSERT(fi >= 0 && fi < num_faces_,
@@ -380,7 +385,7 @@ public:
       const auto &b = basis_[fi];
       for (int d = 0; d < dim_; d++)
       {
-         delta_u_global[d] += g * b.normal[d];
+         delta_u_global[d] -= g * b.normal[d];
       }
    }
 
@@ -396,7 +401,7 @@ public:
          const auto &qd = b.qp_data[q];
          for (int d = 0; d < dim_; d++)
          {
-            delta_u_global[d] += g * qd.normal[d];
+            delta_u_global[d] -= g * qd.normal[d];
          }
       }
       else

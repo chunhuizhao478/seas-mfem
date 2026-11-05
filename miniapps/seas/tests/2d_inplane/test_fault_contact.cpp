@@ -21,11 +21,13 @@
 //        (its own internal check against the solve path runs the dense
 //        column <-> stage slip index mapping) equals the slip_comps = 2
 //        G stage for the same slip, within the same instance-noise bound.
-//   B1c  the opening column: a unit opening at one fault DOF, solved
-//        through the stage (t = 0, no loading), REDUCES the elastic normal
-//        traction at that DOF (compression positive, so the diagonal of
-//        G^{sigma g} is negative), and its out-of-plane shear row is
-//        exactly zero (plane strain).
+//   B1c  the opening column: a unit PHYSICAL opening (faces apart; the
+//        embedding is -g x basis normal, orientation measured by B1f) at
+//        one fault DOF, solved through the stage (t = 0, no loading),
+//        RAISES the elastic normal traction at that DOF (compression
+//        positive: inserting an opening between the Dirichlet walls loads
+//        the fault, so the diagonal of G^{sigma g} is positive), and its
+//        out-of-plane shear row is exactly zero (plane strain).
 //   B1d  energy reciprocity: with u_e = K^{-1} B e the solve of one unit
 //        column, u_i^T (B e_j) = u_j^T (B e_i) for a slip column i and an
 //        opening column j, because K is symmetric (SIPG) — exact up to the
@@ -34,12 +36,15 @@
 //        the face mass, so reciprocity holds in the energy pairing, not
 //        entry by entry.  T2 of the plan measures the entrywise asymmetry
 //        of the gathered G_OO block where the active set uses it.)
-//   B1e  a uniform opening of the whole fault relieves compression on the
-//        interior of the patch: the elastic normal-traction response is
-//        negative at every DOF in the middle 60% of the fault, and in the
-//        mean.  (At the buried tip and the free surface the closing
-//        constraint next to the patch can push a tip row positive — crack
-//        mechanics, not a bug.)
+//   B1e  a uniform opening of the whole fault loads its interior: between
+//        Dirichlet walls, prescribing the faces apart inserts material, so
+//        the elastic normal-traction response is positive (more
+//        compression) at every DOF in the middle 60% of the fault, and in
+//        the mean.  (A tip row can unload — crack mechanics, not a bug.)
+//   B1f  the kinematic sign: the solved uniform-gap displacement moves the
+//        two sides of every fault face APART along the geometric normal
+//        ((u_A - u_B) . n > 0 with side A along +n) — the measurement that
+//        fixes the embedding orientation (and the s of plan eq. 4.3).
 //
 // Usage (from miniapps/seas; PETSc/MUMPS needed):
 //   mpirun -np N ./seas_test_fault_contact
@@ -290,8 +295,9 @@ int main(int argc, char *argv[])
       real_t outrow = 0.0;
       for (int i = 0; i < nown; i++) { outrow = std::max(outrow, std::abs(Tcol(2 * i + out))); }
       outrow = RMax(outrow, comm);
-      TEST_ASSERT(gdiag < 0.0, "B1c p = " << p << ": unit opening reduces the elastic "
-                  "normal traction at its own DOF (G^{sigma g} diagonal " << gdiag << " Pa/m)");
+      TEST_ASSERT(gdiag > 0.0, "B1c p = " << p << ": a unit physical opening raises "
+                  "the elastic normal traction at its own DOF (G^{sigma g} diagonal "
+                  << gdiag << " Pa/m)");
       TEST_ASSERT(outrow == 0.0, "B1c p = " << p << ": the opening column's out-of-plane "
                   "shear rows are exactly zero (" << outrow << "; probe slot value " << gout << ")");
 
@@ -329,21 +335,68 @@ int main(int argc, char *argv[])
       Vector xyz_loc, xyz_own;
       op3->GetFaultDOFCoords3D(xyz_loc);
       op3->RestrictToOwnedFault(xyz_loc, xyz_own, 3);
-      real_t tn_mid = -1e300, tn_mean = 0.0;
+      real_t tn_mid = 1e300, tn_mean = 0.0;
       for (int i = 0; i < nown; i++)
       {
          tn_mean += Tnu(i);
          const real_t depth = -xyz_own(3 * i + 1);   // y <= 0 on the fault
          if (depth > 0.2 * kWf && depth < 0.8 * kWf)
          {
-            tn_mid = std::max(tn_mid, Tnu(i));
+            tn_mid = std::min(tn_mid, Tnu(i));
          }
       }
-      tn_mid = RMax(tn_mid, comm);
+      tn_mid = -RMax(-tn_mid, comm);
       tn_mean = RSum(tn_mean, comm) / static_cast<real_t>(nf);
-      TEST_ASSERT(tn_mid < 0.0 && tn_mean < 0.0, "B1e p = " << p << ": uniform 1 mm "
-                  "opening relieves compression on the middle 60% of the fault "
-                  "(interior max " << tn_mid << " Pa, mean " << tn_mean << " Pa)");
+      TEST_ASSERT(tn_mid > 0.0 && tn_mean > 0.0, "B1e p = " << p << ": uniform 1 mm "
+                  "opening loads the middle 60% of the fault (interior min "
+                  << tn_mid << " Pa, mean " << tn_mean << " Pa)");
+
+      // ---- B1f: the KINEMATIC direction of the g column (B2 sign s) ----
+      // uu solves the uniform +1 mm gap.  At the centre of each local
+      // interior fault face, the jump (u_A - u_B) . n_hat, with side A the
+      // element whose centroid lies along +n_hat of the face centre and
+      // n_hat = (sin dip, cos dip, 0) the geometric fault normal: POSITIVE
+      // = +g moves the faces APART, the physical opening.  (Measured
+      // 2026-11-05: the raw +basis-normal jump moves them TOGETHER by
+      // exactly g, which is why EmbedOpening embeds -g x normal.)
+      {
+         const real_t rad = 60.0 * M_PI / 180.0;
+         const real_t nh[2] = {std::sin(rad), std::cos(rad)};
+         real_t sep_min = 1e300, sep_max = -1e300;
+         const auto &ff = op3->GetFaultInteriorFaces();
+         for (int k = 0; k < ff.Size(); k++)
+         {
+            auto *FTr = pm3.GetInteriorFaceTransformations(ff[k]);
+            if (!FTr) { continue; }
+            const IntegrationPoint &ipc = Geometries.GetCenter(FTr->GetGeometryType());
+            FTr->SetAllIntPoints(&ipc);
+            Vector u1v, u2v, fc(2), c1(2), c2(2);
+            FTr->Face->Transform(ipc, fc);
+            uu.GetVectorValue(*FTr->Elem1, FTr->GetElement1IntPoint(), u1v);
+            uu.GetVectorValue(*FTr->Elem2, FTr->GetElement2IntPoint(), u2v);
+            pm3.GetElementCenter(FTr->Elem1No, c1);
+            pm3.GetElementCenter(FTr->Elem2No, c2);
+            const real_t side1 = (c1(0) - fc(0)) * nh[0] + (c1(1) - fc(1)) * nh[1];
+            const real_t side2 = (c2(0) - fc(0)) * nh[0] + (c2(1) - fc(1)) * nh[1];
+            MFEM_VERIFY(side1 * side2 < 0.0, "B1f: sides not straddling");
+            const real_t ju = ((u1v(0) - u2v(0)) * nh[0] + (u1v(1) - u2v(1)) * nh[1])
+                              * (side1 > 0.0 ? 1.0 : -1.0);
+            sep_min = std::min(sep_min, ju);
+            sep_max = std::max(sep_max, ju);
+         }
+         sep_max = RMax(sep_max, comm);
+         sep_min = -RMax(-sep_min, comm);
+         if (g_rank == 0)
+         {
+            std::cout << "  B1f p = " << p << ": face separation (u_A - u_B) . n per"
+                      " +1 mm gap in [" << sep_min << ", " << sep_max << "] m ("
+                      << (sep_min > 0.0 ? "+g = faces APART"
+                          : (sep_max < 0.0 ? "+g = faces TOGETHER" : "MIXED")) << ")\n";
+         }
+         TEST_ASSERT(sep_min > 0.0, "B1f p = " << p << ": a positive gap moves the "
+                     "two sides of every fault face APART (kinematic sign of the g "
+                     "column: separation in [" << sep_min << ", " << sep_max << "] m)");
+      }
    }
 
    real_t failed = num_failed;

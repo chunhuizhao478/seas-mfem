@@ -487,6 +487,10 @@
    {
       const int dim = dim_;
       int nbf = nbf_per_face_;
+      // Fault opening version B, B2: [dip, strike, opening] per DOF when the
+      // slip carries 3 components (contact mode).
+      const int sc = (num_fault_dofs_ > 0 &&
+                      slip_bc.Size() == 3 * num_fault_dofs_) ? 3 : 2;
 
       // v55: Use the combined integrator's AssembleSlipFaceRHS to guarantee
       // K-b consistency. Same traction operator, quadrature, and penalty as K.
@@ -505,15 +509,16 @@
          for (int kk = 0; kk < nbf && all_zero; kk++)
          {
             int dof_idx = fi * nbf + kk;
-            if (std::abs(slip_bc(2 * dof_idx)) >= 1e-15 ||
-                std::abs(slip_bc(2 * dof_idx + 1)) >= 1e-15)
+            if (std::abs(slip_bc(sc * dof_idx)) >= 1e-15 ||
+                std::abs(slip_bc(sc * dof_idx + 1)) >= 1e-15 ||
+                (sc == 3 && std::abs(slip_bc(sc * dof_idx + 2)) >= 1e-15))
             { all_zero = false; }
          }
          if (all_zero) { continue; }
 
          // Build slip at quad points (Tandem evaluate_slip)
          Vector delta_u_quad;
-         BuildSlipAtQuadPoints(fi, slip_bc, delta_u_quad);
+         BuildSlipAtQuadPoints(fi, slip_bc, delta_u_quad, sc);
 
          const FiniteElement *fe1 = scalar_fes_->GetFE(FTr->Elem1No);
          const FiniteElement *fe2 = scalar_fes_->GetFE(FTr->Elem2No);
@@ -551,6 +556,8 @@
 
    void AssembleSlipContributionBR2(Vector &rhs, const Vector &slip_bc) const
    {
+      MFEM_VERIFY(num_fault_dofs_ == 0 || slip_bc.Size() == 2 * num_fault_dofs_,
+                  "BR2 slip load: no opening component (IP only)");
       int dim = 3;
       if (!mass_inv_computed_) { PrecomputeMassInverse(); }
 
@@ -829,6 +836,9 @@
 #ifdef MFEM_USE_MPI
          const int dim = dim_;
          int nbf = nbf_per_face_;
+         // Fault opening version B, B2 (as AssembleSlipContributionIP)
+         const int sc = (num_fault_dofs_ > 0 &&
+                         slip_bc.Size() == 3 * num_fault_dofs_) ? 3 : 2;
 
          // v55: Use combined integrator for K-b consistency (shared faces)
          DGElasticityIPCombinedIntegrator slip_integrator(
@@ -846,14 +856,15 @@
             for (int kk = 0; kk < nbf && all_zero; kk++)
             {
                int dof_idx = slip_idx * nbf + kk;
-               if (std::abs(slip_bc(2 * dof_idx)) >= 1e-15 ||
-                   std::abs(slip_bc(2 * dof_idx + 1)) >= 1e-15)
+               if (std::abs(slip_bc(sc * dof_idx)) >= 1e-15 ||
+                   std::abs(slip_bc(sc * dof_idx + 1)) >= 1e-15 ||
+                   (sc == 3 && std::abs(slip_bc(sc * dof_idx + 2)) >= 1e-15))
                { all_zero = false; }
             }
             if (all_zero) { continue; }
 
             Vector delta_u_quad;
-            BuildSlipAtQuadPoints(slip_idx, slip_bc, delta_u_quad);
+            BuildSlipAtQuadPoints(slip_idx, slip_bc, delta_u_quad, sc);
 
             const FiniteElement *fe1 = scalar_fes_->GetFE(FTr->Elem1No);
             auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
@@ -890,6 +901,8 @@
       if constexpr (IsParallelMesh<MeshType>::value)
       {
 #ifdef MFEM_USE_MPI
+         MFEM_VERIFY(num_fault_dofs_ == 0 || slip_bc.Size() == 2 * num_fault_dofs_,
+                     "BR2 slip load: no opening component (IP only)");
          int dim = 3;
          if (!mass_inv_computed_) { PrecomputeMassInverse(); }
 

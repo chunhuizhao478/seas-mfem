@@ -747,6 +747,15 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
    Vector *normal_correction_out)
 {
    const int dim = dim_;
+   // Fault opening version B, B2: the slip may carry an opening (gap) third
+   // component per DOF ([dip, strike, opening], contact mode).  The traction
+   // outputs keep their layout (2 shear per DOF + 1 normal).
+   const int sc = (num_fault_dofs_ > 0 &&
+                   slip_bc.Size() == 3 * num_fault_dofs_) ? 3 : 2;
+   MFEM_ASSERT(num_fault_dofs_ == 0 || slip_bc.Size() == sc * num_fault_dofs_,
+               "ComputeTractionImpl: slip size " << slip_bc.Size());
+   MFEM_VERIFY(sc == 2 || method_ == DGMethod::IP,
+               "ComputeTractionImpl: an opening component needs the IP method");
    traction.SetSize(2 * num_fault_dofs_);
    traction = 0.0;
 
@@ -861,8 +870,8 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             // operators probe (GPU plan G2), so both share its arithmetic.
             Vector trac_local;
             ComputeIPFaceTraction(fi, *FTr, *fe1, *fe2, u1_all, u2_all,
-                                  slip_bc.GetData() + 2 * fi * nbf,
-                                  normal_traction != nullptr, trac_local);
+                                  slip_bc.GetData() + sc * fi * nbf,
+                                  normal_traction != nullptr, trac_local, sc);
             const int tang_offset = normal_traction ? 1 : 0;
             for (int kk = 0; kk < nbf; kk++)
             {
@@ -895,17 +904,19 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          if (!basis.qp_data.empty())
          {
             // Per-QP tangent embedding (matches Tandem for any nbf)
-            // Step 1: tangential slip components per DOF
-            Vector slip_tang(2 * nbf);
+            // Step 1: slip components per DOF (sc = 3: + opening, B2)
+            Vector slip_tang(sc * nbf);
             for (int kk = 0; kk < nbf; kk++)
             {
                int dof_idx = fi * nbf + kk;
-               slip_tang(0 * nbf + kk) = slip_bc(2 * dof_idx);      // dip
-               slip_tang(1 * nbf + kk) = slip_bc(2 * dof_idx + 1);  // strike
+               for (int c = 0; c < sc; c++)
+               {
+                  slip_tang(c * nbf + kk) = slip_bc(sc * dof_idx + c);
+               }
             }
-            // Step 2: interpolate tangential components to QPs
+            // Step 2: interpolate the components to QPs
             Vector slip_tang_q;
-            face_quad_->InterpolateToQuadPoints(2, slip_tang, slip_tang_q);
+            face_quad_->InterpolateToQuadPoints(sc, slip_tang, slip_tang_q);
             // Step 3: embed at each QP using per-QP tangent frame
             delta_u_quad_t.SetSize(dim * nqp_slip);
             for (int q = 0; q < nqp_slip; q++)
@@ -913,6 +924,11 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                real_t sl_q[2] = {slip_tang_q(q), slip_tang_q(nqp_slip + q)};
                real_t du[3];
                fault_basis_.EmbedSlipQP(fi, q, sl_q, du);
+               if (sc == 3)
+               {
+                  fault_basis_.EmbedOpeningQP(fi, q,
+                                              slip_tang_q(2 * nqp_slip + q), du);
+               }
                for (int c = 0; c < dim; c++)
                   delta_u_quad_t(c * nqp_slip + q) = du[c];
             }
@@ -924,9 +940,13 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             for (int kk = 0; kk < nbf; kk++)
             {
                int dof_idx = fi * nbf + kk;
-               real_t sl[2] = {slip_bc(2 * dof_idx), slip_bc(2 * dof_idx + 1)};
+               real_t sl[2] = {slip_bc(sc * dof_idx), slip_bc(sc * dof_idx + 1)};
                real_t du[3];
                fault_basis_.EmbedSlip(fi, sl, du);
+               if (sc == 3)
+               {
+                  fault_basis_.EmbedOpening(fi, slip_bc(sc * dof_idx + 2), du);
+               }
                for (int c = 0; c < dim; c++)
                   delta_u_nodal_t(c * nbf + kk) = du[c];
             }
@@ -1370,8 +1390,8 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                // Production path (face-local function, as interior faces).
                Vector trac_local_sh;
                ComputeIPFaceTraction(trac_idx, *FTr, *fe1, *fe2, u1_all, u2_all,
-                                     slip_bc.GetData() + 2 * trac_idx * nbf_sh,
-                                     normal_traction != nullptr, trac_local_sh);
+                                     slip_bc.GetData() + sc * trac_idx * nbf_sh,
+                                     normal_traction != nullptr, trac_local_sh, sc);
                const int tang_off_sh = normal_traction ? 1 : 0;
                for (int kk = 0; kk < nbf_sh; kk++)
                {
@@ -1399,16 +1419,19 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
 
             if (!basis_sh.qp_data.empty())
             {
-               // Per-QP tangent embedding (Tandem evaluate_slip)
-               Vector slip_tang_sh(2 * nbf_sh);
+               // Per-QP tangent embedding (Tandem evaluate_slip);
+               // sc = 3: + opening (B2)
+               Vector slip_tang_sh(sc * nbf_sh);
                for (int kk = 0; kk < nbf_sh; kk++)
                {
                   int dof_idx = trac_idx * nbf_sh + kk;
-                  slip_tang_sh(0 * nbf_sh + kk) = slip_bc(2 * dof_idx);      // dip
-                  slip_tang_sh(1 * nbf_sh + kk) = slip_bc(2 * dof_idx + 1);  // strike
+                  for (int c = 0; c < sc; c++)
+                  {
+                     slip_tang_sh(c * nbf_sh + kk) = slip_bc(sc * dof_idx + c);
+                  }
                }
                Vector slip_tang_q_sh;
-               face_quad_->InterpolateToQuadPoints(2, slip_tang_sh, slip_tang_q_sh);
+               face_quad_->InterpolateToQuadPoints(sc, slip_tang_sh, slip_tang_q_sh);
                delta_u_quad_sh.SetSize(dim * nqp_sh_slip);
                for (int q = 0; q < nqp_sh_slip; q++)
                {
@@ -1416,6 +1439,11 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                                     slip_tang_q_sh(nqp_sh_slip + q)};
                   real_t du[3];
                   fault_basis_.EmbedSlipQP(trac_idx, q, sl_q, du);
+                  if (sc == 3)
+                  {
+                     fault_basis_.EmbedOpeningQP(trac_idx, q,
+                                                 slip_tang_q_sh(2 * nqp_sh_slip + q), du);
+                  }
                   for (int c = 0; c < dim; c++)
                      delta_u_quad_sh(c * nqp_sh_slip + q) = du[c];
                }
@@ -1427,9 +1455,13 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                for (int kk = 0; kk < nbf_sh; kk++)
                {
                   int dof_idx = trac_idx * nbf_sh + kk;
-                  real_t sl[2] = {slip_bc(2 * dof_idx), slip_bc(2 * dof_idx + 1)};
+                  real_t sl[2] = {slip_bc(sc * dof_idx), slip_bc(sc * dof_idx + 1)};
                   real_t du[3];
                   fault_basis_.EmbedSlip(trac_idx, sl, du);
+                  if (sc == 3)
+                  {
+                     fault_basis_.EmbedOpening(trac_idx, slip_bc(sc * dof_idx + 2), du);
+                  }
                   for (int c = 0; c < dim; c++)
                      delta_u_nodal_sh(c * nbf_sh + kk) = du[c];
                }
@@ -1824,8 +1856,8 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                       << traction(2*i+1) << ")"
                       << " at x=(" << face_center(0) << ","
                       << face_center(1) << "," << face_center(2) << ")"
-                      << " slip=(" << slip_bc(2*i) << ","
-                      << slip_bc(2*i+1) << ")\n";
+                      << " slip=(" << slip_bc(sc*i) << ","
+                      << slip_bc(sc*i+1) << ")\n";
          }
       }
    }

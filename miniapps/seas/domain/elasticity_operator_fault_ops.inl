@@ -36,7 +36,7 @@ template <typename MeshType>
 void ElasticityDomainOperator<MeshType>::FaultFaceTractionKernel_(
    int idx, FaceElementTransformations &FTr, const FiniteElement &fe1,
    const FiniteElement &fe2, const Vector &u1, const Vector &u2,
-   const Vector &slip_bc, Vector &out) const
+   const Vector &slip_bc, Vector &out, int scomp) const
 {
    // Same steps as the IP branch of ComputeTractionImpl with a normal
    // traction requested and no decomposition.
@@ -44,7 +44,7 @@ void ElasticityDomainOperator<MeshType>::FaultFaceTractionKernel_(
    const auto &basis = fault_basis_.GetBasis(idx);
    FTr.SetAllIntPoints(&Geometries.GetCenter(FTr.GetGeometryType()));
    Vector du_q;
-   BuildSlipAtQuadPoints(idx, slip_bc, du_q);
+   BuildSlipAtQuadPoints(idx, slip_bc, du_q, scomp);
    DGElasticityIPCombinedIntegrator integ(*lambda_ptr_, *mu_ptr_, dim, epsilon_,
                                           penalty_factor_);
    Vector T_q, nl_q;
@@ -72,9 +72,12 @@ void ElasticityDomainOperator<MeshType>::FaultFaceTractionKernel_(
 }
 
 template <typename MeshType>
-void ElasticityDomainOperator<MeshType>::BuildFaultFaceOps()
+void ElasticityDomainOperator<MeshType>::BuildFaultFaceOps(int slip_comps)
 {
    MFEM_VERIFY(method_ == DGMethod::IP, "BuildFaultFaceOps: IP method only");
+   MFEM_VERIFY(slip_comps == 2 || slip_comps == 3,
+               "BuildFaultFaceOps: slip_comps = " << slip_comps);
+   const int sc = slip_comps;   // 3: + opening column per DOF (version B, B2)
    const int nfi = fault_interior_faces_.Size(), nfs = fault_shared_faces_.Size();
    const int nbf = nbf_per_face_, nf = nfi + nfs;
    MFEM_VERIFY(num_fault_dofs_ == nf * nbf, "BuildFaultFaceOps: " << num_fault_dofs_
@@ -92,6 +95,7 @@ void ElasticityDomainOperator<MeshType>::BuildFaultFaceOps()
 #endif
    ffo_.nf = nf;
    ffo_.nfi = nfi;
+   ffo_.slip_comps = sc;
    ffo_.off_vd.assign(nf + 1, 0);
    ffo_.off_A.assign(nf + 1, 0);
    ffo_.off_G.assign(nf + 1, 0);
@@ -102,7 +106,7 @@ void ElasticityDomainOperator<MeshType>::BuildFaultFaceOps()
    ffo_.G.clear();
    ffo_.nbr_face_elem.assign(nfs, -1);
 
-   Vector probe(2 * num_fault_dofs_);
+   Vector probe(sc * num_fault_dofs_);
    probe = 0.0;
    DGElasticityIPCombinedIntegrator slip_integ(*lambda_ptr_, *mu_ptr_, dim_, epsilon_,
                                                penalty_factor_);
@@ -147,7 +151,7 @@ void ElasticityDomainOperator<MeshType>::BuildFaultFaceOps()
       {
          MFEM_VERIFY(vd2[j] >= 0, "BuildFaultFaceOps: signed vdof (not DG?)");
       }
-      const int n1 = vd1.Size(), n2 = vd2.Size(), nc = n1 + n2 + 2 * nbf;
+      const int n1 = vd1.Size(), n2 = vd2.Size(), nc = n1 + n2 + sc * nbf;
       ffo_.n1[f] = n1;
       ffo_.n2[f] = n2;
       for (int j = 0; j < n1; j++) { ffo_.vd.push_back(vd1[j]); }
@@ -165,8 +169,8 @@ void ElasticityDomainOperator<MeshType>::BuildFaultFaceOps()
          int sj = -1;
          if (c < n1) { u1(c) = 1.0; }
          else if (c < n1 + n2) { u2(c - n1) = 1.0; }
-         else { sj = 2 * f * nbf + (c - n1 - n2); probe(sj) = 1.0; }
-         FaultFaceTractionKernel_(f, *FTr, *fe1, *fe2, u1, u2, probe, out);
+         else { sj = sc * f * nbf + (c - n1 - n2); probe(sj) = 1.0; }
+         FaultFaceTractionKernel_(f, *FTr, *fe1, *fe2, u1, u2, probe, out, sc);
          if (sj >= 0) { probe(sj) = 0.0; }
          for (int r = 0; r < 3 * nbf; r++) { ffo_.A[a0 + static_cast<std::size_t>(r) * nc + c] = out(r); }
       }
@@ -175,20 +179,20 @@ void ElasticityDomainOperator<MeshType>::BuildFaultFaceOps()
       // G_f: slip-load vectors, column by column (row-major, ng rows)
       const int ng = shared ? n1 : n1 + n2;
       const std::size_t g0 = ffo_.G.size();
-      ffo_.G.resize(g0 + static_cast<std::size_t>(ng) * 2 * nbf, 0.0);
-      for (int c = 0; c < 2 * nbf; c++)
+      ffo_.G.resize(g0 + static_cast<std::size_t>(ng) * sc * nbf, 0.0);
+      for (int c = 0; c < sc * nbf; c++)
       {
-         const int sj = 2 * f * nbf + c;
+         const int sj = sc * f * nbf + c;
          probe(sj) = 1.0;
-         BuildSlipAtQuadPoints(f, probe, du_q);
+         BuildSlipAtQuadPoints(f, probe, du_q, sc);
          probe(sj) = 0.0;
          slip_integ.AssembleSlipFaceRHS(*fe1, *fe2, *FTr, du_q, ev1, ev2);
-         for (int r = 0; r < n1; r++) { ffo_.G[g0 + static_cast<std::size_t>(r) * 2 * nbf + c] = ev1(r); }
+         for (int r = 0; r < n1; r++) { ffo_.G[g0 + static_cast<std::size_t>(r) * sc * nbf + c] = ev1(r); }
          if (!shared)
          {
             for (int r = 0; r < n2; r++)
             {
-               ffo_.G[g0 + static_cast<std::size_t>(n1 + r) * 2 * nbf + c] = ev2(r);
+               ffo_.G[g0 + static_cast<std::size_t>(n1 + r) * sc * nbf + c] = ev2(r);
             }
          }
       }
@@ -339,7 +343,10 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionFast(
    const Vector &u, const Vector &slip_bc, Vector &traction, Vector &normal_traction) const
 {
    MFEM_VERIFY(ffo_.built, "ComputeTractionFast: call BuildFaultFaceOps first");
-   const int nbf = nbf_per_face_;
+   const int nbf = nbf_per_face_, sc = ffo_.slip_comps;
+   MFEM_ASSERT(slip_bc.Size() == sc * num_fault_dofs_,
+               "ComputeTractionFast: slip size " << slip_bc.Size()
+               << " != " << sc << " x " << num_fault_dofs_);
    traction.SetSize(2 * num_fault_dofs_);
    normal_traction.SetSize(num_fault_dofs_);
    FaultNbrExchange_(u);
@@ -348,7 +355,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionFast(
    std::vector<real_t> &x = ffo_.x;
    for (int f = 0; f < ffo_.nf; f++)
    {
-      const int n1 = ffo_.n1[f], n2 = ffo_.n2[f], nc = n1 + n2 + 2 * nbf;
+      const int n1 = ffo_.n1[f], n2 = ffo_.n2[f], nc = n1 + n2 + sc * nbf;
       x.resize(nc);
       const int *vd = &ffo_.vd[ffo_.off_vd[f]];
       for (int j = 0; j < n1; j++) { x[j] = pu[vd[j]]; }
@@ -361,7 +368,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionFast(
          const real_t *nb = ffo_.recv_buf.data() + ffo_.nbr_off[f - ffo_.nfi];
          for (int j = 0; j < n2; j++) { x[n1 + j] = nb[j]; }
       }
-      for (int j = 0; j < 2 * nbf; j++) { x[n1 + n2 + j] = ps[2 * f * nbf + j]; }
+      for (int j = 0; j < sc * nbf; j++) { x[n1 + n2 + j] = ps[sc * f * nbf + j]; }
       const real_t *A = &ffo_.A[ffo_.off_A[f]];
       for (int kk = 0; kk < nbf; kk++)
       {
@@ -386,12 +393,15 @@ void ElasticityDomainOperator<MeshType>::AddSlipLoadFast(const Vector &slip_bc,
                                                          Vector &rhs) const
 {
    MFEM_VERIFY(ffo_.built, "AddSlipLoadFast: call BuildFaultFaceOps first");
-   const int nbf = nbf_per_face_, m = 2 * nbf;
+   const int nbf = nbf_per_face_, sc = ffo_.slip_comps, m = sc * nbf;
+   MFEM_ASSERT(slip_bc.Size() == sc * num_fault_dofs_,
+               "AddSlipLoadFast: slip size " << slip_bc.Size()
+               << " != " << sc << " x " << num_fault_dofs_);
    const real_t *ps = slip_bc.GetData();
    real_t *pr = rhs.GetData();
    for (int f = 0; f < ffo_.nf; f++)
    {
-      const real_t *s = ps + 2 * f * nbf;
+      const real_t *s = ps + sc * f * nbf;
       const int ng = (f < ffo_.nfi) ? ffo_.n1[f] + ffo_.n2[f] : ffo_.n1[f];
       const int *vd = &ffo_.vd[ffo_.off_vd[f]];
       const real_t *G = &ffo_.G[ffo_.off_G[f]];

@@ -804,12 +804,12 @@
    /// @param slip_bc            Full local slip vector [2 * num_fault_dofs]
    /// @param[out] delta_u_quad  3D slip at QPs [dim * nq], sign-corrected
    void BuildSlipAtQuadPoints(int logical_fault_idx, const Vector &slip_bc,
-                              Vector &delta_u_quad) const
+                              Vector &delta_u_quad, int scomp = 2) const
    {
       BuildSlipAtQuadPointsFace(
          logical_fault_idx,
-         slip_bc.GetData() + 2 * logical_fault_idx * nbf_per_face_,
-         delta_u_quad);
+         slip_bc.GetData() + scomp * logical_fault_idx * nbf_per_face_,
+         delta_u_quad, scomp);
    }
 
    /// Face-local form of BuildSlipAtQuadPoints: @a face_slip holds this
