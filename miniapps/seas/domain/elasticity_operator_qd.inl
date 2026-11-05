@@ -652,6 +652,26 @@ void ElasticityDomainOperator<MeshType>::QDSolvePathTraction(
 }
 
 template <typename MeshType>
+void ElasticityDomainOperator<MeshType>::QDUnitColumn(const Vector &e_owned,
+                                                      Vector &T, Vector *Tn)
+{
+   MFEM_VERIFY(qd_ops_, "QDUnitColumn: BuildQDStageOperators() was not "
+               "called");
+   MFEM_VERIFY(stiffness_assembled_ && solver_,
+               "QDUnitColumn: no assembled stiffness / solver (BuildQDGreen "
+               "or a stage solve sets them up)");
+   StageTimers *timers = stage_timers_;
+   stage_timers_ = nullptr;
+   const QDStageOperators &ops = *qd_ops_;
+   Vector b(ops.B->Height()), x(ops.B->Height());
+   ops.B->Mult(e_owned, b);
+   x = 0.0;
+   solver_->Mult(b, x);
+   QDStageTraction(x, e_owned, T, Tn);
+   stage_timers_ = timers;
+}
+
+template <typename MeshType>
 void ElasticityDomainOperator<MeshType>::BuildQDGreen(
    const QDGreenConfig &config)
 {

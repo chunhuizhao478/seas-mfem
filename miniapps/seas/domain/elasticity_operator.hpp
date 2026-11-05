@@ -465,6 +465,14 @@ public:
    void QDStageRHS(real_t time, const Vector &slip_owned, Vector &b) const;
    void QDStageTraction(const Vector &u, const Vector &slip_owned,
                         Vector &traction_owned, Vector *normal_owned) const;
+   // Fault opening version B, B3: the pure traction response of one owned
+   // stage-slip vector e (slip_comps entries per owned fault DOF; with 3,
+   // entry 3j + 2 is the opening): b = B e, K x = b, T = C_u x + C_δ e,
+   // T_n = N_u x + N_δ e — the Green build's column recipe, so no loading
+   // enters and the result is one column of the extended Green map (plan
+   // eq. 5.2) exactly.  Needs the assembled stiffness and its solver
+   // (BuildQDGreen or a stage solve sets them up).  Collective.
+   void QDUnitColumn(const Vector &e_owned, Vector &T, Vector *Tn);
    /// g(t) evaluations so far, their accepted / rejected steps and timing.
    /// Collective; prints on rank 0.
    void PrintQDStageEvalSummary(long long accepted_steps,

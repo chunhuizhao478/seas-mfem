@@ -737,6 +737,21 @@ public:
       open_.assign(no_, char(0));
    }
    bool ContactOpening() const { return contact_; }
+   /// [cycle.opening] mode = "contact" (fault opening plan rev 1, eq. 6.2,
+   /// D-B2): the floor arm is capped by the true clamping stress, so the law
+   /// sees max(sigma - r, min(floor, max(sigma, 0))) and the strength goes
+   /// to zero continuously as a point approaches opening (sigma here is the
+   /// projected end-of-step normal stress, >= 0 at a closed contact point).
+   /// Needs NitscheFaultSetup::sigma_floor > 0.  Off (the default): the hard
+   /// floor, every bit unchanged.
+   void SetFloorTaper(bool on)
+   {
+      MFEM_VERIFY(!on || sigma_floor_ > 0.0,
+                  "SetFloorTaper: needs a floor (NitscheFaultSetup::"
+                  "sigma_floor > 0); the taper caps the floor arm");
+      floor_taper_ = on;
+   }
+   bool FloorTaper() const { return floor_taper_; }
    /// Per owned DOF: 1 where the last step was open (or SetOpenFlags set it).
    const std::vector<char> &OpenFlags() const { return open_; }
    /// The open flags the next step's predictor sees (the switch from QD).
@@ -904,12 +919,21 @@ public:
                        << sig_law << " < sigma_min = " << sigma_min_);
          }
       }
-      if (sigma_floor_ > 0.0 && !(sig_law >= sigma_floor_))
+      if (sigma_floor_ > 0.0)
       {
-         // the opt-in floor (file comment); count once per DOF and step
-         sig_law = sigma_floor_;
-         floor_hits_++;
-         floored_[j] = 1;
+         // the opt-in floor (file comment); with SetFloorTaper the arm is
+         // capped by the projected clamping stress (plan eq. 6.2), so the
+         // strength falls to zero continuously as the point approaches
+         // opening; count once per DOF and step
+         const real_t arm =
+            floor_taper_ ? std::min(sigma_floor_, std::max(sigma_eff, real_t(0)))
+                         : sigma_floor_;
+         if (!(sig_law >= arm))
+         {
+            sig_law = arm;
+            floor_hits_++;
+            floored_[j] = 1;
+         }
       }
       real_t Vl[2];
       const real_t gamma = ClosureGamma(j);
@@ -1965,6 +1989,7 @@ private:
    const IFaultClosure *closure_ = nullptr;
    real_t sigma_min_ = 0.0;
    real_t sigma_floor_ = 0.0;            ///< NitscheFaultSetup::sigma_floor
+   bool floor_taper_ = false;            ///< SetFloorTaper (plan eq. 6.2)
    mutable long floor_hits_ = 0;         ///< DOF-steps at the floor
    mutable std::vector<char> floored_;   ///< per owned DOF: the floor acted
    bool opening_ = false;                ///< SetShearFreeOpening or SetContactOpening

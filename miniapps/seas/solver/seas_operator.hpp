@@ -218,9 +218,13 @@ public:
    /// true builds the operators now, with N_u, N_δ when elastic sigma_n is
    /// on, so call it after SetElasticSigmaN().  SetInitialCondition() and
    /// the face tracer's decomposed traction stay on the loops.
-   void SetQDOperators(bool matrix)
+   /// Fault opening version B, B3: @a slip_comps = 3 builds them with the
+   /// opening columns (the contact mode's unit g columns, QDUnitColumn);
+   /// the stage path itself stays tangential (the dense G keeps 2 columns
+   /// per DOF, D-B6).  2 (the default) is today's build, unchanged.
+   void SetQDOperators(bool matrix, int slip_comps = 2)
    {
-      if (matrix) { domain_->BuildQDStageOperators(elastic_sigma_n_); }
+      if (matrix) { domain_->BuildQDStageOperators(elastic_sigma_n_, slip_comps); }
       qd_matrix_ = matrix;
       qd_matrix_normal_ = elastic_sigma_n_;
    }

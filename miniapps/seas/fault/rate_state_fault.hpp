@@ -278,6 +278,38 @@ public:
    }
    real_t SigmaNFloor() const { return sigma_floor_; }
 
+   /// [cycle.opening] mode = "contact" (fault opening plan rev 1, eq. 6.2,
+   /// decision D-B2): the floor arm is capped by the true clamping stress,
+   /// so the law sees max(sigma - r, min(floor, max(sigma, 0))) and the
+   /// strength goes to zero continuously as a point approaches opening (a
+   /// flip releases no shear).  Needs SetSigmaNFloor > 0.  Inside the
+   /// hysteresis band (sigma in (-sigma_tol, 0], still closed) the law then
+   /// legitimately sees 0, so the kRSSigmaNNonPositive host warning is not
+   /// rerun for.  Off (the default): the hard floor (6.1), every bit
+   /// unchanged.
+   void SetFloorTaper(bool on)
+   {
+      MFEM_VERIFY(SlipComponents == 2 || !on,
+                  "SetFloorTaper: the BP5 vector path only");
+      MFEM_VERIFY(!on || sigma_floor_ > 0.0,
+                  "SetFloorTaper: needs a floor (SetSigmaNFloor > 0); the "
+                  "taper caps the floor arm (plan eq. 6.2)");
+      floor_taper_ = on;
+   }
+   bool FloorTaper() const { return floor_taper_; }
+
+   /// [cycle.opening] mode = "contact" (fault opening plan rev 1, Section
+   /// 5.5, decision D-B5): a friction solve that ends without a finite slip
+   /// rate (non-finite V, failed brackets) no longer stops the run; the
+   /// non-finite rate goes to the integrator, whose stage check rejects the
+   /// step so the controller shrinks dt and retries (QDPhase::InitTS).
+   /// Non-finite INPUTS still stop the run: the integrator checks each
+   /// stage state before evaluating it, so they cannot come from a retried
+   /// step.  Off (the default): every non-finite V aborts, as today.
+   void SetNonFiniteVReject(bool on) { nonfinite_v_reject_ = on; }
+   /// Evaluations D-B5 sent a non-finite rate to the integrator for.
+   long NonFiniteVRejects() const { return nonfinite_v_rejects_; }
+
    /// Opt-in normal-stress reduction (Chunhui Zhao, 2026-11-02: sigma_n'
    /// relaxation for the UCERF 2-D runs, cycle/normal_stress_relaxation.hpp):
    /// with `red` non-null (NumNodes() values, Pa, compression positive) the
@@ -627,7 +659,23 @@ public:
                        Dc_values_, rate, slip_rate_, rs_workspace_);
          V_max_ = res.first;
          if (res.second & kRSSigmaNFloored) { CountFloored_(normal_traction); }
-         if ((res.second & ~kRSSigmaNFloored) != 0)
+         // [cycle.opening] mode = "contact": with the tapered floor the law
+         // legitimately sees sigma = 0 inside the hysteresis band (a closed
+         // point with sigma in (-sigma_tol, 0]), and with D-B5 a friction
+         // solve without a finite V sends its non-finite rate to the
+         // integrator, whose stage check rejects the step (SetFloorTaper,
+         // SetNonFiniteVReject).  Neither reruns the host loop.
+         int expected = kRSSigmaNFloored;
+         if (floor_taper_) { expected |= kRSSigmaNNonPositive; }
+         if (nonfinite_v_reject_)
+         {
+            if ((res.second & (kRSAbortRHS & ~kRSBadInput)) != 0)
+            {
+               nonfinite_v_rejects_++;
+            }
+            expected |= kRSAbortRHS & ~kRSBadInput;
+         }
+         if ((res.second & ~expected) != 0)
          {
             ReportRHSStatus_(res.second, traction, state, normal_traction);
          }
@@ -972,7 +1020,11 @@ public:
             RSFaultSlipRate(num_nodes_, use_dev, DeviceParams_().V0,
                             FaultInputs_(traction, state, normal_traction),
                             V_out, rs_workspace_);
-         if ((status & ~kRSSigmaNFloored) != 0)
+         // SetFloorTaper: sigma_law = 0 inside the hysteresis band is the
+         // taper's own regime, not a warning worth a host rerun
+         const int expected =
+            kRSSigmaNFloored | (floor_taper_ ? kRSSigmaNNonPositive : 0);
+         if ((status & ~expected) != 0)
          {
             // A kernel cannot print: the host loop reruns on the same
             // inputs, into scratch, for today's [FRIC-RESID] and
@@ -1268,6 +1320,7 @@ private:
       in.a = &a_values_;
       in.eta = &eta_values_;
       in.sigma_floor = sigma_floor_;
+      in.floor_taper = floor_taper_;
       in.sigma_red = sigma_red_;
       in.frozen = frozen_;
       return in;
@@ -1286,9 +1339,15 @@ private:
       {
          if (frozen_ && (*frozen_)(i) != 0.0) { continue; }   // open: not floored
          const real_t sigma_n_pre = SigmaNAt_(i);
-         real_t s = normal_traction ? sigma_n_pre + (*normal_traction)(i) : sigma_n_pre;
+         const real_t s_true =
+            normal_traction ? sigma_n_pre + (*normal_traction)(i) : sigma_n_pre;
+         real_t s = s_true;
          if (sigma_red_) { s -= (*sigma_red_)(i); }
-         if (s < sigma_floor_)
+         // SetFloorTaper: the arm the kernel used (eq. 6.2)
+         const real_t arm =
+            floor_taper_ ? std::min(sigma_floor_, std::max(s_true, real_t(0)))
+                         : sigma_floor_;
+         if (s < arm)
          {
             n++;
             if (s < floor_stats_.min_sigma)
@@ -1405,8 +1464,15 @@ private:
                }
             }
 
-            // SetSigmaNFloor: the law sees the floor, as in the kernel
-            if (sigma_floor_ > 0.0 && sigma_n_eff < sigma_floor_) { sigma_n_eff = sigma_floor_; }
+            // SetSigmaNFloor / SetFloorTaper: the law's floor, as in the kernel
+            {
+               int fstat = 0;
+               const real_t s_true =
+                  sigma_n_eff + (sigma_red_ ? (*sigma_red_)(i) : 0.0);
+               sigma_n_eff = RSLawSigmaN(sigma_n_eff, s_true,
+                                                   sigma_floor_, floor_taper_,
+                                                   fstat);
+            }
 
             int dbg_rank = mpi_ctx_ ? mpi_ctx_->Rank() : 0;
             real_t dbg_x = geom_ ? geom_->GetCoordsX2()(i) : 0.0;
@@ -1431,11 +1497,18 @@ private:
                   << " psi=" << psi << " sn_eff=" << sigma_n_eff
                   << " a=" << a << " eta=" << eta
                   << std::endl;
-               MFEM_ABORT("Non-finite V from friction solver at DOF " << i);
+               // SetNonFiniteVReject (D-B5): the print stays, the stop moves
+               // to the integrator's stage check (the step is rejected)
+               if (!nonfinite_v_reject_)
+               {
+                  MFEM_ABORT("Non-finite V from friction solver at DOF " << i);
+               }
             }
       }
 
-      MFEM_VERIFY(!(status & kRSAbortRHS),
+      const int must_stop =
+         nonfinite_v_reject_ ? (kRSAbortRHS & kRSBadInput) : kRSAbortRHS;
+      MFEM_VERIFY(!(status & must_stop),
                   "RateStateFaultOperator::ComputeRHS: the fault kernel "
                   "flagged status " << status << " (RSStatus, "
                   "friction/device_rate_state.hpp), but the host rerun did "
@@ -1483,8 +1556,15 @@ private:
             }
             // SetSigmaNReduction: less the reduction, as in the kernel
             if (sigma_red_) { sigma_n_eff -= (*sigma_red_)(i); }
-            // SetSigmaNFloor: the law sees the floor, as in the kernel
-            if (sigma_floor_ > 0.0 && sigma_n_eff < sigma_floor_) { sigma_n_eff = sigma_floor_; }
+            // SetSigmaNFloor / SetFloorTaper: the law's floor, as in the kernel
+            {
+               int fstat = 0;
+               const real_t s_true =
+                  sigma_n_eff + (sigma_red_ ? (*sigma_red_)(i) : 0.0);
+               sigma_n_eff = RSLawSigmaN(sigma_n_eff, s_true,
+                                                   sigma_floor_, floor_taper_,
+                                                   fstat);
+            }
 
             real_t V_vec[2];
             dr_friction_->SolveSlipRateVectorPsi(
@@ -1496,6 +1576,11 @@ private:
 
    /// SetSigmaNFloor (0 = off) and where it acted.
    real_t sigma_floor_ = 0.0;
+   /// SetFloorTaper: contact mode's tapered floor (plan eq. 6.2).
+   bool floor_taper_ = false;
+   /// SetNonFiniteVReject (D-B5) and the evaluations it let through.
+   bool nonfinite_v_reject_ = false;
+   mutable long nonfinite_v_rejects_ = 0;
    /// SetSigmaNReduction (null = off; not owned).
    const Vector *sigma_red_ = nullptr;
    /// SetFrozenNodes (null = off; not owned).

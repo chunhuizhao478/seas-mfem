@@ -31,6 +31,9 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-vertex-normal-kernels # vertex-normal plan P2 (T1, T4)
 #   make -f tests/2d_inplane/2d_inplane.mk test-vertex-normal-cycle # vertex-normal plan P3 (the cycle)
 #   make -f tests/2d_inplane/2d_inplane.mk test-fault-opening       # [cycle.opening] version A (shear-free)
+#   make -f tests/2d_inplane/2d_inplane.mk test-fault-contact       # fault opening B, B1 (opening columns)
+#   make -f tests/2d_inplane/2d_inplane.mk test-fault-contact-dyn   # fault opening B, B2 (dynamic projection)
+#   make -f tests/2d_inplane/2d_inplane.mk test-fault-contact-qd    # fault opening B, B3 (QD contact + taper)
 #   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
 # The 3D parity set (every phase must leave it bit for bit unchanged) is the
 # script tests/2d_inplane/parity_3d.sh (see its header).  The tensor
@@ -848,7 +851,7 @@ seas_test_fault_opening: $(TEST_FAULT_OPENING_OBJ) $(CYCLE_LINK_OBJS)
 
 FAULT_OPENING_DECKS = simple_cases/configs/D9f_arc08L2p5_h250_avg_floor10_open.toml \
                       config/fd_cycle/ucerf2d_saf_sjf_500m_R70_avg_tip_relax_open_fd.toml
-FAULT_OPENING_REFUSALS = 1:is version B|2:use "shear_free"|3:max_passes = 0 must be >= 1|4:[cycle.opening] needs [cycle.qd.green]|5:[cycle.opening] is built and tested on 2-D meshes only|6:[cycle.opening] with [friction.prakash_clifton]|7:[cycle.probe] with [cycle.opening]
+FAULT_OPENING_REFUSALS = 1:check_every: the solve-path check does not carry|2:use "shear_free"|3:max_passes = 0 must be >= 1|4:[cycle.opening] needs [cycle.qd.green]|5:[cycle.opening] is built and tested on 2-D meshes only|6:[cycle.opening] with [friction.prakash_clifton]|7:[cycle.probe] with [cycle.opening]|8:H-matrix path carries no opening columns|9:belong to mode = "contact"|10:floor_taper needs [cycle].sigma_n_floor_pa > 0|11:must be >= 0 (0 = the pure law, D-B7)
 test-fault-opening: seas_test_fault_opening
 	@for n in 1 2; do \
 	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_fault_opening < /dev/null || exit 1; \
@@ -910,13 +913,35 @@ test-fault-contact-dyn: seas_test_fault_contact_dyn
 	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_fault_contact_dyn < /dev/null || exit 1; \
 	done
 
+# Fault opening version B, phase B3 (plan Sections 5-6): the QD contact
+# solve (OpenSetQD 2x2 blocks), the active-set rule with hysteresis, the
+# tapered floor and the contact deck.
+TEST_FAULT_CONTACT_QD_SRC = tests/2d_inplane/test_fault_contact_qd.cpp
+TEST_FAULT_CONTACT_QD_OBJ = $(TEST_FAULT_CONTACT_QD_SRC:.cpp=.o)
+$(TEST_FAULT_CONTACT_QD_OBJ): %.o: $(SRC)%.cpp $(CYCLE_HEADERS) $(CYCLE_STAMP) \
+                              $(CYCLE_SHARED_HEADERS) $(INPLANE_HEADERS) $(NITSCHE_2D_HEADERS) \
+                              $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
+
+seas_test_fault_contact_qd: $(TEST_FAULT_CONTACT_QD_OBJ) $(CYCLE_LINK_OBJS)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_CONTACT_QD_OBJ) $(CYCLE_LINK_OBJS) \
+	    $(CYCLE_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-fault-contact-qd: seas_test_fault_contact_qd
+	@for n in 1 2; do \
+	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_fault_contact_qd < /dev/null || exit 1; \
+	done
+
 2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
                 test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
                 test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
                 test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
                 test-handback-table test-tip-zone test-sigma-floor test-relaxation test-2d5-width test-2d5-dyn-driver \
                 test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle \
-                test-fault-opening test-fault-contact test-fault-contact-dyn
+                test-fault-opening test-fault-contact test-fault-contact-dyn \
+                test-fault-contact-qd
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \

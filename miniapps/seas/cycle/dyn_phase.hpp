@@ -350,8 +350,15 @@ public:
                                                    : NitscheWaveOperator::KVLength::Inscribed);
       }
       if (dc.pc) { W_->SetPrakashClifton(dc.pc_v_star, dc.pc_length); }
-      // [cycle.opening] mode = "shear_free": the open rule of CloseDOF
-      if (cfg.opening.On()) { W_->SetShearFreeOpening(true); }
+      // [cycle.opening]: the open rule of CloseDOF — mode = "shear_free"
+      // (version A) or "contact" (version B: the projection of plan eq. 4.4,
+      // with the tapered floor of eq. 6.2 behind floor_taper)
+      if (cfg.opening.Contact())
+      {
+         W_->SetContactOpening(true);
+         W_->SetFloorTaper(cfg.opening.floor_taper);
+      }
+      else if (cfg.opening.On()) { W_->SetShearFreeOpening(true); }
       if (lts_on)
       {
          // After Kelvin-Voigt: its blocks hold K_eta (collective).
@@ -381,7 +388,10 @@ public:
                   << W_->GetTime() << ", not 0 (the loads would read t_s + clock)");
       W_->SetFaultState(d, V, psi);
       // [cycle.opening]: no DOF open until SetOpenFlags hands the QD set over
-      if (W_->ShearFreeOpening()) { W_->SetOpenFlags(std::vector<char>(W_->NumOwnedFaultDOFs(), 0)); }
+      if (W_->ShearFreeOpening() || W_->ContactOpening())
+      {
+         W_->SetOpenFlags(std::vector<char>(W_->NumOwnedFaultDOFs(), 0));
+      }
       // PML (plan rev2, Section 3.1): memory to zero, b_band from u_s and the
       // wall data at t_s, so the static QD state is an equilibrium of W
       if (pml_) { W_->PmlEnter(u_s); }
@@ -460,7 +470,7 @@ public:
 
    /// [cycle.opening]: the open flags per owned DOF (1 open; the last step's,
    /// or the QD regime's handed over by SetOpenFlags after Enter).
-   bool Opening() const { return W_->ShearFreeOpening(); }
+   bool Opening() const { return W_->ShearFreeOpening() || W_->ContactOpening(); }
    const std::vector<char> &OpenFlags() const { return W_->OpenFlags(); }
    void SetOpenFlags(const std::vector<char> &f) { W_->SetOpenFlags(f); }
    /// Open DOFs over all ranks.  Collective.
@@ -776,7 +786,7 @@ public:
       f.eta = 0.0;
       if (relax_r_) { f.sigma_red = *relax_r_; }   // [cycle.relaxation]: frozen r
       else { f.sigma_red.SetSize(0); }
-      if (W_->ShearFreeOpening())
+      if (W_->ShearFreeOpening() || W_->ContactOpening())
       {
          // [cycle.opening]: the last step's open flags
          f.open.SetSize(N);

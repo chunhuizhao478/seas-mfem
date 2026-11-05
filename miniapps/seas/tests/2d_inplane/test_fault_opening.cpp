@@ -38,9 +38,14 @@
 // Refusals (--refuse n, each must abort with its message; the deck is D0
 // with a [cycle.opening] section appended, written to
 // test_fault_opening_refuse.toml, which --clean deletes): 1 mode "contact"
-// (version B), 2 an unknown mode, 3 max_passes 0, 4 no [cycle.qd.green], 5
-// a 3-D mesh (the deck: config/fd_cycle/bp5_scec_fd.toml with
-// [cycle.qd].operators = "matrix" and [cycle.qd.green] on), 6 [friction.prakash_clifton], 7 [cycle.probe].
+// with D0's [cycle.qd.green].check_every (the solve-path check carries no
+// gap), 2 an unknown mode, 3 max_passes 0, 4 no [cycle.qd.green], 5 a 3-D
+// mesh (the deck: config/fd_cycle/bp5_scec_fd.toml with
+// [cycle.qd].operators = "matrix" and [cycle.qd.green] on), 6
+// [friction.prakash_clifton], 7 [cycle.probe].  Contact (version B, plan
+// rev 1): 8 the H-matrix path (compress), 9 a contact knob (floor_taper)
+// under mode "shear_free", 10 floor_taper without [cycle].sigma_n_floor_pa,
+// 11 sigma_tol_pa < 0.
 //
 // Deck mode: --load-deck d.toml only reads a deck (CycleConfig::Load) and
 // prints its [cycle.opening] (the committed opening decks, no solve).
@@ -715,17 +720,45 @@ int Refuse(int n)
    std::stringstream ss;
    ss << in.rdbuf();
    std::string deck = ss.str();
-   std::string mode = "shear_free", extra;
+   std::string mode = "shear_free", extra, open_extra;
    int passes = 20;
-   if (n == 1) { mode = "contact"; }
-   if (n == 2) { mode = "gap"; }
-   if (n == 3) { passes = 0; }
-   if (n == 4)
+   auto erase_green = [&deck]()
    {
       const std::string g = "[cycle.qd.green]\ncheck_every = 10000\n";
       const size_t at = deck.find(g);
       MFEM_VERIFY(at != std::string::npos, "D0 has no '[cycle.qd.green] check_every' block");
       deck.erase(at, g.size());
+   };
+   // 1: D0 keeps check_every = 10000, which contact refuses (the solve-path
+   // check carries no gap)
+   if (n == 1) { mode = "contact"; }
+   if (n == 2) { mode = "gap"; }
+   if (n == 3) { passes = 0; }
+   if (n == 4) { erase_green(); }
+   if (n == 8)
+   {
+      mode = "contact";
+      erase_green();
+      extra = "\n[cycle.qd.green]\ncompress = 0.5\n";
+   }
+   if (n == 9) { open_extra = "floor_taper = true\n"; }
+   if (n == 10)
+   {
+      // floor_taper defaults true and D0 has no [cycle].sigma_n_floor_pa
+      mode = "contact";
+      erase_green();
+      extra = "\n[cycle.qd.green]\nblock = 8\n";
+   }
+   if (n == 11)
+   {
+      mode = "contact";
+      erase_green();
+      extra = "\n[cycle.qd.green]\nblock = 8\n";
+      const std::string cy = "[cycle]\n";
+      const size_t at = deck.find(cy);
+      MFEM_VERIFY(at != std::string::npos, "D0 has no [cycle] section");
+      deck.insert(at + cy.size(), "sigma_n_floor_pa = 10.0e6\n");
+      open_extra = "sigma_tol_pa = -1.0\n";
    }
    if (n == 5)
    {
@@ -739,7 +772,7 @@ int Refuse(int n)
    if (n == 6) { extra = "\n[friction.prakash_clifton]\nv_star = 1.0\nlength = 100.0\n"; }
    if (n == 7) { extra = "\n[cycle.probe]\nV_off = [1.0e-3]\nT_dwell = [10.0]\n"; }
    deck += "\n[cycle.opening]\nmode = \"" + mode + "\"\nmax_passes = " +
-           std::to_string(passes) + "\n" + extra;
+           std::to_string(passes) + "\n" + open_extra + extra;
    const std::string fn = "test_fault_opening_refuse.toml";
    {
       std::ofstream out(fn);

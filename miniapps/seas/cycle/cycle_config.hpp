@@ -77,7 +77,18 @@
 //                   [20]: set updates per accepted QD state before the run
 //                   stops.  Needs [cycle.qd.green] (decision D6) and a 2-D
 //                   mesh; refused with [friction.prakash_clifton] and
-//                   [cycle.probe].  "contact" (version B) is not built.
+//                   [cycle.probe].  mode = "contact" (version B, fault
+//                   opening plan rev 1): full unilateral contact — the fault
+//                   gains the opening unknown g (>= 0), an open DOF carries
+//                   no traction at all and sigma_n' is bounded at 0 (the QD
+//                   open-set solve imposes tau = sigma = 0 on G's extended
+//                   map, the dynamic closure projects per point, plan eq.
+//                   4.4).  sigma_tol_pa [1000]: the open/close hysteresis
+//                   half-band (D-B7).  floor_taper [true]: the law's floor
+//                   arm is capped by the true clamping stress (eq. 6.2), so
+//                   strength -> 0 continuously at opening; needs
+//                   [cycle].sigma_n_floor_pa > 0.  Also refused with
+//                   [cycle.qd.green] compress or check_every.
 //   [cycle.qd]      solver ("mumps" | "mumps_blr"), blr_tol,
 //                   petsc_options (PETSc TS options file; it must pick an RK
 //                   tableau with the FSAL property, see qd_phase.hpp),
@@ -544,12 +555,20 @@ struct DynamicConfig
    real_t sigma_min = 0.0;         ///< [Pa]
 };
 
-/// [cycle.opening] (fault opening design rev 1.1, cycle/fault_opening.hpp).
+/// [cycle.opening] (fault opening design rev 1.1 and plan rev 1,
+/// cycle/fault_opening.hpp).
 struct OpeningConfig
 {
-   std::string mode = "off";   ///< "off" | "shear_free" (version A)
+   std::string mode = "off";   ///< "off" | "shear_free" (A) | "contact" (B)
    int max_passes = 20;        ///< set updates per accepted QD state
+   /// contact: the hysteresis half-band of the open/close rule [Pa]
+   /// ([cycle.opening].sigma_tol_pa, plan 5.5, D-B7)
+   real_t sigma_tol = 1000.0;
+   /// contact: the tapered floor (plan eq. 6.2, D-B2); false = the hard
+   /// floor (6.1), as version A
+   bool floor_taper = true;
    bool On() const { return mode != "off"; }
+   bool Contact() const { return mode == "contact"; }
 };
 
 /// A vector key the deck gave and its number of entries (2 or 3).
@@ -993,17 +1012,27 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
    {
       const std::string sec = "cycle.opening";
       const toml::value &op = cy.at("opening");
-      OnlyKeys(op, sec, {"mode", "max_passes"});
+      OnlyKeys(op, sec, {"mode", "max_passes", "sigma_tol_pa", "floor_taper"});
       OpeningConfig &o = c.opening;
       o.mode = Str(op, sec, "mode", "", true);
-      MFEM_VERIFY(o.mode != "contact", "[" << sec << "].mode = \"contact\" is version B "
-                  "(fault opening design rev 1.1, Section 4), not built yet; use "
-                  "\"shear_free\" (version A)");
-      MFEM_VERIFY(o.mode == "shear_free", "[" << sec << "].mode = \"" << o.mode
-                  << "\"; use \"shear_free\" (or leave the section out)");
+      MFEM_VERIFY(o.mode == "shear_free" || o.mode == "contact",
+                  "[" << sec << "].mode = \"" << o.mode << "\"; use \"shear_free\" "
+                  "(version A) or \"contact\" (version B, fault opening plan rev 1), "
+                  "or leave the section out");
       o.max_passes = Int(op, sec, "max_passes", o.max_passes);
       MFEM_VERIFY(o.max_passes >= 1, "[" << sec << "].max_passes = " << o.max_passes
                   << " must be >= 1");
+      // contact-only knobs: version A keeps today's law untouched
+      MFEM_VERIFY(o.Contact() || (!op.contains("sigma_tol_pa") &&
+                                  !op.contains("floor_taper")),
+                  "[" << sec << "] sigma_tol_pa and floor_taper belong to mode = "
+                  "\"contact\" (version B); mode = \"" << o.mode
+                  << "\" does not read them");
+      o.sigma_tol = Real(op, sec, "sigma_tol_pa", o.sigma_tol);
+      MFEM_VERIFY(std::isfinite(o.sigma_tol) && o.sigma_tol >= 0.0,
+                  "[" << sec << "].sigma_tol_pa = " << o.sigma_tol
+                  << " must be >= 0 (0 = the pure law, D-B7)");
+      o.floor_taper = Bool(op, sec, "floor_taper", o.floor_taper);
    }
 
    if (cy.contains("qd"))
@@ -1663,6 +1692,19 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       MFEM_VERIFY(c.qd.green.enabled, "[cycle.opening] needs [cycle.qd.green]: the QD "
                   "open-set solve works on the Green's function (decision D6); the "
                   "direct-solve path refuses the deck");
+   }
+   if (c.opening.Contact())
+   {
+      // fault opening plan rev 1 (version B), Section 5 and D-B6
+      MFEM_VERIFY(c.qd.green.compress == 0.0, "[cycle.opening] mode = \"contact\" with "
+                  "[cycle.qd.green].compress: the H-matrix path carries no opening "
+                  "columns; use the dense G");
+      MFEM_VERIFY(c.qd.green.check_every == 0, "[cycle.opening] mode = \"contact\" with "
+                  "[cycle.qd.green].check_every: the solve-path check does not carry "
+                  "the open set's gap; set check_every = 0");
+      MFEM_VERIFY(!c.opening.floor_taper || c.sigma_n_floor > 0.0, "[cycle.opening] "
+                  "floor_taper needs [cycle].sigma_n_floor_pa > 0 (the taper caps the "
+                  "floor arm, plan eq. 6.2); give a floor or set floor_taper = false");
    }
 
    if (c.lts.On())

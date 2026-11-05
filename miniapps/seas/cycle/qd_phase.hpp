@@ -106,6 +106,18 @@
 // flip", "settle", "next dt").  Off (the default): no mask, no hook, every
 // bit unchanged.
 //
+// mode = "contact" (version B; fault opening plan rev 1, 2026-11-05,
+// cycle/fault_opening.hpp file comment): the same machinery with the open
+// unknowns grown to (delta, g) pairs — the stage solve imposes tau = 0 AND
+// sigma = 0 on the open set, the rule opens at sigma < -sigma_tol and
+// closes at solved g < 0 (hysteresis, D-B7), the flip log gains g, the
+// stage operators are built with slip_comps = 3 for the unit g columns
+// (QDUnitColumn; the dense G stays tangential, D-B6), the kernel sees the
+// tapered floor behind [cycle.opening].floor_taper (plan eq. 6.2,
+// RateStateFaultOperator::SetFloorTaper), and a friction solve without a
+// finite V rejects the TS step instead of aborting (D-B5,
+// SetNonFiniteVReject + TSSetFunctionDomainError in InitTS).
+//
 // This file and dyn_phase.hpp are the only cycle files that include solver
 // headers (rule M4).
 
@@ -282,6 +294,14 @@ public:
       // The tensor: tau_pre and sigma_n per DOF, from H1b's copies.
       if (tensor) { fault_->SetSAFSMode(true, &geom_->GetTauPre(), &geom_->sigma_n_per_dof()); }
       fault_->SetSigmaNFloor(cfg_.sigma_n_floor);   // [cycle].sigma_n_floor_pa (0 = off)
+      if (cfg_.opening.Contact())
+      {
+         // [cycle.opening] mode = "contact": the tapered floor (plan eq.
+         // 6.2, behind [cycle.opening].floor_taper) and the non-finite step
+         // rejection (D-B5; the TS domain check is set in InitTS)
+         fault_->SetFloorTaper(cfg_.opening.floor_taper);
+         fault_->SetNonFiniteVReject(true);
+      }
 
       op_ = std::make_unique<PBP5SEASOp>(dom_.get(), fault_.get(), &mpi_);
       op_->SetElasticSigmaN(true);
@@ -298,7 +318,11 @@ public:
       matrix_ = (cfg_.qd.operators == "matrix");
       if (matrix_)
       {
-         op_->SetQDOperators(true);
+         // [cycle.opening] mode = "contact": the stage operators carry the
+         // opening columns (slip_comps = 3) for the unit g columns of the
+         // open-set solve (QDUnitColumn); the stage path itself and the
+         // dense G stay tangential (D-B6)
+         op_->SetQDOperators(true, cfg_.opening.Contact() ? 3 : 2);
          dom_->GetQDStageOperators()->PrintSummary(mpi_.GetComm(), std::cout);
       }
       if (cfg_.qd.green.enabled)
@@ -812,6 +836,54 @@ public:
                   "TSSetApplicationContext failed");
       MFEM_VERIFY(TSSetPostStep(ts, &QDPhase::PostStepCallback_) == PETSC_SUCCESS,
                   "TSSetPostStep failed");
+      if (open_ && open_->Contact())
+      {
+         // [cycle.opening] mode = "contact" (D-B5): a non-finite stage state
+         // (a friction solve that could not finish sent a non-finite rate
+         // into the next stage, SetNonFiniteVReject) rejects the step, so
+         // the controller shrinks dt and retries; the abort remains where
+         // the adapt hits its minimum step (PETSc).
+         MFEM_VERIFY(TSSetFunctionDomainError(ts, &QDPhase::StageStateFinite_)
+                     == PETSC_SUCCESS, "TSSetFunctionDomainError failed");
+      }
+   }
+
+   /// [cycle.opening] mode = "contact" (D-B5): PETSc calls this on every
+   /// stage state; accept = false rejects the step.  The answer must agree
+   /// on every rank (PETSc), hence the reduction.
+   static PetscErrorCode StageStateFinite_(TS ts, PetscReal t, Vec Y,
+                                           PetscBool *accept)
+   {
+      PetscFunctionBeginUser;
+      PetscInt n = 0;
+      const PetscScalar *a = nullptr;
+      PetscCall(VecGetLocalSize(Y, &n));
+      PetscCall(VecGetArrayRead(Y, &a));
+      PetscInt ok = 1;
+      for (PetscInt i = 0; i < n; i++)
+      {
+         if (!std::isfinite(static_cast<double>(PetscRealPart(a[i]))))
+         {
+            ok = 0;
+            break;
+         }
+      }
+      PetscCall(VecRestoreArrayRead(Y, &a));
+      MPI_Comm comm = PetscObjectComm(reinterpret_cast<PetscObject>(ts));
+      PetscCall(MPIU_Allreduce(MPI_IN_PLACE, &ok, 1, MPIU_INT, MPI_MIN, comm));
+      *accept = ok ? PETSC_TRUE : PETSC_FALSE;
+      if (!ok)
+      {
+         PetscMPIInt rank = 0;
+         MPI_Comm_rank(comm, &rank);
+         if (rank == 0)
+         {
+            std::cout << "  [cycle.opening] non-finite stage state at t = "
+                      << static_cast<double>(t)
+                      << " s: the step is rejected and dt shrinks (D-B5)\n";
+         }
+      }
+      PetscFunctionReturn(PETSC_SUCCESS);
    }
 
    /// Plan 6.3, the switch back: SetFaultState, Solve(t), and a new TS at t
@@ -912,10 +984,32 @@ private:
       MFEM_VERIFY(G && pmesh_.Dimension() == 2 && G->Planar(), "[cycle.opening]: a 2-D "
                   "mesh with the planar Green's function only (design rev 1.1, Section 6)");
       DomainOp *dom = dom_.get();
-      open_ = std::make_unique<OpenSetQD>(
-         mpi_.GetComm(), fault_->NumNodes(), G->PlanarSlot(),
-         [dom](const Vector &e, Vector &T, Vector &Tn) { dom->GreenStage(0.0, e, T, &Tn); },
-         fault_->TauPre());
+      if (cfg_.opening.Contact())
+      {
+         // mode = "contact" (fault opening plan rev 1, Section 5): the open
+         // unknowns are (delta, g) pairs; the delta columns stay the Green's
+         // function's, the g columns are pure solve-path responses of a unit
+         // opening through the stage operators' opening columns, fetched
+         // once per DOF at its first opening (D-B6)
+         MFEM_VERIFY(dom_->GetQDStageOperators() &&
+                     dom_->GetQDStageOperators()->slip_comps == 3,
+                     "[cycle.opening] mode = \"contact\": the stage operators "
+                     "carry no opening columns (Setup builds them with "
+                     "slip_comps = 3)");
+         open_ = std::make_unique<OpenSetQD>(
+            mpi_.GetComm(), fault_->NumNodes(), G->PlanarSlot(),
+            [dom](const Vector &e, Vector &T, Vector &Tn) { dom->GreenStage(0.0, e, T, &Tn); },
+            fault_->TauPre(),
+            [dom](const Vector &e, Vector &T, Vector &Tn) { dom->QDUnitColumn(e, T, &Tn); },
+            sigma0_, cfg_.opening.sigma_tol);
+      }
+      else
+      {
+         open_ = std::make_unique<OpenSetQD>(
+            mpi_.GetComm(), fault_->NumNodes(), G->PlanarSlot(),
+            [dom](const Vector &e, Vector &T, Vector &Tn) { dom->GreenStage(0.0, e, T, &Tn); },
+            fault_->TauPre());
+      }
       fault_->SetFrozenNodes(&open_->Mask());
       if (relax_) { relax_->SetFrozen(&open_->Mask()); }
       OpenSetQD *os = open_.get();
@@ -997,9 +1091,10 @@ private:
    void LogFlips_(real_t t, const char *where, long step, int pass, long n,
                   const Vector &sn, const Vector &tau, const Vector &x) const
    {
-      constexpr int kFields = 7;   // global DOF, x, y, sigma_n', tau, now open, psi
+      constexpr int kFields = 8;   // global DOF, x, y, sigma_n', tau, now open, psi, g
       x.HostRead();
       const std::vector<int> &fl = open_->LastFlipped();
+      const std::vector<real_t> &fg = open_->LastFlippedGaps();   // contact; else empty
       std::vector<double> mine(kFields * fl.size());
       for (size_t k = 0; k < fl.size(); k++)
       {
@@ -1012,6 +1107,7 @@ private:
          r[4] = tau(j);
          r[5] = open_->IsOpen(j) ? 1.0 : 0.0;
          r[6] = x(FaultOp::StatePerNode * j + FaultOp::PsiIndex);
+         r[7] = (k < fg.size()) ? static_cast<double>(fg[k]) : 0.0;
       }
       const MPI_Comm comm = mpi_.GetComm();
       const int nranks = mpi_.Size();
@@ -1035,8 +1131,11 @@ private:
                    << " s, pass " << pass << "): DOF " << static_cast<long long>(r[0])
                    << " at (" << r[1] / 1e3 << ", " << r[2] / 1e3 << ") km "
                    << (r[5] != 0.0 ? "closed -> open" : "open -> closed") << ", sigma_n' "
-                   << r[3] / 1e6 << " MPa, shear " << r[4] / 1e6 << " MPa, psi " << r[6]
-                   << "\n";
+                   << r[3] / 1e6 << " MPa, shear " << r[4] / 1e6 << " MPa, psi " << r[6];
+         // contact (plan 5.5): the released shear is the printed shear of a
+         // closed -> open flip; the gap column is the g the solve wanted
+         if (open_->Contact()) { std::cout << ", g " << r[7] << " m"; }
+         std::cout << "\n";
       }
       if (n > 8) { std::cout << "  [cycle.opening] ... and " << n - 8 << " more flips\n"; }
    }
