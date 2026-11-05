@@ -1,9 +1,10 @@
 // Copyright (c) 2010-2026, Lawrence Livermore National Security, LLC.
 //
 // tests/2d_inplane/test_fault_contact_qd.cpp — fault opening version B,
-// phase B3 (plan 2026-11-05, Sections 5 and 6): the QD contact solve
-// (OpenSetQD in contact mode), the active-set rule with hysteresis, and the
-// tapered floor, on the miniature BP3 layout of test_fault_contact.cpp
+// phases B3 and B4 (plan 2026-11-05, Sections 5 and 6): the QD contact solve
+// (OpenSetQD in contact mode), the active-set rule with hysteresis, the
+// tapered floor, and the B4 gap carriers (the bridge, checkpoint V7), on
+// the miniature BP3 layout of test_fault_contact.cpp
 // (ShearBox, dip 60, p = 1 and 2, stage operators with slip_comps = 3 and
 // the dense Green's function, the production lambdas of
 // QDPhase::SetupOpening_):
@@ -36,6 +37,14 @@
 //   Q8  a valid contact deck (D0 + mode = "contact", a floor, no
 //       check_every) loads: Contact(), sigma_tol_pa and floor_taper
 //       defaults.
+//   Q9  the bridge with the gap (B4, cycle/state_bridge.hpp): on synthetic
+//       frames (eps = +-1, rotated triads) ToNitsche with a gap puts g on
+//       d's normal component (d . eps n_k = g), the tangential pairs read
+//       back through ToQD unchanged, GapFromGlobal returns the gap, and V
+//       keeps no normal part.
+//   Q10 checkpoint FD_CYCLE_V7 (B4, cycle/checkpoint.hpp): the open flags
+//       and the gap round-trip bit for bit; a shear-free info still writes
+//       V6.
 //
 // Usage (from miniapps/seas; PETSc/MUMPS needed):
 //   mpirun -np N ./seas_test_fault_contact_qd
@@ -46,6 +55,8 @@
 #include "../../constitutive/linear_elastic.hpp"
 #include "../../cycle/fault_opening.hpp"
 #include "../../cycle/cycle_config.hpp"
+#include "../../cycle/state_bridge.hpp"
+#include "../../cycle/checkpoint.hpp"
 #include "../../friction/device_rate_state.hpp"
 
 #include <cmath>
@@ -227,6 +238,124 @@ int main(int argc, char *argv[])
       int sn = 0;
       const real_t nan_through = RSLawSigmaN(std::nan(""), std::nan(""), fl, true, sn);
       TEST_ASSERT(std::isnan(nan_through), "Q7: a NaN stays NaN for the input checks");
+   }
+
+   // ---- Q9: the bridge with the gap (host, synthetic frames) ----
+   {
+      const int N = 5;
+      Vector packed(cycle::FrameMap::kPerDOF * N);
+      for (int j = 0; j < N; j++)
+      {
+         const real_t th = 0.37 * j - 0.6, c = std::cos(th), s = std::sin(th);
+         real_t *f = packed.GetData() + cycle::FrameMap::kPerDOF * j;
+         f[0] = (j % 2 == 0) ? 1.0 : -1.0;                   // eps_f
+         f[1] = c; f[2] = s; f[3] = 0.0;                     // n_k
+         f[4] = 0.0; f[5] = 0.0; f[6] = 1.0;                 // t1_k
+         f[7] = s; f[8] = -c; f[9] = 0.0;                    // t2_k = n x t1
+      }
+      cycle::FrameMap f(packed);
+      Vector sk(2 * N), vk(2 * N), psi_qd(N), gap(N);
+      for (int j = 0; j < N; j++)
+      {
+         sk(2 * j) = 0.5 * j - 1.0;
+         sk(2 * j + 1) = 0.25 * j + 0.1;
+         vk(2 * j) = 1e-9 * (j + 1);
+         vk(2 * j + 1) = -2e-9 * j;
+         psi_qd(j) = 0.7;
+         gap(j) = (j % 2 == 1) ? 0.01 * (j + 1) : 0.0;      // 0 at "closed" DOFs
+      }
+      Vector d, V, psi, sk2, psi2, gap2;
+      cycle::bridge::ToNitsche(f, sk, vk, psi_qd, d, V, psi, &gap);
+      real_t e_norm = 0.0, e_vnorm = 0.0;
+      for (int j = 0; j < N; j++)
+      {
+         const real_t dn = f.Eps(j) * fault_frame::Dot(&d(3 * j), f.Nk(j));
+         const real_t vn = f.Eps(j) * fault_frame::Dot(&V(3 * j), f.Nk(j));
+         e_norm = std::max(e_norm, std::abs(dn - gap(j)));
+         e_vnorm = std::max(e_vnorm, std::abs(vn));
+      }
+      TEST_ASSERT(e_norm <= 1e-14, "Q9: d . n = g after ToNitsche with the gap ("
+                  << e_norm << " m)");
+      // the two tangential products round independently, so the normal dot
+      // is zero only to an ulp of |V| ~ 1e-9 m/s
+      TEST_ASSERT(e_vnorm <= 1e-23, "Q9: V keeps no normal part (" << e_vnorm
+                  << " m/s against 1e-23)");
+      cycle::bridge::ToQD(f, d, psi, sk2, psi2, &gap2);
+      real_t e_slip = 0.0, e_gap = 0.0;
+      for (int j = 0; j < N; j++)
+      {
+         e_slip = std::max(e_slip, std::abs(sk2(2 * j) - sk(2 * j)));
+         e_slip = std::max(e_slip, std::abs(sk2(2 * j + 1) - sk(2 * j + 1)));
+         e_gap = std::max(e_gap, std::abs(gap2(j) - gap(j)));
+      }
+      TEST_ASSERT(e_slip <= 1e-14, "Q9: the tangential pairs cross the bridge "
+                  "unchanged (" << e_slip << " m)");
+      TEST_ASSERT(e_gap <= 1e-14, "Q9: GapFromGlobal reads the gap back ("
+                  << e_gap << " m)");
+      Vector d0, V0, psi0;
+      cycle::bridge::ToNitsche(f, sk, vk, psi_qd, d0, V0, psi0);   // no gap
+      real_t e_zero = 0.0;
+      for (int j = 0; j < N; j++)
+      {
+         e_zero = std::max(e_zero, std::abs(fault_frame::Dot(&d0(3 * j), f.Nk(j))));
+      }
+      TEST_ASSERT(e_zero == 0.0, "Q9: without a gap d keeps no normal part ("
+                  << e_zero << ")");
+   }
+
+   // ---- Q10: checkpoint FD_CYCLE_V7 round trip ----
+   {
+      MPIContext mpi(MPI_COMM_WORLD);
+      const int n = 7 + g_rank;
+      cycle::CheckpointInfo w;
+      w.t = 1.25e9;
+      w.dt_next = 3.5;
+      w.step = 42;
+      w.commit = "contact-test";
+      w.ic = "scec_fd";
+      w.fault_digest = 1.0;
+      w.opening = true;
+      w.open.resize(n);
+      w.contact = true;
+      w.gap.SetSize(n);
+      for (int i = 0; i < n; i++)
+      {
+         w.open[i] = (i % 3 == 1) ? 1 : 0;
+         w.gap(i) = w.open[i] ? 1.0e-3 * (i + 1) + 1.0e-13 : 0.0;
+      }
+      cycle::CheckpointData d;
+      d.state.SetSize(3 * n);
+      d.state = 0.5;
+      d.displacement.SetSize(4);
+      d.displacement = 0.0;
+      d.traction.SetSize(2 * n);
+      d.traction = 1.0;
+      d.slip_rate.SetSize(2 * n);
+      d.slip_rate = 1e-9;
+      const std::string prefix = "test_fault_contact_qd_ckpt";
+      cycle::WriteCycleCheckpoint(prefix, w, d, mpi);
+      cycle::CheckpointInfo r;
+      cycle::CheckpointData e;
+      cycle::ReadCycleCheckpoint(prefix, "contact-test", false, r, e, mpi);
+      bool ok = r.opening && r.contact && r.open == w.open && r.gap.Size() == n;
+      for (int i = 0; ok && i < n; i++) { ok = (r.gap(i) == w.gap(i)); }
+      int all = ok ? 1 : 0;
+      MPI_Allreduce(MPI_IN_PLACE, &all, 1, MPI_INT, MPI_MIN, comm);
+      TEST_ASSERT(all == 1, "Q10: V7 flags and gap read back bit for bit");
+      std::remove(CheckpointFilename(prefix, mpi.Rank()).c_str());
+
+      w.contact = false;        // shear-free stays V6
+      w.gap.SetSize(0);
+      const std::string p6 = "test_fault_contact_qd_ckpt6";
+      cycle::WriteCycleCheckpoint(p6, w, d, mpi);
+      cycle::CheckpointInfo r6;
+      cycle::CheckpointData e6;
+      cycle::ReadCycleCheckpoint(p6, "contact-test", false, r6, e6, mpi);
+      int v6 = (r6.opening && !r6.contact && r6.gap.Size() == 0 && r6.open == w.open)
+               ? 1 : 0;
+      MPI_Allreduce(MPI_IN_PLACE, &v6, 1, MPI_INT, MPI_MIN, comm);
+      TEST_ASSERT(v6 == 1, "Q10: without contact the block stays V6 (no gap)");
+      std::remove(CheckpointFilename(p6, mpi.Rank()).c_str());
    }
 
    const real_t sigma_tol = 1000.0;   // the D-B7 default

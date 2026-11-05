@@ -122,33 +122,73 @@ public:
       }
    }
 
+   /// [cycle.opening] mode = "contact" (fault opening plan rev 1, Section 4):
+   /// the dynamic fault state carries the gap as its normal component,
+   /// g = d . n with n the oriented frame normal, and eps_f n_k = n to
+   /// rounding (DynPhase's NormalMismatch check).  AddGapToGlobal puts a QD
+   /// gap there, d += g (eps_f n_k), on top of ToGlobal's tangential part.
+   void AddGapToGlobal(const Vector &gap, Vector &d) const
+   {
+      const int N = Size();
+      MFEM_VERIFY(gap.Size() == N && d.Size() == 3 * N, "FrameMap::AddGapToGlobal: "
+                  << gap.Size() << " gaps and size " << d.Size() << " for " << N
+                  << " DOFs");
+      for (int j = 0; j < N; j++)
+      {
+         const real_t ge = gap(j) * Eps(j);
+         const real_t *nk = Nk(j);
+         for (int i = 0; i < 3; i++) { d(3 * j + i) += ge * nk[i]; }
+      }
+   }
+
+   /// The inverse read: g_j = d_j . n = eps_f d_j . n_k (ToKernel keeps only
+   /// the tangential pair, so the gap crosses the bridge through this).
+   void GapFromGlobal(const Vector &d, Vector &gap) const
+   {
+      const int N = Size();
+      MFEM_VERIFY(d.Size() == 3 * N, "FrameMap::GapFromGlobal: size " << d.Size()
+                  << " != 3 x " << N);
+      gap.SetSize(N);
+      for (int j = 0; j < N; j++)
+      {
+         gap(j) = Eps(j) * fault_frame::Dot(&d(3 * j), Nk(j));
+      }
+   }
+
 private:
    Vector f_;
 };
 
 /// Bridge::ToNitsche and Bridge::ToQD (plan 3.3 f) on plain vectors: the QD
 /// side as kernel pairs (slip, slip rate: 2 N) and psi (N), the Nitsche side
-/// as global three-vectors (3 N) and psi (N).
+/// as global three-vectors (3 N) and psi (N).  With [cycle.opening] mode =
+/// "contact" (fault opening plan rev 1, B4) the gap crosses too: `gap` into
+/// ToNitsche adds g to d's normal component (the QD gap is static, so V
+/// keeps none), and `gap` out of ToQD reads it back; null leaves both
+/// calls as before, byte for byte.
 namespace bridge
 {
 
 inline void ToNitsche(const FrameMap &f, const Vector &slip_k, const Vector &V_k,
-                      const Vector &psi_qd, Vector &d, Vector &V, Vector &psi)
+                      const Vector &psi_qd, Vector &d, Vector &V, Vector &psi,
+                      const Vector *gap = nullptr)
 {
    MFEM_VERIFY(psi_qd.Size() == f.Size(), "bridge::ToNitsche: " << psi_qd.Size()
                << " psi values for " << f.Size() << " DOFs");
    f.ToGlobal(slip_k, d);
    f.ToGlobal(V_k, V);
    psi = psi_qd;
+   if (gap) { f.AddGapToGlobal(*gap, d); }
 }
 
 inline void ToQD(const FrameMap &f, const Vector &d, const Vector &psi_dyn,
-                 Vector &slip_k, Vector &psi)
+                 Vector &slip_k, Vector &psi, Vector *gap = nullptr)
 {
    MFEM_VERIFY(psi_dyn.Size() == f.Size(), "bridge::ToQD: " << psi_dyn.Size()
                << " psi values for " << f.Size() << " DOFs");
    f.ToKernel(d, slip_k);
    psi = psi_dyn;
+   if (gap) { f.GapFromGlobal(d, *gap); }
 }
 
 } // namespace bridge

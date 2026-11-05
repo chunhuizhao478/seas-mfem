@@ -456,6 +456,31 @@ public:
       MFEM_VERIFY(open_, "QDPhase::SetOpenFlags: [cycle.opening] is off");
       open_->SetFlags(f);
    }
+   /// Contact: the gap per owned DOF [m] (0 at closed DOFs).
+   void Gap(Vector &g) const
+   {
+      MFEM_VERIFY(open_ && open_->Contact(), "QDPhase::Gap: mode contact only");
+      const std::vector<real_t> &gv = open_->Gap();
+      g.SetSize(static_cast<int>(gv.size()));
+      for (size_t j = 0; j < gv.size(); j++) { g(static_cast<int>(j)) = gv[j]; }
+   }
+   /// Contact: replace the gap (a restart: after SetOpenFlags, before the
+   /// first stage; g != 0 only at open DOFs).  Collective.
+   void SetGap(const Vector &g)
+   {
+      MFEM_VERIFY(open_ && open_->Contact(), "QDPhase::SetGap: mode contact only");
+      std::vector<real_t> gv(static_cast<size_t>(g.Size()));
+      for (int j = 0; j < g.Size(); j++) { gv[static_cast<size_t>(j)] = g(j); }
+      open_->SetGap(gv);
+   }
+   /// Contact: the largest gap over all ranks [m].  Collective.
+   real_t MaxGapGlobal() const
+   {
+      MFEM_VERIFY(open_ && open_->Contact(), "QDPhase::MaxGapGlobal: mode contact only");
+      real_t m = 0.0;
+      for (real_t g : open_->Gap()) { m = std::max(m, g); }
+      return mpi_.GlobalMax(m);
+   }
    /// [cycle.opening]: one Solve(t) and the rule at (t, State()) until
    /// nothing flips (the start of a run).  Returns the DOFs that flipped.
    /// Collective.
@@ -888,9 +913,12 @@ public:
 
    /// Plan 6.3, the switch back: SetFaultState, Solve(t), and a new TS at t
    /// (first step dt0, step counter `step`).  Returns the global max V of
-   /// the solve.  Collective.
+   /// the solve.  Contact (B4): `gap` is the dynamic regime's gap per owned
+   /// DOF (g = d . n through the bridge); the carried set starts the first
+   /// solve at it, and the settle's rule takes over.  Collective.
    real_t Reenter(const Vector &slip_k, const Vector &psi, real_t t, int step, real_t dt0,
-                  const std::vector<char> *open_flags = nullptr)
+                  const std::vector<char> *open_flags = nullptr,
+                  const Vector *gap = nullptr)
    {
       SetFaultState(slip_k, psi);
       if (relax_) { relax_->Restart(t); }   // r kept from the switch; the clock at t
@@ -901,6 +929,27 @@ public:
          MFEM_VERIFY(open_flags, "QDPhase::Reenter: [cycle.opening] needs the dynamic "
                      "regime's open flags");
          open_->SetFlags(*open_flags);
+         if (open_->Contact())
+         {
+            MFEM_VERIFY(gap, "QDPhase::Reenter: mode contact needs the dynamic "
+                        "regime's gap");
+            // CloseDOF's projection returns a closing DOF's gap to zero only
+            // to rounding, and the bridge's dot products add their own, so
+            // residue far below any physical opening is dropped; more than
+            // that at a closed DOF (or a negative gap) is a real mismatch
+            // between the flags and the state, and OpenSetQD::SetGap aborts.
+            const real_t residue = 1e-9;   // m
+            Vector gk(*gap);
+            for (int j = 0; j < gk.Size(); j++)
+            {
+               if (std::abs(gk(j)) <= residue &&
+                   (!(*open_flags)[static_cast<size_t>(j)] || gk(j) < 0.0))
+               {
+                  gk(j) = 0.0;
+               }
+            }
+            SetGap(gk);
+         }
       }
       real_t Vmax = Solve(t);
       if (open_)
@@ -1143,8 +1192,15 @@ private:
    /// [cycle.opening]: the open flags into the station fields (empty when off).
    void OpenToStation_(StationFields &f) const
    {
-      if (!open_) { f.open.SetSize(0); return; }
+      if (!open_) { f.open.SetSize(0); f.gap.SetSize(0); return; }
       f.open = open_->Mask();
+      if (open_->Contact())
+      {
+         const std::vector<real_t> &gv = open_->Gap();
+         f.gap.SetSize(static_cast<int>(gv.size()));
+         for (size_t j = 0; j < gv.size(); j++) { f.gap(static_cast<int>(j)) = gv[j]; }
+      }
+      else { f.gap.SetSize(0); }
    }
 
    void BuildTable_()

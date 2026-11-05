@@ -299,6 +299,9 @@ struct StationFields
    Vector sigma_red;
    /// [cycle.opening]: 1 at an open DOF, 0 closed; empty when off
    Vector open;
+   /// [cycle.opening] mode = "contact": the gap g per DOF [m] (0 at closed
+   /// DOFs); empty otherwise
+   Vector gap;
 };
 
 /// The regime's displacement u and velocity v, vectors of the QD regime's

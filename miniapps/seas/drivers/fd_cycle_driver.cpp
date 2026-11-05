@@ -227,11 +227,15 @@ void WriteHandbackTable(const MPIContext &mpi, const cycle::CycleConfig &cfg,
       return strike ? -(f.tau_a_strike(j) + f.tau_b_strike(j) + f.eta * f.V_strike(j))
                     : -(f.tau_a_dip(j) + f.tau_b_dip(j) + f.eta * f.V_dip(j));
    };
-   // [cycle.opening]: two more columns, the open flags of both regimes
+   // [cycle.opening]: two more columns, the open flags of both regimes; mode
+   // contact (B4): two more again, the gap of both regimes
    const bool opening = cfg.opening.On();
+   const bool contact = cfg.opening.Contact();
    MFEM_VERIFY(!opening || (fd.open.Size() == N && fq.open.Size() == N),
                "handback table: [cycle.opening] without open flags");
-   const int nc = opening ? 17 : 15;
+   MFEM_VERIFY(!contact || (fd.gap.Size() == N && fq.gap.Size() == N),
+               "handback table: mode contact without the gap");
+   const int nc = contact ? 19 : opening ? 17 : 15;
    std::vector<double> rows(static_cast<size_t>(nc) * N);
    for (int j = 0; j < N; j++)
    {
@@ -255,6 +259,11 @@ void WriteHandbackTable(const MPIContext &mpi, const cycle::CycleConfig &cfg,
       {
          r[15] = fd.open(j);
          r[16] = fq.open(j);
+      }
+      if (contact)
+      {
+         r[17] = fd.gap(j);
+         r[18] = fq.gap(j);
       }
    }
    const int np = mpi.Size(), n_loc = nc * N;
@@ -288,7 +297,9 @@ void WriteHandbackTable(const MPIContext &mpi, const cycle::CycleConfig &cfg,
      "slip_strike(m), slip_dip(m), V_strike_dyn(m/s), V_strike_qd(m/s), V_dip_dyn(m/s), "
      "V_dip_qd(m/s), tau_strike_dyn(MPa), tau_strike_qd(MPa), tau_dip_dyn(MPa), "
      "tau_dip_qd(MPa), sigma_n_dyn(MPa), sigma_n_qd(MPa)"
-     << (opening ? ", open_dyn, open_qd ([cycle.opening]: 1 open, shear-free)" : "") << "\n"
+     << (contact ? ", open_dyn, open_qd ([cycle.opening]: 1 open, contact)"
+         : opening ? ", open_dyn, open_qd ([cycle.opening]: 1 open, shear-free)" : "")
+     << (contact ? ", gap_dyn(m), gap_qd(m)" : "") << "\n"
      << std::scientific << std::uppercase << std::setprecision(12);
    const size_t n = all.size() / nc;
    size_t jt = 0, js = 0, jv = 0;
@@ -468,21 +479,33 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
 
    // ---- hand-over (plan 6.2): U = u_s, U' = 0, (d, V, psi), sigma* ----
    {
-      Vector sk, psi_qd, sn, d, V, psi;
+      Vector sk, psi_qd, sn, d, V, psi, gk;
       qd.Slip(sk);
       qd.Psi(psi_qd);
       qd.SigmaN(sn);
-      cycle::bridge::ToNitsche(dyn.Frames(), sk, qd.SlipRate(), psi_qd, d, V, psi);
+      if (cfg.opening.Contact()) { qd.Gap(gk); }   // contact (B4): g = d . n
+      cycle::bridge::ToNitsche(dyn.Frames(), sk, qd.SlipRate(), psi_qd, d, V, psi,
+                               cfg.opening.Contact() ? &gk : nullptr);
       dyn.Enter(qd.Displacement(), d, V, psi, sn, t);
       if (cfg.opening.On()) { dyn.SetOpenFlags(qd.OpenFlags()); }   // [cycle.opening]
    }
    if (cfg.opening.On())
    {
       const int n_open = qd.Opening()->NumOpenGlobal();
+      const real_t gmax = cfg.opening.Contact() ? qd.MaxGapGlobal() : 0.0;   // collective
       if (root)
       {
-         std::cout << "  [cycle.opening] " << n_open << " open DOFs at the switch to the "
-                   << "dynamic regime (shear-free, left out of max V)\n";
+         if (cfg.opening.Contact())
+         {
+            std::cout << std::setprecision(6) << "  [cycle.opening] " << n_open
+                      << " open DOFs at the switch to the dynamic regime (contact, left "
+                      << "out of max V; largest gap " << gmax << " m)\n";
+         }
+         else
+         {
+            std::cout << "  [cycle.opening] " << n_open << " open DOFs at the switch to the "
+                      << "dynamic regime (shear-free, left out of max V)\n";
+         }
       }
    }
    ctl.EnterDynamic(t);
@@ -605,6 +628,7 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
    // The deck pair's switch state (plan 6.3 hands over slip and psi only).
    Vector snap_sk, snap_psi;
    std::vector<char> snap_open;   // [cycle.opening]: the open flags there
+   Vector snap_gap;               // mode contact: the gap there (g = d . n)
    real_t snap_Vmax = 0.0;
    cycle::StationFields snap_fd;   // [cycle.output].handback_table
 
@@ -753,7 +777,8 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
          const bool to_qd = !ctl.LastPhase();
          verdict = cycle::DynVerdict::EndOfPhase;
          finish_phase(forced ? "end_phase_after" : "end_of_phase", to_qd);
-         cycle::bridge::ToQD(dyn.Frames(), dyn.Slip(), dyn.Psi(), snap_sk, snap_psi);
+         cycle::bridge::ToQD(dyn.Frames(), dyn.Slip(), dyn.Psi(), snap_sk, snap_psi,
+                             cfg.opening.Contact() ? &snap_gap : nullptr);
          if (cfg.opening.On()) { snap_open = dyn.OpenFlags(); }
          if (cfg.output.handback_table && to_qd) { dyn.FillStationFields(snap_fd); }
          snap_Vmax = Vmax;
@@ -827,9 +852,11 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
       MPI_Allreduce(MPI_IN_PLACE, &open_dyn, 1, MPI_LONG, MPI_SUM, mpi.GetComm());
    }
    const real_t Vqd = qd.Reenter(snap_sk, snap_psi, end.t, step0, cfg.dt_init,
-                                 cfg.opening.On() ? &snap_open : nullptr);
-   real_t open_res = 0.0;
+                                 cfg.opening.On() ? &snap_open : nullptr,
+                                 cfg.opening.Contact() ? &snap_gap : nullptr);
+   real_t open_res = 0.0, gmax_qd = 0.0;
    if (cfg.opening.On()) { open_res = qd.OpenShearResidual(); }   // collective
+   if (cfg.opening.Contact()) { gmax_qd = qd.MaxGapGlobal(); }    // collective
    if (root)
    {
       std::cout << std::setprecision(6) << "\n  back to QD at t = " << end.t
@@ -842,6 +869,11 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
                    << "switch, " << qd.Opening()->NumOpenGlobal() << " after the QD settle ("
                    << qd.ReenterFlips() << " flips); max |tau| at open DOFs "
                    << open_res / 1e6 << " MPa\n";
+         if (cfg.opening.Contact())
+         {
+            std::cout << "  [cycle.opening] largest gap after the settle " << gmax_qd
+                      << " m\n";
+         }
       }
       std::cout << std::flush;
    }
@@ -1211,6 +1243,13 @@ int main(int argc, char *argv[])
                         << qd.Table().Size() << " owned fault DOFs");
             qd.SetOpenFlags(info.open);
          }
+         MFEM_VERIFY(info.contact == cfg.opening.Contact(), "restart: the checkpoint "
+                     "was written with [cycle.opening] mode "
+                     << (info.contact ? "\"contact\"" : "without the gap block")
+                     << ", the deck has mode "
+                     << (cfg.opening.Contact() ? "\"contact\"" : "\""
+                         + cfg.opening.mode + "\""));
+         if (info.contact) { qd.SetGap(info.gap); }   // after the flags (B4)
          qd.RestoreTS(info.step);
          MFEM_VERIFY(info.bench == cfg.bench.enabled, "restart: the checkpoint was written "
                      "with [cycle.benchmark] " << (info.bench ? "on" : "off") << ", the deck "
@@ -1327,6 +1366,11 @@ int main(int argc, char *argv[])
          {
             info.opening = true;
             info.open = qd.OpenFlags();
+            if (cfg.opening.Contact())   // V7 (B4): the gap rides along
+            {
+               info.contact = true;
+               qd.Gap(info.gap);
+            }
          }
          cycle::CheckpointData d;
          d.state = qd.State();

@@ -793,6 +793,9 @@ public:
          for (int j = 0; j < N; j++) { f.open(j) = W_->OpenFlags()[j] ? 1.0 : 0.0; }
       }
       else { f.open.SetSize(0); }
+      // contact (B4): the gap is the fault state's normal component
+      if (W_->ContactOpening()) { frames_.GapFromGlobal(W_->Slip(), f.gap); }
+      else { f.gap.SetSize(0); }
    }
 
    /// Plan R8: max over local fault DOFs of |eps_f t_k (this copy) - eps_f

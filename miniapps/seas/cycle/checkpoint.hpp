@@ -27,7 +27,11 @@
 //      then "relax_on 0|1" and the V5 relaxation record when 1, then the
 //      open flags per owned fault DOF ("opening n" and n values 0/1;
 //      cycle/fault_opening.hpp; Chunhui Zhao, 2026-11-04).  Without it the
-//      block stays V4 or V5, byte for byte as before.
+//      block stays V4 or V5, byte for byte as before.  With [cycle.opening]
+//      mode = "contact" the block is FD_CYCLE_V7: V6, then the gap per owned
+//      fault DOF ("gap n" and n values [m], 0 at closed DOFs; fault opening
+//      plan rev 1, B4; Chunhui Zhao, 2026-11-05).  Mode "shear_free" stays
+//      V6, byte for byte as before.
 // Blocks 1 and 2 are written by the existing functions unchanged, so the
 // readers of seas_bp5_full can read the first two blocks.
 //
@@ -48,6 +52,7 @@
 #include "../io/petsc_ts_checkpoint.hpp"
 #include "../common/mpi_context.hpp"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -88,6 +93,9 @@ struct CheckpointInfo
    /// V6: [cycle.opening] was on; then the open flags per owned fault DOF.
    bool opening = false;
    std::vector<char> open;
+   /// V7: mode = "contact"; then the gap per owned fault DOF [m].
+   bool contact = false;
+   Vector gap;
 };
 
 /// A number that changes when this rank's owned fault DOFs (positions, 3 N)
@@ -127,7 +135,10 @@ inline void WriteCycleCheckpoint(const std::string &prefix, const CheckpointInfo
       MFEM_VERIFY(out.good(), "WriteCycleCheckpoint: cannot append to " << fn);
       const FdCycleOutput::State &o = info.out;
       out << std::setprecision(17) << std::scientific;
-      out << (info.opening ? "FD_CYCLE_V6\n" : info.relax ? "FD_CYCLE_V5\n" : "FD_CYCLE_V4\n");
+      MFEM_VERIFY(!info.contact || info.opening,
+                  "WriteCycleCheckpoint: contact without opening");
+      out << (info.contact ? "FD_CYCLE_V7\n" : info.opening ? "FD_CYCLE_V6\n"
+              : info.relax ? "FD_CYCLE_V5\n" : "FD_CYCLE_V4\n");
       out << "commit " << info.commit << "\n";
       out << "ic " << info.ic << "\n";
       out << "regime " << info.regime << "\n";
@@ -193,6 +204,18 @@ inline void WriteCycleCheckpoint(const std::string &prefix, const CheckpointInfo
          }
          out << "\n";
       }
+      if (info.contact)
+      {
+         MFEM_VERIFY(static_cast<size_t>(info.gap.Size()) == info.open.size(),
+                     "WriteCycleCheckpoint: " << info.gap.Size() << " gaps for "
+                     << info.open.size() << " open flags");
+         out << "gap " << info.gap.Size() << "\n";
+         for (int i = 0; i < info.gap.Size(); i++)
+         {
+            out << (i ? " " : "") << info.gap(i);
+         }
+         out << "\n";
+      }
       out << "FD_CYCLE_END\n";
       out.close();
       MFEM_VERIFY(!out.fail(), "WriteCycleCheckpoint: write failed for " << fn);
@@ -240,8 +263,9 @@ inline void ReadCycleCheckpoint(const std::string &prefix, const std::string &co
       if (tok == "FD_CYCLE_V4") { version = 4; break; }
       if (tok == "FD_CYCLE_V5") { version = 5; break; }
       if (tok == "FD_CYCLE_V6") { version = 6; break; }
+      if (tok == "FD_CYCLE_V7") { version = 7; break; }
    }
-   MFEM_VERIFY(version > 0, "ReadCycleCheckpoint: " << fn << " has no FD_CYCLE_V1-V6 "
+   MFEM_VERIFY(version > 0, "ReadCycleCheckpoint: " << fn << " has no FD_CYCLE_V1-V7 "
                "block (not written by seas_fd_cycle_driver)");
    auto tag = [&](const char *want)
    {
@@ -361,6 +385,29 @@ inline void ReadCycleCheckpoint(const std::string &prefix, const std::string &co
          in >> v;
          MFEM_VERIFY(v == 0 || v == 1, "ReadCycleCheckpoint: " << fn << ": open flag " << v);
          info.open[static_cast<size_t>(i)] = static_cast<char>(v);
+      }
+   }
+   info.contact = false;
+   info.gap.SetSize(0);
+   if (version >= 7)
+   {
+      long n = -1;
+      tag("gap"); in >> n;
+      MFEM_VERIFY(n >= 0 && static_cast<size_t>(n) == info.open.size(),
+                  "ReadCycleCheckpoint: " << fn << ": " << n << " gaps for "
+                  << info.open.size() << " open flags");
+      info.contact = true;
+      info.gap.SetSize(static_cast<int>(n));
+      for (long i = 0; i < n; i++)
+      {
+         in >> info.gap(static_cast<int>(i));
+         MFEM_VERIFY(std::isfinite(info.gap(static_cast<int>(i))) &&
+                     (info.gap(static_cast<int>(i)) == 0.0 ||
+                      info.open[static_cast<size_t>(i)]),
+                     "ReadCycleCheckpoint: " << fn << ": gap "
+                     << info.gap(static_cast<int>(i)) << " at "
+                     << (info.open[static_cast<size_t>(i)] ? "open" : "closed")
+                     << " DOF " << i);
       }
    }
    MFEM_VERIFY(!in.fail(), "ReadCycleCheckpoint: " << fn << ": cannot read the cycle block");
