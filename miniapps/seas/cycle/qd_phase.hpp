@@ -589,7 +589,28 @@ public:
       if (matrix_)
       {
          Vector T(V.Size());
-         dom_->SolveStage(1.0, V, *vel_gf_, T, nullptr);
+         if (open_ && open_->Contact())
+         {
+            // contact (B6): the stage operators take 3 components per DOF,
+            // so the tangential rates ride with a zero third component.  The
+            // open set's gap rate is not tracked, so its du/dt share is left
+            // out of this diagnostic velocity.
+            const int n = V.Size() / 2;
+            Vector V3(3 * n);
+            V.HostRead();
+            V3.HostWrite();
+            for (int j = 0; j < n; j++)
+            {
+               V3(3 * j) = V(2 * j);
+               V3(3 * j + 1) = V(2 * j + 1);
+               V3(3 * j + 2) = 0.0;
+            }
+            dom_->SolveStage(1.0, V3, *vel_gf_, T, nullptr);
+         }
+         else
+         {
+            dom_->SolveStage(1.0, V, *vel_gf_, T, nullptr);
+         }
       }
       else
       {
