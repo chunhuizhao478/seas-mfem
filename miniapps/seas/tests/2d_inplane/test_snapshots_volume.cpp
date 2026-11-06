@@ -37,6 +37,11 @@
 //                box_min .. box_max: the elements whose centroid is in the
 //                box, counted independently from the mesh vertices; every
 //                element block of the file has its centroid in the box.
+//   surface_unset_z_p1, surface_unset_z_p2
+//                the free-surface plane test on a 2-D ParMesh with every
+//                vertex's (never set) third coordinate poisoned with NaN:
+//                still the whole bottom edge, the same points as with z = 0
+//                (the Vista build 1125339 restart abort, 146 of 152 points).
 //
 // Modes for the make target's refusals: --empty-box (a box that holds no
 // element centroid), --quads (a quadrilateral mesh), --load-deck d.toml
@@ -60,6 +65,7 @@
 #include <cstring>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -518,6 +524,75 @@ void TestBox(MPI_Comm comm, int dim)
    MPI_Barrier(comm);
 }
 
+/// The surface plane test on a 2-D ParMesh, whose vertices never get their
+/// third coordinate (ParMesh::BuildLocalVertices copies SpaceDimension of
+/// them).  Every vertex's z is poisoned with NaN, as heap garbage did on
+/// Vista (build 1125339: 146 of 152 points on a restart): the writer must
+/// still select the whole bottom edge, the same points as with z = 0.
+void TestSurfaceUnsetZ(MPI_Comm comm, int p)
+{
+   const std::string name = "surface_unset_z_p" + std::to_string(p);
+   if (g_rank == 0) { std::cout << "\n=== " << name << " ===\n"; }
+   const std::string dir = Tmp("seas_test_snapshots_volume");
+   if (g_rank == 0) { std::filesystem::create_directories(dir); }
+   MPI_Barrier(comm);
+   cycle::CycleConfig cfg;
+   cfg.shared.mesh.order = p;
+   cfg.output.dir = dir;
+   cfg.snapshots.surface.enabled = true;
+   cfg.snapshots.surface.dt_qd = 10.0;
+   cfg.snapshots.surface.dt_dyn = 0.1;
+   cfg.snapshots.surface_attrs = {1};                 // MakeCartesian2D: the bottom, y = 0
+   cfg.snapshots.surface_normal = {{0.0, 1.0, 0.0}};  // a 2-D deck's [0, 1], padded
+   cfg.snapshots.surface_offset = 0.0;
+   cycle::FaultDOFTable table;
+   long long n_clean = -1, n_nan = -1;
+   std::vector<double> pts_clean, pts_nan;
+   auto build = [&](bool poison, long long &npts, std::vector<double> &pts)
+   {
+      Grid g = MakeGrid(comm, 2, p);
+      if (poison)
+      {
+         for (int i = 0; i < g.pmesh->GetNV(); i++)
+         {
+            g.pmesh->GetVertex(i)[2] = std::numeric_limits<real_t>::quiet_NaN();
+         }
+      }
+      cfg.output.prefix = name + (poison ? "_nan" : "_clean");
+      {
+         cycle::Snapshots snaps(cfg, comm, *g.pmesh, *g.fes, table, 0, "test", nullptr);
+         npts = snaps.SurfacePoints();
+      }
+      if (g_rank == 0)
+      {
+         const std::string path = dir + "/" + cfg.output.prefix + "_surface_snapshots.vtkhdf";
+         const hid_t f = H5Fopen(path.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
+         pts = ReadD(f, "/VTKHDF/Points");
+         H5Fclose(f);
+         std::filesystem::remove(path);
+      }
+      MPI_Barrier(comm);
+   };
+   build(false, n_clean, pts_clean);
+   build(true, n_nan, pts_nan);
+   const long long want = 4 * (p + 1);   // 4 bottom segments, p + 1 points each
+   Check(n_clean == want, name + ": z = 0, the whole bottom edge",
+         std::to_string(n_clean) + " points, expected " + std::to_string(want));
+   Check(n_nan == want, name + ": z = NaN, still the whole bottom edge",
+         std::to_string(n_nan) + " points, expected " + std::to_string(want));
+   if (g_rank == 0)
+   {
+      bool on = !pts_nan.empty();
+      for (size_t j = 0; j < pts_nan.size() / 3; j++)
+      {
+         on = on && pts_nan[3 * j + 1] == 0.0 && pts_nan[3 * j + 2] == 0.0;
+      }
+      Check(pts_nan == pts_clean && on, name + ": the same points either way, all at "
+            "y = 0 and z = 0");
+   }
+   MPI_Barrier(comm);
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -576,6 +651,7 @@ int main(int argc, char *argv[])
    }
    TestBox(MPI_COMM_WORLD, 2);
    TestBox(MPI_COMM_WORLD, 3);
+   for (int p : {1, 2}) { TestSurfaceUnsetZ(MPI_COMM_WORLD, p); }
    if (g_rank == 0)
    {
       std::cout << "\ntest_snapshots_volume: " << (g_failures ? "FAILED" : "PASSED") << " ("

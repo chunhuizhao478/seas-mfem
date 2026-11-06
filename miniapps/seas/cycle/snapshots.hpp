@@ -827,6 +827,11 @@ private:
       const Geometry::Type fgeom = (dim_ == 3) ? Geometry::TRIANGLE : Geometry::SEGMENT;
       const int per = dim_;   // points per cell: triangle 3, line 2
       const std::array<real_t, 3> &n = cfg_.surface_normal;
+      // Only the mesh's own coordinates: a 2-D ParMesh never sets a vertex's
+      // third coordinate (ParMesh::BuildLocalVertices copies SpaceDimension
+      // of them into uninitialised storage), and a NaN there made 0 * z NaN
+      // and dropped the face at random.
+      const int sdim = pmesh.SpaceDimension();
       std::vector<double> xyz;
       std::vector<long long> conn;
       long long nloc_cells = 0;
@@ -842,8 +847,9 @@ private:
          for (int k = 0; k < v.Size() && on; k++)
          {
             const real_t *p = pmesh.GetVertex(v[k]);
-            on = std::abs(n[0] * p[0] + n[1] * p[1] + n[2] * p[2] - cfg_.surface_offset)
-                 <= cfg_.surface_tol;
+            real_t s = 0.0;
+            for (int d = 0; d < sdim; d++) { s += n[d] * p[d]; }
+            on = std::abs(s - cfg_.surface_offset) <= cfg_.surface_tol;
          }
          if (!on) { continue; }
          FaceElementTransformations *T = pmesh.GetBdrFaceTransformations(be);

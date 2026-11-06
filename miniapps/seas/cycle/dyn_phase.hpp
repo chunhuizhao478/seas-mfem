@@ -595,8 +595,10 @@ public:
          Array<int> v;
          m.GetElementVertices(e, v);
          c[0] = c[1] = c[2] = 0.0;
+         // SpaceDimension coordinates only: a 2-D ParMesh's third one is unset
          for (int k = 0; k < v.Size(); k++)
-            for (int d = 0; d < 3; d++) { c[d] += m.GetVertex(v[k])[d] / v.Size(); }
+            for (int d = 0; d < m.SpaceDimension(); d++)
+            { c[d] += m.GetVertex(v[k])[d] / v.Size(); }
       };
       L.cl.clear();
       for (int i = 0; i < smesh.GetNE(); i++)
