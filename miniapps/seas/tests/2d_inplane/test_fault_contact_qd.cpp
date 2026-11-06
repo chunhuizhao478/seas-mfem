@@ -41,7 +41,9 @@
 //       frames (eps = +-1, rotated triads) ToNitsche with a gap puts g on
 //       d's normal component (d . eps n_k = g), the tangential pairs read
 //       back through ToQD unchanged, GapFromGlobal returns the gap, and V
-//       keeps no normal part.
+//       keeps no normal part; without a gap d is ToGlobal's alone, bit for
+//       bit, and its normal part is round-off (an ulp, not exact zero: an
+//       FMA-contracting compiler rounds the dot differently).
 //   Q10 checkpoint FD_CYCLE_V7 (B4, cycle/checkpoint.hpp): the open flags
 //       and the gap round-trip bit for bit; a shear-free info still writes
 //       V6.
@@ -292,15 +294,23 @@ int main(int argc, char *argv[])
                   "unchanged (" << e_slip << " m)");
       TEST_ASSERT(e_gap <= 1e-14, "Q9: GapFromGlobal reads the gap back ("
                   << e_gap << " m)");
-      Vector d0, V0, psi0;
+      Vector d0, V0, psi0, d_ref;
       cycle::bridge::ToNitsche(f, sk, vk, psi_qd, d0, V0, psi0);   // no gap
+      f.ToGlobal(sk, d_ref);
+      bool same = d0.Size() == d_ref.Size();
+      for (int i = 0; same && i < d0.Size(); i++) { same = d0(i) == d_ref(i); }
+      TEST_ASSERT(same, "Q9: without a gap d is the tangential map alone, bit "
+                  "for bit");
       real_t e_zero = 0.0;
       for (int j = 0; j < N; j++)
       {
          e_zero = std::max(e_zero, std::abs(fault_frame::Dot(&d0(3 * j), f.Nk(j))));
       }
-      TEST_ASSERT(e_zero == 0.0, "Q9: without a gap d keeps no normal part ("
-                  << e_zero << ")");
+      // d = a t1 + b t2 rounds its products on their own, and a compiler that
+      // contracts the dot into an FMA (Apple clang on arm64 does by default)
+      // rounds one of them less, so d . n is zero only to an ulp of |d| ~ 1 m
+      TEST_ASSERT(e_zero <= 1e-15, "Q9: without a gap d keeps no normal part ("
+                  << e_zero << " m against 1e-15)");
    }
 
    // ---- Q10: checkpoint FD_CYCLE_V7 round trip ----
