@@ -559,10 +559,21 @@ public:
    /// What the last evaluation left, for the bridge (owned fault DOFs; slip
    /// and slip rate as kernel (dip, strike) pairs, 2 N values).  The
    /// displacement is solved here when the Green's function left it stale
-   /// (collective then; every rank must ask).
+   /// (collective then; every rank must ask).  Contact solves on every call,
+   /// with the gap as the third slip component (B5): the 2 N slip must not
+   /// meet the widened stage operators, and the gap's elastic field belongs
+   /// in the volume solve.
    const Vector &Displacement() const
    {
-      op_->RefreshDisplacement();
+      if (open_ && open_->Contact())
+      {
+         Gap(gap_refresh_);
+         op_->RefreshDisplacement(gap_refresh_);
+      }
+      else
+      {
+         op_->RefreshDisplacement();
+      }
       return op_->GetDisplacement();
    }
    bool GreenActive() const { return op_->QDGreenActive(); }
@@ -1495,6 +1506,7 @@ private:
    Vector sigma0_;   ///< sigma0 per owned fault DOF (Setup), for SigmaN
    std::unique_ptr<NormalStressRelaxation> relax_;   ///< [cycle.relaxation] or null
    std::unique_ptr<OpenSetQD> open_;                ///< [cycle.opening] or null
+   mutable Vector gap_refresh_;                     ///< Displacement(), contact
    long reenter_flips_ = 0;
    real_t eta_ = 0.0;
    bool matrix_ = false;

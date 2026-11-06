@@ -1610,11 +1610,27 @@ private:
             ? std::hypot(fault_frame::Dot(Vn, dv), fault_frame::Dot(Vn, sv))
             : std::sqrt(Vn[0] * Vn[0] + Vn[1] * Vn[1] + Vn[2] * Vn[2]);
          // C-07 anti-parallel: V . X_tan < 0 wherever the slip rate > 0.
+         // Contact (B5): the gap rate rides along n and the stored frame is
+         // orthogonal to rounding only, so the tangential dots carry a leak
+         // of order eps |V|, which outweighs V_tan at a locked point closing
+         // a residual gap (measured: |V_tan| ~ 1e-29 under a 1e-13 m/s gap
+         // rate).  The allowance sits at that floor; a wrong direction at a
+         // real slip rate is larger by |V_tan| / (eps |V|).
          const real_t VX = X[0] * fault_frame::Dot(Vn, dv) + X[1] * fault_frame::Dot(Vn, sv);
-         MFEM_VERIFY(Vabs == 0.0 || VX < 0.0,
+         const real_t V3 = contact_
+            ? std::sqrt(Vn[0] * Vn[0] + Vn[1] * Vn[1] + Vn[2] * Vn[2]) : Vabs;
+         const real_t vx_allow = 8.0 * std::numeric_limits<real_t>::epsilon()
+                                 * std::hypot(X[0], X[1]) * V3;
+         MFEM_VERIFY(Vabs == 0.0 || VX < vx_allow,
                      "NitscheWaveOperator: slip rate not anti-parallel to the "
                      "shear traction on rank " << Mpi::WorldRank() << ", owned "
-                     "fault DOF " << j << ", step " << steps_ << ": V.X = " << VX);
+                     "fault DOF " << j << ", step " << steps_ << ": V.X = " << VX
+                     << " (X = " << X[0] << ", " << X[1] << "; V.dv = "
+                     << fault_frame::Dot(Vn, dv) << ", V.sv = "
+                     << fault_frame::Dot(Vn, sv) << ", V.n = "
+                     << fault_frame::Dot(Vn, &frame_own_(9 * j))
+                     << ", gamma = " << ClosureGamma(j) << ", Vabs = " << Vabs
+                     << ", open = " << (is_open ? 1 : 0) << ")");
          if (nsm_)
          {
             // the shear traction the law balanced (the station traction) and |V^{n+1}|

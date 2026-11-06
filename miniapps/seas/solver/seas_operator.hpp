@@ -117,6 +117,38 @@ public:
       u_stale_ = false;
    }
 
+   /// @brief Contact ([cycle.opening] mode = "contact", fault opening B5):
+   /// RefreshDisplacement() with the opening as the third kernel slip
+   /// component, so the slip matches the widened stage operators and the
+   /// displacement carries the gap's elastic field.  Always re-solves: the
+   /// open set moves the gap without a stage.  @a gap is the kernel opening
+   /// per owned fault DOF [m].  Collective.
+   void RefreshDisplacement(const Vector &gap) const
+   {
+      if (!qd_green_) { return; }
+      const int nc = domain_->NumSlipComponents();
+      const int n = domain_->GetNumOwnedFaultDOFs();
+      MFEM_VERIFY(gap.Size() == n && slip_.Size() == nc * n,
+                  "RefreshDisplacement(gap): gap size " << gap.Size()
+                  << " and slip size " << slip_.Size() << " against " << n
+                  << " owned fault DOFs x " << nc << " slip components");
+      Vector slip3((nc + 1) * n);
+      slip_.HostRead();
+      gap.HostRead();
+      slip3.HostWrite();
+      for (int j = 0; j < n; j++)
+      {
+         for (int c = 0; c < nc; c++)
+         {
+            slip3((nc + 1) * j + c) = slip_(nc * j + c);
+         }
+         slip3((nc + 1) * j + nc) = gap(j);
+      }
+      domain_->SolveStage(green_last_t_, slip3, *u_gf_, green_T_,
+                          qd_matrix_normal_ ? &green_Tn_ : nullptr);
+      u_stale_ = false;
+   }
+
    /// @brief Whether stages run through the Green's function (--qd-green).
    bool QDGreenActive() const { return qd_green_; }
 

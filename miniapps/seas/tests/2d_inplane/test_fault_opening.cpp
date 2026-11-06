@@ -35,6 +35,24 @@
 //       (the guard's) is the closed DOFs' max.
 //   C1  checkpoint V6 round trip: the open flags, with and without the
 //       relaxation record.
+//
+// Version B, mode = "contact" (fault opening plan rev 1, Section 10; B5):
+//   T1c static cracks through the contact solve (D0): the whole fault
+//       forced open (no settle, no friction; the solve is linear), both
+//       tractions vanish there, the slip matches plane-strain mode II for
+//       tau_inf and the gap mode I for sigma_inf = -sigma_0 (the same
+//       C = 2 (1 - nu) / mu) to 3% at |x| <= 0.8 a; the negative g is the
+//       interpenetration the rule would close (the admissible path is T4c
+//       and test_fault_contact_qd), but no admissible uniform load exists
+//       on this kernel, whose sigma_0 is one positive scalar.
+//   T4c the switch with g != 0 (D9f floor deck, taper on and off): the T2
+//       slip opens the arc with real gaps; d . n = g across the hand-over;
+//       the dynamic steps keep shear and sigma zero at open DOFs, g >= 0,
+//       psi frozen, max V over closed; the switch back carries the dynamic
+//       gap into the re-entry settle and the guard; taper off adds the
+//       restart leg, a QD run repeating bit for bit from a (state, flags,
+//       g) snapshot (TS stepping on the taper is B6's Mac measurement,
+//       D-B2).
 // Refusals (--refuse n, each must abort with its message; the deck is D0
 // with a [cycle.opening] section appended, written to
 // test_fault_opening_refuse.toml, which --clean deletes): 1 mode "contact"
@@ -112,15 +130,25 @@ struct Stack
    cycle::FaultParams par;
    cycle::Prestress pre;
 
+   /// `contact` (version B): mode = "contact" with the given floor taper; a
+   /// deck without [cycle].sigma_n_floor_pa gets 10 MPa, so the closed
+   /// friction stays healthy at a tensile pre-stress before the rule opens
+   /// it (as the D9f floor deck).
    Stack(MPIContext &mpi, const std::string &deck, bool opening,
-         const std::function<void(cycle::Prestress &, const cycle::FaultDOFTable &)> &edit = nullptr)
+         const std::function<void(cycle::Prestress &, const cycle::FaultDOFTable &)> &edit = nullptr,
+         bool contact = false, bool taper = false)
       : cfg(cycle::CycleConfig::Load(deck))
    {
       cfg.qd.operators = "matrix";
       cfg.qd.green.enabled = true;
       cfg.qd.green.cache.clear();
       cfg.qd.green.check_every = 0;
-      if (opening) { cfg.opening.mode = "shear_free"; }
+      if (opening) { cfg.opening.mode = contact ? "contact" : "shear_free"; }
+      if (contact)
+      {
+         if (cfg.sigma_n_floor <= 0.0) { cfg.sigma_n_floor = 10.0e6; }
+         cfg.opening.floor_taper = taper;
+      }
       std::unique_ptr<Mesh> smesh = cycle::LoadScaledMesh(cfg.shared.mesh.path, cfg.mesh_scale);
       pmesh = std::make_unique<ParMesh>(mpi.GetComm(), *smesh);
       smesh.reset();
@@ -653,6 +681,409 @@ void TestT2T4(MPIContext &mpi, bool do_t2, bool do_t4)
          std::abs(Vg - vc) / vc);
 }
 
+// --------------------------------------------------------- T1c (contact)
+// Plan rev 1, Section 10, T1 for version B: the static cracks through the
+// contact solve on D0, operator level.  The whole fault is FORCED open
+// (SetOpenFlags; no settle, no friction: the closed set is empty and the
+// solve is linear), so one stage must kill both tractions there.  Under the
+// deck's uniform compression sigma_0 and a uniform shear tau_inf, the slip
+// is the plane-strain mode II crack and the gap the mode I crack of
+// sigma_inf = -sigma_0, both with C = 2 (1 - nu) / mu and a the fault
+// half-length:
+//   delta(x) = -C tau_inf sqrt(a^2 - x^2),   g(x) = -C sigma_0 sqrt(a^2 - x^2)
+// (slip anti-parallel to tau; the negative g is an interpenetration the
+// rule would close — T4c and the Q tests cover the admissible path — but it
+// validates the solve against the analytic form, which no admissible
+// uniform load can on this kernel: its sigma_0 is one positive scalar).
+void TestT1Contact(MPIContext &mpi)
+{
+   if (mpi.IsRoot()) { std::cout << "\nT1c: static mode I + II cracks (D0, contact)\n"; }
+   const real_t tau_inf = 5.0e6;
+   Stack st(mpi, "simple_cases/configs/D0_straight.toml", true,
+            [&](cycle::Prestress &pre, const cycle::FaultDOFTable &)
+   {
+      for (int i = 0; i < pre.tau0.Size() / 2; i++)
+      {
+         pre.tau0(2 * i) = 0.0;
+         pre.tau0(2 * i + 1) = tau_inf;
+      }
+   }, /*contact*/ true, /*taper*/ false);
+   cycle::QDPhase &qd = *st.qd;
+   const int N = st.N();
+   const int slot = qd.Opening()->Slot();
+   MFEM_VERIFY(slot == 1 && qd.Opening()->Contact(), "T1c: slot " << slot << ", contact "
+               << qd.Opening()->Contact());
+   const auto &m = st.cfg.shared.material_fallback;
+   const real_t nu = m.lambda / (2.0 * (m.lambda + m.mu));
+   const real_t C = 2.0 * (1.0 - nu) / m.mu;
+   const real_t sig0 = GMax(mpi, st.pre.sigma0.Size() > 0 ? st.pre.sigma0(0) : -1e30);
+   real_t xlo = 1e30, xhi = -1e30;
+   for (int j = 0; j < N; j++) { xlo = std::min(xlo, st.X(j)); xhi = std::max(xhi, st.X(j)); }
+   xlo = GMin(mpi, xlo);
+   xhi = GMax(mpi, xhi);
+   const real_t a = 0.5 * (xhi - xlo), xc = 0.5 * (xhi + xlo);
+   const real_t d0 = C * tau_inf * a, g0 = C * sig0 * a;
+
+   Vector zero(2 * N), psi0;
+   zero = 0.0;
+   qd.Psi(psi0);
+   qd.SetFaultState(zero, psi0);
+   qd.SetOpenFlags(std::vector<char>(N, 1));
+   qd.Solve(0.0);
+   const std::vector<char> O(N, 1);
+   Vector gap, sn;
+   qd.Gap(gap);
+   qd.SigmaN(sn);
+   const Vector &s = qd.Operator().GetStageSlip();
+   real_t res_n = 0.0, err2 = 0.0, err1 = 0.0, sgn_bad = 0.0, gpos = 0.0;
+   real_t center_s = 0.0, center_g = 0.0, cdist = 1e30;
+   for (int j = 0; j < N; j++)
+   {
+      const real_t x = st.X(j) - xc;
+      res_n = std::max(res_n, std::abs(sn(j)));
+      if (s(2 * j + slot) * tau_inf > 0.0) { sgn_bad = std::max(sgn_bad, std::abs(s(2 * j + slot))); }
+      gpos = std::max(gpos, gap(j));
+      if (std::abs(x) < cdist) { cdist = std::abs(x); center_s = s(2 * j + slot); center_g = gap(j); }
+      if (std::abs(x) <= 0.8 * a)
+      {
+         const real_t r = std::sqrt(a * a - x * x);
+         err2 = std::max(err2, std::abs(s(2 * j + slot) + C * tau_inf * r));
+         err1 = std::max(err1, std::abs(gap(j) + C * sig0 * r));
+      }
+   }
+   res_n = GMax(mpi, res_n);
+   err2 = GMax(mpi, err2);
+   err1 = GMax(mpi, err1);
+   sgn_bad = GMax(mpi, sgn_bad);
+   gpos = GMax(mpi, gpos);
+   struct { double d; int r; } in{static_cast<double>(cdist), mpi.Rank()}, out;
+   MPI_Allreduce(&in, &out, 1, MPI_DOUBLE_INT, MPI_MINLOC, mpi.GetComm());
+   double cv[2] = {center_s, center_g};
+   MPI_Bcast(cv, 2, MPI_DOUBLE, out.r, mpi.GetComm());
+   const real_t res_t = ShearAt(mpi, qd, O);
+   if (mpi.IsRoot())
+   {
+      std::printf("  %d global DOFs forced open, sigma_0 %.1f MPa; delta(0) = %.6e m "
+                  "(mode II: %.6e), g(0) = %.6e m (mode I, sigma_inf = -sigma_0: %.6e); "
+                  "profile errors %.4e (II), %.4e (I) of the centre values; residuals "
+                  "%.3e (tau), %.3e (sigma)\n", qd.NumGlobalFaultDOFs(), sig0 / 1e6,
+                  cv[0], -d0, cv[1], -g0, err2 / d0, err1 / g0, res_t, res_n);
+   }
+   Check(mpi, res_t <= 1e-9 * tau_inf, "T1c: shear at the open DOFs <= 1e-9 tau_inf",
+         res_t / tau_inf);
+   Check(mpi, res_n <= 1e-9 * sig0, "T1c: sigma at the open DOFs <= 1e-9 sigma_0",
+         res_n / sig0);
+   Check(mpi, sgn_bad == 0.0, "T1c: open slip anti-parallel to tau_pre", sgn_bad);
+   Check(mpi, gpos <= 0.0, "T1c: the compressed fault interpenetrates (g <= 0, the mode I "
+         "sign)", gpos);
+   Check(mpi, err2 <= 0.03 * d0, "T1c: |delta - mode II| at |x| <= 0.8 a <= 3% of "
+         "delta(0)", err2 / d0);
+   Check(mpi, err1 <= 0.03 * g0, "T1c: |g - mode I| at |x| <= 0.8 a <= 3% of g(0)",
+         err1 / g0);
+}
+
+// --------------------------------------------------------- T4c (contact)
+// Plan rev 1, Section 10, T4 for version B: the switch with g != 0 on the
+// D9f arc (its 10 MPa floor deck), mode = "contact".  The T2 slip A w(x)
+// opens the arc with real gaps; the hand-over puts g on d's normal
+// component (checked against the frames), the dynamic steps keep the
+// contact conditions (shear and sigma zero at open DOFs, g >= 0, psi
+// frozen, the record's max V over closed DOFs), and the switch back
+// carries the dynamic gap into the re-entry settle.  taper = false adds
+// the restart leg: a QD run from the re-entered state repeats bit for bit
+// from a (state, flags, g) snapshot (the TS stepping runs on the hard
+// floor; stepping on the taper is the B6 Mac measurement, D-B2).
+void TestT4Contact(MPIContext &mpi, bool taper)
+{
+   if (mpi.IsRoot())
+   {
+      std::printf("\nT4c: the switch with the gap (D9f arc, contact, taper %s)\n",
+                  taper ? "on" : "off");
+   }
+   Stack st(mpi, "simple_cases/configs/D9f_arc08L2p5_h250_avg_floor10.toml", true, nullptr,
+            /*contact*/ true, taper);
+   cycle::QDPhase &qd = *st.qd;
+   const int N = st.N();
+   const int slot = qd.Opening()->Slot();
+   const real_t sigma_tol = qd.Opening()->SigmaTol();
+   const real_t tau_scale = 1.0e6;
+   real_t xlo = 1e30, xhi = -1e30;
+   for (int j = 0; j < N; j++) { xlo = std::min(xlo, st.X(j)); xhi = std::max(xhi, st.X(j)); }
+   xlo = GMin(mpi, xlo);
+   xhi = GMax(mpi, xhi);
+   const real_t xc = 0.5 * (xlo + xhi), L = 0.45 * (xhi - xlo);
+   Vector w(2 * N), psi0;
+   w = 0.0;
+   for (int j = 0; j < N; j++)
+   {
+      const real_t u = (st.X(j) - xc) / L;
+      w(2 * j + slot) = std::max(0.0, 1.0 - u * u);
+   }
+   qd.Psi(psi0);
+   const std::vector<char> none(N, 0);
+   Vector zero(2 * N), sn0, sn1;
+   zero = 0.0;
+   qd.SetOpenFlags(none);
+   qd.SetFaultState(zero, psi0);
+   qd.Solve(0.0);
+   qd.SigmaN(sn0);
+   qd.SetFaultState(w, psi0);
+   qd.Solve(0.0);
+   qd.SigmaN(sn1);
+   real_t Ap = 1e30;
+   for (int j = 0; j < N; j++)
+   {
+      const real_t d = sn1(j) - sn0(j);
+      if (d < 0.0) { Ap = std::min(Ap, sn0(j) / -d); }
+   }
+   Ap = GMin(mpi, Ap);
+   MFEM_VERIFY(Ap < 1e29, "T4c: the slip w makes no tension");
+   Vector sA(w);
+   sA *= 1.5 * Ap;
+
+   // the settle at +A w: a consistent contact state with real gaps
+   qd.SetFaultState(sA, psi0);
+   const long flips_a = qd.SettleOpening(0.0);
+   const std::vector<char> Oa = qd.OpenFlags();
+   const long na = GSum(mpi, std::count(Oa.begin(), Oa.end(), char(1)));
+   Vector ga, sn;
+   qd.Gap(ga);
+   qd.SigmaN(sn);
+   real_t gmin = 1e30, gmax = 0.0, closed_min = 1e30, comp = 0.0;
+   for (int j = 0; j < N; j++)
+   {
+      if (Oa[j])
+      {
+         gmin = std::min(gmin, ga(j));
+         gmax = std::max(gmax, ga(j));
+         comp = std::max(comp, std::abs(ga(j) * sn(j)));
+      }
+      else { closed_min = std::min(closed_min, sn(j)); }
+   }
+   gmin = GMin(mpi, gmin);
+   gmax = GMax(mpi, gmax);
+   closed_min = GMin(mpi, closed_min);
+   comp = GMax(mpi, comp);
+   const real_t res_a = ShearAt(mpi, qd, Oa);
+   if (mpi.IsRoot())
+   {
+      std::printf("  settle: %ld open (%ld flips), g in [%.3e, %.3e] m, min sigma closed "
+                  "%.4f MPa, max |g sigma| %.3e, shear at open %.3e Pa\n", na, flips_a,
+                  gmin, gmax, closed_min / 1e6, comp, res_a);
+   }
+   Check(mpi, na > 0 && gmax > 0.0, "T4c: the settle opens DOFs with g > 0", gmax);
+   Check(mpi, gmin >= 0.0 && closed_min >= -sigma_tol, "T4c: g >= 0 open, sigma >= "
+         "-sigma_tol closed", std::min(gmin, (closed_min + sigma_tol) / tau_scale));
+   Check(mpi, comp <= gmax * 1e-9 * tau_scale, "T4c: |g sigma| at round-off", comp);
+   Check(mpi, res_a <= 1e-9 * tau_scale, "T4c: shear at the open DOFs", res_a);
+
+   // ---- the switch: g rides d's normal component ----
+   const real_t ts = 0.0;
+   Vector skq, psiq, snq;
+   qd.Slip(skq);
+   qd.Psi(psiq);
+   qd.SigmaN(snq);
+   const Vector Vqd = qd.SlipRate();
+   const Vector us = qd.Displacement();
+   cycle::DynPhase dyn(*st.pmesh, st.cfg, qd.Table(), st.par, st.pre, 1.0, nullptr,
+                       qd.Domain().FrameField(), qd.SubstrateShape(), qd.PmlBandPtr(),
+                       qd.PmlWallSpeedFactor());
+   Vector d, V, psin, gchk;
+   cycle::bridge::ToNitsche(dyn.Frames(), skq, Vqd, psiq, d, V, psin, &ga);
+   dyn.Frames().GapFromGlobal(d, gchk);
+   real_t e_bridge = 0.0;
+   for (int j = 0; j < N; j++) { e_bridge = std::max(e_bridge, std::abs(gchk(j) - ga(j))); }
+   e_bridge = GMax(mpi, e_bridge);
+   Check(mpi, e_bridge <= 1e-12 * (1.0 + gmax), "T4c: d . n = g across the hand-over",
+         e_bridge);
+   dyn.Enter(us, d, V, psin, snq, ts);
+   dyn.SetOpenFlags(Oa);
+   // Plan T4: the hand-over leaves both tractions zero at the open DOFs on
+   // the dynamic side too, and the closed DOFs see the QD normal stress
+   // (entry consistency, before any step; T_h(u_s, d) + S against the QD
+   // stage solution).
+   {
+      cycle::StationFields f0;
+      dyn.FillStationFields(f0);
+      real_t e_tau0 = 0.0, e_sig0 = 0.0, e_closed = 0.0;
+      for (int j = 0; j < N; j++)
+      {
+         if (Oa[j])
+         {
+            e_tau0 = std::max(e_tau0, std::hypot(f0.tau_a_dip(j), f0.tau_a_strike(j)));
+            e_sig0 = std::max(e_sig0, std::abs(f0.sigma_n(j)));
+         }
+         else { e_closed = std::max(e_closed, std::abs(f0.sigma_n(j) - snq(j))); }
+      }
+      e_tau0 = GMax(mpi, e_tau0);
+      e_sig0 = GMax(mpi, e_sig0);
+      e_closed = GMax(mpi, e_closed);
+      if (mpi.IsRoot())
+      {
+         std::printf("  entry: max |tau| %.3e Pa, max |sigma| %.3e Pa at the open DOFs; "
+                     "max |sigma_dyn - sigma_qd| %.3e Pa at the closed DOFs\n",
+                     e_tau0, e_sig0, e_closed);
+      }
+      Check(mpi, e_tau0 <= 1e-3 * tau_scale, "T4c: entry shear at the open DOFs is zero "
+            "on the dynamic side", e_tau0);
+      Check(mpi, e_sig0 <= 1e-3 * tau_scale, "T4c: entry sigma at the open DOFs is zero "
+            "on the dynamic side", e_sig0);
+      Check(mpi, e_closed <= 1e-3 * tau_scale, "T4c: entry sigma at the closed DOFs "
+            "matches the QD solution", e_closed);
+   }
+   Vector psi_enter(dyn.Psi());
+   std::vector<char> open_all(N, 1);
+   real_t worst_tau = 0.0, vmax_err = 0.0, gmin_dyn = 1e30, gmax_dyn = 0.0;
+   long open_steps = 0;
+   const int n_dyn = 60;
+   cycle::StationFields f;
+   for (int k = 0; k < n_dyn; k++)
+   {
+      dyn.Step();
+      const std::vector<char> &O = dyn.OpenFlags();
+      dyn.FillStationFields(f);
+      Vector vabs;
+      dyn.SlipRateMagnitude(vabs);
+      real_t tm = 0.0, vc = 0.0;
+      long no = 0;
+      for (int j = 0; j < N; j++)
+      {
+         if (O[j])
+         {
+            no++;
+            tm = std::max(tm, std::hypot(f.tau_a_dip(j), f.tau_a_strike(j)));
+            gmin_dyn = std::min(gmin_dyn, f.gap(j));
+            gmax_dyn = std::max(gmax_dyn, f.gap(j));
+         }
+         else
+         {
+            vc = std::max(vc, vabs(j));
+            open_all[j] = 0;
+         }
+      }
+      worst_tau = std::max(worst_tau, GMax(mpi, tm));
+      const real_t vcg = GMax(mpi, vc);
+      vmax_err = std::max(vmax_err, std::abs(dyn.LastStepInfo().max_V - vcg) / vcg);
+      open_steps += GSum(mpi, no);
+   }
+   real_t psi_dev = 0.0;
+   for (int j = 0; j < N; j++)
+   {
+      if (open_all[j]) { psi_dev = std::max(psi_dev, std::abs(dyn.Psi()(j) - psi_enter(j))); }
+   }
+   psi_dev = GMax(mpi, psi_dev);
+   gmin_dyn = GMin(mpi, gmin_dyn);
+   gmax_dyn = GMax(mpi, gmax_dyn);
+   if (mpi.IsRoot())
+   {
+      std::printf("  T4c dynamic: %d steps, open DOF-steps %ld, g in [%.3e, %.3e] m; max "
+                  "|X + gamma V| at open %.3e Pa, |max V - closed max| / closed max %.3e, "
+                  "psi change at always-open %.3e\n", n_dyn, open_steps, gmin_dyn, gmax_dyn,
+                  worst_tau, vmax_err, psi_dev);
+   }
+   Check(mpi, open_steps > 0 && gmax_dyn > 0.0, "T4c: open DOFs with g > 0 in the dynamic "
+         "steps", gmax_dyn);
+   Check(mpi, gmin_dyn >= -1e-12 * (1.0 + gmax_dyn), "T4c: the projection keeps g >= 0",
+         gmin_dyn);
+   Check(mpi, worst_tau <= 1e-9 * tau_scale, "T4c: end-of-step shear at open DOFs",
+         worst_tau);
+   Check(mpi, vmax_err <= 1e-14, "T4c: the record's max V = the closed DOFs' max", vmax_err);
+   Check(mpi, psi_dev == 0.0, "T4c: psi frozen at DOFs open in every step", psi_dev);
+
+   // ---- the switch back: the gap crosses into the re-entry settle ----
+   Vector sk2, psi2, gap_dyn;
+   cycle::bridge::ToQD(dyn.Frames(), dyn.Slip(), dyn.Psi(), sk2, psi2, &gap_dyn);
+   std::vector<char> Od = dyn.OpenFlags();
+   const real_t Vg = qd.Reenter(sk2, psi2, dyn.Time(), 100, 1.0e-3, &Od, &gap_dyn);
+   const std::vector<char> &Oq = qd.OpenFlags();
+   Vector gq, snr;
+   qd.Gap(gq);
+   qd.SigmaN(snr);
+   const real_t res_q = ShearAt(mpi, qd, Oq);
+   real_t vc = 0.0, gmin_q = 1e30, gmax_q = 0.0, closed_min_q = 1e30;
+   Vector vq;
+   qd.SlipRateMagnitude(vq);
+   for (int j = 0; j < N; j++)
+   {
+      if (Oq[j]) { gmin_q = std::min(gmin_q, gq(j)); gmax_q = std::max(gmax_q, gq(j)); }
+      else { vc = std::max(vc, vq(j)); closed_min_q = std::min(closed_min_q, snr(j)); }
+   }
+   vc = GMax(mpi, vc);
+   gmin_q = GMin(mpi, gmin_q);
+   gmax_q = GMax(mpi, gmax_q);
+   closed_min_q = GMin(mpi, closed_min_q);
+   if (mpi.IsRoot())
+   {
+      std::printf("  T4c back to QD: %d open (%ld flips in the settle), g in [%.3e, %.3e] "
+                  "m; shear at open %.3e Pa; guard max V %.4e (closed max %.4e)\n",
+                  qd.Opening()->NumOpenGlobal(), qd.ReenterFlips(), gmin_q, gmax_q, res_q,
+                  Vg, vc);
+   }
+   Check(mpi, gmax_q > 0.0, "T4c: the carried opening survives the switch back", gmax_q);
+   Check(mpi, gmin_q >= 0.0 && closed_min_q >= -sigma_tol, "T4c: the re-entered set is "
+         "consistent", std::min(gmin_q, (closed_min_q + sigma_tol) / tau_scale));
+   Check(mpi, res_q <= 1e-9 * tau_scale, "T4c: shear 0 at the QD open DOFs after the "
+         "switch back", res_q);
+   Check(mpi, std::abs(Vg - vc) <= 1e-14 * vc, "T4c: the guard's max V is the closed "
+         "DOFs' max", std::abs(Vg - vc) / (vc > 0.0 ? vc : 1.0));
+
+   if (taper) { return; }
+   // ---- the restart leg (hard floor): (state, flags, g) repeats bit for bit ----
+   const int k_ckpt = 106, n_more = 6;
+   std::vector<Vector> rec_a, rec_b;
+   Vector state_k, u_k, V_k, gap_k;
+   std::vector<char> flags_k;
+   real_t t_k = 0.0, dt_k = 0.0;
+   int step_k = 0;
+   auto mon = [&](int step, real_t tt) -> bool
+   {
+      if (step == k_ckpt)
+      {
+         state_k = qd.State();
+         u_k = qd.Displacement();
+         V_k = qd.SlipRate();
+         flags_k = qd.OpenFlags();
+         qd.Gap(gap_k);
+         t_k = tt;
+         dt_k = qd.NextDt();
+         step_k = step;
+         qd.RestartStage();
+      }
+      if (step > k_ckpt) { rec_a.push_back(qd.State()); }
+      return true;
+   };
+   real_t t = dyn.Time(), dt = 1.0e-3;
+   // Reenter set the TS step counter to 100, and Run's cap is the total
+   // step number (as T2d's from 0), so the caps below count from there.
+   qd.Run(t, dt, 1.0e9, k_ckpt + n_more, mon);
+   MFEM_VERIFY(!rec_a.empty(), "T4c: the QD run recorded no steps after " << k_ckpt);
+   qd.State() = state_k;
+   qd.Operator().SetDisplacement(u_k);
+   qd.Fault().SetSlipRate(V_k);
+   qd.SetOpenFlags(flags_k);
+   qd.SetGap(gap_k);
+   qd.RestoreTS(step_k);
+   auto mon_b = [&](int step, real_t) -> bool
+   {
+      if (step > k_ckpt) { rec_b.push_back(qd.State()); }
+      return true;
+   };
+   t = t_k;
+   dt = dt_k;
+   qd.Run(t, dt, 1.0e9, k_ckpt + n_more, mon_b);
+   bool same = rec_a.size() == rec_b.size() && !rec_a.empty();
+   for (size_t i = 0; same && i < rec_a.size(); i++)
+   {
+      same = (rec_a[i].Size() == rec_b[i].Size()) &&
+             std::memcmp(rec_a[i].GetData(), rec_b[i].GetData(),
+                         sizeof(real_t) * rec_a[i].Size()) == 0;
+   }
+   int all_same = same ? 1 : 0;
+   MPI_Allreduce(MPI_IN_PLACE, &all_same, 1, MPI_INT, MPI_MIN, mpi.GetComm());
+   Check(mpi, all_same == 1, "T4c: restart from (state, flags, g) at step k repeats the "
+         "next steps bit for bit", static_cast<real_t>(rec_b.size()));
+}
+
 // ------------------------------------------------------------------ C1
 void TestC1(MPIContext &mpi)
 {
@@ -798,7 +1229,7 @@ int main(int argc, char *argv[])
    args.AddOption(&load_deck, "-ld", "--load-deck", "Only read this deck and print [cycle.opening].");
    args.AddOption(&clean, "-c", "--clean", "-no-c", "--no-clean",
                   "Delete the refusals' deck file and stop.");
-   args.AddOption(&only, "-o", "--only", "Comma list of T1, T2, T4, C1 (default: all).");
+   args.AddOption(&only, "-o", "--only", "Comma list of T1, T2, T4, T1C, T4C, C1 (default: all).");
    args.AddOption(&refuse, "-r", "--refuse", "Run refusal n (it must abort).");
    args.Parse();
    if (!args.Good())
@@ -833,6 +1264,8 @@ int main(int argc, char *argv[])
    if (mpi.IsRoot()) { std::cout << "test_fault_opening on " << mpi.Size() << " ranks\n"; }
    if (Wanted(o, "T1")) { TestT1(mpi); }
    if (Wanted(o, "T2") || Wanted(o, "T4")) { TestT2T4(mpi, Wanted(o, "T2"), Wanted(o, "T4")); }
+   if (Wanted(o, "T1C")) { TestT1Contact(mpi); }
+   if (Wanted(o, "T4C")) { TestT4Contact(mpi, false); TestT4Contact(mpi, true); }
    if (Wanted(o, "C1")) { TestC1(mpi); }
    if (mpi.IsRoot()) { std::cout << (fails ? "FAILED: " : "ALL PASS: ") << fails << "\n"; }
    MFEMFinalizePetsc();

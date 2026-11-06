@@ -521,6 +521,11 @@ void ElasticityDomainOperator<MeshType>::QDStageRHS(
    MFEM_VERIFY(qd_ops_, "QD stage operators: BuildQDStageOperators() was "
                "not called");
    const QDStageOperators &ops = *qd_ops_;
+   // Fault opening B5: hypre reads past a narrower vector without an error.
+   MFEM_VERIFY(slip_owned.Size() == ops.slip_comps * num_owned_fault_dofs_,
+               "QD stage slip width: got " << slip_owned.Size()
+               << ", the operators take " << ops.slip_comps << " x "
+               << num_owned_fault_dofs_ << " owned fault DOFs");
    b.SetSize(ops.B->Height());
    {
       ScopedStageTimer timer(stage_timers_, StageTimers::SlipRHS);
@@ -545,6 +550,11 @@ void ElasticityDomainOperator<MeshType>::QDStageTraction(
    MFEM_VERIFY(normal_owned == nullptr || ops.with_normal,
                "QD stage operators: normal traction requested, but N_u and "
                "N_delta were not built (BuildQDStageOperators(false))");
+   // Fault opening B5: hypre reads past a narrower vector without an error.
+   MFEM_VERIFY(slip_owned.Size() == ops.slip_comps * num_owned_fault_dofs_,
+               "QD stage slip width: got " << slip_owned.Size()
+               << ", the operators take " << ops.slip_comps << " x "
+               << num_owned_fault_dofs_ << " owned fault DOFs");
    traction_owned.SetSize(ops.Cu->Height());
    ops.Cu->Mult(u, traction_owned);
    ops.Cd->Mult(1.0, slip_owned, 1.0, traction_owned);
