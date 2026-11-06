@@ -279,10 +279,12 @@ public:
    real_t SigmaNFloor() const { return sigma_floor_; }
 
    /// [cycle.opening] mode = "contact" (fault opening plan rev 1, eq. 6.2,
-   /// decision D-B2): the floor arm is capped by the true clamping stress,
-   /// so the law sees max(sigma - r, min(floor, max(sigma, 0))) and the
-   /// strength goes to zero continuously as a point approaches opening (a
-   /// flip releases no shear).  Needs SetSigmaNFloor > 0.  Inside the
+   /// decision D-B2, in its whole-law form): where sigma is below the floor,
+   /// the law's stress is scaled by w = max(sigma, 0) / floor, so the law
+   /// sees max((sigma - r) w, min(floor, max(sigma, 0))) (RSLawSigmaN) and
+   /// the strength goes to zero continuously as a point approaches opening,
+   /// for any relaxation r (a flip releases no locked shear).  r >= 0, or
+   /// sigma >= floor: eq. 6.2 bit for bit.  Needs SetSigmaNFloor > 0.  Inside the
    /// hysteresis band (sigma in (-sigma_tol, 0], still closed) the law then
    /// legitimately sees 0, so the kRSSigmaNNonPositive host warning is not
    /// rerun for.  Off (the default): the hard floor (6.1), every bit
@@ -1343,11 +1345,11 @@ private:
             normal_traction ? sigma_n_pre + (*normal_traction)(i) : sigma_n_pre;
          real_t s = s_true;
          if (sigma_red_) { s -= (*sigma_red_)(i); }
-         // SetFloorTaper: the arm the kernel used (eq. 6.2)
-         const real_t arm =
-            floor_taper_ ? std::min(sigma_floor_, std::max(s_true, real_t(0)))
-                         : sigma_floor_;
-         if (s < arm)
+         // the kernel's own test (RSLawSigmaN): the hard floor, or with
+         // SetFloorTaper the tapered arm and the whole-law taper
+         int st = 0;
+         RSLawSigmaN(s, s_true, sigma_floor_, floor_taper_, st);
+         if (st & kRSSigmaNFloored)
          {
             n++;
             if (s < floor_stats_.min_sigma)
@@ -1576,7 +1578,7 @@ private:
 
    /// SetSigmaNFloor (0 = off) and where it acted.
    real_t sigma_floor_ = 0.0;
-   /// SetFloorTaper: contact mode's tapered floor (plan eq. 6.2).
+   /// SetFloorTaper: contact mode's tapered floor (plan eq. 6.2, whole-law form).
    bool floor_taper_ = false;
    /// SetNonFiniteVReject (D-B5) and the evaluations it let through.
    bool nonfinite_v_reject_ = false;

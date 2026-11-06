@@ -738,10 +738,11 @@ public:
    }
    bool ContactOpening() const { return contact_; }
    /// [cycle.opening] mode = "contact" (fault opening plan rev 1, eq. 6.2,
-   /// D-B2): the floor arm is capped by the true clamping stress, so the law
-   /// sees max(sigma - r, min(floor, max(sigma, 0))) and the strength goes
-   /// to zero continuously as a point approaches opening (sigma here is the
-   /// projected end-of-step normal stress, >= 0 at a closed contact point).
+   /// D-B2, whole-law form): the law sees max((sigma - r) w, min(floor,
+   /// max(sigma, 0))), w = min(1, max(sigma, 0) / floor) (RSLawSigmaN), and
+   /// the strength goes to zero continuously as a point approaches opening,
+   /// for any relaxation r (r >= 0 or sigma >= floor: eq. 6.2; sigma here is
+   /// the projected end-of-step normal stress, >= 0 at a closed contact point).
    /// Needs NitscheFaultSetup::sigma_floor > 0.  Off (the default): the hard
    /// floor, every bit unchanged.
    void SetFloorTaper(bool on)
@@ -922,15 +923,26 @@ public:
       if (sigma_floor_ > 0.0)
       {
          // the opt-in floor (file comment); with SetFloorTaper the arm is
-         // capped by the projected clamping stress (plan eq. 6.2), so the
-         // strength falls to zero continuously as the point approaches
-         // opening; count once per DOF and step
+         // capped by the projected clamping stress (plan eq. 6.2) and, below
+         // the floor, the whole law is scaled by max(sigma_eff, 0) / floor
+         // (RSLawSigmaN), so the strength falls to zero continuously as the
+         // point approaches opening for any relaxation; count once per DOF
+         // and step
          const real_t arm =
             floor_taper_ ? std::min(sigma_floor_, std::max(sigma_eff, real_t(0)))
                          : sigma_floor_;
          if (!(sig_law >= arm))
          {
             sig_law = arm;
+            floor_hits_++;
+            floored_[j] = 1;
+         }
+         else if (floor_taper_ && sigma_eff < sigma_floor_ && sig_law > arm)
+         {
+            // the whole-law taper: the part above the arm that the
+            // relaxation holds (r < 0) falls to zero with the weight
+            const real_t w = std::max(sigma_eff, real_t(0)) / sigma_floor_;
+            sig_law = std::max(sig_law * w, arm);
             floor_hits_++;
             floored_[j] = 1;
          }
@@ -2005,7 +2017,7 @@ private:
    const IFaultClosure *closure_ = nullptr;
    real_t sigma_min_ = 0.0;
    real_t sigma_floor_ = 0.0;            ///< NitscheFaultSetup::sigma_floor
-   bool floor_taper_ = false;            ///< SetFloorTaper (plan eq. 6.2)
+   bool floor_taper_ = false;            ///< SetFloorTaper (plan eq. 6.2, whole-law form)
    mutable long floor_hits_ = 0;         ///< DOF-steps at the floor
    mutable std::vector<char> floored_;   ///< per owned DOF: the floor acted
    bool opening_ = false;                ///< SetShearFreeOpening or SetContactOpening

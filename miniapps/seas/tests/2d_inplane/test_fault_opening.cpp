@@ -53,6 +53,13 @@
 //       restart leg, a QD run repeating bit for bit from a (state, flags,
 //       g) snapshot (TS stepping on the taper is B6's Mac measurement,
 //       D-B2).
+//   T4w the whole-law taper (plan eq. 6.2, whole-law form) with an
+//       unclamping relaxation r = -30 MPa at every DOF (the T6 flips; the
+//       D9f deck has none), from T4c's +A w state: QD all closed (a trial
+//       stage): taper off the law holds strength at every closed DOF with
+//       sigma_n' < 0, on it sees 0 there (V = |tau| / eta), V bit for bit at
+//       or above the floor and faster in [0, floor); dynamic (60 steps from
+//       the settle): off the floor never acts, on the taper acts.
 // Refusals (--refuse n, each must abort with its message; the deck is D0
 // with a [cycle.opening] section appended, written to
 // test_fault_opening_refuse.toml, which --clean deletes): 1 mode "contact"
@@ -69,7 +76,7 @@
 // prints its [cycle.opening] (the committed opening decks, no solve).
 //
 // Usage (from miniapps/seas; PETSc needed): mpirun -np N ./seas_test_fault_opening
-//        [--only T1,T2,T4,C1] [--refuse n] [--clean] [--load-deck d.toml]
+//        [--only T1,T2,T4,T1C,T4C,T4W,C1] [--refuse n] [--clean] [--load-deck d.toml]
 
 #include "mfem.hpp"
 #include "../../cycle/scaled_mesh.hpp"
@@ -89,6 +96,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -1085,6 +1093,174 @@ void TestT4Contact(MPIContext &mpi, bool taper)
 }
 
 // ------------------------------------------------------------------ C1
+// The whole-law taper (fault opening plan rev 1.1, eq. 6.2, whole-law form;
+// RSLawSigmaN and NitscheWaveOperator::CloseDOF): version A's F1 c') and d')
+// on version B's contact stack.  T4c's +A w state on the D9f arc, with an
+// unclamping relaxation r = -30 MPa at every DOF (the T6 flips held 1.7 to
+// 41 MPa at sigma_n' ~ 0 with r -12.7 to -42.7 MPa; the D9f deck has none):
+// QD all closed (a trial stage) and 60 dynamic steps from the settle, taper
+// off then on.
+void TestT4Whole(MPIContext &mpi)
+{
+   if (mpi.IsRoot())
+   {
+      std::printf("\nT4w: the whole-law taper, r = -30 MPa (D9f arc, contact)\n");
+   }
+   Stack st(mpi, "simple_cases/configs/D9f_arc08L2p5_h250_avg_floor10.toml", true, nullptr,
+            /*contact*/ true, /*taper*/ true);
+   cycle::QDPhase &qd = *st.qd;
+   const int N = st.N();
+   const int slot = qd.Opening()->Slot();
+   const real_t fl = st.cfg.sigma_n_floor;
+   MFEM_VERIFY(fl == 10.0e6, "T4w: the D9f deck's floor is " << fl << " Pa, not 10 MPa");
+   const real_t rn = -30.0e6;
+   real_t xlo = 1e30, xhi = -1e30;
+   for (int j = 0; j < N; j++) { xlo = std::min(xlo, st.X(j)); xhi = std::max(xhi, st.X(j)); }
+   xlo = GMin(mpi, xlo);
+   xhi = GMax(mpi, xhi);
+   const real_t xc = 0.5 * (xlo + xhi), L = 0.45 * (xhi - xlo);
+   Vector w(2 * N), psi0;
+   w = 0.0;
+   for (int j = 0; j < N; j++)
+   {
+      const real_t u = (st.X(j) - xc) / L;
+      w(2 * j + slot) = std::max(0.0, 1.0 - u * u);
+   }
+   qd.Psi(psi0);
+   const std::vector<char> none(N, 0);
+   Vector zero(2 * N), sn0, sn1;
+   zero = 0.0;
+   qd.SetOpenFlags(none);
+   qd.SetFaultState(zero, psi0);
+   qd.Solve(0.0);
+   qd.SigmaN(sn0);
+   qd.SetFaultState(w, psi0);
+   qd.Solve(0.0);
+   qd.SigmaN(sn1);
+   real_t Ap = 1e30;
+   for (int j = 0; j < N; j++)
+   {
+      const real_t d = sn1(j) - sn0(j);
+      if (d < 0.0) { Ap = std::min(Ap, sn0(j) / -d); }
+   }
+   Ap = GMin(mpi, Ap);
+   MFEM_VERIFY(Ap < 1e29, "T4w: the slip w makes no tension");
+   Vector sA(w);
+   sA *= 1.5 * Ap;
+
+   // ---- QD, all closed at +A w (no settle, a trial stage), r = -30 MPa ----
+   Vector rneg(N);
+   rneg = rn;
+   qd.Fault().SetSigmaNReduction(&rneg);
+   auto solve_c = [&](bool taper, Vector &v)
+   {
+      qd.Fault().SetFloorTaper(taper);
+      qd.SetOpenFlags(none);
+      qd.SetFaultState(sA, psi0);
+      qd.Solve(0.0);
+      qd.SlipRateMagnitude(v);
+   };
+   Vector vr_off, vr_on, snr;
+   solve_c(false, vr_off);
+   qd.SigmaN(snr);
+   solve_c(true, vr_on);
+   const Vector &Tr = qd.Traction();
+   const Vector &tpc = qd.Fault().TauPre();
+   long nr_tens = 0, nr_band = 0, nr_band_faster = 0;
+   real_t worst_r = 0.0, dev_r = 0.0, min_held = std::numeric_limits<real_t>::max();
+   bool finite_r = true;
+   for (int j = 0; j < N; j++)
+   {
+      finite_r = finite_r && std::isfinite(vr_on(j));
+      if (snr(j) >= fl) { dev_r = std::max(dev_r, std::abs(vr_on(j) - vr_off(j))); continue; }
+      if (snr(j) >= 0.0)
+      {
+         nr_band++;
+         if (vr_on(j) > vr_off(j)) { nr_band_faster++; }
+         continue;
+      }
+      nr_tens++;
+      const real_t tau = std::hypot(tpc(2 * j) + Tr(2 * j), tpc(2 * j + 1) + Tr(2 * j + 1));
+      const real_t eta = st.par.rs.eta(j);
+      worst_r = std::max(worst_r, std::abs(vr_on(j) * eta - tau) / std::max(tau, 1.0));
+      // the strength the taper-off law holds there: |tau| - eta V
+      min_held = std::min(min_held, tau - vr_off(j) * eta);
+   }
+   nr_tens = GSum(mpi, nr_tens);
+   min_held = GMin(mpi, min_held);
+   nr_band = GSum(mpi, nr_band);
+   nr_band_faster = GSum(mpi, nr_band_faster);
+   worst_r = GMax(mpi, worst_r);
+   dev_r = GMax(mpi, dev_r);
+   int all_finite_r = finite_r ? 1 : 0;
+   MPI_Allreduce(MPI_IN_PLACE, &all_finite_r, 1, MPI_INT, MPI_MIN, mpi.GetComm());
+   if (mpi.IsRoot())
+   {
+      std::printf("  QD all closed at +A w, r = -30 MPa: %ld closed DOFs with sigma_n' < 0; "
+                  "taper off the law holds at least %.4f MPa of strength there (|tau| - eta "
+                  "V); taper on: max |V eta - |tau|| / |tau| there %.3e; %ld DOFs in [0, 10) "
+                  "MPa, %ld faster with the taper\n", nr_tens, min_held / 1e6, worst_r,
+                  nr_band, nr_band_faster);
+   }
+   Check(mpi, nr_tens > 0 && min_held > 1.0e6, "T4w: taper off, r = -30 MPa holds more than "
+         "1 MPa of strength at every closed DOF with sigma_n' < 0 (the T6 flips)", min_held);
+   Check(mpi, worst_r <= 1e-12 && all_finite_r == 1, "T4w: taper on, the law sees 0 there "
+         "for r < 0 too: V = |tau| / eta, finite", worst_r);
+   Check(mpi, dev_r == 0.0, "T4w: V unchanged bit for bit at DOFs at or above the floor",
+         dev_r);
+   Check(mpi, nr_band_faster == nr_band, "T4w: V larger at every DOF in [0, floor) (the "
+         "relaxation-held part tapered)", static_cast<real_t>(nr_band_faster));
+   qd.Fault().SetSigmaNReduction(nullptr);
+   qd.Fault().SetFloorTaper(true);
+
+   // ---- dynamic, 60 steps from the settle at +A w, r = -30 MPa ----
+   qd.SetFaultState(sA, psi0);
+   qd.SettleOpening(0.0);
+   const std::vector<char> Oa = qd.OpenFlags();
+   Vector ga, skq, psiq, snq;
+   qd.Gap(ga);
+   qd.Slip(skq);
+   qd.Psi(psiq);
+   qd.SigmaN(snq);
+   const Vector Vqd = qd.SlipRate();
+   const Vector us = qd.Displacement();
+   const int n_dyn = 60;
+   long hits_r[2] = {0, 0}, dofs_r[2] = {0, 0};
+   real_t vmax_r[2] = {0.0, 0.0};
+   for (int tp = 0; tp <= 1; tp++)
+   {
+      Vector rdyn(N);   // per owned DOF, outlives dr (the hook keeps a pointer)
+      rdyn = rn;
+      st.cfg.opening.floor_taper = (tp == 1);
+      cycle::DynPhase dr(*st.pmesh, st.cfg, qd.Table(), st.par, st.pre, 1.0, nullptr,
+                         qd.Domain().FrameField(), qd.SubstrateShape(), qd.PmlBandPtr(),
+                         qd.PmlWallSpeedFactor());
+      st.cfg.opening.floor_taper = true;
+      dr.SetNormalStressRelaxation(rdyn);   // the cycle's own path ([cycle.relaxation])
+      Vector d, V, psin;
+      cycle::bridge::ToNitsche(dr.Frames(), skq, Vqd, psiq, d, V, psin, &ga);
+      dr.Enter(us, d, V, psin, snq, 0.0);
+      dr.SetOpenFlags(Oa);
+      for (int k = 0; k < n_dyn; k++)
+      {
+         dr.Step();
+         vmax_r[tp] = std::max(vmax_r[tp], dr.LastStepInfo().max_V);
+      }
+      dr.FloorCount(hits_r[tp], dofs_r[tp]);
+   }
+   if (mpi.IsRoot())
+   {
+      std::printf("  dynamic, %d steps, r = -30 MPa: taper off the floor acted at %ld "
+                  "DOF-steps, on at %ld DOF-steps on %ld DOFs; max V (closed DOFs) %.4e m/s "
+                  "off, %.4e m/s on\n", n_dyn, hits_r[0], hits_r[1], dofs_r[1], vmax_r[0],
+                  vmax_r[1]);
+   }
+   Check(mpi, hits_r[0] == 0, "T4w: taper off, r = -30 MPa keeps every closed DOF above the "
+         "floor", static_cast<real_t>(hits_r[0]));
+   Check(mpi, hits_r[1] > 0 && std::isfinite(vmax_r[1]), "T4w: taper on, the whole-law taper "
+         "acts below the floor in the dynamic law", static_cast<real_t>(hits_r[1]));
+}
+
 void TestC1(MPIContext &mpi)
 {
    if (mpi.IsRoot()) { std::cout << "\nC1: checkpoint V6 round trip\n"; }
@@ -1266,6 +1442,7 @@ int main(int argc, char *argv[])
    if (Wanted(o, "T2") || Wanted(o, "T4")) { TestT2T4(mpi, Wanted(o, "T2"), Wanted(o, "T4")); }
    if (Wanted(o, "T1C")) { TestT1Contact(mpi); }
    if (Wanted(o, "T4C")) { TestT4Contact(mpi, false); TestT4Contact(mpi, true); }
+   if (Wanted(o, "T4W")) { TestT4Whole(mpi); }
    if (Wanted(o, "C1")) { TestC1(mpi); }
    if (mpi.IsRoot()) { std::cout << (fails ? "FAILED: " : "ALL PASS: ") << fails << "\n"; }
    MFEMFinalizePetsc();

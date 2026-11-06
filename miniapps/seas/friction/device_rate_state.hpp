@@ -372,11 +372,12 @@ struct RSFaultInputs
    const Vector *a;
    const Vector *eta;
    real_t sigma_floor = 0.0;   ///< > 0: the law sees max(sigma_n_eff, it)
-   /// [cycle.opening] mode = "contact" (fault opening plan rev 1, eq. 6.2):
-   /// the floor arm is capped by the true clamping stress,
+   /// [cycle.opening] floor_taper (fault opening plan rev 1, eq. 6.2, whole
+   /// law; RSLawSigmaN): where sigma_n_true is below the floor, the law's
+   /// stress is scaled by max(sigma_n_true, 0) / sigma_floor and never below
    /// min(sigma_floor, max(sigma_n_true, 0)), so the strength the law sees
-   /// goes to zero continuously as a point approaches opening.  false (the
-   /// default): the hard floor, every bit unchanged.
+   /// goes to zero continuously as a point approaches opening, for any
+   /// relaxation r.  false (the default): the hard floor, every bit unchanged.
    bool floor_taper = false;
    /// per-node amount taken off sigma_n_eff before the floor (Pa,
    /// compression positive), or nullptr (the default: nothing)
@@ -399,14 +400,23 @@ MFEM_HOST_DEVICE inline real_t RSFlooredSigmaN(real_t sigma_n_eff,
    return sigma_n_eff;
 }
 
-/// The normal stress the law sees with the tapered floor of contact mode
-/// (fault opening plan rev 1, eq. 6.2): as RSFlooredSigmaN, except that with
-/// @a taper the floor arm is capped by the true clamping stress,
-/// arm = min(sigma_floor, max(sigma_n_true, 0)), so the strength goes to
-/// zero continuously as the point approaches opening and a flip releases no
-/// shear.  @a sigma_n_eff is the relaxed stress (sigma - r), @a sigma_n_true
-/// the elastic stress before the relaxation (sigma).  taper = false is
-/// RSFlooredSigmaN bit for bit (and a NaN stays NaN for the input checks).
+/// The normal stress the law sees with the tapered floor (fault opening plan
+/// rev 1, eq. 6.2, and its whole-law form): as RSFlooredSigmaN, except that
+/// with @a taper, where sigma = sigma_n_true is below the floor, the whole
+/// law is scaled by w = max(sigma, 0) / sigma_floor:
+///   sigma_law = max((sigma - r) w, arm),  arm = min(sigma_floor, max(sigma, 0)),
+/// that is w max(sigma - r, sigma_floor) in exact arithmetic.  The strength
+/// goes to zero continuously as the point approaches opening for any r, so a
+/// flip releases no locked shear, also where the relaxation holds the law's
+/// stress up (unclamping, r < 0: sigma - r stays near sigma0 while sigma
+/// goes to 0).  @a sigma_n_eff is the relaxed stress (sigma - r), @a
+/// sigma_n_true the elastic stress before the relaxation (sigma).
+/// - sigma - r < arm: the eq. 6.2 lines, so r >= 0 is eq. 6.2 bit for bit;
+/// - sigma >= sigma_floor (w = 1): eq. 6.2 bit for bit for any r;
+/// - otherwise, with r < 0: the scaled law (kRSSigmaNFloored: the law did not
+///   see sigma - r).
+/// taper = false is RSFlooredSigmaN bit for bit (and a NaN stays NaN for the
+/// input checks).
 MFEM_HOST_DEVICE inline real_t RSLawSigmaN(real_t sigma_n_eff,
                                            real_t sigma_n_true,
                                            real_t sigma_floor, bool taper,
@@ -421,6 +431,14 @@ MFEM_HOST_DEVICE inline real_t RSLawSigmaN(real_t sigma_n_eff,
       {
          status |= kRSSigmaNFloored;
          return arm;
+      }
+      if (taper && sigma_n_true < sigma_floor && sigma_n_eff > arm)
+      {
+         // the whole-law taper: the part above the arm that the relaxation
+         // holds (r < 0) falls to zero with w
+         status |= kRSSigmaNFloored;
+         const real_t w = fmax(sigma_n_true, (real_t) 0.0) / sigma_floor;
+         return fmax(sigma_n_eff * w, arm);
       }
    }
    return sigma_n_eff;

@@ -34,6 +34,10 @@
 //       arm is min(floor, max(sigma, 0)) — identical to the hard floor at
 //       sigma >= floor, equal to sigma in the band 0 < sigma < floor (for a
 //       relaxed point), 0 at sigma <= 0, and continuous at both edges.
+//       The whole-law form (r < 0, the unclamping relaxation of version
+//       A's T6 flips): = eq. 6.2 bit for bit (value and status) for r >= 0
+//       and for sigma >= floor; (sigma - r) w below the floor with r < 0,
+//       never below sigma; continuous; 0 at and below opening.
 //   Q8  a valid contact deck (D0 + mode = "contact", a floor, no
 //       check_every) loads: Contact(), sigma_tol_pa and floor_taper
 //       defaults.
@@ -63,6 +67,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -240,6 +245,59 @@ int main(int argc, char *argv[])
       int sn = 0;
       const real_t nan_through = RSLawSigmaN(std::nan(""), std::nan(""), fl, true, sn);
       TEST_ASSERT(std::isnan(nan_through), "Q7: a NaN stays NaN for the input checks");
+      // the whole-law form against eq. 6.2 as B3 wrote it (the reference below
+      // is that helper's taper branch, line for line): equal bit for bit
+      // (value and status) for r >= 0 at every sigma, and for any r at
+      // sigma >= floor
+      auto eq62 = [&](real_t eff, real_t sig, int &stt) -> real_t
+      {
+         const real_t arm = std::fmin(fl, std::fmax(sig, (real_t) 0.0));
+         if (eff < arm) { stt |= kRSSigmaNFloored; return arm; }
+         return eff;
+      };
+      long n62 = 0, n62_diff = 0;
+      for (real_t r0 : {0.0, 1e3, 4.0e6, 12.0e6, 40.0e6, -1e3, -4.0e6, -30.0e6})
+      {
+         for (real_t sig : {-5e6, -1e3, 0.0, 1e3, 5e6, 9.999e6, 10e6, 10.001e6, 15e6, 60e6})
+         {
+            if (r0 < 0.0 && sig < fl) { continue; }   // the whole-law rows, below
+            int s1 = 0, s2 = 0;
+            const real_t a = eq62(sig - r0, sig, s1);
+            const real_t b = RSLawSigmaN(sig - r0, sig, fl, true, s2);
+            n62++;
+            if (std::memcmp(&a, &b, sizeof(real_t)) != 0 || s1 != s2) { n62_diff++; }
+         }
+      }
+      TEST_ASSERT(n62_diff == 0, "Q7 whole law: = eq. 6.2 bit for bit (value and status) "
+                  "for r >= 0 at every sigma and for r < 0 at sigma >= floor (" << n62
+                  << " points, " << n62_diff << " differ)");
+      // r < 0 (unclamping: the relaxation holds sigma - r up), below the floor:
+      // max((sigma - r) w, sigma), w = sigma / floor; 0 at and below opening
+      const real_t rn = -30.0e6;
+      int swn = 0;
+      const real_t wb = RSLawSigmaN(5e6 - rn, 5e6, fl, true, swn);   // 35 MPa x 0.5
+      int s62 = 0;
+      const real_t wb62 = eq62(5e6 - rn, 5e6, s62);                  // 35 MPa
+      const real_t wl = RSLawSigmaN(1e5 - rn, 1e5, fl, true, swn);   // 30.1 MPa x 0.01
+      const real_t wlo = RSLawSigmaN(5e6 + 2e6, 5e6, fl, true, swn); // r = -2: 7 x 0.5 < 5
+      const real_t w0 = RSLawSigmaN(0.0 - rn, 0.0, fl, true, swn);
+      const real_t wneg = RSLawSigmaN(-1e3 - rn, -1e3, fl, true, swn);
+      TEST_ASSERT(wb == 17.5e6 && wb62 == 35.0e6 && std::abs(wl - 0.301e6) <= 1e-9 * 0.301e6 &&
+                  wlo == 5e6 && w0 == 0.0 && wneg == 0.0 && (swn & kRSSigmaNFloored) != 0,
+                  "Q7 whole law: r < 0 below the floor: (sigma - r) w, never below sigma ("
+                  << wb / 1e6 << " MPa at sigma = 5 MPa, r = -30 MPa, where eq. 6.2 keeps "
+                  << wb62 / 1e6 << " MPa), 0 at and below opening");
+      const real_t f1 = std::abs(RSLawSigmaN(fl + eps - rn, fl + eps, fl, true, st) -
+                                 RSLawSigmaN(fl - eps - rn, fl - eps, fl, true, st));
+      const real_t f2 = std::abs(RSLawSigmaN(eps - rn, eps, fl, true, st) -
+                                 RSLawSigmaN(-eps - rn, -eps, fl, true, st));
+      const real_t lip = 2.0 + std::abs(rn) / fl;   // the slope of (sigma - r) sigma / floor
+      TEST_ASSERT(f1 <= 2.0 * eps * lip && f2 <= 2.0 * eps * lip, "Q7 whole law: continuous "
+                  "at sigma = floor and at sigma = 0 with r = -30 MPa (" << f1 << ", " << f2
+                  << " Pa per 2 Pa; slope <= 2 + |r| / floor = 5)");
+      int sn_st2 = 0;
+      TEST_ASSERT(std::isnan(RSLawSigmaN(std::nan(""), 5e6, fl, true, sn_st2)),
+                  "Q7 whole law: a NaN sigma - r stays NaN in the band");
    }
 
    // ---- Q9: the bridge with the gap (host, synthetic frames) ----
