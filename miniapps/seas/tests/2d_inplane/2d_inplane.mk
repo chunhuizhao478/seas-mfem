@@ -34,6 +34,7 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-fault-contact       # fault opening B, B1 (opening columns)
 #   make -f tests/2d_inplane/2d_inplane.mk test-fault-contact-dyn   # fault opening B, B2 (dynamic projection)
 #   make -f tests/2d_inplane/2d_inplane.mk test-fault-contact-qd    # fault opening B, B3 (QD contact + taper)
+#   make -f tests/2d_inplane/2d_inplane.mk test-exact-retry         # [cycle.qd] exact_retry (PETSc RK rollback)
 #   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
 # The 3D parity set (every phase must leave it bit for bit unchanged) is the
 # script tests/2d_inplane/parity_3d.sh (see its header).  The tensor
@@ -934,6 +935,23 @@ test-fault-contact-qd: seas_test_fault_contact_qd
 	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_fault_contact_qd < /dev/null || exit 1; \
 	done
 
+# [cycle.qd] exact_retry (cycle/exact_retry.hpp; the UCERF quench run's QD
+# crash, 2026-11-07): a PETSc RK 5dp toy, PETSc's rollback vs the saved copy.
+TEST_EXACT_RETRY_SRC = tests/2d_inplane/test_exact_retry.cpp
+TEST_EXACT_RETRY_OBJ = $(TEST_EXACT_RETRY_SRC:.cpp=.o)
+$(TEST_EXACT_RETRY_OBJ): %.o: $(SRC)%.cpp cycle/exact_retry.hpp $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
+
+seas_test_exact_retry: $(TEST_EXACT_RETRY_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_EXACT_RETRY_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-exact-retry: seas_test_exact_retry
+	@for n in 1 2; do \
+	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_exact_retry < /dev/null || exit 1; \
+	done
+
 2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
                 test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
                 test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
@@ -941,7 +959,7 @@ test-fault-contact-qd: seas_test_fault_contact_qd
                 test-handback-table test-tip-zone test-sigma-floor test-relaxation test-2d5-width test-2d5-dyn-driver \
                 test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle \
                 test-fault-opening test-fault-contact test-fault-contact-dyn \
-                test-fault-contact-qd
+                test-fault-contact-qd test-exact-retry
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
@@ -949,4 +967,4 @@ test-fault-contact-qd: seas_test_fault_contact_qd
         test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
         test-handback-table test-tip-zone test-sigma-floor test-relaxation test-2d5-width test-2d5-dyn-driver \
         test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle \
-        test-fault-opening 2d-inplane-all
+        test-fault-opening test-exact-retry 2d-inplane-all

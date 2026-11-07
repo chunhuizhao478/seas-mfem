@@ -118,6 +118,15 @@
 // finite V rejects the TS step instead of aborting (D-B5,
 // SetNonFiniteVReject + TSSetFunctionDomainError in InitTS).
 //
+// [cycle.qd] exact_retry (Chunhui Zhao, 2026-11-07, the card "Safe retry
+// only"; cycle/exact_retry.hpp): TSPreStep keeps a copy of the state each
+// step starts from and TSPreStage copies it back at the first stage of a
+// retry, so a rejected step never hands its retry PETSc's rollback, which
+// turns a last-stage Inf rate into NaN in the state (Vista 1127480 at
+// 12,222 yr: ten retries from psi = NaN, DIVERGED_STEP_REJECTED); the driver
+// then scans the whole state for NaN after each step.  Off (the default):
+// no hook, every bit unchanged.
+//
 // This file and dyn_phase.hpp are the only cycle files that include solver
 // headers (rule M4).
 
@@ -135,6 +144,7 @@
 #include "bench_output.hpp"
 #include "normal_stress_relaxation.hpp"
 #include "fault_opening.hpp"
+#include "exact_retry.hpp"
 
 #include "../solver/seas_operator.hpp"
 #include "../domain/elasticity_operator.hpp"
@@ -904,6 +914,63 @@ public:
          MFEM_VERIFY(TSSetFunctionDomainError(ts, &QDPhase::StageStateFinite_)
                      == PETSC_SUCCESS, "TSSetFunctionDomainError failed");
       }
+      if (cfg_.qd.exact_retry)
+      {
+         // [cycle.qd] exact_retry (cycle/exact_retry.hpp): the retry of a
+         // rejected step starts from a copy of the step's start state, not
+         // from PETSc's rollback.  Off (the default): no hook, every bit as
+         // before.
+         MFEM_VERIFY(TSSetPreStep(ts, &QDPhase::PreStepSave_) == PETSC_SUCCESS,
+                     "TSSetPreStep failed");
+         MFEM_VERIFY(TSSetPreStage(ts, &QDPhase::PreStageRestore_) == PETSC_SUCCESS,
+                     "TSSetPreStage failed");
+      }
+   }
+
+   /// [cycle.qd] exact_retry: TSPreStep, copy the state the step starts from.
+   static PetscErrorCode PreStepSave_(TS ts)
+   {
+      PetscFunctionBeginUser;
+      void *ctx = nullptr;
+      PetscCall(TSGetApplicationContext(ts, &ctx));
+      PetscCall(static_cast<QDPhase *>(ctx)->retry_.Save(ts));
+      PetscFunctionReturn(PETSC_SUCCESS);
+   }
+
+   /// [cycle.qd] exact_retry: TSPreStage, at the first stage of a retry put
+   /// the copy back over PETSc's rollback.  Rank 0 logs a retry whose
+   /// rollback had left non-finite entries (the case that ended Vista
+   /// 1127480).  Collective: every rank sees the same rejections.
+   static PetscErrorCode PreStageRestore_(TS ts, PetscReal t)
+   {
+      PetscFunctionBeginUser;
+      void *ctx = nullptr;
+      PetscCall(TSGetApplicationContext(ts, &ctx));
+      QDPhase *self = static_cast<QDPhase *>(ctx);
+      bool restored = false;
+      long bad = 0;
+      PetscCall(self->retry_.RestoreIfRetry(ts, restored, &bad));
+      if (!restored) { PetscFunctionReturn(PETSC_SUCCESS); }
+      long bad_all = bad;
+      MPI_Comm comm = PetscObjectComm(reinterpret_cast<PetscObject>(ts));
+      PetscCallMPI(MPI_Allreduce(&bad, &bad_all, 1, MPI_LONG, MPI_SUM, comm));
+      if (bad_all > 0)
+      {
+         self->retry_nonfinite_++;
+         if (self->mpi_.Rank() == 0)
+         {
+            PetscInt step = 0;
+            PetscReal dt = 0.0;
+            PetscCall(TSGetStepNumber(ts, &step));
+            PetscCall(TSGetTimeStep(ts, &dt));
+            std::cout << "  [cycle.qd] exact retry: the rollback of a rejected try of step "
+                      << step << " left " << bad_all << " non-finite state entries; "
+                      << "the retry (dt = " << static_cast<double>(dt) << " s, t = "
+                      << static_cast<double>(t) << " s) starts from the saved copy"
+                      << std::endl;
+         }
+      }
+      PetscFunctionReturn(PETSC_SUCCESS);
    }
 
    /// [cycle.opening] mode = "contact" (D-B5): PETSc calls this on every
@@ -1097,6 +1164,11 @@ public:
       TSGetStepRejections(*ode_, &n);
       return static_cast<int>(n);
    }
+   /// [cycle.qd] exact_retry: retries started from the saved copy, and
+   /// those whose PETSc rollback had left non-finite entries (this phase's
+   /// lifetime, all TS objects).
+   long ExactRetries() const { return retry_.Restores(); }
+   long ExactRetriesNonFinite() const { return retry_nonfinite_; }
    TS GetTS() const { return *ode_; }
 #endif
 
@@ -1567,6 +1639,9 @@ private:
    }
 
    std::unique_ptr<PetscODESolver> ode_;
+   /// [cycle.qd] exact_retry (declared after ode_, so destroyed before it).
+   ExactRetry retry_;
+   long retry_nonfinite_ = 0;
    /// ReportNonFinite_: lines printed on this rank (capped).
    mutable long nonfinite_lines_ = 0;
 #endif

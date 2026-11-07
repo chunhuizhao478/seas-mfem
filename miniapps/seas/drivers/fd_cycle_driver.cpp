@@ -1062,7 +1062,10 @@ int main(int argc, char *argv[])
                 << "  mesh: " << cfg.shared.mesh.path << " x " << cfg.mesh_scale
                 << ", p = " << cfg.shared.mesh.order << "\n"
                 << "  QD solver: " << cfg.qd.solver << ", PETSc options: "
-                << cfg.qd.petsc_options << " (atol " << cfg.qd.ts_atol << ")\n"
+                << cfg.qd.petsc_options << " (atol " << cfg.qd.ts_atol << ")"
+                << (cfg.qd.exact_retry ? ", exact retry ([cycle.qd].exact_retry: a "
+                    "rejected step retries from a copy of its start state; the whole "
+                    "state is scanned for NaN after each step)" : "") << "\n"
                 << "  QD stages: " << cfg.qd.operators;
       if (cfg.qd.green.enabled)
       {
@@ -1535,7 +1538,10 @@ int main(int argc, char *argv[])
          const real_t Vmax = qd.MaxV();
          bool bad = !std::isfinite(Vmax);
          const Vector &st = qd.State();
-         for (int i = 0; i < std::min(st.Size(), 100) && !bad; i++)
+         // the first 100 entries per rank, or all with [cycle.qd].exact_retry
+         // (Vista 1127480: the bad entry lay further down its rank's list)
+         const int nscan = cfg.qd.exact_retry ? st.Size() : std::min(st.Size(), 100);
+         for (int i = 0; i < nscan && !bad; i++)
          {
             if (!std::isfinite(st(i))) { bad = true; }
          }
@@ -1659,6 +1665,11 @@ int main(int argc, char *argv[])
                       << "  final time: " << t << " s (" << t / yr << " yr)\n"
                       << "  TS steps: " << steps << "\n"
                       << "  step rejections: " << rejections_before + qd.Rejections() << "\n"
+                      << (cfg.qd.exact_retry
+                          ? "  exact retries: " + std::to_string(qd.ExactRetries()) + " ("
+                            + std::to_string(qd.ExactRetriesNonFinite())
+                            + " after a rollback with non-finite entries)\n"
+                          : std::string())
                       << "  dynamic phases: " << ctl.Phases() << "\n"
                       << "  events: " << out->NumEvents() << "\n"
                       << "  snapshots: fault " << snaps.FaultSteps() << ", surface "

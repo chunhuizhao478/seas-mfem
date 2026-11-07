@@ -95,7 +95,13 @@
 //                   ts_atol, ts_rtol,
 //                   operators ["loops"]: "matrix" runs each stage through
 //                   the domain's prebuilt stage operators (seas_bp5_full
-//                   --qd-operators matrix, QD speed item 1)
+//                   --qd-operators matrix, QD speed item 1),
+//                   exact_retry [false]: a rejected step's retry starts
+//                   from a copy of the step's start state, not from PETSc's
+//                   rollback (which turns a last-stage Inf rate into NaN
+//                   in the state), and the driver scans the whole state for
+//                   NaN after each step instead of its first 100 entries
+//                   (cycle/exact_retry.hpp)
 //   [cycle.qd.green] the discrete Green's function stage (seas_bp5_full
 //                   --qd-green, items 3 and 4); present means on unless
 //                   enabled = false, and it needs operators = "matrix".
@@ -409,6 +415,10 @@ struct QDConfig
    real_t ts_atol = 1e-7;
    real_t ts_rtol = 1e-50;
    std::string operators = "loops";   ///< "loops" or "matrix"
+   /// Undo a rejected step by copying back its start state instead of
+   /// PETSc's rollback, and scan the whole state for NaN after every step
+   /// (cycle/exact_retry.hpp; the UCERF quench run's crash, 2026-11-07).
+   bool exact_retry = false;
    QDGreenDeck green;
 };
 
@@ -1075,13 +1085,14 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       MFEM_VERIFY(!q.contains("penalty_factor"), "[cycle.qd].penalty_factor is now "
                   "[cycle].penalty_factor: one value for both regimes' stiffness");
       OnlyKeys(q, "cycle.qd", {"solver", "blr_tol", "petsc_options", "ts_atol", "ts_rtol",
-                               "operators", "green"});
+                               "operators", "green", "exact_retry"});
       c.qd.solver = Str(q, "cycle.qd", "solver", c.qd.solver);
       c.qd.blr_tol = Real(q, "cycle.qd", "blr_tol", c.qd.blr_tol);
       c.qd.petsc_options = Str(q, "cycle.qd", "petsc_options", c.qd.petsc_options);
       c.qd.ts_atol = Real(q, "cycle.qd", "ts_atol", c.qd.ts_atol);
       c.qd.ts_rtol = Real(q, "cycle.qd", "ts_rtol", c.qd.ts_rtol);
       c.qd.operators = Str(q, "cycle.qd", "operators", c.qd.operators);
+      c.qd.exact_retry = Bool(q, "cycle.qd", "exact_retry", c.qd.exact_retry);
       if (q.contains("green"))
       {
          const std::string sec = "cycle.qd.green";
