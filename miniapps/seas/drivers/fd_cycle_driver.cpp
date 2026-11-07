@@ -61,6 +61,10 @@
 //               override its files), the options file (rk 5dp, atol)
 //   dynamic:    [cycle.lts] mode = "rate2" (local time stepping; the mesh
 //               is cut with BuildLtsAwarePartition for both regimes)
+//               [cycle.quench] on (quench plan rev1, Chunhui Zhao 2026-11-06):
+//               once a phase's max V < V_q the damping C_q = d M_rho goes on
+//               (DynPhase::SetQuench), off again above V_q or at the phase
+//               end; "quench_on" / "quench_off" lines in the switch log
 //
 // The per-step work and its order follow seas_bp5_full's TS monitor
 // (tests/verification/bp5_verification_full.cpp:529-718), so with the gold
@@ -438,6 +442,17 @@ void PrintDynamicSetup(const MPIContext &mpi, const cycle::CycleConfig &cfg,
              << "    switch: V_on " << sw.V_on << ", V_off " << sw.V_off << " m/s, T_dwell "
              << sw.T_dwell << " s, T_min " << sw.T_min << " s, T_max " << sw.T_max
              << " s, max_dynamic_phases " << sw.max_dynamic_phases << "\n";
+   if (cfg.quench.On())
+   {
+      std::cout << "    quench ([cycle.quench]): C_q = d M_rho on every element while max V < V_q = "
+                << cfg.quench.V_q << " m/s; d = " << dyn.QuenchRate() << " 1/s";
+      if (cfg.quench.AutoRate())
+      {
+         std::cout << " (\"auto\" = 2 pi c_s,min / L_max: c_s,min " << dyn.QuenchShearSpeedMin()
+                   << " m/s, L_max " << dyn.QuenchBoxLength() / 1e3 << " km)";
+      }
+      std::cout << "; decay time 2 / d = " << 2.0 / dyn.QuenchRate() << " s\n";
+   }
 }
 
 /// One dynamic phase (plan 6.2, 6.3): from the QD balance at t_s (max V =
@@ -621,6 +636,11 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
    cycle::DynVerdict verdict = cycle::DynVerdict::Stay;
    bool step_cap = false;
    double step_s = 0.0, wall0 = MPI_Wtime();
+   // [cycle.quench] (quench plan rev1, Q4): on at the first step with max V
+   // below V_q, off if it rises above V_q again; the counts for the summary
+   const cycle::QuenchConfig &qc = cfg.quench;
+   long quench_steps = 0, quench_switches = 0;
+   double quench_s = 0.0;
    cycle::DynPhase::StepInfo first{}, worst{};
    worst.min_sigma_eff = std::numeric_limits<real_t>::infinity();
    worst.min_sigma_pc = std::numeric_limits<real_t>::infinity();
@@ -716,6 +736,14 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
             std::cout << "\n  [cycle.opening] open DOFs at the last step: " << open_end
                       << " (max V above is over the closed DOFs)";
          }
+         if (qc.On())
+         {
+            std::cout << "\n  quench: on for " << quench_steps << " of " << dyn.Steps()
+                      << " steps (" << quench_steps * dyn.StepDt() << " s of phase time), "
+                      << "switched on " << quench_switches << " time(s), d = "
+                      << dyn.QuenchRate() << " 1/s; " << (quench_steps > 0 ? quench_s / quench_steps : 0.0)
+                      << " s per quenched step (rank 0)";
+         }
          std::cout << "\n  time per dynamic step: " << step_avg << " s (rank 0), " << step_max
                    << " s (slowest rank), on " << mpi.Size() << " ranks; loop with output "
                    << loop_s << " s\n"
@@ -729,9 +757,16 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
 
    while (true)
    {
+      const bool quenched_step = dyn.Quenched();
       const double w = MPI_Wtime();
       dyn.Step();
-      step_s += MPI_Wtime() - w;
+      const double w_step = MPI_Wtime() - w;
+      step_s += w_step;
+      if (quenched_step)
+      {
+         quench_s += w_step;
+         quench_steps++;
+      }
       t = dyn.Time();
       const cycle::DynPhase::StepInfo r = dyn.LastStepInfo();
       Vmax = r.max_V;
@@ -754,6 +789,30 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
          if (bench) { bench->Profiles(t, Vmax, fill_dyn); }
          snaps.Dyn(t, dyn.Tau(), dyn.Steps(), phase, fill_dyn, dyn.U(), dyn.Ud());
          verdict = ctl.AfterDynStep(Vmax, t, dyn.Tau());
+      }
+      if (qc.On())
+      {
+         // [cycle.quench]: on below V_q, off above it (a second rupture in
+         // the phase runs undamped); the probe pairs below read the same field
+         const bool want = (Vmax < qc.V_q);
+         if (want != dyn.Quenched())
+         {
+            if (want)
+            {
+               dyn.SetQuench();
+               quench_switches++;
+            }
+            else { dyn.ClearQuench(); }
+            out.SwitchLog(t, Vmax, "dynamic", "dynamic", want ? "quench_on" : "quench_off");
+            if (root)
+            {
+               std::cout << std::scientific << std::setprecision(3) << "  quench "
+                         << (want ? "on" : "off") << " at tau = " << dyn.Tau() << " s (step "
+                         << dyn.Steps() << ", max V = " << Vmax << (want ? " < " : " >= ")
+                         << "V_q = " << qc.V_q << " m/s), d = " << dyn.QuenchRate() << " 1/s\n"
+                         << std::flush;
+            }
+         }
       }
       for (size_t k = 0; k < probes.size(); k++)
       {

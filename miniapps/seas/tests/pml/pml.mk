@@ -7,7 +7,8 @@
 #   make -f tests/pml/pml.mk test-pml-band     # P1: PmlBand, C0, band integrators, patch test
 #   make -f tests/pml/pml.mk test-pml-qd       # P1: the QD band on Q0 (T1, D3), 1 and 2 ranks
 #   make -f tests/pml/pml.mk test-pml-dyn      # P2: the dynamic PML (S0, S1, T2-T4), 1 and 2 ranks
-#   make -f tests/pml/pml.mk test-pml-switch   # P2/P3: DynPhase with the band on D0 (also KV, sponge)
+#   make -f tests/pml/pml.mk test-pml-switch   # P2/P3: DynPhase with the band on D0 (also KV, sponge, quench)
+#   make -f tests/pml/pml.mk test-quench       # quench plan rev1: energy identity, decay, static end state
 #   make -f tests/pml/pml.mk test-pml-decks    # P3: the hand-back decks' switch set-up (Mac)
 
 include tests/2d_inplane/2d_inplane.mk
@@ -75,6 +76,29 @@ test-pml-switch: seas_test_pml_switch
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_pml_switch
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_pml_switch --kv-eta 0.1
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_pml_switch --kind sponge --kv-eta 0.1
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_pml_switch --quench 1.0
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_pml_switch --kv-eta 0.1 --quench 1.0
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_pml_switch --kind sponge --kv-eta 0.1 --quench 1.0
+
+# quench plan rev1 (Chunhui Zhao 2026-11-06), T-Q2/T-Q3 at the operator level:
+# a box at rest under a body load switched on at t = 0, plain walls and the
+# CFS band; the discrete energy identity with the quench, the decay against
+# the modal bound and the static end state
+TEST_QUENCH_SRC = tests/pml/test_quench.cpp
+TEST_QUENCH_OBJ = $(TEST_QUENCH_SRC:.cpp=.o)
+$(TEST_QUENCH_OBJ): %.o: $(SRC)%.cpp $(PML_HEADERS) $(SEAS_HEADERS) $(INPLANE_HEADERS) \
+                     $(NITSCHE_2D_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI -c $< -o $@
+
+seas_test_quench: $(TEST_QUENCH_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_QUENCH_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-quench: seas_test_quench
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_quench
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_quench
 
 # P3: the hand-back decks (simple_cases/configs/D0_straight_hb_*): every band
 # deck read (cloud), and its switch set-up and 20 steps (the Mac: a start-up check)
@@ -89,4 +113,5 @@ test-pml-decks: seas_test_pml_switch
 	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_pml_switch --deck simple_cases/configs/$$d.toml \
 	      --as-is --dyn-steps 20 || exit 1; done
 
-.PHONY: test-pml-band test-pml-qd test-pml-dyn test-pml-switch test-pml-decks-parse test-pml-decks
+.PHONY: test-pml-band test-pml-qd test-pml-dyn test-pml-switch test-pml-decks-parse test-pml-decks \
+        test-quench

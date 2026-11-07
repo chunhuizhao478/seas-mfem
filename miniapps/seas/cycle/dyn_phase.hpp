@@ -367,6 +367,42 @@ public:
                                                 cfg.penalty_factor);
       }
 
+      if (cfg.quench.On())
+      {
+         // [cycle.quench] (quench plan rev1, Q3): the rate d for the run
+         MFEM_VERIFY(!lts_on, "DynPhase: [cycle.quench] with local time stepping");
+         if (cfg.quench.AutoRate())
+         {
+            // d_auto = 2 pi c_s,min / L_max, the critical damping of the
+            // slowest shear mode of the box (plan Statement 2): c_s,min over
+            // the elements of the material sample, L_max the longest side of
+            // the mesh's bounding box; both collective
+            ParMesh &wm = W_->GetMesh();
+            const NitscheMaterialSample &sm = W_->Sample();
+            const ParFiniteElementSpace *sfes = sm.RhoGF().ParFESpace();
+            real_t cs_min = std::numeric_limits<real_t>::infinity();
+            Array<int> dofs;
+            for (int e = 0; e < wm.GetNE(); e++)
+            {
+               sfes->GetElementDofs(e, dofs);
+               cs_min = std::min(cs_min, std::sqrt(sm.MuGF()(dofs[0]) / sm.RhoGF()(dofs[0])));
+            }
+            MPI_Allreduce(MPI_IN_PLACE, &cs_min, 1, MPITypeMap<real_t>::mpi_type, MPI_MIN,
+                          wm.GetComm());
+            Vector lo, hi;
+            wm.GetBoundingBox(lo, hi);
+            real_t L = 0.0;
+            for (int i = 0; i < wm.Dimension(); i++) { L = std::max(L, hi(i) - lo(i)); }
+            MFEM_VERIFY(L > 0.0 && std::isfinite(L) && cs_min > 0.0 && std::isfinite(cs_min),
+                        "DynPhase: [cycle.quench] d_per_s = \"auto\" needs a box (L_max = "
+                        << L << " m) and a shear speed (c_s,min = " << cs_min << " m/s)");
+            quench_cs_min_ = cs_min;
+            quench_L_max_ = L;
+            quench_d_ = 2.0 * M_PI * cs_min / L;
+         }
+         else { quench_d_ = cfg.quench.d; }
+      }
+
       const int n = W_->Height();
       U_.SetSize(n);
       Ud_.SetSize(n);
@@ -381,6 +417,7 @@ public:
    {
       MFEM_VERIFY(u_s.Size() == W_->Height(), "DynPhase::Enter: displacement size "
                   << u_s.Size() << " != " << W_->Height());
+      if (quench_on_) { ClearQuench(); }   // [cycle.quench]: a phase starts without it
       *t0_ = t_s;
       tau_ = 0.0;
       W_->SetTime(0.0);
@@ -655,6 +692,31 @@ public:
    bool HasPml() const { return pml_ != nullptr; }
    bool HasSponge() const { return sponge_; }
    long Steps() const { return steps_; }
+
+   /// [cycle.quench] (quench plan rev1, Q3): the damping C_q = d M_rho on
+   /// every element (NitscheWaveOperator::SetQuench), the driver's call once
+   /// max V < V_q; ClearQuench when it rises above V_q again; Enter clears
+   /// it, so a phase starts without it.  Both collective.
+   void SetQuench()
+   {
+      MFEM_VERIFY(cfg_.quench.On() && quench_d_ > 0.0, "DynPhase::SetQuench without "
+                  "[cycle.quench]");
+      MFEM_VERIFY(entered_ && !lts_, "DynPhase::SetQuench before Enter or with local time "
+                  "stepping");
+      W_->SetQuench(quench_d_);
+      quench_on_ = true;
+   }
+   void ClearQuench()
+   {
+      W_->ClearQuench();
+      quench_on_ = false;
+   }
+   bool Quenched() const { return quench_on_; }
+   /// The rate d [1/s] of [cycle.quench] for this run (0 without it), and
+   /// what "auto" was built from (0 when the deck gives the number).
+   real_t QuenchRate() const { return quench_d_; }
+   real_t QuenchShearSpeedMin() const { return quench_cs_min_; }
+   real_t QuenchBoxLength() const { return quench_L_max_; }
    /// Global max |V| of the last step (0 before the first).
    real_t MaxV() const { return W_->LastStep().max_V; }
 
@@ -910,6 +972,10 @@ private:
    std::shared_ptr<const PmlBand> pml_;   ///< [cycle.pml] (null: off)
    real_t pml_kappa_max_ = 1.0;
    bool sponge_ = false;                  ///< [cycle.pml] kind = "sponge"
+   // [cycle.quench]: the rate d in force for the run (the deck's number, or
+   // "auto" = 2 pi c_s,min / L_max), what "auto" was built from, and the state
+   real_t quench_d_ = 0.0, quench_cs_min_ = 0.0, quench_L_max_ = 0.0;
+   bool quench_on_ = false;
    const Vector *relax_r_ = nullptr;   ///< [cycle.relaxation]: the QD regime's r
    std::unique_ptr<FrozenNormalStressReduction> relax_mod_;
    std::unique_ptr<CentralDifferenceSolver> ode_;

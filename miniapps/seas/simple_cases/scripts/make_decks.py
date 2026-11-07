@@ -78,6 +78,22 @@
 #                      30,000 yr) with [cycle.opening] mode = "shear_free":
 #                      a DOF whose elastic sigma_n' is tensile is open
 #                      (shear-free in both regimes, psi frozen, out of max V)
+# switch probe (PROBE): the 10 MPa floor D9f deck (RELAX, no relaxation; the
+#                      probe refuses [cycle.relaxation] and [cycle.opening]),
+#                      1,000 yr, with [cycle.probe] V_off [1e-3, 1e-4] and
+#                      T_dwell [10, 30, 100, 300, 600] s (every pair), and
+#                      [cycle.switch] max_dynamic_phases = 1, T_max 2400 s:
+#                      event 1's dynamic phase runs on to the last pair's
+#                      switch and the driver writes tau_qd -
+#                      tau_dyn at every station at each dwell (the dwell test
+#                      of the hand-back offset explainer rev1, section 6);
+#                      once with the absorbing walls, once with the CFS-PML
+#                      band (PML, f_alpha 0.01 Hz)
+# quench (QUENCH):     the two PROBE decks with [cycle.quench] on, d_per_s
+#                      "auto" (quench plan rev1: the damping C_q = d M_rho in
+#                      every element once the phase's max V < V_off, off
+#                      again above it or at the phase end), the W1 / B1 runs
+#                      of the plan's D9f test against W0 / B0 (the PROBE decks)
 import argparse
 import math
 import os
@@ -157,6 +173,12 @@ CASES = [
     ("D9f_arc08L2p5_h250_avg_floor10_relax5k_pml0p01", "arc08L2p5_h250", "D", True, "PML P4 (T6): relaxation V1 (D9f, t_r 5 kyr, 10 MPa floor) with the CFS-PML band, f_alpha 0.01 Hz, 12,000 yr"),
     # fault opening design rev 1.1, version A (T5): the floor control with open points
     ("D9f_arc08L2p5_h250_avg_floor10_open", "arc08L2p5_h250", "D", True, "fault opening A (T5): D9f with the sigma_n' floor at 10 MPa and shear-free open points ([cycle.opening]), 30,000 yr"),
+    # the D9f dwell test (2026-11-06): the hand-back jump against the dwell, walls vs band
+    ("D9f_arc08L2p5_h250_avg_floor10_probe", "arc08L2p5_h250", "D", True, "D9f dwell test: the 10 MPa floor D9f deck with the switch probe (dwell 10 to 600 s) and the absorbing walls, event 1 only"),
+    ("D9f_arc08L2p5_h250_avg_floor10_pml0p01_probe", "arc08L2p5_h250", "D", True, "D9f dwell test: the 10 MPa floor D9f deck with the switch probe (dwell 10 to 600 s) and the CFS-PML band, f_alpha 0.01 Hz, event 1 only"),
+    # the quench (2026-11-06): the two dwell-test decks with the dwell damping on
+    ("D9f_arc08L2p5_h250_avg_floor10_probe_quench", "arc08L2p5_h250", "D", True, "D9f quench test W1: the dwell-test deck with the absorbing walls and [cycle.quench] on (d \"auto\"), event 1 only"),
+    ("D9f_arc08L2p5_h250_avg_floor10_pml0p01_probe_quench", "arc08L2p5_h250", "D", True, "D9f quench test B1: the dwell-test deck with the CFS-PML band (f_alpha 0.01 Hz) and [cycle.quench] on (d \"auto\"), event 1 only"),
 ]
 SMOOTH = ["D7f_arc08L10_h250_avg_floor", "D9f_arc08L2p5_h250_avg_floor", "D6f_arc03L10_h250_avg_floor",
           "D8f_arc03L2p5_h250_avg_floor", "D10f_sbend03L05_h250_avg_floor"]
@@ -211,6 +233,12 @@ RELAX = {
     "D9f_arc08L2p5_h250_avg_floor10_relax5k_pml0p01": dict(floor=10.0e6, years=12000.0, t_relax_yr=5000.0),
     # fault opening A (T5): the floor control with [cycle.opening]
     "D9f_arc08L2p5_h250_avg_floor10_open": dict(floor=10.0e6, years=30000.0, t_relax_yr=None),
+    # the D9f dwell test (PROBE): event 1 (at about 857 yr) and its probed dwells
+    "D9f_arc08L2p5_h250_avg_floor10_probe": dict(floor=10.0e6, years=1000.0, t_relax_yr=None),
+    "D9f_arc08L2p5_h250_avg_floor10_pml0p01_probe": dict(floor=10.0e6, years=1000.0, t_relax_yr=None),
+    # the quench test (QUENCH): the same, with the dwell damping
+    "D9f_arc08L2p5_h250_avg_floor10_probe_quench": dict(floor=10.0e6, years=1000.0, t_relax_yr=None),
+    "D9f_arc08L2p5_h250_avg_floor10_pml0p01_probe_quench": dict(floor=10.0e6, years=1000.0, t_relax_yr=None),
 }
 for _c in RELAX:
     OPTS[_c] = dict(averaged=True)
@@ -306,6 +334,9 @@ PML = {
     "D0_straight_hb_sponge": dict(kind="sponge"),
     # P4 (T6): against D9f_arc08L2p5_h250_avg_floor10_relax5k's first two events
     "D9f_arc08L2p5_h250_avg_floor10_relax5k_pml0p01": dict(kind="cfs", f_alpha=0.01, years=12000.0),
+    # the D9f dwell test (PROBE): the band at f_alpha 0.01 Hz, event 1 only
+    "D9f_arc08L2p5_h250_avg_floor10_pml0p01_probe": dict(kind="cfs", f_alpha=0.01, years=1000.0),
+    "D9f_arc08L2p5_h250_avg_floor10_pml0p01_probe_quench": dict(kind="cfs", f_alpha=0.01, years=1000.0),
 }
 PML_YEARS = 900.0
 PML_L_KM = 150.0
@@ -318,6 +349,27 @@ GO_CASE["D9f_arc08L2p5_h250_avg_floor10_relax5k_pml0p01"] = (
 OPEN = ["D9f_arc08L2p5_h250_avg_floor10_open"]
 for _c in OPEN:
     GO_CASE[_c] = "# 2026-11-04: \"start version A\", fault opening design rev 1.1, T5):"
+
+# the D9f dwell test (cycle/cycle_config.hpp [cycle.probe], the switch probe of
+# the BP5 plan P3): is the hand-back jump tau_qd - tau_dyn the unsettled box
+# swing (it falls as the dwell grows) or a different static system (it stays)?
+PROBE = {
+    "D9f_arc08L2p5_h250_avg_floor10_probe": dict(V_off=[1.0e-3, 1.0e-4], T_dwell=[10.0, 30.0, 100.0, 300.0, 600.0], T_max=2400.0),
+    "D9f_arc08L2p5_h250_avg_floor10_pml0p01_probe": dict(V_off=[1.0e-3, 1.0e-4], T_dwell=[10.0, 30.0, 100.0, 300.0, 600.0], T_max=2400.0),
+}
+for _c in PROBE:
+    GO_CASE[_c] = ("# 2026-11-06: \"can we test in a small case D9f maybe, that with pml we are\n"
+                   "# solving the same system in end of dynamic phase and QD?\", the D9f dwell test):")
+
+# the quench (quench plan rev1, section 6; cycle/cycle_config.hpp [cycle.quench]):
+# the dwell-test decks with the dwell damping on, d "auto" = 2 pi c_s / L_max
+# (0.045 1/s on this box, decay time 44 s), the W1 / B1 runs against W0 / B0
+QUENCH = ["D9f_arc08L2p5_h250_avg_floor10_probe_quench",
+          "D9f_arc08L2p5_h250_avg_floor10_pml0p01_probe_quench"]
+for _c in QUENCH:
+    PROBE[_c] = PROBE[_c.replace("_quench", "")]
+    GO_CASE[_c] = ("# 2026-11-06: \"let's proceed with the plan, implement all phases, pass the\n"
+                   "# tests, remind me when D9f is ready to run\", the quench plan rev1, section 6):")
 
 
 def header(case, mesh, regime, floor, row):
@@ -395,6 +447,39 @@ def make(case, mesh, regime, floor, row, base):
             "# on closed DOFs only.\n"
             "[cycle.opening]\n"
             "mode = \"shear_free\"\n\n"
+            "# The BP5-FD switch.\n[cycle.switch]\n")
+    if case in PROBE:
+        pr = PROBE[case]
+        sub("# The BP5-FD switch.\n[cycle.switch]\n",
+            "# The switch probe (make_decks.py PROBE; cycle/cycle_config.hpp [cycle.probe]):\n"
+            "# the first dynamic phase runs on until every (V_off, T_dwell) pair would have\n"
+            "# switched back (or T_max), and at each pair's switch the driver solves the QD\n"
+            "# balance from the dynamic state and writes tau and V of both regimes at every\n"
+            "# station to <prefix>_switch_probe.txt (the summary with the fault-wide largest\n"
+            "# |delta tau| to <prefix>_switch_probe_summary.txt); a pair that has not switched\n"
+            "# by T_max is recorded as such.  The run itself stops at the end of this phase\n"
+            "# (max_dynamic_phases = 1 below).\n"
+            "[cycle.probe]\n"
+            f"V_off   = [{', '.join(f'{v:.1e}' for v in pr['V_off'])}]\n"
+            f"T_dwell = [{', '.join(f'{d:.1f}' for d in pr['T_dwell'])}]\n\n"
+            "# The BP5-FD switch.\n[cycle.switch]\n")
+        sub("max_dynamic_phases = 0\n",
+            "max_dynamic_phases = 1   # the dwell test: event 1's probed phase only (mapview_rs_fd.toml: 0)\n")
+        sub("T_max              = 1200.0\n",
+            f"T_max              = {pr['T_max']:.1f}   # the dwell test: room for the V_off 1e-4 pairs (mapview_rs_fd.toml: 1200)\n")
+    if case in QUENCH:
+        sub("# The BP5-FD switch.\n[cycle.switch]\n",
+            "# Dynamic relaxation during the dwell (make_decks.py QUENCH; quench plan rev1;\n"
+            "# cycle/cycle_config.hpp [cycle.quench]): once the phase's max V drops below\n"
+            "# V_q (= V_off below) the damping C_q = d M_rho goes on in every element, with\n"
+            "# d = \"auto\" = 2 pi c_s,min / L_max, the critical damping of the slowest shear\n"
+            "# mode of the box (0.045 1/s here: decay time 2/d = 44 s), off again above V_q\n"
+            "# or at the phase end.  The term vanishes at rest (the static end state is the\n"
+            "# same) and enters the implicit damped mass (the step is the same).  The probe\n"
+            "# pairs above read the quenched field at their dwells.\n"
+            "[cycle.quench]\n"
+            "on      = true\n"
+            "d_per_s = \"auto\"\n\n"
             "# The BP5-FD switch.\n[cycle.switch]\n")
     pk = PML.get(case, {}).get("kind")
     if pk:

@@ -17,6 +17,11 @@
 // --parse-only only reads it.  --kind sponge (the comparator: no QD band, wall factor 1, no b_band,
 // the plain step) and --kv-eta 0.1 (Kelvin-Voigt as the simple-case decks).
 //   steps      n dynamic steps finite; the band DOFs' max |U - u_s| printed
+// --quench d (quench plan rev1, T-Q1 at the phase level): with [cycle.quench]
+// d_per_s = d, the round trip DynPhase::SetQuench + ClearQuench at step n/2
+// leaves the run bit for bit the plain run's (U and U'); Enter clears a
+// quench in force; a quench kept on changes the step (its decay and static
+// end state: tests/pml/test_quench.cpp).
 //
 // Usage (from miniapps/seas; PETSc needed):
 //   mpirun -np N ./seas_test_pml_switch [--deck simple_cases/configs/D0_straight.toml]
@@ -60,6 +65,7 @@ int main(int argc, char *argv[])
    const char *deck = "simple_cases/configs/D0_straight.toml";
    int n_dyn = 200;
    const char *kind = "cfs";
+   real_t quench_d = 0.0;
    real_t kv = 0.0;
    bool as_is = false, parse_only = false;
    OptionsParser args(argc, argv);
@@ -71,6 +77,8 @@ int main(int argc, char *argv[])
    args.AddOption(&kv, "-kv", "--kv-eta", "Kelvin-Voigt eta_bar of the dynamic phase (0: off).");
    args.AddOption(&deck, "-d", "--deck", "2-D switching deck with loaded walls (attribute 5).");
    args.AddOption(&n_dyn, "-n", "--dyn-steps", "Dynamic steps after the switch.");
+   args.AddOption(&quench_d, "-q", "--quench",
+                  "[cycle.quench] d_per_s for the round-trip check (0: off).");
    args.Parse();
    if (!args.Good())
    {
@@ -115,6 +123,12 @@ int main(int argc, char *argv[])
       cfg.pml.c_ref = std::sqrt((m.lambda + 2.0 * m.mu) / m.rho);
    }
    cfg.pml.wall_speed_factor = cfg.pml.Sponge() ? 1.0 : 0.0;   // "auto" for the CFS-PML
+   }
+   if (quench_d > 0.0)
+   {
+      cfg.quench.on = true;
+      cfg.quench.d = quench_d;
+      cfg.quench.V_q = cfg.switch_cfg.V_off;
    }
    const bool sponge = cfg.pml.Sponge();
    MFEMInitializePetsc(&argc, &argv, cfg.qd.petsc_options.c_str(), NULL);
@@ -269,6 +283,78 @@ int main(int argc, char *argv[])
                      "max V %.4e m/s\n", n_dyn, W.GetTime(), du, du_b, vmax_dyn);
       }
       Check(mpi, fin_all == 1, "steps: finite", 0.0);
+
+      if (quench_d > 0.0)
+      {
+         // [cycle.quench] (quench plan rev1, T-Q1 at the phase level).  Every
+         // run below starts with Enter after a run, as the plain run A does.
+         auto same = [&](const Vector &a, const Vector &b)
+         {
+            int eq = (a.Size() == b.Size()) ? 1 : 0;
+            for (int i = 0; eq && i < a.Size(); i++) { if (a(i) != b(i)) { eq = 0; } }
+            MPI_Allreduce(MPI_IN_PLACE, &eq, 1, MPI_INT, MPI_MIN, mpi.GetComm());
+            return eq == 1;
+         };
+         auto gnorm = [&](const Vector &a)
+         {
+            real_t l = a * a, g = 0.0;
+            MPI_Allreduce(&l, &g, 1, MPITypeMap<real_t>::mpi_type, MPI_SUM, mpi.GetComm());
+            return std::sqrt(g);
+         };
+         const int k0 = n_dyn / 2;
+         Check(mpi, dyn.QuenchRate() == quench_d && !dyn.Quenched(), "quench: the run's d, off "
+               "before SetQuench", dyn.QuenchRate());
+         // A: plain
+         dyn.Enter(us, d, V, psin, sn, ts);
+         for (int k = 0; k < n_dyn; k++) { dyn.Step(); }
+         const Vector UA(dyn.U()), VA(dyn.Ud());
+         // B: the round trip at step k0
+         dyn.Enter(us, d, V, psin, sn, ts);
+         bool b_on = false, b_off = false;
+         for (int k = 0; k < n_dyn; k++)
+         {
+            if (k == k0)
+            {
+               dyn.SetQuench();
+               b_on = dyn.Quenched() && W.Quenched() && W.QuenchRate() == quench_d;
+               dyn.ClearQuench();
+               b_off = !dyn.Quenched() && !W.Quenched() && W.QuenchRate() == 0.0;
+            }
+            dyn.Step();
+         }
+         const Vector UB(dyn.U()), VB(dyn.Ud());
+         // C: on from step k0 to the end
+         dyn.Enter(us, d, V, psin, sn, ts);
+         for (int k = 0; k < n_dyn; k++)
+         {
+            if (k == k0) { dyn.SetQuench(); }
+            dyn.Step();
+         }
+         const Vector UC(dyn.U()), VC(dyn.Ud());
+         const bool c_on = dyn.Quenched() && W.Quenched();
+         // D: on at step k0, then Enter (which clears it) and the plain run
+         dyn.Enter(us, d, V, psin, sn, ts);
+         for (int k = 0; k < k0; k++) { dyn.Step(); }
+         dyn.SetQuench();
+         dyn.Enter(us, d, V, psin, sn, ts);
+         const bool d_off = !dyn.Quenched() && !W.Quenched();
+         for (int k = 0; k < n_dyn; k++) { dyn.Step(); }
+         const Vector UD(dyn.U()), VD(dyn.Ud());
+         const real_t nVA = gnorm(VA), nVC = gnorm(VC);
+         if (mpi.IsRoot())
+         {
+            std::printf("  quench d = %.3e 1/s at step %d of %d: |U'| at the end %.4e (plain) "
+                        "%.4e (quenched)\n", quench_d, k0, n_dyn, nVA, nVC);
+         }
+         Check(mpi, b_on && b_off, "quench: on after SetQuench, off after ClearQuench", 0.0);
+         Check(mpi, same(UA, UB) && same(VA, VB),
+               "quench round trip: U and U' bit for bit the plain run's", 0.0);
+         Check(mpi, c_on, "quench: still on at the end of the quenched run", 0.0);
+         Check(mpi, !same(UA, UC), "quench on: the step changes", 0.0);
+         Check(mpi, d_off, "quench: Enter clears it", 0.0);
+         Check(mpi, same(UA, UD) && same(VA, VD),
+               "quench cleared by Enter: the plain run bit for bit", 0.0);
+      }
    }
    if (mpi.IsRoot()) { std::cout << (fails ? "FAILED: " : "ALL PASS: ") << fails << "\n"; }
    MFEMFinalizePetsc();

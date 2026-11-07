@@ -119,6 +119,16 @@
 //                   driver solves the QD balance and writes the jump in tau
 //                   and V at every station to _switch_probe.txt.  The run
 //                   itself switches back with [cycle.switch]'s pair.
+//   [cycle.quench]  on [false], d_per_s ["auto" = 2 pi c_s,min / L_max, or a
+//                   number > 0], V_q [0 = [cycle.switch].V_off].  Dynamic
+//                   relaxation during the dwell (quench plan rev1, Chunhui
+//                   Zhao 2026-11-06): once the phase's max V drops below V_q
+//                   the driver adds the damping C_q = d M_rho on every
+//                   element (the sponge's rho d U' with one constant rate d),
+//                   off again if max V rises above V_q or at the phase end.
+//                   The term vanishes at rest (the static end state is
+//                   unchanged) and enters the implicit damped mass (the step
+//                   is unchanged).  Needs switching; not with [cycle.lts].
 //   [cycle.prestress] V_background (V_bg of psi0)                   [required]
 //                   eta_V_init: tau0 += eta |V_init| (BuildPrestress
 //                   include_eta: eq. 20, and eq. 23 with dtau = eta V_i, the
@@ -508,6 +518,29 @@ struct ProbeConfig
    bool Enabled() const { return !V_off.empty(); }
 };
 
+/// [cycle.quench]: dynamic relaxation during the dwell (quench plan rev1,
+/// Chunhui Zhao 2026-11-06 "let's proceed with the plan").  Off by default.
+/// Once the dynamic phase's global max V drops below V_q the driver adds the
+/// damping C_q = d M_rho (NitscheWaveOperator::SetQuench: the sponge's term
+/// rho d U' with one constant rate d on every element) and removes it when
+/// max V rises above V_q again or the phase ends (DynPhase::Enter).  The
+/// term vanishes at rest, so the static end state of the phase is unchanged;
+/// it enters the implicit damped mass (M + dt/2 C), so the step and its CFL
+/// limit are unchanged.
+struct QuenchConfig
+{
+   bool on = false;
+   /// d_per_s: the damping rate d [1/s]; 0 = "auto" = 2 pi c_s,min / L_max,
+   /// the critical damping of the slowest shear mode of the box (DynPhase
+   /// sets it from the mesh's bounding box and the material sample)
+   real_t d = 0.0;
+   /// V_q [m/s]: the quench is on while max V < V_q; the deck's 0 (or no
+   /// key) = [cycle.switch].V_off, resolved by Load
+   real_t V_q = 0.0;
+   bool On() const { return on; }
+   bool AutoRate() const { return d == 0.0; }
+};
+
 /// [cycle.loading] (see the file comment and cycle/loading.hpp).
 struct LoadingConfig
 {
@@ -599,6 +632,7 @@ struct CycleConfig
    QDConfig qd;
    SwitchConfig switch_cfg;
    ProbeConfig probe;
+   QuenchConfig quench;           ///< [cycle.quench] (default: off)
    DynamicConfig dyn;
    PrestressConfig prestress;     ///< include_eta: [cycle.prestress].eta_V_init
    FaultFieldsConfig fields;
@@ -966,7 +1000,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
    }
    OnlyKeys(cy, "cycle", {"ic", "switching", "qd_radiation_damping", "mesh_scale",
                           "plate_rate", "penalty_factor", "sigma_n_floor_pa", "qd", "switch",
-                          "probe", "relaxation", "opening",
+                          "probe", "quench", "relaxation", "opening",
                           "prestress", "fields", "output", "checkpoint", "snapshots",
                           "benchmark", "lts", "loading", "absorbing", "finite_width",
                           "pml"});
@@ -1683,6 +1717,40 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
                      "not implemented");
          MFEM_VERIFY(P.wall_speed_factor == 1.0 || c.loading.Plate(), "[" << sec
                      << "].wall_speed_factor needs [cycle.loading] kind = \"plate\"");
+      }
+   }
+
+   // ---- [cycle.quench] (quench plan rev1, Q1) ----
+   if (cy.contains("quench"))
+   {
+      const std::string sec = "cycle.quench";
+      const toml::value &qt = cy.at("quench");
+      OnlyKeys(qt, sec, {"on", "d_per_s", "V_q"});
+      QuenchConfig &Q = c.quench;
+      Q.on = Bool(qt, sec, "on", false);
+      if (qt.contains("d_per_s") && qt.at("d_per_s").is_string())
+      {
+         MFEM_VERIFY(Str(qt, sec, "d_per_s", "") == "auto", "[" << sec
+                     << "].d_per_s must be \"auto\" or a number > 0");
+         Q.d = 0.0;
+      }
+      else if (qt.contains("d_per_s"))
+      {
+         Q.d = Real(qt, sec, "d_per_s", 0.0);
+         MFEM_VERIFY(Q.d > 0.0 && std::isfinite(Q.d), "[" << sec << "].d_per_s = " << Q.d
+                     << " must be > 0 (or \"auto\")");
+      }
+      Q.V_q = Real(qt, sec, "V_q", 0.0);
+      if (Q.on)
+      {
+         MFEM_VERIFY(c.switching, "[" << sec << "] acts in the dynamic phase's dwell; it "
+                     "needs [cycle].switching = true");
+         if (Q.V_q == 0.0) { Q.V_q = c.switch_cfg.V_off; }
+         MFEM_VERIFY(Q.V_q > 0.0 && std::isfinite(Q.V_q) && Q.V_q <= c.switch_cfg.V_on,
+                     "[" << sec << "].V_q = " << Q.V_q << " m/s must be in (0, V_on = "
+                     << c.switch_cfg.V_on << " m/s] (0 or absent = V_off)");
+         MFEM_VERIFY(!c.lts.On(), "[" << sec << "] with [cycle.lts]: the LTS run integrates "
+                     "its own element matrices; use global stepping");
       }
    }
 

@@ -307,6 +307,8 @@ public:
    /// With absorbing faces it also builds (M + dt/2 C)^{-1}.
    void SetTimeStep(real_t dt)
    {
+      MFEM_VERIFY(!quench_on_, "NitscheWaveOperator::SetTimeStep with the quench on: "
+                  "ClearQuench first");
       dt_ = dt;
       if (pml_) { pml_->SetTimeStep(dt); }
       if (has_damping_global_)
@@ -489,6 +491,82 @@ public:
       has_damping_global_ = (global != 0);
    }
    bool HasSponge() const { return sponge_ != nullptr; }
+
+   /// Dynamic relaxation, the "quench" (quench plan rev1, Chunhui Zhao
+   /// 2026-11-06): C_q = d M_rho on EVERY element, the sponge's damping
+   /// rho d U' with one constant rate d [1/s] and no profile, added to the
+   /// damping blocks (the absorbing faces', the sponge's and the CFS band's
+   /// blocks stay), and the damped mass (M + dt/2 C) rebuilt for the current
+   /// step; the step itself is the damped branch of ImplicitSolve, unchanged.
+   /// The term vanishes at rest (the static state is unchanged) and only
+   /// removes energy (M_rho is positive definite).  Collective; after
+   /// SetTimeStep; not with local time stepping (the LTS run holds its own
+   /// matrices).  ClearQuench puts the blocks and the damped mass back as
+   /// they were, the same objects, so the step after it is bit for bit the
+   /// step before SetQuench.
+   void SetQuench(real_t d)
+   {
+      MFEM_VERIFY(d > 0.0 && std::isfinite(d), "SetQuench: d = " << d << " 1/s must be > 0");
+      MFEM_VERIFY(dt_ > 0.0, "SetQuench before SetTimeStep");
+      MFEM_VERIFY(!quench_on_, "SetQuench: the quench is already on");
+      quench_saved_blocks_ = damping_blocks_;
+      quench_saved_mass_ = std::move(mass_damped_);
+      quench_saved_global_ = has_damping_global_;
+      const ParFiniteElementSpace &fes = elast_->GetFESpace();
+      Vector sh;
+      for (int e = 0; e < mesh_.GetNE(); e++)
+      {
+         const FiniteElement &fe = *fes.GetFE(e);
+         ElementTransformation &T = *mesh_.GetElementTransformation(e);
+         // the mass matrix's own rule (domain/nitsche_mass.hpp): C_q,e = d rho_e M_e
+         const IntegrationRule &ir = IntRules.Get(fe.GetGeomType(), 2 * fe.GetOrder());
+         const int nd = fe.GetDof();
+         sh.SetSize(nd);
+         auto it = damping_blocks_.find(e);
+         if (it == damping_blocks_.end())
+         {
+            it = damping_blocks_.emplace(e, DenseMatrix(dim_ * nd)).first;
+            it->second = 0.0;
+         }
+         DenseMatrix &B = it->second;
+         for (int q = 0; q < ir.GetNPoints(); q++)
+         {
+            const IntegrationPoint &ip = ir.IntPoint(q);
+            T.SetIntPoint(&ip);
+            fe.CalcShape(ip, sh);
+            const real_t s = ip.weight * T.Weight() * rho_e_(e) * d;
+            for (int k = 0; k < nd; k++)
+               for (int l = 0; l < nd; l++)
+               {
+                  const real_t v = s * sh(k) * sh(l);
+                  for (int c = 0; c < dim_; c++) { B(c * nd + k, c * nd + l) += v; }
+               }
+         }
+      }
+      {
+         int local = damping_blocks_.empty() ? 0 : 1, global = 0;
+         MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_LOR, mesh_.GetComm());
+         has_damping_global_ = (global != 0);
+      }
+      // collective (the NitscheMass constructor builds a ParFiniteElementSpace)
+      mass_damped_ = std::make_unique<NitscheMass>(mesh_, order_, rho_e_, &damping_blocks_,
+                                                   0.5 * dt_);
+      quench_rate_ = d;
+      quench_on_ = true;
+   }
+   void ClearQuench()
+   {
+      MFEM_VERIFY(quench_on_, "ClearQuench: the quench is off");
+      damping_blocks_.swap(quench_saved_blocks_);
+      quench_saved_blocks_.clear();
+      mass_damped_ = std::move(quench_saved_mass_);
+      has_damping_global_ = quench_saved_global_;
+      quench_rate_ = 0.0;
+      quench_on_ = false;
+   }
+   bool Quenched() const { return quench_on_; }
+   /// d of the quench in force [1/s] (0 when off).
+   real_t QuenchRate() const { return quench_rate_; }
 
    PmlDynamicTerms *Pml() { return pml_.get(); }
    const PmlDynamicTerms *Pml() const { return pml_.get(); }
@@ -2002,6 +2080,12 @@ private:
    std::unique_ptr<NitscheMass> mass_damped_;
    std::map<int, DenseMatrix> damping_blocks_;
    bool has_damping_global_ = false;   ///< any rank has absorbing faces
+   // the quench (SetQuench): what it replaced, put back by ClearQuench
+   bool quench_on_ = false;
+   real_t quench_rate_ = 0.0;
+   std::map<int, DenseMatrix> quench_saved_blocks_;
+   std::unique_ptr<NitscheMass> quench_saved_mass_;
+   bool quench_saved_global_ = false;
    Vector rho_e_;
    real_t dt_ = 0.0;
    real_t last_solve_time_ = std::numeric_limits<real_t>::quiet_NaN();

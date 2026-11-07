@@ -319,6 +319,41 @@ Design: `/mnt/project-files/2d-inplane/relaxation/relaxation-design-rev0.md`
   fault median of tau_qd - tau_dyn (the wall offset), QD balance V, event
   times and slip, floored DOFs, sigma_n' at the arc ends.
 
+## Quench on D9f: the dwell test with and without the dwell damping (quench plan rev1; 2026-11-06)
+
+- **Why:** with the band the hand-back jump that is left (about -0.015 MPa
+  on D9f, flat event to event) is the slow swing of the whole box, which
+  the band cannot absorb (periods 125-300 s, below f_alpha) and which a 10 s
+  dwell does not outlast.  `[cycle.quench]` adds the damping C_q = d M_rho
+  to every element once the phase's max V drops below V_off (d "auto" =
+  2 pi c_s / L_max = 0.045 1/s here, decay time 44 s), so the swing dies
+  within the dwell; the static end state is unchanged.
+- **Cases:** the 10 MPa floor D9f deck without relaxation and without
+  contact (the switch probe refuses both), event 1 only (at about 857 yr),
+  with `[cycle.probe]` V_off in {1e-3, 1e-4} m/s x T_dwell in {10, 30, 100,
+  300, 600} s and T_max 2400 s: the dynamic phase runs on until every pair
+  would have switched, and at each pair's switch the driver solves the QD
+  balance and writes tau_qd - tau_dyn at every station.
+
+  | Case | Outer boundary | Quench |
+  |---|---|---|
+  | `D9f_arc08L2p5_h250_avg_floor10_probe` (W0) | absorbing walls | off |
+  | `D9f_arc08L2p5_h250_avg_floor10_probe_quench` (W1) | absorbing walls | on, d "auto" |
+  | `D9f_arc08L2p5_h250_avg_floor10_pml0p01_probe` (B0) | CFS-PML band, f_alpha 0.01 Hz | off |
+  | `D9f_arc08L2p5_h250_avg_floor10_pml0p01_probe_quench` (B1) | CFS-PML band, f_alpha 0.01 Hz | on, d "auto" |
+
+- **What to read:** `<prefix>_switch_probe.txt` and its summary: per pair
+  the median and the largest |tau_qd - tau_dyn| over the stations and the
+  fault-wide largest change of the shear traction; the driver log's
+  "quench on" line and the phase summary's quenched steps and step time.
+- **Pass (plan section 6):** B1 at the 100 s dwell at most a tenth of B0 at
+  10 s (that is at most 0.002 MPa) and no larger at 300 and 600 s; W1
+  within 10 % of W0 at every pair (the walls' jump is static: the quench
+  cannot remove it); the quenched step at most 5 % slower.
+- **Where:** Vista, `jobs/2d_inplane/submit_vista_2d_cycle.sh` with the four
+  decks in CYCLE_DECKS (144 ranks; the band decks' phases of up to 2,400 s
+  take about 1-2 h each, the wall decks minutes).
+
 ## Fault opening A on D9f (fault opening design rev 1.1, test T5; 2026-11-04)
 
 - **Why:** the 10 MPa floor control (`D9f_arc08L2p5_h250_avg_floor10`)
