@@ -44,6 +44,10 @@
 # Disk: the UCERF decks' volume snapshots, about 35 MB each every 10 s of a
 # dynamic phase: about 6.5 GB per 1,850 s phase (the deck's note).
 # Cost: 1 node x <= 24 h per link on gg = <= 8 SU per link (EAR20006).
+# CYCLE_DRIVER_ARGS (optional): more driver options for this link, e.g.
+# --allow-other-commit for a restart from a checkpoint another commit wrote
+# (only on Chunhui Zhao's approval of that change); PETSC_OPTIONS reaches
+# PETSc as usual (e.g. -ts_adapt_monitor).  Both go to RUN_INFO.txt.
 # Submit only on Chunhui Zhao's typed go for these jobs.
 export LC_ALL=C LANG=C
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NVPL_BLAS_NUM_THREADS=1 NVPL_LAPACK_NUM_THREADS=1
@@ -52,6 +56,7 @@ MODULES="gcc/13.2.0 openmpi/5.0.11 nvpl/26.9 cmake/3.31.5"
 RUN=${1:-}
 DECK=${CYCLE_DECK:?set CYCLE_DECK to the deck, relative to miniapps/seas}
 WALL=${CYCLE_WALL_S:-75600}                               # 21 h
+read -r -a EXTRA <<< "${CYCLE_DRIVER_ARGS:-}"
 ROOT=$(cd "$SLURM_SUBMIT_DIR/../../../.." && pwd)          # repository root
 cd "$ROOT" || exit 2
 
@@ -109,7 +114,8 @@ fi
 { echo "commit $HEAD"; echo "built $BUILT"; echo "deck $DECK"; echo "deck sha256 $(sha256sum "$DECK" | cut -d' ' -f1)"
   echo "mesh $MESH"; echo "mesh sha256 $(sha256sum "$MESH" | cut -d' ' -f1)"
   echo "job $SLURM_JOB_ID ranks $SLURM_NTASKS nodes $SLURM_JOB_NODELIST wall limit $WALL s"
-  echo "link $([ -z "$RUN" ] && echo first || echo "restart from QD $STEPS")"; } >> "$OUT/RUN_INFO.txt"
+  echo "link $([ -z "$RUN" ] && echo first || echo "restart from QD $STEPS")"
+  echo "driver args ${CYCLE_DRIVER_ARGS:-none}  PETSC_OPTIONS ${PETSC_OPTIONS:-none}"; } >> "$OUT/RUN_INFO.txt"
 
 module purge
 for m in $MODULES; do module load $m || exit 2; done
@@ -121,7 +127,7 @@ MEMLOG=$!
 trap 'kill $MEMLOG 2>/dev/null' EXIT
 s=$(date +%s)
 ibrun ./seas_fd_cycle_driver \
-   --deck "$DECK" --output-dir "$OUT" "${RESTART[@]}" \
+   --deck "$DECK" --output-dir "$OUT" "${RESTART[@]}" "${EXTRA[@]}" \
    --wall-limit "$WALL" --log-every 1000 > "$LOG" 2>&1
 rc=$?
 echo "seas_fd_cycle_driver exit $rc after $(( $(date +%s) - s )) s"

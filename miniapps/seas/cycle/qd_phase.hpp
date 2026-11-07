@@ -154,6 +154,7 @@
 #include <array>
 #include <cmath>
 #include <functional>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <string>
@@ -925,6 +926,17 @@ public:
             break;
          }
       }
+      if (!ok)
+      {
+         // diagnosis (2026-11-07): name the entries (print only)
+         void *ctx = nullptr;
+         PetscCall(TSGetApplicationContext(ts, &ctx));
+         if (ctx)
+         {
+            static_cast<const QDPhase *>(ctx)->ReportNonFinite_(
+               a, n, "stage state", static_cast<real_t>(t));
+         }
+      }
       PetscCall(VecRestoreArrayRead(Y, &a));
       MPI_Comm comm = PetscObjectComm(reinterpret_cast<PetscObject>(ts));
       PetscCall(MPIU_Allreduce(MPI_IN_PLACE, &ok, 1, MPIU_INT, MPI_MIN, comm));
@@ -938,9 +950,42 @@ public:
             std::cout << "  [cycle.opening] non-finite stage state at t = "
                       << static_cast<double>(t)
                       << " s: the step is rejected and dt shrinks (D-B5)\n";
+            PetscReal dt_try = 0.0;
+            PetscCall(TSGetTimeStep(ts, &dt_try));
+            std::cout << "  [cycle.opening] diag: the rejected step tried dt = "
+                      << static_cast<double>(dt_try) << " s" << std::endl;
          }
       }
       PetscFunctionReturn(PETSC_SUCCESS);
+   }
+
+   /// [cycle.opening] mode = "contact", diagnosis of D-B5 (2026-11-07): on
+   /// this rank, print up to 5 non-finite entries of a TS vector (the
+   /// fault state: per owned DOF the dip slip, the strike slip, psi) with
+   /// the DOF's coordinates.  At most 200 lines per rank per run; print
+   /// only.
+   void ReportNonFinite_(const PetscScalar *a, PetscInt n, const char *what,
+                         real_t t) const
+   {
+      const int per = FaultOp::StatePerNode;
+      int shown = 0;
+      for (PetscInt k = 0; k < n && shown < 5 && nonfinite_lines_ < 200; k++)
+      {
+         const double v = static_cast<double>(PetscRealPart(a[k]));
+         if (std::isfinite(v)) { continue; }
+         const int i = static_cast<int>(k) / per;
+         const int c = static_cast<int>(k) % per;
+         std::cout << std::scientific << std::setprecision(9)
+                   << "  [cycle.opening] diag non-finite " << what << " at t = "
+                   << t << " s: rank " << mpi_.Rank() << " DOF " << i << " x "
+                   << geom_->GetCoordsX2()(i) << " y " << geom_->GetCoordsX3()(i)
+                   << " component " << c
+                   << (c == FaultOp::PsiIndex ? " (psi)" : " (slip)")
+                   << " value " << v << std::endl;
+         std::cout << std::defaultfloat;
+         shown++;
+         nonfinite_lines_++;
+      }
    }
 
    /// Plan 6.3, the switch back: SetFaultState, Solve(t), and a new TS at t
@@ -1461,6 +1506,21 @@ private:
       PetscReal t;
       PetscCall(TSGetStepNumber(ts, &step));
       PetscCall(TSGetTime(ts, &t));
+      if (self->open_ && self->open_->Contact())
+      {
+         // D-B5 checks the stage states only: a non-finite rate of the
+         // last stage reaches the accepted state through the update (a
+         // zero weight times NaN), and every retry of the next step then
+         // fails.  Diagnosis (2026-11-07): name such entries (print only).
+         Vec U;
+         PetscCall(TSGetSolution(ts, &U));
+         PetscInt n = 0;
+         const PetscScalar *a = nullptr;
+         PetscCall(VecGetLocalSize(U, &n));
+         PetscCall(VecGetArrayRead(U, &a));
+         self->ReportNonFinite_(a, n, "accepted state", static_cast<real_t>(t));
+         PetscCall(VecRestoreArrayRead(U, &a));
+      }
       if (self->relax_)
       {
          // [cycle.relaxation]: accept the step (the file comment)
@@ -1507,6 +1567,8 @@ private:
    }
 
    std::unique_ptr<PetscODESolver> ode_;
+   /// ReportNonFinite_: lines printed on this rank (capped).
+   mutable long nonfinite_lines_ = 0;
 #endif
 
    ParMesh &pmesh_;

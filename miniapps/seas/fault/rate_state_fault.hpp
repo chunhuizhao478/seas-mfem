@@ -676,6 +676,12 @@ public:
                nonfinite_v_rejects_++;
             }
             expected |= kRSAbortRHS & ~kRSBadInput;
+            // D-B5 names no node when it rejects a step, and a state rate
+            // that overflowed (the aging law's exp) sets no status bit:
+            // print every node whose rate came out non-finite, with its
+            // inputs (print only; the UCERF QD crash of Vista 1127480 at
+            // 12,222 yr, 2026-11-07)
+            ReportNonFiniteRates_(rate, traction, state, normal_traction);
          }
          if ((res.second & ~expected) != 0)
          {
@@ -1377,6 +1383,70 @@ private:
       }
    }
 
+   /// SetNonFiniteVReject (D-B5), diagnosis: after a ComputeRHS with the
+   /// rejection on, print each node whose rate [V_dip, V_strike, dpsi/dt]
+   /// is not finite, with what the kernel saw there: psi, the traction
+   /// vector, the elastic sigma_n', the reduction r, the law's sigma_n
+   /// (RSLawSigmaN), a, eta, Dc and the node's status bits, recomputed on
+   /// the host (RSNodeRHS, the kernel's own function).  At most 200 lines
+   /// per rank per run; nothing is changed.
+   void ReportNonFiniteRates_(const Vector &rate, const Vector &traction,
+                              const Vector &state,
+                              const Vector *normal_traction) const
+   {
+      if (nonfinite_rate_lines_ >= 200) { return; }
+      const real_t *R = rate.HostRead();
+      const int n = num_nodes_ * StatePerNode;
+      int first = -1;
+      for (int k = 0; k < n; k++)
+      {
+         if (!std::isfinite(R[k])) { first = k; break; }
+      }
+      if (first < 0) { return; }
+      traction.HostRead();
+      state.HostRead();
+      if (normal_traction) { normal_traction->HostRead(); }
+      if (sigma_red_) { sigma_red_->HostRead(); }
+      HostReadParams_();
+      const real_t *A = a_values_.HostRead();
+      const real_t *ETA = eta_values_.HostRead();
+      const RSDeviceParams prm = DeviceParams_();
+      const int rank = mpi_ctx_ ? mpi_ctx_->Rank() : 0;
+      for (int i = first / StatePerNode;
+           i < num_nodes_ && nonfinite_rate_lines_ < 200; i++)
+      {
+         const real_t *Ri = R + i * StatePerNode;
+         if (std::isfinite(Ri[0]) && std::isfinite(Ri[1]) &&
+             std::isfinite(Ri[StatePerNode - 1])) { continue; }
+         const real_t psi = state(i * StatePerNode + PsiIndex);
+         const real_t tau0 = TauPreAt_(2 * i) + traction(2 * i);
+         const real_t tau1 = TauPreAt_(2 * i + 1) + traction(2 * i + 1);
+         const real_t s_pre = SigmaNAt_(i);
+         const real_t s_true =
+            normal_traction ? s_pre + (*normal_traction)(i) : s_pre;
+         const real_t red = sigma_red_ ? (*sigma_red_)(i) : 0.0;
+         int st = 0;
+         const real_t s_law = RSLawSigmaN(s_true - red, s_true, sigma_floor_,
+                                          floor_taper_, st);
+         real_t v0 = 0.0, v1 = 0.0, dpsi = 0.0;
+         RSNodeRHS(psi, tau0, tau1, s_law, A[i], ETA[i], Dc_values_(i), prm,
+                   v0, v1, dpsi, st);
+         const real_t x2 = geom_ ? geom_->GetCoordsX2()(i) : 0.0;
+         const real_t x3 = geom_ ? geom_->GetCoordsX3()(i) : 0.0;
+         std::cout << std::scientific << std::setprecision(9)
+                   << "  [cycle.opening] diag non-finite rate: rank " << rank
+                   << " DOF " << i << " x " << x2 << " y " << x3
+                   << " rate (" << Ri[0] << ", " << Ri[1] << ", "
+                   << Ri[StatePerNode - 1] << ") psi " << psi
+                   << " tau (" << tau0 << ", " << tau1 << ") sigma_n' "
+                   << s_true << " r " << red << " law sigma_n " << s_law
+                   << " a " << A[i] << " eta " << ETA[i] << " Dc "
+                   << Dc_values_(i) << " status " << st << std::endl;
+         std::cout << std::defaultfloat;
+         nonfinite_rate_lines_++;
+      }
+   }
+
    /// GPU plan G4: the ComputeRHS kernel flagged @a status (RSStatus bits).
    /// A kernel cannot print, so the host loop of the BP5 path reruns on the
    /// same inputs: it prints the [FRIC-GUARD], [FRIC-RESID] and
@@ -1583,6 +1653,8 @@ private:
    /// SetNonFiniteVReject (D-B5) and the evaluations it let through.
    bool nonfinite_v_reject_ = false;
    mutable long nonfinite_v_rejects_ = 0;
+   /// ReportNonFiniteRates_: lines printed on this rank (capped).
+   mutable long nonfinite_rate_lines_ = 0;
    /// SetSigmaNReduction (null = off; not owned).
    const Vector *sigma_red_ = nullptr;
    /// SetFrozenNodes (null = off; not owned).
