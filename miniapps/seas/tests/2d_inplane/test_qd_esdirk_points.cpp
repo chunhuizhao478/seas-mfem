@@ -336,7 +336,7 @@ std::string Summary(const RunOut &r)
      << ", Jacobians " << r.counts.jacobians << ", residuals " << r.counts.residuals
      << ", clipped its " << r.counts.clipped_its << ", Newton fails " << r.counts.newton_fails
      << ", branch changes " << r.counts.branch_changes << ", gap columns " << r.counts.columns
-     << ", most open " << r.counts.max_open;
+     << ", most open " << r.counts.max_open << ", plain updates " << r.counts.plain_applies;
    return o.str();
 }
 
@@ -444,9 +444,13 @@ void TestT0ab(MPI_Comm comm)
                         Mode{10e6, false, "hard floor 10 MPa"}})
    {
       for (const double shift : {2.3e-3, 10.0})
+      for (const bool local : {false, true})
       {
+         // local: Newton's own residual G (each point's stage solve) and
+         // its matrix; else F and dF/dU + shift dF/dUdot
          T0State S = MakeT0(comm, m.floor, m.taper);
          QDImplicitSettings set;
+         set.newton_local = local;
          QDImplicitFault f(comm, S.P, set);
          f.EnsureColumn(1);
          f.EnsureColumn(4);
@@ -476,7 +480,8 @@ void TestT0ab(MPI_Comm comm)
          f.Jacobian(0.0, U.data(), Ud.data(), shift);
          std::vector<real_t> Jx(3 * n), Fp(3 * n), Fm(3 * n), Up(3 * n), Um(3 * n), Udp(3 * n),
              Udm(3 * n);
-         f.ApplyJacobian(x.data(), Jx.data());
+         if (local) { f.ApplyLocalJacobian(x.data(), Jx.data()); }
+         else { f.ApplyJacobian(x.data(), Jx.data()); }
          const double eps = 1e-4;
          for (int i = 0; i < 3 * n; i++)
          {
@@ -485,8 +490,16 @@ void TestT0ab(MPI_Comm comm)
             Udp[i] = Ud[i] + shift * eps * x[i];
             Udm[i] = Ud[i] - shift * eps * x[i];
          }
-         f.Residual(0.0, Up.data(), Udp.data(), Fp.data());
-         f.Residual(0.0, Um.data(), Udm.data(), Fm.data());
+         if (local)
+         {
+            f.LocalResidual(0.0, Up.data(), Udp.data(), shift, Fp.data());
+            f.LocalResidual(0.0, Um.data(), Udm.data(), shift, Fm.data());
+         }
+         else
+         {
+            f.Residual(0.0, Up.data(), Udp.data(), Fp.data());
+            f.Residual(0.0, Um.data(), Udm.data(), Fm.data());
+         }
          double num = 0.0, den = 0.0;
          for (int i = 0; i < 3 * n; i++)
          {
@@ -507,8 +520,16 @@ void TestT0ab(MPI_Comm comm)
          }
          const std::vector<real_t> b = own(ball);
          std::vector<real_t> y(3 * n), Jy(3 * n);
-         f.ApplyInverse(b.data(), y.data());
-         f.ApplyJacobian(y.data(), Jy.data());
+         if (local)
+         {
+            f.ApplyLocalInverse(b.data(), y.data());
+            f.ApplyLocalJacobian(y.data(), Jy.data());
+         }
+         else
+         {
+            f.ApplyInverse(b.data(), y.data());
+            f.ApplyJacobian(y.data(), Jy.data());
+         }
          double pn = 0.0, pd = 0.0;
          for (int i = 0; i < 3 * n; i++)
          {
@@ -519,7 +540,7 @@ void TestT0ab(MPI_Comm comm)
          MPI_Allreduce(MPI_IN_PLACE, pnd, 2, MPI_DOUBLE, MPI_MAX, comm);
          const double prel = pnd[0] / pnd[1];
          std::ostringstream w;
-         w << m.name << ", shift " << shift;
+         w << m.name << ", shift " << shift << (local ? ", G (point stage solves)" : ", F");
          Say("    " + w.str() + ": V = " + Fmt(V_all[0], 3) + " .. " + Fmt(V_all[5], 3) +
              " m/s, |J x - FD| / |J x| = " + Fmt(rel, 3) + ", |J P b - b| / |b| = " +
              Fmt(prel, 3));

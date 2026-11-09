@@ -87,6 +87,7 @@ struct QDGreenConfig
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -163,6 +164,10 @@ public:
    HYPRE_BigInt NumColumns() const { return ncols_; }
    /// Rows (fault DOFs × ncomp) this rank holds.
    int NumLocalRows() const { return nb_ * ncomp_; }
+   /// This rank's owned fault DOFs: global [FirstOwned(), FirstOwned() +
+   /// NumOwned()) (the columns' order).
+   long long FirstOwned() const { return own_lo_[rank_]; }
+   int NumOwned() const { return nown_; }
    /// True after PackPlanar() (2D).
    bool Planar() const { return planar_; }
    /// The in-plane slot PackPlanar kept (0 dip, 1 strike); 0 before.
@@ -354,6 +359,50 @@ public:
       std::vector<real_t>().swap(P);
       planar_ = true;
       slot_ = slot;
+   }
+
+   /// 2D, option I (cycle/qd_implicit.hpp, the implicit QD step): the
+   /// packed planar rows of ALL fault DOFs on every rank, global order,
+   /// row-major N_f × N_f: @a Gt the in-plane shear rows, @a Gs the normal
+   /// rows (in-plane slip columns), and T_D's in-plane and normal entries
+   /// (@a TDt, @a TDs, N_f each).  Needs PackPlanar() and the normal rows.
+   /// Reads only; Apply is unchanged.  Collective.
+   void GatherPlanar(std::vector<real_t> &Gt, std::vector<real_t> &Gs,
+                     std::vector<real_t> &TDt, std::vector<real_t> &TDs) const
+   {
+      MFEM_VERIFY(planar_ && !h_ && ncomp_ == 3, "QD Green: GatherPlanar needs "
+                  "the packed planar dense rows with the normal rows");
+      const size_t nf = static_cast<size_t>(nf_);
+      MFEM_VERIFY(nf * nf < static_cast<size_t>(std::numeric_limits<int>::max()),
+                  "QD Green: GatherPlanar: N_f = " << nf_ << " is too large for "
+                  "one all-gather");
+      std::vector<real_t> mt(static_cast<size_t>(nb_) * nf), ms(mt.size());
+      std::vector<real_t> tt(nb_), ts(nb_);
+      for (int b = 0; b < nb_; b++)
+      {
+         const real_t *a = G_.data() + static_cast<size_t>(b) * 2 * nf;
+         std::copy(a, a + nf, mt.data() + static_cast<size_t>(b) * nf);
+         std::copy(a + nf, a + 2 * nf, ms.data() + static_cast<size_t>(b) * nf);
+         tt[b] = TD_[static_cast<size_t>(b) * ncomp_ + slot_];
+         ts[b] = TD_[static_cast<size_t>(b) * ncomp_ + 2];
+      }
+      std::vector<int> cr(nranks_), dr(nranks_), c1(nranks_), d1(nranks_);
+      for (int r = 0; r < nranks_; r++)
+      {
+         c1[r] = static_cast<int>(row_lo_[r + 1] - row_lo_[r]);
+         d1[r] = static_cast<int>(row_lo_[r]);
+         cr[r] = static_cast<int>(c1[r] * nf);
+         dr[r] = static_cast<int>(d1[r] * nf);
+      }
+      const MPI_Datatype T = MPITypeMap<real_t>::mpi_type;
+      Gt.resize(nf * nf);
+      Gs.resize(nf * nf);
+      TDt.resize(nf);
+      TDs.resize(nf);
+      MPI_Allgatherv(mt.data(), cr[rank_], T, Gt.data(), cr.data(), dr.data(), T, comm_);
+      MPI_Allgatherv(ms.data(), cr[rank_], T, Gs.data(), cr.data(), dr.data(), T, comm_);
+      MPI_Allgatherv(tt.data(), nb_, T, TDt.data(), c1.data(), d1.data(), T, comm_);
+      MPI_Allgatherv(ts.data(), nb_, T, TDs.data(), c1.data(), d1.data(), T, comm_);
    }
 
    /// [T; T_n] = G·δ + t·T_D on owned fault DOFs.  @a slip_owned: 2·nown;

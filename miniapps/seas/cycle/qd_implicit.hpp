@@ -5,8 +5,11 @@
 // by recommended items"; plan /mnt/project-files/fully-dynamic-fault-opening/
 // qd-implicit-friction/, Claude Doc "Option I: implementation and test
 // plan", rev 14; note qd-implicit-friction-rev2.pdf).  Phase I1: the fault
-// system, its Newton matrix and the PETSc set-up, on any dense G; the QD
-// phase hands it the planar Green's function in I2.
+// system, its Newton matrix and the PETSc set-up, on any dense G.  Phase I2:
+// PlanarProblem (end of file) builds it from the 2-D planar dense Green's
+// function (QDGreenOperator::GatherPlanar) and the solve path's unit
+// opening responses (ElasticityDomainOperator::QDUnitColumn); the QD phase
+// calls it in I3.
 //
 // Every fault point is implicit in every stage of a stiffly accurate ESDIRK
 // (PETSc arkimex, fully implicit; P2), contact is decided inside each stage
@@ -41,13 +44,31 @@
 // sigma_law f(V, psi) + eta V = 0, V anti-parallel to tau), so the row
 // delta' = V* is the plan's closed row (2.3) with V solved out, and at
 // sigma_law = 0 it is V* = -tau / eta: the radiation row of an open point
-// (P3, 2.4) with no branch in the slip row.  sigma_law = Lambda(sigma,
-// sigma) of the kernel at r = 0 (RSLawSigmaN): max(sigma, 0) with the
-// whole-law taper or without a floor, max(sigma, floor) with the hard floor.
-// open_j: sigma_j < gamma_j g_j, the branch of the min (2.5, 2.9); psi is
-// frozen while open (D-B3).  gamma_j = Ggs_jj, the point's own normal stress
-// per unit opening ([cycle.opening] contact_scale = "auto"); it only enters
-// where g_j != 0, which needs the cached column anyway.
+// (P3, 2.4) with no branch in the slip row.  sigma_law = Lambda(s, s) of
+// the kernel at r = 0 (RSLawSigmaN): max(s, 0) with the whole-law taper or
+// without a floor, max(s, floor) with the hard floor, at
+//
+//    s_j = sigma_j - gamma_j g_j       the normal stress without the point's
+//                                      own gap term (the trial normal stress
+//                                      of semismooth contact Newton)
+//
+// open_j: s_j < 0, i.e. sigma_j < gamma_j g_j, the branch of the min (2.5,
+// 2.9); psi is frozen while open (D-B3).  gamma_j = Ggs_jj, the point's own
+// normal stress per unit opening ([cycle.opening] contact_scale = "auto");
+// it only enters where g_j != 0, which needs the cached column anyway.
+//
+// Why s and not sigma in the law (phase I2, test G6): at a solution they
+// give the same strength (closed: g = 0, s = sigma; open: sigma = 0 and
+// s < 0, both zero strength, or the hard floor), so the solutions are the
+// same.  They differ at Newton iterates of an open point, where sigma is
+// not yet 0: with max(sigma, 0) an iterate with sigma > 0 switches the
+// whole friction strength sigma f on at tau ~ 0, V* drops from |tau| / eta
+// to nothing within sigma ~ |tau| / f (0.01 Pa), and the linearization at
+// sigma = 0 answers a 0.1 MPa change of sigma with metres of slip (the
+// opening run on the real G: 30 factors and more than one failed solve per
+// step while a gap closed).  With s the open point's slip row is tau +
+// eta V = 0 at every iterate, linear, and the residual stays continuous at
+// the branch (s = 0 on both sides).
 //
 // Why V is solved out instead of kept in the row (plan 2.3): the slip and
 // psi rows are then Udot - H(t, U), an identity mass, and PETSc's explicit
@@ -61,7 +82,7 @@
 // Per point, at the iterate (V = V*_j):
 //
 //    D_j  = sigma_law f_V + eta              (slope of the law in V)
-//    fs_j = f_j dsigma_law/dsigma            (strength change with sigma)
+//    fs_j = f_j dsigma_law/ds                (strength change with s_j)
 //    p_j  = sigma_law f_psi / D_j            (dF_delta/dpsi_j)
 //    c_j  = (b / Dc_j) sgn(V_j), 0 when open (psi row's pull from |V|)
 //    A_j  = shift + (V0 / Dc_j) exp((f0 - psi_j)/b), shift when open
@@ -69,12 +90,13 @@
 //    J x |_delta,j = shift x_delta,j + w_j + p_j x_psi,j
 //    J x |_psi,j   = -c_j w_j + (A_j - c_j p_j) x_psi,j
 //    J x |_g,j     = closed: gamma_j x_g,j;  open: [Gs x_delta + Ggs x_g]_j
-//    w_j = ( [(Gt + fs Gs) x_delta]_j + [(Ggt + fs Ggs) x_g]_j ) / D_j
+//    w_j = ( [(Gt + fs Gs) x_delta]_j + [(Ggt + fs Ggs~) x_g]_j ) / D_j
+//    Ggs~ = Ggs without its diagonal (ds_j/dg_j = 0)
 //
 // Eliminating psi per point and the closed gap rows (x_g = b_g / gamma)
 // leaves the plan's (2.8) on (delta, g_O), times D_j on the slip rows:
 //
-//    [ diag(Dt) + Gt + fs Gs     Ggt_:O + fs Ggs_:O ] [y_delta]   [r_delta]
+//    [ diag(Dt) + Gt + fs Gs     Ggt_:O + fs Ggs~_:O] [y_delta]   [r_delta]
 //    [ Gs_O:                     Ggs_OO             ] [y_gO   ] = [r_gO   ]
 //    Dt_j = D_j shift (1 - p_j c_j / A_j)
 //    r_delta,j = D_j (b_delta,j - p_j (b_psi,j + c_j b_delta,j) / A_j) - closed-g terms
@@ -89,6 +111,45 @@
 // it (ESDIRK: one gamma_d).  The SNES Mat is a MATSHELL that is never
 // multiplied (KSP preonly + PCSHELL).
 //
+// Newton on each point's own stage equation ([cycle.qd] newton_local, on by
+// default; phase I2, test G6).  Why: V* is exponential in tau / (a
+// sigma_law) (f ~ a ln V + psi), so Newton on F, which linearizes V* in the
+// slips, gains one unit of that exponent per iteration from above and
+// throws metres of slip from below.  Where a sliding point's sigma falls
+// through its last MPa (tau / (a sigma) ~ 65, a 7% change of sigma in a
+// step), that took 60 to 80 factors and a rejected step per step.  The cure
+// is the one of every implicit rate-and-state solver: solve the point's
+// friction equation for V with the point's own elastic response inside it.
+// In a stage, delta_j = (delta'_j - const) / shift, so with the other
+// points held, the point's row is the scalar equation
+//
+//    tau_j - keff_j Vit_j + (eta_j + keff_j) V + sigma_law,j f(V, psi_j) = 0,
+//    keff_j = max(Gt_jj, 0) / shift,   Vit_j = delta'_j at the iterate
+//
+// (tau_j - keff_j Vit_j does not depend on delta_j).  Its root V_loc,j is
+// the kernel's bracketed solve with eta + keff for eta.  Newton then works
+// on
+//
+//    G_delta,j = delta'_j - V_loc,j        G_psi,j = psi'_j - aging(|V_loc,j|, psi_j)
+//    G_g,j     = F_g,j
+//
+// G = 0 exactly where F = 0 (V_loc = Vit = V* there), so the TS sees the
+// same stage solutions, and F itself (the IFunction, the first-stage slope)
+// is untouched.  For one point G is solved in one iteration at any step
+// size; with many, Newton only has the coupling between points left, which
+// is linear in the slips.  Its matrix is the one below with the law
+// evaluated at V_loc, behind the row map q_j = D_j / (D_j + keff_j):
+//
+//    (J_G x)_delta = q (J x)_delta     (J_G x)_psi = (J x)_psi + c (1 - q)(J x)_delta
+//
+// so the same reduced matrix and factor serve, and the update is
+// ApplyInverse of (G_delta / q, G_psi - c (keff / D) G_delta, G_g).  PETSc
+// hands the preconditioner F; the slip and psi rows of G are kept from the
+// Jacobian evaluation at the same iterate (checked: the same U as the last
+// residual, and no residual since; otherwise the update is the plain one
+// and Counts::plain_applies counts it).  newton_local = false is Newton on
+// F as in phase I1.
+//
 // Newton in psi with the aging exponential kept (a line-search pre-check).
 // Why: the aging rate is (b V0 / Dc) exp((f0 - psi)/b), so with a long step
 // (shift = 1/(h gamma_d) small) the stage residual in psi is concave with a
@@ -98,6 +159,7 @@
 // iteration.  The linear model of the psi row at the iterate is
 //    F_psi + (other terms) + (s' + kappa) d = 0,  s' = shift - c p,
 //    kappa = (V0 / Dc) exp((f0 - psi)/b)  (closed points; 0 when open),
+// (p -> p D / (D + keff) with newton_local: V_loc's slope in psi),
 // and Newton's d_N zeroes it.  The pre-check keeps the other terms and the
 // shift part linear and replaces kappa d by the exact change of the aging
 // term, kappa b (1 - exp(-d / b)), so the psi change d solves
@@ -134,6 +196,7 @@
 
 #include "mfem.hpp"
 #include "../friction/device_rate_state.hpp"
+#include "../domain/qd_green_operator.hpp"
 
 #if defined(MFEM_USE_PETSC) && defined(MFEM_USE_MPI)
 #include "petsc.h"
@@ -160,6 +223,8 @@ struct QDImplicitSettings
    real_t newton_psi_scale = 1.0;     ///< psi updates beyond it (in b) are log-damped
    real_t newton_psi_cap = 30.0;      ///< |psi update| <= cap * b per iteration
    real_t newton_theta_refactor = 0.2;   ///< contraction above it: refactor
+   bool newton_local = true;          ///< Newton on each point's own stage equation
+                                      ///< (file comment); false: on F as it stands
    int newton_max_it = 20;            ///< more: a failed solve, the step is rejected
    std::string jacobian_reuse = "step";   ///< "step", "stage" or "iteration"
    real_t atol = 1e-7;                ///< the TS's absolute tolerance
@@ -204,6 +269,7 @@ public:
       long columns = 0;          ///< gap columns fetched
       long newton_its = 0, newton_solves = 0, newton_fails = 0;
       long clipped_its = 0;      ///< Newton iterations whose psi change moved > 10%
+      long plain_applies = 0;    ///< newton_local: updates that fell back to F (not expected)
       long max_open = 0;         ///< most points on the open branch at a Jacobian
    };
 
@@ -356,18 +422,26 @@ public:
       bool open = false;
       int status = 0;
    };
-   PointEval EvalPoint(int o, real_t tau, real_t sigma, real_t psi, real_t g) const
+   /// With keff > 0 the slip rate is the point's own stage solve (file
+   /// comment, "Newton on each point's own stage equation"): tau - keff
+   /// Vit + (eta + keff) V + sigma_law f(V, psi) = 0; keff = 0 is the law.
+   PointEval EvalPoint(int o, real_t tau, real_t sigma, real_t psi, real_t g,
+                       real_t keff = 0.0, real_t Vit = 0.0) const
    {
       PointEval e;
       const int j = P_.lo + o;
       const real_t gam = (slot_[j] >= 0) ? cols_s_[slot_[j]][j] : 1.0;
       MFEM_VERIFY(g == 0.0 || slot_[j] >= 0, "QDImplicitFault: point " << j << " has g = "
                   << g << " m but no gap column");
-      e.open = sigma < gam * g;
-      e.sig_law = LawSigma(sigma, e.ds);
-      const real_t Vabs = RSSolveSlipRatePsi(std::abs(tau), psi, e.sig_law, P_.eta[o], P_.a[o],
+      // the normal stress without the point's own gap term (file comment)
+      const real_t st = sigma - gam * g;
+      e.open = st < 0.0;
+      e.sig_law = LawSigma(st, e.ds);
+      const real_t tau0 = (keff > 0.0) ? tau - keff * Vit : tau;
+      const real_t eta0 = (keff > 0.0) ? P_.eta[o] + keff : P_.eta[o];
+      const real_t Vabs = RSSolveSlipRatePsi(std::abs(tau0), psi, e.sig_law, eta0, P_.a[o],
                                              P_.V0, e.status);
-      e.V = (tau > 0.0) ? -Vabs : ((tau < 0.0) ? Vabs : 0.0);
+      e.V = (tau0 > 0.0) ? -Vabs : ((tau0 < 0.0) ? Vabs : 0.0);
       Friction(e.V, psi, P_.a[o], e.f, e.fV, e.fpsi);
       e.dpsi = e.open ? 0.0 : RSAgingRatePsi(std::abs(e.V), psi, P_.Dc[o], prm_);
       return e;
@@ -429,6 +503,28 @@ public:
          F[kPer * o + 2] = e.open ? sig[o] : gam * U[kPer * o + 2];
          res_branch_[o] = e.open ? 1 : 0;
       }
+      res_U_.assign(U, U + size_t(kPer) * P_.n);
+      res_serial_++;
+   }
+
+   /// newton_local: the residual Newton works on, G(t, U, Udot; shift).  The
+   /// slip row is delta' - V_loc and the psi row psi' - aging(|V_loc|, psi),
+   /// V_loc the point's own stage solve (EvalPoint with keff = max(Gt_jj,
+   /// 0) / shift and Vit = delta'); the gap row is F's.  G = 0 exactly where
+   /// F = 0.  Owned entries (3 n).  Collective.
+   void LocalResidual(real_t t, const real_t *U, const real_t *Ud, real_t shift, real_t *G)
+   {
+      Gather_(U);
+      std::vector<real_t> tau, sig;
+      Tractions(t, tau, sig);
+      for (int o = 0; o < P_.n; o++)
+      {
+         const PointEval e = EvalPoint(o, tau[o], sig[o], U[kPer * o + 1], U[kPer * o + 2],
+                                       Keff_(o, shift), Ud[kPer * o]);
+         G[kPer * o] = Ud[kPer * o] - e.V;
+         G[kPer * o + 1] = Ud[kPer * o + 1] - e.dpsi;
+         G[kPer * o + 2] = e.open ? sig[o] : GammaOr1_(P_.lo + o) * U[kPer * o + 2];
+      }
    }
 
    /// The Newton matrix at (t, U, Udot, shift): per-point numbers, the gap
@@ -438,7 +534,6 @@ public:
    /// psi rows and zero on the gap rows.  Collective.
    void Jacobian(real_t t, const real_t *U, const real_t *Ud, real_t shift)
    {
-      (void) Ud;
       counts_.jacobians++;
       const int N = P_.N, n = P_.n;
       if (shift >= 1e14)
@@ -451,13 +546,20 @@ public:
       Gather_(U);
       std::vector<real_t> tau, sig;
       Tractions(t, tau, sig);
-      // per point: D, Dt, fs, p, c, A, open
-      constexpr int kRec = 7;
+      // per point: D, Dt, fs, p, c, A, open, keff.  newton_local: the law
+      // at V_loc, the point's own stage solve; else at V* (the law's)
+      constexpr int kRec = 8;
       std::vector<real_t> mine(size_t(kRec) * n), all(size_t(kRec) * N);
+      loc_d_.resize(n);
+      loc_p_.resize(n);
       for (int o = 0; o < n; o++)
       {
          const real_t psi = U[kPer * o + 1];
-         const PointEval e = EvalPoint(o, tau[o], sig[o], psi, U[kPer * o + 2]);
+         const real_t keff = S_.newton_local ? Keff_(o, shift) : 0.0;
+         const PointEval e = EvalPoint(o, tau[o], sig[o], psi, U[kPer * o + 2], keff,
+                                       Ud[kPer * o]);
+         loc_d_[o] = Ud[kPer * o] - e.V;
+         loc_p_[o] = Ud[kPer * o + 1] - e.dpsi;
          const real_t D = e.sig_law * e.fV + P_.eta[o];
          const real_t fs = e.f * e.ds;
          const real_t p = e.sig_law * e.fpsi / D;
@@ -473,18 +575,27 @@ public:
          r[4] = c;
          r[5] = A;
          r[6] = e.open ? 1.0 : 0.0;
+         r[7] = keff;
       }
+      // the update is built from loc_d_, loc_p_ only if they belong to the
+      // residual PETSc hands the preconditioner: the last one, at this U
+      loc_ok_ = S_.newton_local && res_U_.size() == size_t(kPer) * n &&
+                std::equal(res_U_.begin(), res_U_.end(), U);
+      loc_serial_ = res_serial_;
       GatherRec_(mine, all, kRec);
       ev_.shift = shift;
+      ev_.local = S_.newton_local;
       ev_.D.resize(N); ev_.Dt.resize(N); ev_.fs.resize(N); ev_.p.resize(N);
-      ev_.c.resize(N); ev_.A.resize(N); ev_.open.assign(N, 0);
+      ev_.c.resize(N); ev_.A.resize(N); ev_.keff.resize(N); ev_.open.assign(N, 0);
       bool finite = true;
       for (int j = 0; j < N; j++)
       {
          const real_t *r = all.data() + size_t(kRec) * j;
          ev_.D[j] = r[0]; ev_.Dt[j] = r[1]; ev_.fs[j] = r[2]; ev_.p[j] = r[3];
          ev_.c[j] = r[4]; ev_.A[j] = r[5]; ev_.open[j] = (r[6] != 0.0) ? 1 : 0;
+         ev_.keff[j] = r[7];
          for (int k = 0; k < 6; k++) { finite = finite && std::isfinite(r[k]); }
+         finite = finite && std::isfinite(r[7]);
       }
       // the gap columns of points new on the open branch (same list on
       // every rank: from the gathered flags), in global order
@@ -555,7 +666,8 @@ public:
          real_t r = fa_.D[j] * (bd - fa_.p[j] * (bp + fa_.c[j] * bd) / fa_.A[j]);
          for (int l : gc)
          {
-            r -= (cols_t_[slot_[l]][j] + fa_.fs[j] * cols_s_[slot_[l]][j]) * yg[l];
+            r -= (cols_t_[slot_[l]][j] +
+                  ((l == j) ? 0.0 : fa_.fs[j] * cols_s_[slot_[l]][j])) * yg[l];
          }
          z(j) = r;
       }
@@ -581,6 +693,43 @@ public:
 
    /// y = J x with the numbers of the last Jacobian evaluation (exact, no
    /// factor; tests).  Owned entries.  Collective.
+   /// newton_local: y = (dG/dU + shift dG/dUdot) x at the last Jacobian
+   /// evaluation, G of LocalResidual.  With J x of ApplyJacobian (the same
+   /// formulas, the law at V_loc) and q_j = D_j / (D_j + keff_j):
+   ///    slip: q (J x)_delta      psi: (J x)_psi + c (1 - q)(J x)_delta
+   /// and the gap rows as they are.
+   void ApplyLocalJacobian(const real_t *x, real_t *y) const
+   {
+      ApplyJacobian(x, y);
+      for (int o = 0; o < P_.n; o++)
+      {
+         const int j = P_.lo + o;
+         const real_t q = ev_.D[j] / (ev_.D[j] + ev_.keff[j]), jd = y[kPer * o];
+         y[kPer * o] = q * jd;
+         y[kPer * o + 1] += ev_.c[j] * (1.0 - q) * jd;
+      }
+   }
+
+   /// newton_local: y = (dG/dU + shift dG/dUdot)^-1 b with the factor's
+   /// numbers: ApplyInverse of (b_delta / q, b_psi - c (keff / D) b_delta,
+   /// b_g), the inverse of the row map of ApplyLocalJacobian.
+   void ApplyLocalInverse(const real_t *b, real_t *y) const
+   {
+      std::vector<real_t> bh(b, b + size_t(kPer) * P_.n);
+      if (!slope_mode_)
+      {
+         MFEM_VERIFY(have_factor_, "QDImplicitFault::ApplyLocalInverse: no factor");
+         for (int o = 0; o < P_.n; o++)
+         {
+            const int j = P_.lo + o;
+            const real_t r = fa_.keff[j] / fa_.D[j], bd = b[kPer * o];
+            bh[kPer * o] = (1.0 + r) * bd;
+            bh[kPer * o + 1] = b[kPer * o + 1] - fa_.c[j] * r * bd;
+         }
+      }
+      ApplyInverse(bh.data(), y);
+   }
+
    void ApplyJacobian(const real_t *x, real_t *y) const
    {
       MFEM_VERIFY(ev_.valid, "QDImplicitFault::ApplyJacobian: no Jacobian evaluation");
@@ -610,8 +759,10 @@ public:
                gss += cols_s_[slot_[l]][j] * xg;
             }
          }
-         const real_t w = (st + ev_.fs[j] * ss + gtt + ev_.fs[j] * gss) / ev_.D[j];
          const real_t xd = x[kPer * o], xp = x[kPer * o + 1], xg = x[kPer * o + 2];
+         // ds_j = d sigma_j - gamma_j dg_j: Ggs without its diagonal
+         const real_t gss_t = (xg != 0.0) ? gss - cols_s_[slot_[j]][j] * xg : gss;
+         const real_t w = (st + ev_.fs[j] * ss + gtt + ev_.fs[j] * gss_t) / ev_.D[j];
          y[kPer * o] = ev_.shift * xd + w + ev_.p[j] * xp;
          y[kPer * o + 1] = -ev_.c[j] * w + (ev_.A[j] - ev_.c[j] * ev_.p[j]) * xp;
          y[kPer * o + 2] = ev_.open[j] ? (ss + gss) : ev_.gamma[j] * xg;
@@ -774,10 +925,20 @@ private:
       bool valid = false;
       real_t shift = 0.0;
       long solve = -1;
+      bool local = false;               ///< evaluated at V_loc (newton_local)
       std::vector<real_t> D, Dt, fs, p, c, A, gamma;
+      std::vector<real_t> keff;         ///< max(Gt_jj, 0) / shift, or 0
       std::vector<char> open;
       std::vector<int> O;
    };
+
+   /// Owned point o: its own shear stiffness over the shift, the weight of
+   /// its own slip in its stage equation (0 where Gt_jj <= 0).
+   real_t Keff_(int o, real_t shift) const
+   {
+      const int j = P_.lo + o;
+      return std::max(P_.Gt[size_t(j) * P_.N + j], real_t(0.0)) / shift;
+   }
 
    real_t GammaOr1_(int l) const { return (slot_[l] >= 0) ? cols_s_[slot_[l]][l] : 1.0; }
 
@@ -839,7 +1000,9 @@ private:
          for (int k = 0; k < m; k++)
          {
             const int l = ev_.O[k];
-            a[size_t(N + k) * M + j] = cols_t_[slot_[l]][j] + fs * cols_s_[slot_[l]][j];
+            // Ggs~: no own term (ds_j/dg_j = 0; fs_l is 0 on the open branch anyway)
+            a[size_t(N + k) * M + j] = cols_t_[slot_[l]][j] +
+                                       ((l == j) ? 0.0 : fs * cols_s_[slot_[l]][j]);
          }
       }
       for (int k = 0; k < m; k++)
@@ -906,7 +1069,7 @@ private:
       PetscFunctionBeginUser;
       void *ctx = nullptr;
       PetscCall(PCShellGetContext(pc, &ctx));
-      const QDImplicitFault *self = static_cast<const QDImplicitFault *>(ctx);
+      QDImplicitFault *self = static_cast<QDImplicitFault *>(ctx);
       if (!self->slope_mode_ && (self->bad_jacobian_ || !self->have_factor_ ||
                                  self->factor_singular_))
       {
@@ -919,7 +1082,37 @@ private:
       PetscScalar *yy;
       PetscCall(VecGetArrayRead(b, &bb));
       PetscCall(VecGetArray(y, &yy));
-      self->ApplyInverse(reinterpret_cast<const real_t *>(bb), reinterpret_cast<real_t *>(yy));
+      const real_t *br = reinterpret_cast<const real_t *>(bb);
+      real_t *yr = reinterpret_cast<real_t *>(yy);
+      if (self->slope_mode_ || !self->S_.newton_local) { self->ApplyInverse(br, yr); }
+      else
+      {
+         // Newton on G: b is F at the iterate of the last Jacobian
+         // evaluation (SNES newtonls: function, Jacobian, solve), so its
+         // slip and psi rows are replaced by G's from that evaluation.  If
+         // the order ever differs (another residual in between, or another
+         // U), the update falls back to F with the same factor and is
+         // counted; every rank decides alike.
+         int ok = (self->loc_ok_ && self->loc_serial_ == self->res_serial_ && self->fa_.local)
+                  ? 1 : 0;
+         PetscCallMPI(MPI_Allreduce(MPI_IN_PLACE, &ok, 1, MPI_INT, MPI_MIN, self->comm_));
+         if (ok)
+         {
+            const int n = self->P_.n;
+            std::vector<real_t> g(br, br + size_t(kPer) * n);
+            for (int o = 0; o < n; o++)
+            {
+               g[kPer * o] = self->loc_d_[o];
+               g[kPer * o + 1] = self->loc_p_[o];
+            }
+            self->ApplyLocalInverse(g.data(), yr);
+         }
+         else
+         {
+            self->counts_.plain_applies++;
+            self->ApplyInverse(br, yr);
+         }
+      }
       PetscCall(VecRestoreArray(y, &yy));
       PetscCall(VecRestoreArrayRead(b, &bb));
       PetscFunctionReturn(PETSC_SUCCESS);
@@ -982,7 +1175,10 @@ private:
          PetscScalar &yp = y[kPer * o + 1];
          const real_t dN = -static_cast<real_t>(PetscRealPart(yp));
          const real_t kappa = ev.A[j] - ev.shift;
-         const real_t sp = ev.shift - ev.c[j] * ev.p[j];
+         // dV/dpsi at the point: -p (the law), -p D / (D + keff) (its stage solve)
+         const real_t pl = (ev.keff[j] > 0.0) ? ev.p[j] * ev.D[j] / (ev.D[j] + ev.keff[j])
+                           : ev.p[j];
+         const real_t sp = ev.shift - ev.c[j] * pl;
          const real_t d = PsiChange(dN, sp, kappa, b, sc, cap);
          if (d != dN)
          {
@@ -1110,6 +1306,10 @@ private:
    std::vector<int> slot_;                       ///< global point -> column slot
    std::vector<std::vector<real_t>> cols_t_, cols_s_;
    std::vector<char> res_branch_;                ///< owned: open at the last residual
+   std::vector<real_t> res_U_;                   ///< owned: the last residual's U
+   long res_serial_ = 0, loc_serial_ = -1;       ///< residuals so far; at the last Jacobian
+   std::vector<real_t> loc_d_, loc_p_;           ///< owned: G's slip and psi rows there
+   bool loc_ok_ = false;                         ///< they belong to the last residual
    Snapshot ev_, fa_;                            ///< last evaluation, factor's
    DenseMatrix lu_mat_;
    std::vector<int> lu_piv_;
@@ -1121,6 +1321,119 @@ private:
    Counts counts_;
    Mat J_ = nullptr;
 };
+
+/// Option I, phase I2 (P5): the owned fault data of the planar problem, in
+/// the QD kernel's layouts.
+struct PlanarFaultInputs
+{
+   Vector tau_pre;        ///< 2 per owned DOF (the kernel's TauPre; in-plane at the slot)
+   Vector sigma0;         ///< 1 per owned DOF, compression > 0
+   Vector a, eta, Dc;     ///< 1 per owned DOF
+   real_t b = 0.0, f0 = 0.0, V0 = 0.0;
+   real_t sigma_floor = 0.0;    ///< [cycle].sigma_n_floor_pa
+   bool floor_taper = false;    ///< [cycle.opening].floor_taper
+};
+
+/// The pure traction response of one owned stage-slip vector e (3 entries
+/// per owned DOF; entry 3 o + 2 the opening): T (2 per owned DOF), T_n (1
+/// per owned DOF).  ElasticityDomainOperator::QDUnitColumn.  Collective.
+using UnitResponse = std::function<void(const Vector &e, Vector &T, Vector &Tn)>;
+
+/// Option I, phase I2: the problem of QDImplicitFault on the 2-D planar
+/// dense Green's function @a G (P5: refuses the H-matrix, 3-D and a G
+/// without normal rows).  Gt, Gs, TDt, TDs: G's in-plane shear and normal
+/// rows (in-plane slip columns) and its loading rates, gathered on every
+/// rank (QDGreenOperator::GatherPlanar; the global point order is G's, rank
+/// by rank).  tau_pre: the in-plane slot of the kernel's pre-stress (an
+/// out-of-plane pre-stress is refused: option I has one shear component).
+/// gap_column(l): @a unit_g of a unit opening at global point l (zero
+/// elsewhere, so no loading enters), its in-plane shear and normal parts
+/// gathered on every rank; it refuses a nonzero out-of-plane shear.
+/// Collective.
+inline QDImplicitFault::Problem PlanarProblem(MPI_Comm comm, const QDGreenOperator &G,
+                                              const PlanarFaultInputs &in,
+                                              UnitResponse unit_g)
+{
+   MFEM_VERIFY(G.Planar() && G.NComp() == 3 && !G.Compressed(), "option I (P5): the 2-D "
+               "planar dense Green's function with its normal rows only");
+   int rank = 0, nranks = 1;
+   MPI_Comm_rank(comm, &rank);
+   MPI_Comm_size(comm, &nranks);
+   const int n = G.NumOwned(), slot = G.PlanarSlot();
+   long long lo = 0, mine = n;
+   MPI_Exscan(&mine, &lo, 1, MPI_LONG_LONG, MPI_SUM, comm);
+   if (rank == 0) { lo = 0; }
+   MFEM_VERIFY(lo == G.FirstOwned(), "option I: the Green's function's owned range starts "
+               "at " << G.FirstOwned() << ", not at the rank-order offset " << lo);
+   MFEM_VERIFY(in.tau_pre.Size() == 2 * n && in.sigma0.Size() == n && in.a.Size() == n &&
+               in.eta.Size() == n && in.Dc.Size() == n, "option I: PlanarFaultInputs "
+               "sizes (tau_pre 2 n, the rest n; n = " << n << ")");
+   real_t out = 0.0;
+   for (int o = 0; o < n; o++) { out = std::max(out, std::abs(in.tau_pre(2 * o + 1 - slot))); }
+   MPI_Allreduce(MPI_IN_PLACE, &out, 1, MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
+   MFEM_VERIFY(out == 0.0, "option I: an out-of-plane shear pre-stress (largest " << out
+               << " Pa); the implicit fault has the in-plane shear only");
+   MFEM_VERIFY(unit_g, "option I: no unit opening response");
+
+   QDImplicitFault::Problem P;
+   P.N = static_cast<int>(G.NumFaultDofs());
+   G.GatherPlanar(P.Gt, P.Gs, P.TDt, P.TDs);
+   P.lo = static_cast<int>(lo);
+   P.n = n;
+   P.tau_pre.resize(n);
+   P.sigma0.resize(n);
+   P.a.resize(n);
+   P.eta.resize(n);
+   P.Dc.resize(n);
+   for (int o = 0; o < n; o++)
+   {
+      P.tau_pre[o] = in.tau_pre(2 * o + slot);
+      P.sigma0[o] = in.sigma0(o);
+      P.a[o] = in.a(o);
+      P.eta[o] = in.eta(o);
+      P.Dc[o] = in.Dc(o);
+   }
+   P.b = in.b;
+   P.f0 = in.f0;
+   P.V0 = in.V0;
+   P.sigma_floor = in.sigma_floor;
+   P.floor_taper = in.floor_taper;
+
+   std::vector<int> cnt(nranks), dsp(nranks);
+   MPI_Allgather(&n, 1, MPI_INT, cnt.data(), 1, MPI_INT, comm);
+   for (int r = 0, d = 0; r < nranks; r++) { dsp[r] = d; d += cnt[r]; }
+   const int N = P.N, lo_i = P.lo;
+   P.gap_column = [comm, N, n, lo_i, slot, cnt, dsp, unit_g](int l, std::vector<real_t> &t,
+                                                             std::vector<real_t> &s)
+   {
+      Vector e(3 * n), T, Tn;
+      e = 0.0;
+      if (lo_i <= l && l < lo_i + n) { e(3 * (l - lo_i) + 2) = 1.0; }
+      unit_g(e, T, Tn);
+      MFEM_VERIFY(T.Size() == 2 * n && Tn.Size() == n, "option I: the unit opening "
+                  "response has " << T.Size() << " shear and " << Tn.Size()
+                  << " normal entries (n = " << n << ")");
+      std::vector<real_t> mt(n), ms(n);
+      real_t big[2] = {0.0, 0.0};   // out-of-plane, in-plane
+      for (int o = 0; o < n; o++)
+      {
+         mt[o] = T(2 * o + slot);
+         ms[o] = Tn(o);
+         big[0] = std::max(big[0], std::abs(T(2 * o + 1 - slot)));
+         big[1] = std::max(big[1], std::max(std::abs(mt[o]), std::abs(ms[o])));
+      }
+      MPI_Allreduce(MPI_IN_PLACE, big, 2, MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
+      MFEM_VERIFY(big[0] <= 1e-12 * big[1], "option I: the opening at point " << l
+                  << " drives an out-of-plane shear of " << big[0] << " Pa/m (in-plane and "
+                  "normal up to " << big[1] << " Pa/m)");
+      t.resize(N);
+      s.resize(N);
+      const MPI_Datatype R = MPITypeMap<real_t>::mpi_type;
+      MPI_Allgatherv(mt.data(), n, R, t.data(), cnt.data(), dsp.data(), R, comm);
+      MPI_Allgatherv(ms.data(), n, R, s.data(), cnt.data(), dsp.data(), R, comm);
+   };
+   return P;
+}
 
 } // namespace cycle
 } // namespace seas
