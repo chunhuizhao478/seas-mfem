@@ -35,6 +35,7 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-fault-contact-dyn   # fault opening B, B2 (dynamic projection)
 #   make -f tests/2d_inplane/2d_inplane.mk test-fault-contact-qd    # fault opening B, B3 (QD contact + taper)
 #   make -f tests/2d_inplane/2d_inplane.mk test-exact-retry         # [cycle.qd] exact_retry (PETSc RK rollback)
+#   make -f tests/2d_inplane/2d_inplane.mk test-qd-esdirk-points    # option I, I1 (implicit QD fault system)
 #   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
 # The 3D parity set (every phase must leave it bit for bit unchanged) is the
 # script tests/2d_inplane/parity_3d.sh (see its header).  The tensor
@@ -952,6 +953,25 @@ test-exact-retry: seas_test_exact_retry
 	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_exact_retry < /dev/null || exit 1; \
 	done
 
+# Option I of the QD step at sigma_n' -> 0, phase I1 (cycle/qd_implicit.hpp;
+# plan "Option I: implementation and test plan", 2026-11-09): the implicit
+# fault system on small dense G's, PETSc arkimex fully implicit (T0, T1).
+TEST_QD_ESDIRK_SRC = tests/2d_inplane/test_qd_esdirk_points.cpp
+TEST_QD_ESDIRK_OBJ = $(TEST_QD_ESDIRK_SRC:.cpp=.o)
+$(TEST_QD_ESDIRK_OBJ): %.o: $(SRC)%.cpp cycle/qd_implicit.hpp friction/device_rate_state.hpp \
+                       $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
+
+seas_test_qd_esdirk_points: $(TEST_QD_ESDIRK_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_QD_ESDIRK_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-qd-esdirk-points: seas_test_qd_esdirk_points
+	@for n in 1 2 4; do \
+	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_qd_esdirk_points < /dev/null || exit 1; \
+	done
+
 2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
                 test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
                 test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
@@ -959,7 +979,7 @@ test-exact-retry: seas_test_exact_retry
                 test-handback-table test-tip-zone test-sigma-floor test-relaxation test-2d5-width test-2d5-dyn-driver \
                 test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle \
                 test-fault-opening test-fault-contact test-fault-contact-dyn \
-                test-fault-contact-qd test-exact-retry
+                test-fault-contact-qd test-exact-retry test-qd-esdirk-points
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
@@ -967,4 +987,4 @@ test-exact-retry: seas_test_exact_retry
         test-2d-absorbing test-absorbing-all test-snapshots-volume test-tensor-prestress \
         test-handback-table test-tip-zone test-sigma-floor test-relaxation test-2d5-width test-2d5-dyn-driver \
         test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle \
-        test-fault-opening test-exact-retry 2d-inplane-all
+        test-fault-opening test-exact-retry test-qd-esdirk-points 2d-inplane-all
