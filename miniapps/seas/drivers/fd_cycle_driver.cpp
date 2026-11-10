@@ -83,6 +83,7 @@
 //   mpirun -np N ./seas_fd_cycle_driver --deck config/fd_cycle/bp5_fd_first_event.toml
 //          [--output-dir DIR] [--max-dyn-steps N] [--log-every N]
 //          [--max-steps N] [--checkpoint-every N] [--restart <prefix>]
+//          [--restart-drop-relaxation]
 //          [--qd-green-cache FILE] [--qd-green-hcache FILE]
 // --max-dyn-steps stops the run in a dynamic phase after N steps (timing and
 // smoke runs); --end-phase-after N ends every dynamic phase after N steps
@@ -1000,6 +1001,7 @@ int main(int argc, char *argv[])
    int max_steps = 10000000;
    const char *restart = "";
    bool allow_other_commit = false;
+   bool restart_drop_relaxation = false;
    const char *output_dir = "";
    int checkpoint_every = -1;
    int max_dyn_steps = -1;
@@ -1018,6 +1020,11 @@ int main(int argc, char *argv[])
    args.AddOption(&allow_other_commit, "-aoc", "--allow-other-commit", "-no-aoc",
                   "--no-allow-other-commit",
                   "Accept a checkpoint written by another commit (needs approval).");
+   args.AddOption(&restart_drop_relaxation, "-rdr", "--restart-drop-relaxation", "-no-rdr",
+                  "--no-restart-drop-relaxation",
+                  "Continue a checkpoint written with [cycle.relaxation] on with a deck "
+                  "that has it off: the checkpoint's r is not read, so the law's normal "
+                  "stress changes by r at the restart (a model change; needs approval).");
    args.AddOption(&output_dir, "-o", "--output-dir",
                   "Run directory of the output and checkpoint files (overrides "
                   "[output].output_dir).");
@@ -1068,6 +1075,8 @@ int main(int argc, char *argv[])
                "--wall-limit needs checkpoints ([cycle.checkpoint].every_qd_steps or "
                "--checkpoint-every > 0): the stop writes one to continue from");
    const std::string restart_prefix = restart;
+   MFEM_VERIFY(!restart_drop_relaxation || !restart_prefix.empty(),
+               "--restart-drop-relaxation needs --restart");
    const std::string ckpt_prefix = cfg.output.dir + "/" + cfg.output.prefix;
 
    if (root)
@@ -1310,10 +1319,34 @@ int main(int argc, char *argv[])
          dt = info.dt_next;
          rejections_before = info.rejections;
          ctl.Restore(info.dyn_phases);
-         MFEM_VERIFY(info.relax == cfg.Relaxation(), "restart: the checkpoint was written "
+         // --restart-drop-relaxation: only checkpoint on, deck off.  The
+         // checkpoint's r (what the law's normal stress was reduced by) is
+         // not carried: from the restart the law sees sigma0 + dsig.
+         const bool drop_relax = restart_drop_relaxation && info.relax && !cfg.Relaxation();
+         MFEM_VERIFY(!restart_drop_relaxation || drop_relax, "--restart-drop-relaxation needs "
+                     "a checkpoint written with [cycle.relaxation] on and a deck with it off "
+                     "(checkpoint " << (info.relax ? "on" : "off") << ", deck "
+                     << (cfg.Relaxation() ? "on" : "off") << ")");
+         MFEM_VERIFY(info.relax == cfg.Relaxation() || drop_relax,
+                     "restart: the checkpoint was written "
                      "with [cycle.relaxation] " << (info.relax ? "on" : "off") << ", the deck "
                      "has it " << (cfg.Relaxation() ? "on" : "off"));
-         if (info.relax)
+         if (drop_relax)
+         {
+            const real_t inf = std::numeric_limits<real_t>::infinity();
+            real_t rlo = info.relax_r.Size() ? info.relax_r.Min() : inf;
+            real_t rhi = info.relax_r.Size() ? info.relax_r.Max() : -inf;
+            rlo = -mpi.GlobalMax(-rlo);
+            rhi = mpi.GlobalMax(rhi);
+            if (root)
+            {
+               std::cout << "  restart: --restart-drop-relaxation: the checkpoint's sigma_n' "
+                         << "relaxation r (" << rlo / 1e6 << " to " << rhi / 1e6
+                         << " MPa over the fault) is dropped; the law's normal stress "
+                         << "changes by r at this restart\n";
+            }
+         }
+         else if (info.relax)
          {
             MFEM_VERIFY(info.relax_t_relax == cfg.relax_t && info.relax_t_n == info.t,
                         "restart: the checkpoint's relaxation has t_relax "
