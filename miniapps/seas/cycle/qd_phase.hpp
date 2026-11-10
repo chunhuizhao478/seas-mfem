@@ -127,6 +127,37 @@
 // then scans the whole state for NaN after each step.  Off (the default):
 // no hook, every bit unchanged.
 //
+// [cycle.qd] integrator = "esdirk" (option I; Chunhui Zhao, 2026-11-09:
+// "let's proceed with implementation, take all decisions p1-p6 by
+// recommended items"; cycle/qd_implicit.hpp, phase I3): the fault state is
+// advanced by QDImplicitFault on its own TS (PETSc arkimex, fully implicit)
+// and its own vector U = (in-plane slip, psi, gap) per owned DOF, built
+// from the planar dense Green's function (PlanarProblem).  Everything else
+// keeps reading this phase as before:
+//   after each accepted step (PostStepImplicit_) U is written into State()
+//   (slip at the in-plane slot, psi) and into the open set (flags: the
+//   branch of the gap row, s = sigma - gamma g < 0; gap: g there, 0
+//   elsewhere, and the same cleaned g back into U, so U is a function of
+//   State() and the gap bit for bit and a restart repeats the run), then
+//   one right-hand-side evaluation of the kernel at that state fills the
+//   operator's caches (traction, sigma_n, slip rate, max V) for the monitor,
+//   the outputs, the switch and the checkpoint.  In that evaluation the
+//   open set only adds the carried gap's tractions (OpenSetQD::StageCarried:
+//   no open-set solve, the stage solves fixed slip and gap), and no DOF is
+//   frozen: at an open DOF sigma = 0, the tapered law has no strength, and
+//   the kernel's friction solve is V = -tau / eta, the radiation row (P3).
+//   MaxV() leaves the open DOFs out, as the DP5 contact path does (there
+//   they are frozen): the switch and the hand-back guard see closed DOFs.
+//   Start, switch back: the consistent start (plan 2.10; ConsistentStart:
+//   the gap rows at fixed slip and psi) takes the place of the settle.
+//   No relaxation (refused), no post-step settle, no reset of the step to
+//   dt_initial after a flip (the flip happened inside an error-controlled
+//   stage solve).
+//   The checkpoint is unchanged (version 7 already carries the flags and
+//   the gap); a checkpoint step restarts the stage and drops the LU factor
+//   in the running run as in the restarted one.
+// Off (the default "dp5"): none of this is built, every bit unchanged.
+//
 // This file and dyn_phase.hpp are the only cycle files that include solver
 // headers (rule M4).
 
@@ -145,6 +176,7 @@
 #include "normal_stress_relaxation.hpp"
 #include "fault_opening.hpp"
 #include "exact_retry.hpp"
+#include "qd_implicit.hpp"
 
 #include "../solver/seas_operator.hpp"
 #include "../domain/elasticity_operator.hpp"
@@ -351,6 +383,11 @@ public:
          op_->SetQDGreen(gc, g.check_every);
       }
       if (cfg_.opening.On()) { SetupOpening_(); }   // [cycle.opening]
+#ifdef MFEM_USE_PETSC
+      if (cfg_.qd.Esdirk()) { SetupImplicit_(par); }   // [cycle.qd] integrator = "esdirk"
+#else
+      MFEM_VERIFY(!cfg_.qd.Esdirk(), "[cycle.qd].integrator = \"esdirk\" needs PETSc");
+#endif
 
       // R-003 of seas_bp5_full: allocate at least one entry so PETSc's
       // PlaceMemory/ResetMemory never sees an empty Memory on a rank without
@@ -426,7 +463,27 @@ public:
    }
    void ResetFloorCount() { fault_->ResetFloorStats(); }
    PBP5SEASOp &Operator() { return *op_; }
-   real_t MaxV() const { return op_->GetMaxSlipRate(); }
+   /// The global max |V| of the last evaluation.  Option I: over the closed
+   /// DOFs (an open DOF slides at -tau / eta, which is not a rupture: as in
+   /// the DP5 contact path, open DOFs stay out of max V and so out of the
+   /// switch and the hand-back guard).  Collective.
+   real_t MaxV() const
+   {
+#ifdef MFEM_USE_PETSC
+      if (imp_)
+      {
+         const Vector &V = fault_->GetSlipRate();
+         V.HostRead();
+         real_t m = 0.0;
+         for (int j = 0; j < fault_->NumNodes(); j++)
+         {
+            if (!open_->IsOpen(j)) { m = std::max(m, std::hypot(V(2 * j), V(2 * j + 1))); }
+         }
+         return mpi_.GlobalMax(m);
+      }
+#endif
+      return op_->GetMaxSlipRate();
+   }
    real_t Eta() const { return eta_; }
 
    /// Plan 6.2, step 1: one right-hand-side evaluation at (t, State()) (one
@@ -446,7 +503,7 @@ public:
                      "relaxation's time " << relax_->Time() << " s");
          relax_->SetDelta(RelaxDelta_());
       }
-      return op_->GetMaxSlipRate();
+      return MaxV();
    }
 
    /// [cycle.relaxation], or null when off.
@@ -498,6 +555,14 @@ public:
    long SettleOpening(real_t t)
    {
       MFEM_VERIFY(open_, "QDPhase::SettleOpening: [cycle.opening] is off");
+#ifdef MFEM_USE_PETSC
+      if (imp_)
+      {
+         const long flips = ConsistentStart_(t, "start at step", 0);
+         Solve(t);
+         return flips;
+      }
+#endif
       Solve(t);
       return SettleOpenSet_(t, state_, "start at step", 0);
    }
@@ -867,6 +932,7 @@ public:
    /// (cfg.qd.petsc_options) must already be loaded by MFEMInitializePetsc.
    void InitTS(real_t dt0)
    {
+      if (imp_) { InitImplicitTS_(dt0); return; }
       ode_ = std::make_unique<PetscODESolver>(mpi_.GetComm(), "");
       ode_->SetAbsTol(cfg_.qd.ts_atol);
       ode_->SetRelTol(cfg_.qd.ts_rtol);
@@ -1095,14 +1161,25 @@ public:
             SetGap(gk);
          }
       }
-      real_t Vmax = Solve(t);
-      if (open_)
+      real_t Vmax = 0.0;
+      if (imp_)
       {
-         reenter_flips_ = SettleOpenSet_(t, state_, "switch back at step", step);
-         Vmax = op_->GetMaxSlipRate();
+         // option I: the gap rows at the handed-back slip and psi (plan
+         // 2.10), then the caches of that state
+         reenter_flips_ = ConsistentStart_(t, "switch back at step", step);
+         Vmax = Solve(t);
+      }
+      else
+      {
+         Vmax = Solve(t);
+         if (open_)
+         {
+            reenter_flips_ = SettleOpenSet_(t, state_, "switch back at step", step);
+            Vmax = op_->GetMaxSlipRate();
+         }
       }
       InitTS(dt0);
-      TS ts = *ode_;
+      TS ts = Ts_();
       MFEM_VERIFY(TSSetStepNumber(ts, step) == PETSC_SUCCESS, "TSSetStepNumber failed");
       skip_monitor_step_ = step;   // that time's rows are the dynamic regime's
       return Vmax;
@@ -1111,8 +1188,9 @@ public:
    /// Continue from a checkpoint: the TS step counter and a fresh first stage.
    void RestoreTS(int step)
    {
-      TS ts = *ode_;
+      TS ts = Ts_();
       MFEM_VERIFY(TSSetStepNumber(ts, step) == PETSC_SUCCESS, "TSSetStepNumber failed");
+      u_stale_ = true;   // option I: U from the restored State() and gap (Run)
       RestartStage();
       skip_monitor_step_ = step;   // its output is already in the files
    }
@@ -1120,8 +1198,10 @@ public:
    /// The next step re-evaluates its first RK stage (see the file comment).
    void RestartStage()
    {
-      TS ts = *ode_;
+      TS ts = Ts_();
       MFEM_VERIFY(TSRestartStep(ts) == PETSC_SUCCESS, "TSRestartStep failed");
+      // option I: a restarted run has no LU factor either
+      if (imp_) { imp_->DropFactor(); }
    }
 
    /// Steps until t_final, max_steps, or `mon` returns false.  t and dt
@@ -1131,11 +1211,32 @@ public:
       monitor_ = mon;
       stopped_ = false;
       // The start step (TSSolve's first TSMonitor call in seas_bp5_full).
-      TS ts = *ode_;
+      TS ts = Ts_();
       PetscInt s0 = 0;
       MFEM_VERIFY(TSGetStepNumber(ts, &s0) == PETSC_SUCCESS, "TSGetStepNumber failed");
       MFEM_VERIFY(TSSetTime(ts, t) == PETSC_SUCCESS && TSSetTimeStep(ts, dt) == PETSC_SUCCESS,
                   "TSSetTime/TSSetTimeStep failed");
+      if (imp_)
+      {
+         // option I: U from State() and the gap when either was set from
+         // outside (a new TS, a restart), then PetscODESolver::Run's calls
+         if (u_stale_) { LoadU_(); }
+         if (CallMonitor_(static_cast<int>(s0), t))
+         {
+            MFEM_VERIFY(TSSetMaxSteps(ts, max_steps) == PETSC_SUCCESS &&
+                        TSSetMaxTime(ts, t_final) == PETSC_SUCCESS &&
+                        TSSetExactFinalTime(ts, TS_EXACTFINALTIME_MATCHSTEP) == PETSC_SUCCESS,
+                        "TSSetMaxSteps/TSSetMaxTime failed");
+            MFEM_VERIFY(TSSolve(ts, U_imp_) == PETSC_SUCCESS, "TSSolve failed");
+            PetscReal pt = 0.0;
+            MFEM_VERIFY(TSGetTime(ts, &pt) == PETSC_SUCCESS, "TSGetTime failed");
+            t = static_cast<real_t>(pt);
+            MFEM_VERIFY(TSGetTimeStep(ts, &pt) == PETSC_SUCCESS, "TSGetTimeStep failed");
+            dt = static_cast<real_t>(pt);
+         }
+         monitor_ = nullptr;
+         return;
+      }
       if (CallMonitor_(static_cast<int>(s0), t))
       {
          ode_->SetMaxIter(max_steps);
@@ -1149,19 +1250,19 @@ public:
    real_t NextDt() const
    {
       PetscReal dt;
-      TSGetTimeStep(*ode_, &dt);
+      TSGetTimeStep(Ts_(), &dt);
       return dt;
    }
    int StepNumber() const
    {
       PetscInt n;
-      TSGetStepNumber(*ode_, &n);
+      TSGetStepNumber(Ts_(), &n);
       return static_cast<int>(n);
    }
    int Rejections() const
    {
       PetscInt n;
-      TSGetStepRejections(*ode_, &n);
+      TSGetStepRejections(Ts_(), &n);
       return static_cast<int>(n);
    }
    /// [cycle.qd] exact_retry: retries started from the saved copy, and
@@ -1169,8 +1270,27 @@ public:
    /// lifetime, all TS objects).
    long ExactRetries() const { return retry_.Restores(); }
    long ExactRetriesNonFinite() const { return retry_nonfinite_; }
-   TS GetTS() const { return *ode_; }
+   TS GetTS() const { return Ts_(); }
+   /// [cycle.qd] integrator = "esdirk": the implicit fault system (its
+   /// counts), or null with "dp5".
+   const QDImplicitFault *Implicit() const { return imp_.get(); }
+   /// Option I: failed stage solves of this phase's current TS (each one a
+   /// rejected step).
+   long ImplicitSNESFailures() const
+   {
+      PetscInt n = 0;
+      if (imp_ && ts_imp_) { TSGetSNESFailures(ts_imp_, &n); }
+      return static_cast<long>(n);
+   }
 #endif
+
+   ~QDPhase()
+   {
+#ifdef MFEM_USE_PETSC
+      if (ts_imp_) { TSDestroy(&ts_imp_); }
+      if (U_imp_) { VecDestroy(&U_imp_); }
+#endif
+   }
 
 private:
    /// [cycle.opening]: the open set on the Green's function (file comment).
@@ -1208,12 +1328,253 @@ private:
             [dom](const Vector &e, Vector &T, Vector &Tn) { dom->GreenStage(0.0, e, T, &Tn); },
             fault_->TauPre());
       }
+      OpenSetQD *os = open_.get();
+      if (cfg_.qd.Esdirk())
+      {
+         // option I (file comment): the stage solves fixed slip and gap, so
+         // an evaluation adds the carried gap's tractions only, and no DOF
+         // is frozen (an open DOF slides at V = -tau / eta, P3)
+         op_->SetGreenStageHook([os](real_t, Vector &, Vector &T, Vector *Tn)
+         { os->StageCarried(T, Tn); });
+         return;
+      }
       fault_->SetFrozenNodes(&open_->Mask());
       if (relax_) { relax_->SetFrozen(&open_->Mask()); }
-      OpenSetQD *os = open_.get();
       op_->SetGreenStageHook([os](real_t, Vector &slip, Vector &T, Vector *Tn)
       { os->Stage(slip, T, Tn); });
    }
+
+#ifdef MFEM_USE_PETSC
+   /// The TS in use: option I's own, or PetscODESolver's.
+   TS Ts_() const { return imp_ ? ts_imp_ : static_cast<TS>(*ode_); }
+
+   /// [cycle.qd] integrator = "esdirk": the implicit fault system on the
+   /// planar dense Green's function (cycle/qd_implicit.hpp, PlanarProblem;
+   /// the deck checks are CycleConfig's, the Green's function's are
+   /// PlanarProblem's).  Collective.
+   void SetupImplicit_(const FaultParams &par)
+   {
+      MFEM_VERIFY(open_ && open_->Contact() && op_->QDGreenActive(), "[cycle.qd].integrator "
+                  "= \"esdirk\" needs [cycle.opening] mode = \"contact\" and "
+                  "[cycle.qd.green]");
+      MFEM_VERIFY(pmesh_.Dimension() == 2, "[cycle.qd].integrator = \"esdirk\": a 2-D "
+                  "mesh only (option I, decision P5)");
+      MFEM_VERIFY(!relax_, "[cycle.qd].integrator = \"esdirk\" with the relaxation");
+      const QDGreenOperator *G = dom_->GetQDGreen();
+      MFEM_VERIFY(G, "[cycle.qd].integrator = \"esdirk\": no Green's function");
+      PlanarFaultInputs in;
+      in.tau_pre = fault_->TauPre();
+      in.sigma0 = sigma0_;
+      in.a = par.rs.a;
+      in.eta = par.rs.eta;
+      in.Dc = par.rs.Dc;
+      in.b = seed_.b;
+      in.f0 = seed_.f0;
+      in.V0 = seed_.V0;
+      in.sigma_floor = cfg_.sigma_n_floor;
+      in.floor_taper = cfg_.opening.floor_taper;
+      QDImplicitSettings set;
+      set.esdirk_type = cfg_.qd.esdirk_type;
+      set.newton_tol = cfg_.qd.newton_tol;
+      set.newton_max_it = cfg_.qd.newton_max_it;
+      set.jacobian_reuse = cfg_.qd.jacobian_reuse;
+      set.newton_local = cfg_.qd.newton_local;
+      set.atol = cfg_.qd.ts_atol;
+      set.rtol = cfg_.qd.ts_rtol;
+      DomainOp *dom = dom_.get();
+      imp_ = std::make_unique<QDImplicitFault>(
+         mpi_.GetComm(),
+         PlanarProblem(mpi_.GetComm(), *G, in,
+                       [dom](const Vector &e, Vector &T, Vector &Tn)
+      { dom->QDUnitColumn(e, T, &Tn); }), set);
+      MFEM_VERIFY(imp_->NumOwned() == fault_->NumNodes(), "option I: " << imp_->NumOwned()
+                  << " points for " << fault_->NumNodes() << " owned fault DOFs");
+      if (mpi_.Rank() == 0)
+      {
+         const double mib = 3.0 * 8.0 * imp_->NumGlobal() * static_cast<double>(imp_->NumGlobal())
+                            / (1024.0 * 1024.0);
+         std::cout << "  [cycle.qd] integrator esdirk (option I): arkimex " << set.esdirk_type
+                   << " fully implicit on " << imp_->NumGlobal() << " fault points, dense LU "
+                   "on every rank (about " << std::setprecision(4) << mib << " MiB per rank "
+                   "for G and the factor), newton_tol " << set.newton_tol << ", newton_max_it "
+                   << set.newton_max_it << ", jacobian_reuse " << set.jacobian_reuse
+                   << ", newton_local " << (set.newton_local ? "on" : "off") << "\n";
+      }
+   }
+
+   /// Option I: a new TS at the current State() and gap (first step dt0).
+   /// The options file's step-controller options apply (-ts_adapt_*); its
+   /// -ts_type is replaced by arkimex.
+   void InitImplicitTS_(real_t dt0)
+   {
+      MPI_Comm comm = mpi_.GetComm();
+      if (ts_imp_) { MFEM_VERIFY(TSDestroy(&ts_imp_) == PETSC_SUCCESS, "TSDestroy failed"); }
+      TS ts = nullptr;
+      MFEM_VERIFY(TSCreate(comm, &ts) == PETSC_SUCCESS, "TSCreate failed");
+      ts_imp_ = ts;
+      TSAdapt adapt;
+      MFEM_VERIFY(TSGetAdapt(ts, &adapt) == PETSC_SUCCESS, "TSGetAdapt failed");
+      MFEM_VERIFY(TSAdaptSetType(adapt, TSADAPTBASIC) == PETSC_SUCCESS,
+                  "TSAdaptSetType(BASIC) failed");
+      MFEM_VERIFY(TSSetFromOptions(ts) == PETSC_SUCCESS, "TSSetFromOptions failed");
+      MFEM_VERIFY(imp_->SetupTS(ts) == PETSC_SUCCESS, "QDImplicitFault::SetupTS failed");
+      MFEM_VERIFY(imp_->SetTolerances(ts) == PETSC_SUCCESS,
+                  "QDImplicitFault::SetTolerances failed");
+      // a failed stage solve or error test shrinks the step; the run ends
+      // where the controller reaches its smallest step (PETSc)
+      MFEM_VERIFY(TSSetMaxStepRejections(ts, -1) == PETSC_SUCCESS,
+                  "TSSetMaxStepRejections failed");
+      MFEM_VERIFY(TSSetTimeStep(ts, dt0) == PETSC_SUCCESS, "TSSetTimeStep failed");
+      MFEM_VERIFY(TSSetApplicationContext(ts, this) == PETSC_SUCCESS,
+                  "TSSetApplicationContext failed");
+      MFEM_VERIFY(TSSetPostStep(ts, &QDPhase::PostStepImplicit_) == PETSC_SUCCESS,
+                  "TSSetPostStep failed");
+      if (cfg_.qd.exact_retry)
+      {
+         MFEM_VERIFY(TSSetPreStep(ts, &QDPhase::PreStepSave_) == PETSC_SUCCESS,
+                     "TSSetPreStep failed");
+         MFEM_VERIFY(TSSetPreStage(ts, &QDPhase::PreStageRestore_) == PETSC_SUCCESS,
+                     "TSSetPreStage failed");
+      }
+      if (!U_imp_)
+      {
+         MFEM_VERIFY(VecCreateMPI(comm, QDImplicitFault::kPer * imp_->NumOwned(),
+                                  PETSC_DETERMINE, &U_imp_) == PETSC_SUCCESS,
+                     "VecCreateMPI failed");
+      }
+      MFEM_VERIFY(TSSetSolution(ts, U_imp_) == PETSC_SUCCESS, "TSSetSolution failed");
+      imp_->DropFactor();
+      u_stale_ = true;
+   }
+
+   /// Option I: per owned DOF (in-plane slip, psi, gap) from State() and
+   /// the open set's gap into @a u (3 N).
+   void StateToU_(real_t *u) const
+   {
+      const int N = fault_->NumNodes();
+      const int spn = FaultOp::StatePerNode, slot = open_->Slot();
+      const std::vector<real_t> &g = open_->Gap();
+      state_.HostRead();
+      for (int o = 0; o < N; o++)
+      {
+         u[3 * o] = state_(spn * o + FaultOp::SlipIndex + slot);
+         u[3 * o + 1] = state_(spn * o + FaultOp::PsiIndex);
+         u[3 * o + 2] = g[static_cast<size_t>(o)];
+      }
+   }
+
+   /// Option I: the gap columns of every point with g != 0 in @a u (a
+   /// restart, a switch back), in global order.  Collective.
+   void EnsureColumns_(const real_t *u)
+   {
+      const int N = fault_->NumNodes(), NG = imp_->NumGlobal();
+      std::vector<int> has(static_cast<size_t>(NG), 0);
+      for (int o = 0; o < N; o++)
+      {
+         if (u[3 * o + 2] != 0.0) { has[static_cast<size_t>(imp_->FirstOwned() + o)] = 1; }
+      }
+      MPI_Allreduce(MPI_IN_PLACE, has.data(), NG, MPI_INT, MPI_MAX, mpi_.GetComm());
+      for (int l = 0; l < NG; l++) { if (has[static_cast<size_t>(l)]) { imp_->EnsureColumn(l); } }
+   }
+
+   /// Option I: U from State() and the gap (a new TS, a restart).  Collective.
+   void LoadU_()
+   {
+      PetscScalar *a = nullptr;
+      MFEM_VERIFY(VecGetArray(U_imp_, &a) == PETSC_SUCCESS, "VecGetArray failed");
+      StateToU_(reinterpret_cast<real_t *>(a));
+      EnsureColumns_(reinterpret_cast<real_t *>(a));
+      MFEM_VERIFY(VecRestoreArray(U_imp_, &a) == PETSC_SUCCESS, "VecRestoreArray failed");
+      u_stale_ = false;
+   }
+
+   /// Option I: an accepted or consistent U (3 N, owned) at time t into
+   /// State() (slip at the in-plane slot, psi) and the open set (flags: the
+   /// branch of the gap row; gap: max(g, 0) there, 0 elsewhere), and the
+   /// same cleaned gap back into @a u.  Returns the DOFs whose flag
+   /// changed, over all ranks.  Collective.
+   long UToState_(real_t t, real_t *u)
+   {
+      const int N = fault_->NumNodes();
+      const int spn = FaultOp::StatePerNode, slot = open_->Slot();
+      imp_->Evaluate(t, u, imp_V_, imp_tau_, imp_sig_, imp_open_);
+      std::vector<char> flags(static_cast<size_t>(N));
+      std::vector<real_t> gap(static_cast<size_t>(N));
+      const std::vector<char> &old = open_->Flags();
+      long changed = 0;
+      state_.HostReadWrite();
+      for (int o = 0; o < N; o++)
+      {
+         const size_t k = static_cast<size_t>(o);
+         const bool is_open = imp_open_[k] != 0 && u[3 * o + 2] > 0.0;
+         flags[k] = is_open ? 1 : 0;
+         gap[k] = is_open ? u[3 * o + 2] : 0.0;
+         u[3 * o + 2] = gap[k];
+         if ((old[k] != 0) != is_open) { changed++; }
+         state_(spn * o + FaultOp::SlipIndex + slot) = u[3 * o];
+         state_(spn * o + FaultOp::PsiIndex) = u[3 * o + 1];
+      }
+      MPI_Allreduce(MPI_IN_PLACE, &changed, 1, MPI_LONG, MPI_SUM, mpi_.GetComm());
+      if (changed > 0) { open_->SetFlags(flags); }
+      open_->SetGap(gap);
+      return changed;
+   }
+
+   /// Option I, the consistent start (plan 2.10) at (t, State()): the gap
+   /// rows min(sigma, gamma g) = 0 at fixed slip and psi, from the gap the
+   /// open set holds; the result into the open set.  Rank 0 logs a change.
+   /// Returns the DOFs whose flag changed.  Collective.
+   long ConsistentStart_(real_t t, const char *where, long step)
+   {
+      const int N = fault_->NumNodes();
+      std::vector<real_t> u(static_cast<size_t>(std::max(3 * N, 1)));
+      StateToU_(u.data());
+      EnsureColumns_(u.data());
+      real_t g_before = 0.0;
+      for (int o = 0; o < N; o++) { g_before = std::max(g_before, u[3 * o + 2]); }
+      g_before = mpi_.GlobalMax(g_before);
+      const long n_open = imp_->ConsistentStart(t, u.data());
+      const long changed = UToState_(t, u.data());
+      const real_t g_after = MaxGapGlobal();
+      if (mpi_.Rank() == 0 && (changed > 0 || n_open > 0))
+      {
+         std::cout << "  [cycle.qd] esdirk consistent start (" << where << " " << step
+                   << ", t = " << t << " s): " << n_open << " open, " << changed
+                   << " flags changed; largest gap " << g_before << " -> " << g_after
+                   << " m\n";
+      }
+      u_stale_ = true;
+      return changed;
+   }
+
+   /// Option I: after each accepted step (file comment).
+   static PetscErrorCode PostStepImplicit_(TS ts)
+   {
+      PetscFunctionBeginUser;
+      void *ctx = nullptr;
+      PetscCall(TSGetApplicationContext(ts, &ctx));
+      QDPhase *self = static_cast<QDPhase *>(ctx);
+      PetscInt step;
+      PetscReal t;
+      PetscCall(TSGetStepNumber(ts, &step));
+      PetscCall(TSGetTime(ts, &t));
+      Vec U;
+      PetscCall(TSGetSolution(ts, &U));
+      PetscScalar *a = nullptr;
+      PetscCall(VecGetArray(U, &a));
+      self->UToState_(static_cast<real_t>(t), reinterpret_cast<real_t *>(a));
+      PetscCall(VecRestoreArray(U, &a));
+      // the kernel's caches at the accepted state, for the monitor
+      self->op_->SetTime(static_cast<real_t>(t));
+      self->imp_rate_.SetSize(self->state_.Size());
+      self->op_->Mult(self->state_, self->imp_rate_);
+      if (!self->CallMonitor_(static_cast<int>(step), static_cast<real_t>(t)))
+      {
+         PetscCall(TSSetConvergedReason(ts, TS_CONVERGED_USER));
+      }
+      PetscFunctionReturn(PETSC_SUCCESS);
+   }
+#endif
 
    /// [cycle.opening]: the rule at an evaluated state x at t (the last
    /// evaluation is at (t, x)): write the solved open slip into x, flip the
@@ -1639,6 +2000,15 @@ private:
    }
 
    std::unique_ptr<PetscODESolver> ode_;
+   /// [cycle.qd] integrator = "esdirk" (option I): the implicit fault
+   /// system, its TS and its state vector (3 per owned DOF); null with "dp5".
+   std::unique_ptr<QDImplicitFault> imp_;
+   TS ts_imp_ = nullptr;
+   Vec U_imp_ = nullptr;
+   bool u_stale_ = true;   ///< U must be rebuilt from State() and the gap
+   std::vector<real_t> imp_V_, imp_tau_, imp_sig_;   ///< UToState_ scratch
+   std::vector<char> imp_open_;
+   Vector imp_rate_;                                 ///< PostStepImplicit_ scratch
    /// [cycle.qd] exact_retry (declared after ode_, so destroyed before it).
    ExactRetry retry_;
    long retry_nonfinite_ = 0;

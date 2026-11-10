@@ -101,7 +101,26 @@
 //                   rollback (which turns a last-stage Inf rate into NaN
 //                   in the state), and the driver scans the whole state for
 //                   NaN after each step instead of its first 100 entries
-//                   (cycle/exact_retry.hpp)
+//                   (cycle/exact_retry.hpp),
+//                   integrator ["dp5"]: "esdirk" is option I (cycle/
+//                   qd_implicit.hpp; Chunhui Zhao, 2026-11-09): every fault
+//                   point implicit in every stage of a stiffly accurate
+//                   ESDIRK (PETSc arkimex, fully implicit), with the contact
+//                   condition inside each stage solve and the radiation row
+//                   tau + eta V = 0 at open points.  It needs [cycle.opening]
+//                   mode = "contact", a dense [cycle.qd.green] on a 2-D
+//                   mesh, and no [cycle.relaxation]; petsc_options then
+//                   gives the step controller's options only (its -ts_type
+//                   is replaced).  "dp5" (the default) is the explicit path,
+//                   every bit as before.  Only with "esdirk":
+//                   esdirk_type ["3"] ("3", "4" or "5": PETSc's arkimex
+//                   type), newton_tol [1e-4] (Newton stops when its update
+//                   is below this fraction of the step's error weights),
+//                   newton_max_it [20] (more is a failed solve: the step is
+//                   rejected and shrunk), jacobian_reuse ["step"] ("step",
+//                   "stage" or "iteration": how long one LU factor is
+//                   kept), newton_local [true] (Newton on each point's own
+//                   stage equation)
 //   [cycle.qd.green] the discrete Green's function stage (seas_bp5_full
 //                   --qd-green, items 3 and 4); present means on unless
 //                   enabled = false, and it needs operators = "matrix".
@@ -419,6 +438,15 @@ struct QDConfig
    /// PETSc's rollback, and scan the whole state for NaN after every step
    /// (cycle/exact_retry.hpp; the UCERF quench run's crash, 2026-11-07).
    bool exact_retry = false;
+   /// "dp5": the explicit RK of petsc_options.  "esdirk": option I
+   /// (cycle/qd_implicit.hpp), opt-in.
+   std::string integrator = "dp5";
+   std::string esdirk_type = "3";         ///< PETSc arkimex type
+   real_t newton_tol = 1e-4;              ///< Newton update / TS error weights
+   int newton_max_it = 20;                ///< more: a failed solve
+   std::string jacobian_reuse = "step";   ///< "step", "stage" or "iteration"
+   bool newton_local = true;              ///< Newton on the point stage equations
+   bool Esdirk() const { return integrator == "esdirk"; }
    QDGreenDeck green;
 };
 
@@ -1085,7 +1113,9 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       MFEM_VERIFY(!q.contains("penalty_factor"), "[cycle.qd].penalty_factor is now "
                   "[cycle].penalty_factor: one value for both regimes' stiffness");
       OnlyKeys(q, "cycle.qd", {"solver", "blr_tol", "petsc_options", "ts_atol", "ts_rtol",
-                               "operators", "green", "exact_retry"});
+                               "operators", "green", "exact_retry", "integrator",
+                               "esdirk_type", "newton_tol", "newton_max_it",
+                               "jacobian_reuse", "newton_local"});
       c.qd.solver = Str(q, "cycle.qd", "solver", c.qd.solver);
       c.qd.blr_tol = Real(q, "cycle.qd", "blr_tol", c.qd.blr_tol);
       c.qd.petsc_options = Str(q, "cycle.qd", "petsc_options", c.qd.petsc_options);
@@ -1093,6 +1123,21 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       c.qd.ts_rtol = Real(q, "cycle.qd", "ts_rtol", c.qd.ts_rtol);
       c.qd.operators = Str(q, "cycle.qd", "operators", c.qd.operators);
       c.qd.exact_retry = Bool(q, "cycle.qd", "exact_retry", c.qd.exact_retry);
+      c.qd.integrator = Str(q, "cycle.qd", "integrator", c.qd.integrator);
+      MFEM_VERIFY(c.qd.integrator == "dp5" || c.qd.integrator == "esdirk",
+                  "[cycle.qd].integrator = \"" << c.qd.integrator << "\"; use \"dp5\" "
+                  "(the explicit RK of petsc_options) or \"esdirk\" (option I)");
+      for (const char *k : {"esdirk_type", "newton_tol", "newton_max_it", "jacobian_reuse",
+                            "newton_local"})
+      {
+         MFEM_VERIFY(c.qd.Esdirk() || !q.contains(k), "[cycle.qd]." << k << " needs "
+                     "[cycle.qd].integrator = \"esdirk\"");
+      }
+      c.qd.esdirk_type = Str(q, "cycle.qd", "esdirk_type", c.qd.esdirk_type);
+      c.qd.newton_tol = Real(q, "cycle.qd", "newton_tol", c.qd.newton_tol);
+      c.qd.newton_max_it = Int(q, "cycle.qd", "newton_max_it", c.qd.newton_max_it);
+      c.qd.jacobian_reuse = Str(q, "cycle.qd", "jacobian_reuse", c.qd.jacobian_reuse);
+      c.qd.newton_local = Bool(q, "cycle.qd", "newton_local", c.qd.newton_local);
       if (q.contains("green"))
       {
          const std::string sec = "cycle.qd.green";
@@ -1128,6 +1173,30 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
    MFEM_VERIFY(!c.qd.green.enabled || c.qd.operators == "matrix",
                "[cycle.qd.green] needs [cycle.qd].operators = \"matrix\" (the Green's "
                "function is built from the stage operators)");
+   if (c.qd.Esdirk())
+   {
+      // option I, decisions P1, P2, P5, P6 (plan "Option I: implementation
+      // and test plan"); a 3-D mesh is refused where the Green's function
+      // is known (QDPhase::Setup)
+      const std::string sec = "[cycle.qd].integrator = \"esdirk\"";
+      MFEM_VERIFY(c.opening.Contact(), sec << " needs [cycle.opening] mode = "
+                  "\"contact\" (the contact condition is part of each stage solve)");
+      MFEM_VERIFY(c.qd.green.enabled && c.qd.green.compress == 0.0, sec << " needs the "
+                  "dense [cycle.qd.green] (no compress): its Newton matrix is G plus a "
+                  "diagonal, factored densely");
+      MFEM_VERIFY(!c.Relaxation(), sec << " with [cycle.relaxation]: option I runs "
+                  "without the sigma_n' relaxation (decision P6); leave the table out");
+      MFEM_VERIFY(c.qd.esdirk_type == "3" || c.qd.esdirk_type == "4" ||
+                  c.qd.esdirk_type == "5", "[cycle.qd].esdirk_type = \"" << c.qd.esdirk_type
+                  << "\"; use \"3\", \"4\" or \"5\" (PETSc arkimex types that are "
+                  "stiffly accurate ESDIRKs when run fully implicit)");
+      MFEM_VERIFY(c.qd.newton_tol > 0.0 && c.qd.newton_max_it >= 1,
+                  "[cycle.qd] newton_tol must be > 0 and newton_max_it >= 1");
+      MFEM_VERIFY(c.qd.jacobian_reuse == "step" || c.qd.jacobian_reuse == "stage" ||
+                  c.qd.jacobian_reuse == "iteration", "[cycle.qd].jacobian_reuse = \""
+                  << c.qd.jacobian_reuse << "\"; use \"step\", \"stage\" or "
+                  "\"iteration\"");
+   }
 
    if (cy.contains("switch"))
    {

@@ -1063,6 +1063,9 @@ int main(int argc, char *argv[])
                 << ", p = " << cfg.shared.mesh.order << "\n"
                 << "  QD solver: " << cfg.qd.solver << ", PETSc options: "
                 << cfg.qd.petsc_options << " (atol " << cfg.qd.ts_atol << ")"
+                << (cfg.qd.Esdirk() ? ", integrator esdirk (option I: implicit fault "
+                    "solve, arkimex " + cfg.qd.esdirk_type + "; the options file's "
+                    "-ts_type is replaced)" : "")
                 << (cfg.qd.exact_retry ? ", exact retry ([cycle.qd].exact_retry: a "
                     "rejected step retries from a copy of its start state; the whole "
                     "state is scanned for NaN after each step)" : "") << "\n"
@@ -1669,6 +1672,18 @@ int main(int argc, char *argv[])
                           ? "  exact retries: " + std::to_string(qd.ExactRetries()) + " ("
                             + std::to_string(qd.ExactRetriesNonFinite())
                             + " after a rollback with non-finite entries)\n"
+                          : std::string())
+                      << (qd.Implicit()
+                          ? "  esdirk (option I): Newton iterations "
+                            + std::to_string(qd.Implicit()->GetCounts().newton_its)
+                            + ", LU factors "
+                            + std::to_string(qd.Implicit()->GetCounts().factors)
+                            + ", failed stage solves "
+                            + std::to_string(qd.Implicit()->GetCounts().newton_fails)
+                            + ", gap columns "
+                            + std::to_string(qd.Implicit()->GetCounts().columns)
+                            + ", most open points in a solve "
+                            + std::to_string(qd.Implicit()->GetCounts().max_open) + "\n"
                           : std::string())
                       << "  dynamic phases: " << ctl.Phases() << "\n"
                       << "  events: " << out->NumEvents() << "\n"

@@ -37,6 +37,7 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-exact-retry         # [cycle.qd] exact_retry (PETSc RK rollback)
 #   make -f tests/2d_inplane/2d_inplane.mk test-qd-esdirk-points    # option I, I1 (implicit QD fault system)
 #   make -f tests/2d_inplane/2d_inplane.mk test-qd-implicit-green   # option I, I2 (on the planar Green's function)
+#   make -f tests/2d_inplane/2d_inplane.mk test-qd-esdirk-cycle     # option I, I3 (in the cycle driver: restart)
 #   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
 # The 3D parity set (every phase must leave it bit for bit unchanged) is the
 # script tests/2d_inplane/parity_3d.sh (see its header).  The tensor
@@ -995,6 +996,21 @@ test-qd-implicit-green: seas_test_qd_implicit_green
 	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_qd_implicit_green < /dev/null || exit 1; \
 	done
 
+# Option I, phase I3: the implicit QD fault solve in the cycle driver
+# ([cycle.qd] integrator = "esdirk"; cycle/qd_phase.hpp).  The D9f contact
+# deck with the key on, 80 QD steps: a run stopped at step 40 and restarted
+# from its checkpoint repeats the uninterrupted run bit for bit, on 1 and 2
+# ranks (tests/cycle/test_cycle_restart.sh; the dense G of 240 fault points
+# is built four times, about 2 minutes per rank count).
+QD_ESDIRK_CYCLE_TMP ?= /tmp/seas_qd_esdirk_cycle
+test-qd-esdirk-cycle: seas_fd_cycle_driver
+	@for n in 1 2; do \
+	   MPIRUN="$(MFEM_MPIEXEC)" OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+	   bash tests/cycle/test_cycle_restart.sh \
+	      simple_cases/configs/D9f_arc08L2p5_h250_avg_floor10_contact_esdirk.toml \
+	      $(QD_ESDIRK_CYCLE_TMP)_np$$n 40 $$n || exit 1; \
+	done
+
 2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
                 test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
                 test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
@@ -1002,7 +1018,8 @@ test-qd-implicit-green: seas_test_qd_implicit_green
                 test-handback-table test-tip-zone test-sigma-floor test-relaxation test-2d5-width test-2d5-dyn-driver \
                 test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle \
                 test-fault-opening test-fault-contact test-fault-contact-dyn \
-                test-fault-contact-qd test-exact-retry test-qd-esdirk-points test-qd-implicit-green
+                test-fault-contact-qd test-exact-retry test-qd-esdirk-points test-qd-implicit-green \
+                test-qd-esdirk-cycle
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
@@ -1011,4 +1028,4 @@ test-qd-implicit-green: seas_test_qd_implicit_green
         test-handback-table test-tip-zone test-sigma-floor test-relaxation test-2d5-width test-2d5-dyn-driver \
         test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle \
         test-fault-opening test-exact-retry test-qd-esdirk-points test-qd-implicit-green \
-        2d-inplane-all
+        test-qd-esdirk-cycle 2d-inplane-all

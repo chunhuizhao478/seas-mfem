@@ -307,6 +307,30 @@ public:
       stages_++;
    }
 
+   /// Contact, [cycle.qd] integrator = "esdirk" (option I; cycle/
+   /// qd_implicit.hpp): the carried gap's columns into T and T_n and nothing
+   /// else (step 1 of StageContact_).  The implicit stage solves already
+   /// fixed the slip and the gap, so an evaluation of the accepted state
+   /// must not solve the open set again.  No communication.
+   void StageCarried(Vector &T, Vector *Tn) const
+   {
+      MFEM_VERIFY(contact_, "OpenSetQD::StageCarried: contact mode only");
+      MFEM_VERIFY(Tn != nullptr, "OpenSetQD::StageCarried: the stage has no normal "
+                  "traction (elastic sigma_n is required)");
+      const int m = static_cast<int>(list_.size());
+      const int n2 = 2 * nown_;
+      real_t *t = T.HostReadWrite();
+      real_t *tn = Tn->HostReadWrite();
+      for (int q = 0; q < m; q++)
+      {
+         const real_t gq = gall_[q];
+         if (gq == 0.0) { continue; }
+         const real_t *c = gcols_.at(list_[q]).data();
+         for (int i = 0; i < n2; i++) { t[i] += gq * c[i]; }
+         for (int i = 0; i < nown_; i++) { tn[i] += gq * c[n2 + i]; }
+      }
+   }
+
    /// The last stage's |Delta| max (the static step size of the open set;
    /// contact: over the slip and the gap updates alike, both meters).
    real_t LastStepMax() const { return delta_.Size() ? delta_.Normlinf() : 0.0; }
