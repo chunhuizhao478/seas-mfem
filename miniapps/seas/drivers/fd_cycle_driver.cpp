@@ -336,6 +336,27 @@ void WriteHandbackTable(const MPIContext &mpi, const cycle::CycleConfig &cfg,
    std::cout << s.str() << std::flush;
 }
 
+/// [cycle.qd] integrator = "esdirk" (option I, phase I5): what the implicit
+/// solve did in the QD regime since the last call, printed on root.
+void PrintQDImplicit(const MPIContext &mpi, cycle::QDPhase &qd, const std::string &when)
+{
+#ifdef MFEM_USE_PETSC
+   if (!qd.Implicit()) { return; }
+   const cycle::QDPhase::ImplicitPhaseInfo f = qd.ImplicitPhase();
+   if (!mpi.IsRoot()) { return; }
+   const double yr = BP5Params::seconds_per_year;
+   const double n = static_cast<double>(std::max(f.steps, 1L));
+   std::ostringstream s;
+   s << std::setprecision(4) << "  esdirk in the QD regime " << when << ": " << f.steps
+     << " steps over " << (f.t1 - f.t0) / yr << " yr; per step " << f.newton_its / n
+     << " Newton iterations and " << f.factors / n << " LU factors; " << f.failed_solves
+     << " failed stage solves; " << f.columns << " new gap columns; most open points in a "
+     << "solve so far " << f.max_open << "; QD loop " << f.wall << " s (" << f.wall / n
+     << " s per step, output included)\n";
+   std::cout << s.str() << std::flush;
+#endif
+}
+
 /// [cycle].sigma_n_floor_pa: where the floor acted in the QD regime since the
 /// last call, printed on root; the count starts again.  Collective.
 void PrintQDFloor(const MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::QDPhase &qd,
@@ -612,6 +633,7 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
       v = &dyn.Ud();
    };
    PrintQDFloor(mpi, cfg, qd, "before dynamic phase " + std::to_string(phase));
+   PrintQDImplicit(mpi, qd, "before dynamic phase " + std::to_string(phase));
    PrintRelaxation(mpi, cfg, qd, "before dynamic phase " + std::to_string(phase));
    if (root)
    {
@@ -925,12 +947,14 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
       if (cfg.opening.On())
       {
          std::cout << "  [cycle.opening] open DOFs: " << open_dyn << " at the dynamic "
-                   << "switch, " << qd.Opening()->NumOpenGlobal() << " after the QD settle ("
+                   << "switch, " << qd.Opening()->NumOpenGlobal()
+                   << (cfg.qd.Esdirk() ? " after the consistent start (" : " after the QD settle (")
                    << qd.ReenterFlips() << " flips); max |tau| at open DOFs "
                    << open_res / 1e6 << " MPa\n";
          if (cfg.opening.Contact())
          {
-            std::cout << "  [cycle.opening] largest gap after the settle " << gmax_qd
+            std::cout << "  [cycle.opening] largest gap after the "
+                      << (cfg.qd.Esdirk() ? "consistent start " : "settle ") << gmax_qd
                       << " m\n";
          }
       }
@@ -1654,6 +1678,7 @@ int main(int argc, char *argv[])
          if (bench) { bench->Flush(); }
          qd.Operator().PrintQDGreenCheckSummary(std::cout);
          PrintQDFloor(mpi, cfg, qd, "since the last switch");
+         PrintQDImplicit(mpi, qd, "since the last switch");
          PrintRelaxation(mpi, cfg, qd, "at the end");
          if (root)
          {

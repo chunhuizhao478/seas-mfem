@@ -1221,6 +1221,12 @@ public:
          // option I: U from State() and the gap when either was set from
          // outside (a new TS, a restart), then PetscODESolver::Run's calls
          if (u_stale_) { LoadU_(); }
+         if (imp_phase_new_)
+         {
+            imp_mark_t0_ = imp_t_last_ = t;
+            imp_phase_new_ = false;
+         }
+         const double wall0 = MPI_Wtime();
          if (CallMonitor_(static_cast<int>(s0), t))
          {
             MFEM_VERIFY(TSSetMaxSteps(ts, max_steps) == PETSC_SUCCESS &&
@@ -1234,6 +1240,7 @@ public:
             MFEM_VERIFY(TSGetTimeStep(ts, &pt) == PETSC_SUCCESS, "TSGetTimeStep failed");
             dt = static_cast<real_t>(pt);
          }
+         imp_wall_ += MPI_Wtime() - wall0;
          monitor_ = nullptr;
          return;
       }
@@ -1274,6 +1281,39 @@ public:
    /// [cycle.qd] integrator = "esdirk": the implicit fault system (its
    /// counts), or null with "dp5".
    const QDImplicitFault *Implicit() const { return imp_.get(); }
+   /// Option I, diagnostics (phase I5): what the implicit solve did since
+   /// the last call (or the start): accepted steps, simulated time, the
+   /// solver's counts, and the wall time of the QD loop (the monitor's
+   /// output included).  The counts agree on every rank; the wall time is
+   /// this rank's.
+   struct ImplicitPhaseInfo
+   {
+      long steps = 0;
+      real_t t0 = 0.0, t1 = 0.0;    ///< [s]
+      long newton_its = 0, factors = 0, failed_solves = 0, columns = 0;
+      long max_open = 0;            ///< most open points in one solve (whole run)
+      double wall = 0.0;            ///< [s]
+   };
+   ImplicitPhaseInfo ImplicitPhase()
+   {
+      ImplicitPhaseInfo r;
+      if (!imp_) { return r; }
+      const QDImplicitFault::Counts &c = imp_->GetCounts();
+      r.steps = imp_steps_ - imp_mark_steps_;
+      r.t0 = imp_mark_t0_;
+      r.t1 = imp_t_last_;
+      r.newton_its = c.newton_its - imp_mark_.newton_its;
+      r.factors = c.factors - imp_mark_.factors;
+      r.failed_solves = c.newton_fails - imp_mark_.newton_fails;
+      r.columns = c.columns - imp_mark_.columns;
+      r.max_open = c.max_open;
+      r.wall = imp_wall_;
+      imp_mark_ = c;
+      imp_mark_steps_ = imp_steps_;
+      imp_wall_ = 0.0;
+      imp_phase_new_ = true;
+      return r;
+   }
    /// Option I: failed stage solves of this phase's current TS (each one a
    /// rejected step).
    long ImplicitSNESFailures() const
@@ -1564,6 +1604,8 @@ private:
       PetscCall(VecGetArray(U, &a));
       self->UToState_(static_cast<real_t>(t), reinterpret_cast<real_t *>(a));
       PetscCall(VecRestoreArray(U, &a));
+      self->imp_steps_++;
+      self->imp_t_last_ = static_cast<real_t>(t);
       // the kernel's caches at the accepted state, for the monitor
       self->op_->SetTime(static_cast<real_t>(t));
       self->imp_rate_.SetSize(self->state_.Size());
@@ -2009,6 +2051,12 @@ private:
    std::vector<real_t> imp_V_, imp_tau_, imp_sig_;   ///< UToState_ scratch
    std::vector<char> imp_open_;
    Vector imp_rate_;                                 ///< PostStepImplicit_ scratch
+   /// ImplicitPhase(): the marks of the last call.
+   QDImplicitFault::Counts imp_mark_;
+   long imp_steps_ = 0, imp_mark_steps_ = 0;
+   real_t imp_mark_t0_ = 0.0, imp_t_last_ = 0.0;
+   double imp_wall_ = 0.0;
+   bool imp_phase_new_ = true;
    /// [cycle.qd] exact_retry (declared after ode_, so destroyed before it).
    ExactRetry retry_;
    long retry_nonfinite_ = 0;
