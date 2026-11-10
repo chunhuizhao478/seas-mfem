@@ -30,6 +30,11 @@
 //   G7  cost sign: one Jacobian (assembly + dense LU) and one solve at
 //       N = 2,638 (the UCERF Type-A count), 0 and 50 open points, on one
 //       rank.
+//   G8  a non-finite Newton iterate (NaN gap at a point without a gap
+//       column, NaN slip): Residual, LocalResidual, Evaluate and Jacobian
+//       return non-finite values on every rank instead of stopping the run,
+//       so the solve fails and TS rejects the step (UCERF T4b, Vista
+//       1133642, stopped in Tractions); a finite state stays finite.
 //
 // Usage (from miniapps/seas; PETSc and MUMPS needed):
 //   mpirun -np N ./seas_test_qd_implicit_green
@@ -688,6 +693,68 @@ void TestG3G4(Box &B, int p)
    }
 }
 
+// ---- G8: a non-finite iterate fails the solve, it does not stop the run ----------
+
+void TestG8(Box &B, int p)
+{
+   MPI_Comm comm = MPI_COMM_WORLD;
+   const QDGreenOperator &G = *B.op->GetQDGreen();
+   const int n = B.n, N = B.N;
+   const int jb = N / 2 + 2;   // no gap column is fetched for it
+   const std::string ps = "p = " + std::to_string(p);
+   PlanarFaultInputs in = Inputs(B, -1.0,
+                                 [](long long j, double) { return 1e-8 * (1.0 + 0.3 * j); },
+                                 [](long long, double) { return 20e6; });
+   for (const bool local : {false, true})
+   {
+      QDImplicitSettings set;
+      set.newton_local = local;
+      QDImplicitFault f(comm, cycle::PlanarProblem(comm, G, in, UnitG(B.op.get())), set);
+      const std::string w = ps + (local ? ", newton_local" : ", F");
+      std::vector<real_t> Uall(3 * N), Udall(3 * N, 0.0);
+      for (int j = 0; j < N; j++)
+      {
+         Uall[3 * j] = 1e-4 * std::sin(0.5 * j + 0.2);
+         Uall[3 * j + 1] = ph.psi_ss(ph.Vpl) + 0.002 * std::sin(0.9 * j);
+         Uall[3 * j + 2] = 0.0;
+         Udall[3 * j] = 1e-9;
+      }
+      struct Case { int comp; const char *name; bool bad; };
+      for (const Case c : {Case{-1, "finite state", false}, Case{2, "NaN gap", true},
+                           Case{0, "NaN slip", true}})
+      {
+         std::vector<real_t> Ua = Uall;
+         if (c.comp >= 0) { Ua[3 * jb + c.comp] = std::numeric_limits<real_t>::quiet_NaN(); }
+         const std::vector<real_t> U = Owned(f, Ua), Ud = Owned(f, Udall);
+         std::vector<real_t> F(3 * n), Gl(3 * n), V, tau, sig;
+         std::vector<char> open;
+         f.Residual(0.0, U.data(), Ud.data(), F.data());
+         f.LocalResidual(0.0, U.data(), Ud.data(), 10.0, Gl.data());
+         f.Evaluate(0.0, U.data(), V, tau, sig, open);
+         f.Jacobian(0.0, U.data(), Ud.data(), 10.0);
+         // every rank: all slip and psi rows finite (a finite state) or
+         // all non-finite (a bad iterate)
+         int all_bad = 1, all_fin = 1;
+         for (int o = 0; o < n; o++)
+         {
+            for (const real_t v : {F[3 * o], F[3 * o + 1], Gl[3 * o], Gl[3 * o + 1], V[o],
+                                   tau[o], sig[o]})
+            {
+               all_bad = all_bad && !std::isfinite(v);
+               all_fin = all_fin && std::isfinite(v);
+            }
+         }
+         MPI_Allreduce(MPI_IN_PLACE, &all_bad, 1, MPI_INT, MPI_MIN, comm);
+         MPI_Allreduce(MPI_IN_PLACE, &all_fin, 1, MPI_INT, MPI_MIN, comm);
+         Say("  G8 " + w + ", " + c.name + ": returned; rows " +
+             (all_fin ? "all finite" : (all_bad ? "all non-finite" : "mixed")));
+         Check(c.bad ? all_bad == 1 : all_fin == 1,
+               std::string("G8 ") + w + ", " + c.name + ": " +
+               (c.bad ? "non-finite residual on every rank, no stop" : "finite residual"));
+      }
+   }
+}
+
 // ---- G5: one event against RK 5dp --------------------------------------------------
 
 struct RefCtx
@@ -1192,6 +1259,7 @@ int main(int argc, char **argv)
       if (Wanted('3') || Wanted('4')) { TestG3G4(*B, p); }
       if (Wanted('5')) { TestG5(*B, p); }
       if (Wanted('6')) { TestG6(*B, p); }
+      if (Wanted('8')) { TestG8(*B, p); }
    }
    if (Wanted('7')) { TestG7(); }
    Say(fails ? "test_qd_implicit_green: " + std::to_string(fails) + " FAILED" :

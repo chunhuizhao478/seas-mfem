@@ -431,8 +431,10 @@ public:
       PointEval e;
       const int j = P_.lo + o;
       const real_t gam = (slot_[j] >= 0) ? cols_s_[slot_[j]][j] : 1.0;
-      MFEM_VERIFY(g == 0.0 || slot_[j] >= 0, "QDImplicitFault: point " << j << " has g = "
-                  << g << " m but no gap column");
+      // a non-finite g (a Newton iterate gone bad) evaluates to non-finite
+      // values and fails the solve; only a finite g needs its column
+      MFEM_VERIFY(g == 0.0 || !std::isfinite(g) || slot_[j] >= 0, "QDImplicitFault: point "
+                  << j << " has g = " << g << " m but no gap column");
       // the normal stress without the point's own gap term (file comment)
       const real_t st = sigma - gam * g;
       e.open = st < 0.0;
@@ -444,6 +446,12 @@ public:
       e.V = (tau0 > 0.0) ? -Vabs : ((tau0 < 0.0) ? Vabs : 0.0);
       Friction(e.V, psi, P_.a[o], e.f, e.fV, e.fpsi);
       e.dpsi = e.open ? 0.0 : RSAgingRatePsi(std::abs(e.V), psi, P_.Dc[o], prm_);
+      if (!std::isfinite(tau) || !std::isfinite(sigma) || !std::isfinite(psi))
+      {
+         // a non-finite iterate: the sign tests above would give V = 0 and
+         // a finite residual; keep it non-finite so the solve fails
+         e.V = e.dpsi = e.f = std::numeric_limits<real_t>::quiet_NaN();
+      }
       return e;
    }
 
@@ -453,6 +461,22 @@ public:
       const int N = P_.N, n = P_.n;
       tau.assign(n, 0.0);
       sig.assign(n, 0.0);
+      // A non-finite slip or gap anywhere (a Newton iterate gone bad, e.g.
+      // after a too-long trial step): non-finite tractions everywhere, so
+      // the residual is non-finite, the Newton test reports
+      // SNES_DIVERGED_FNORM_NAN and TS rejects the step and shrinks dt.
+      // Before this, a non-finite g at a point without a gap column stopped
+      // the run in the check below (UCERF T4b, Vista 1133642).  The same
+      // result on every rank: delta_all_ and g_all_ are gathered.
+      for (int l = 0; l < N; l++)
+      {
+         if (!std::isfinite(delta_all_[l]) || !std::isfinite(g_all_[l]))
+         {
+            tau.assign(n, std::numeric_limits<real_t>::quiet_NaN());
+            sig.assign(n, std::numeric_limits<real_t>::quiet_NaN());
+            return;
+         }
+      }
       // the gap columns with g != 0
       std::vector<int> gl;
       for (int l = 0; l < N; l++)
