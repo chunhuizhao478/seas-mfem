@@ -104,6 +104,32 @@ def compare(pa, pb, tol, exact, dedup, l2=False, columns=None):
     return ok
 
 
+def checkpoint_volume(pa, pb, tol):
+    """Two checkpoint files: every line identical except the values of the
+    displacement block, which may differ by tol times the largest value."""
+    la, lb = open(pa).read().split('\n'), open(pb).read().split('\n')
+    if len(la) != len(lb):
+        return False, f"{len(la)} lines vs {len(lb)}"
+    lo = hi = -1
+    for i, line in enumerate(la):
+        if line.startswith('displacement_size '):
+            lo = i + 1
+            hi = lo + int(line.split()[1])
+            break
+    dmax = vmax = 0.0
+    for i, (x, y) in enumerate(zip(la, lb)):
+        if x == y:
+            continue
+        if not (lo <= i < hi):
+            return False, f"differs at line {i + 1}, outside the displacement block"
+        dmax = max(dmax, abs(float(x) - float(y)))
+    for i in range(max(lo, 0), max(hi, 0)):
+        vmax = max(vmax, abs(float(la[i])))
+    r = dmax / vmax if vmax > 0 else dmax
+    return r <= tol, (f"identical outside the displacement block; displacement "
+                      f"max diff {r:.1e} of the largest value (tolerance {tol:.1e})")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('dir_a')
@@ -116,6 +142,11 @@ def main():
     ap.add_argument('--dedup', action='store_true')
     ap.add_argument('--l2', action='store_true')
     ap.add_argument('--station-columns', default=None)
+    # With --exact on more than one rank: the off-fault station files and the
+    # checkpoint's displacement block come from the parallel direct solve,
+    # whose last digits are not repeatable from run to run; they pass within
+    # this relative tolerance instead (0 = exact like every other file).
+    ap.add_argument('--volume-tol', type=float, default=0.0)
     a = ap.parse_args()
     st_cols = ([int(c) for c in a.station_columns.split(',')]
                if a.station_columns else None)
@@ -138,7 +169,10 @@ def main():
             ok = False
             continue
         cols = st_cols if '_fltst_' in suffix else None
-        ok = compare(fa, fb, a.tol, a.exact, a.dedup, a.l2, cols) and ok
+        if a.volume_tol > 0.0 and '_offst_' in suffix:
+            ok = compare(fa, fb, a.volume_tol, False, a.dedup, a.l2, cols) and ok
+        else:
+            ok = compare(fa, fb, a.tol, a.exact, a.dedup, a.l2, cols) and ok
         n += 1
     if a.checkpoints:
         cka = sorted(glob.glob(os.path.join(a.dir_a, a.prefix_a + '_checkpoint_r*.txt')))
@@ -150,8 +184,10 @@ def main():
             with open(fa, 'rb') as x:
                 da = x.read()
             same = os.path.exists(fb) and open(fb, 'rb').read() == da
-            print(f"  {'ok  ' if same else 'FAIL'} {os.path.basename(fa)}: "
-                  f"{'identical' if same else 'differs'}")
+            note = 'identical' if same else 'differs'
+            if not same and a.volume_tol > 0.0 and os.path.exists(fb):
+                same, note = checkpoint_volume(fa, fb, a.volume_tol)
+            print(f"  {'ok  ' if same else 'FAIL'} {os.path.basename(fa)}: {note}")
             ok = ok and same
             n += 1
     print(f"{'PASSED' if ok else 'FAILED'}: {n} file pairs compared")

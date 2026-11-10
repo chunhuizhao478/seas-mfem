@@ -15,6 +15,14 @@
 # driver: about 4K QD steps in all.  The prefix is read from the deck's
 # [cycle.output] prefix.
 # Exit code 0 = PASSED.
+#
+# GREEN_FILE=1: the full run writes the dense Green's function to
+# WORKDIR/green.bin (--qd-green-cache) and both split runs read it.  On more
+# than one rank the parallel direct solver builds a G that differs in its
+# last digits from run to run, so without the file a restart follows another
+# G.  VOLUME_TOL=T (with GREEN_FILE=1): the off-fault station files and the
+# checkpoint's displacement block, which still come from a parallel solve,
+# pass within the relative tolerance T; every other file stays exact.
 
 set -euo pipefail
 
@@ -32,19 +40,28 @@ PREFIX=$(awk '/^\[cycle\.output\]/{s=1;next} /^\[/{s=0} s&&$1=="prefix"{gsub(/"/
 rm -rf "$WORK/full" "$WORK/split"
 mkdir -p "$WORK/full" "$WORK/split"
 N=$((2 * K))
+GREEN=()
+VOLTOL=()
+if [ "${GREEN_FILE:-0}" = 1 ]; then
+   rm -f "$WORK/green.bin"
+   GREEN=(--qd-green-cache "$WORK/green.bin")
+   [ -z "${VOLUME_TOL:-}" ] || VOLTOL=(--volume-tol "$VOLUME_TOL")
+fi
 
 echo "test_cycle_restart: deck $DECK, prefix $PREFIX, K = $K, ranks $NP"
 echo "[1/3] full: $N steps, checkpoint every $K"
 $MPIRUN -np "$NP" $DRIVER --deck "$DECK" --output-dir "$WORK/full" \
-   --max-steps "$N" --checkpoint-every "$K" > "$WORK/full/run.log" 2>&1
+   --max-steps "$N" --checkpoint-every "$K" ${GREEN[@]+"${GREEN[@]}"} \
+   > "$WORK/full/run.log" 2>&1
 echo "[2/3] split: $K steps, checkpoint at $K"
 $MPIRUN -np "$NP" $DRIVER --deck "$DECK" --output-dir "$WORK/split" \
-   --max-steps "$K" --checkpoint-every "$K" > "$WORK/split/run1.log" 2>&1
+   --max-steps "$K" --checkpoint-every "$K" ${GREEN[@]+"${GREEN[@]}"} \
+   > "$WORK/split/run1.log" 2>&1
 cp "$WORK/split/${PREFIX}_checkpoint_r0.txt" "$WORK/split/checkpoint_step${K}_r0.keep"
 echo "[3/3] split: restart from step $K to $N"
 $MPIRUN -np "$NP" $DRIVER --deck "$DECK" --output-dir "$WORK/split" \
    --max-steps "$N" --checkpoint-every "$K" --restart "$WORK/split/$PREFIX" \
-   > "$WORK/split/run2.log" 2>&1
+   ${GREEN[@]+"${GREEN[@]}"} > "$WORK/split/run2.log" 2>&1
 
 python3 tests/cycle/compare_runs.py "$WORK/full" "$PREFIX" "$WORK/split" "$PREFIX" \
-   --exact --checkpoints
+   --exact --checkpoints ${VOLTOL[@]+"${VOLTOL[@]}"}

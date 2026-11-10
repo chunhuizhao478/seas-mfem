@@ -1000,12 +1000,17 @@ test-qd-implicit-green: seas_test_qd_implicit_green
 # ([cycle.qd] integrator = "esdirk"; cycle/qd_phase.hpp).  The D9f contact
 # deck with the key on, 80 QD steps: a run stopped at step 40 and restarted
 # from its checkpoint repeats the uninterrupted run bit for bit, on 1 and 2
-# ranks (tests/cycle/test_cycle_restart.sh; the dense G of 240 fault points
-# is built four times, about 2 minutes per rank count).
+# ranks (tests/cycle/test_cycle_restart.sh; about 2 minutes per rank count).
+# On 2 ranks the parallel direct solver builds a G whose last digits change
+# from run to run, so there the three runs share one G file (GREEN_FILE=1):
+# every fault, global, source and switch row is then identical, and the
+# off-fault stations and the checkpoint's displacement, which come from the
+# parallel solve itself, agree to VOLUME_TOL.
 QD_ESDIRK_CYCLE_TMP ?= /tmp/seas_qd_esdirk_cycle
 test-qd-esdirk-cycle: seas_fd_cycle_driver
 	@for n in 1 2; do \
 	   MPIRUN="$(MFEM_MPIEXEC)" OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+	   GREEN_FILE=$$((n > 1)) VOLUME_TOL=1e-6 \
 	   bash tests/cycle/test_cycle_restart.sh \
 	      simple_cases/configs/D9f_arc08L2p5_h250_avg_floor10_contact_esdirk.toml \
 	      $(QD_ESDIRK_CYCLE_TMP)_np$$n 40 $$n || exit 1; \

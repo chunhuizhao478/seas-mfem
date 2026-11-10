@@ -793,9 +793,12 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
       {
          // Position key of each owned fault DOF (node, face centroid), so
          // the cache file can be read on another partition.
-         MFEM_VERIFY(mesh_.SpaceDimension() == 3, "--qd-green-cache and "
-                     "--qd-green-compress need a 3-D mesh (they key fault "
-                     "DOFs by position)");
+         // 2D: the dense file only (--qd-green-cache); the key's z entries
+         // are 0 (node) and 1 (centroid slot), so the key of a mid-edge
+         // node (p = 2: the node is its face's centroid) still differs
+         // from its centroid entry, as WriteFile requires.
+         MFEM_VERIFY(mesh_.SpaceDimension() == 3 || !compress,
+                     "--qd-green-compress needs a 3-D mesh");
          Vector xyz, keys(6 * nown);
          GetFaultDOFCoords3D(xyz);
          const int nbf = nbf_per_face_;
@@ -810,6 +813,7 @@ void ElasticityDomainOperator<MeshType>::BuildQDGreen(
                keys(6 * o + d) = xyz(3 * ld + d);
                keys(6 * o + 3 + d) = c / nbf;
             }
+            if (mesh_.SpaceDimension() == 2) { keys(6 * o + 5) = 1.0; }
          }
          green->SetKeys(keys);
       }
