@@ -365,6 +365,7 @@ public:
          lts_ = std::make_unique<NitscheLtsRun>(*W_, lts->cl, lts->cl_nbr, lts->num_clusters,
                                                 lts->fault_cluster, lts->dt0,
                                                 cfg.penalty_factor);
+         lts_->SetStaticSplit(cfg.lts.static_split);
       }
 
       if (cfg.quench.On())

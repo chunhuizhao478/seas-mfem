@@ -81,6 +81,20 @@
 // same_step (test only, P3 test (b)): the same split and clusters, but every
 // cluster steps at dt0 and ends at every tick; equal to global stepping up to
 // round-off.
+//
+// Static split (SetStaticSplit, the cycle's [cycle.lts] static_split; LTS
+// with PML design rev1, Section 4.1, piece P-a): a cycle's dynamic phase
+// starts from a loaded static state (u_s, d_s, t_s) whose total force R =
+// sum_c r_c(u_s) is the QD balance's residual, while each cluster's share
+// r_c(u_s) is of the size of the static stress on the seam rows (the ripple
+// above).  With the split on, Init keeps the shares s_c = r_c(u_s, d_s, t_s)
+// (before the mass) and R, and every later force is
+//    r_c  <-  r_c - s_c + R on the rows of c's own elements,
+// i.e. -K^(c) w - K_eta^(c) v + G (d - d_s) + F_D(t) - F_D(t_s) with w = u -
+// u_s, plus the residual R kicked by the row's own cluster alone.  The sum
+// over the clusters is unchanged, so with one cluster or same_step this is
+// the scheme above up to round-off; at rest r_c - s_c is exactly zero (the
+// same kernels on the same data).  Off (the default): nothing changes.
 
 #ifndef MFEM_SEAS_NITSCHE_LTS_RUN_HPP
 #define MFEM_SEAS_NITSCHE_LTS_RUN_HPP
@@ -1016,16 +1030,48 @@ public:
    /// work count of the element updates.
    long long PatchUpdates() const { return patch_updates_; }
 
+   /// The static split (file header): on, the next Init takes its state (u,
+   /// the operator's slip, t; v must be zero) as the static state.  Before
+   /// Init.  Off by default.
+   void SetStaticSplit(bool on) { split_ = on; }
+   bool StaticSplit() const { return split_; }
+
    /// a_c at (u, v, t) for every cluster with M^{-1} (NewmarkSolver's first
    /// Mult); t starts the first sync interval.
    void Init(const Vector &u, const Vector &v, real_t t)
    {
       t0_ = t;
       m_ = 0;
+      if (split_)
+      {
+         MFEM_VERIFY(v.Normlinf() == 0.0, "NitscheLtsRun: the static split starts from "
+                     "rest (v = 0); max |v| = " << v.Normlinf());
+         s_.assign(nc_, Vector(a_[0].Size()));
+         R_.SetSize(a_[0].Size());
+         R_ = 0.0;
+         capture_ = true;
+      }
       blocks_.PostHalo(L_, u, kv_ ? &v : nullptr);
       for (int c = 0; c <= L_; c++) { blocks_.MultInterior(c, u, kv_ ? &v : nullptr, a_[c]); }
       blocks_.WaitHalo();
       for (int c = 0; c <= L_; c++) { FinishForce_(c, -1, v, t); }
+      if (split_)
+      {
+         // s_c and R are complete: a_c = M^{-1} R on c's own rows
+         capture_ = false;
+         for (int c = 0; c <= L_; c++)
+         {
+            Vector &a = a_[c];
+            const std::vector<int> &pe = blocks_.Patch(c);
+            for (int e : pe)
+            {
+               const int *ie = blocks_.ElementDofs(e);
+               const bool own = (cl_[e] == c);
+               for (int k = 0; k < nb_; k++) { a(ie[k]) = own ? R_(ie[k]) : 0.0; }
+            }
+            ApplyMass_(pe, -1, a);
+         }
+      }
    }
 
    /// Ticks up to and including the next fault closure (every tick without a
@@ -1104,6 +1150,33 @@ private:
             }
          }
       }
+      if (capture_)
+      {
+         // Init with the static split: keep the share, sum the residual
+         Vector &s = s_[c];
+         for (int e : pe)
+         {
+            const int *ie = blocks_.ElementDofs(e);
+            for (int k = 0; k < nb_; k++) { s(ie[k]) = a(ie[k]); R_(ie[k]) += a(ie[k]); }
+         }
+         return;
+      }
+      if (split_)
+      {
+         const Vector &s = s_[c];
+         for (int e : pe)
+         {
+            const int *ie = blocks_.ElementDofs(e);
+            if (cl_[e] == c)
+            {
+               for (int k = 0; k < nb_; k++) { a(ie[k]) = (a(ie[k]) - s(ie[k])) + R_(ie[k]); }
+            }
+            else
+            {
+               for (int k = 0; k < nb_; k++) { a(ie[k]) -= s(ie[k]); }
+            }
+         }
+      }
       ApplyMass_(pe, top, a);
    }
 
@@ -1167,6 +1240,9 @@ private:
    std::vector<int> absorb_;                    ///< element -> absorbing block, or -1
    std::vector<real_t> minv_, inv_rho_, binv_, cblk_;
    std::vector<Vector> a_;
+   std::vector<Vector> s_;   ///< static split: r_c at the static state, per cluster
+   Vector R_;                ///< static split: sum_c s_c, the static residual
+   bool split_ = false, capture_ = false;
    Vector FD_;
    real_t t0_ = 0.0;
    int m_ = 0;

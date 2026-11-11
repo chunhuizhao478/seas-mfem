@@ -1222,7 +1222,9 @@ int main(int argc, char *argv[])
       }
       std::cout << "\n  dynamic stepping: " << (cfg.lts.On() ? "LTS rate2, cluster cap " +
                 std::to_string(cfg.lts.cluster_cap) + ", fault buffer " +
-                std::to_string(cfg.lts.fault_buffer) : std::string("global (central difference)"))
+                std::to_string(cfg.lts.fault_buffer) +
+                (cfg.lts.static_split ? ", static split" : "")
+                : std::string("global (central difference)"))
                 << "\n  benchmark output: " << (cfg.bench.enabled ? std::to_string(
                 cfg.bench.volume_stations.size()) + " off-fault stations, " +
                 std::to_string(cfg.bench.profiles.size()) + " profiles" : std::string("off"))

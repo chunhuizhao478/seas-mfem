@@ -261,7 +261,9 @@
 //                   driver's --lts rate2, solver/nitsche_lts_run.hpp):
 //                   mode ["off" | "rate2"], cluster_cap [4], fault_buffer
 //                   [3] (layers of tets around the fault in its cluster),
-//                   fault_weight [0] (METIS weight per fault-face side).
+//                   fault_weight [0] (METIS weight per fault-face side),
+//                   static_split [false] (step the change from the state
+//                   handed over at the switch: NitscheLtsRun::SetStaticSplit).
 //                   rate2 needs [numerics] cfl <= 0.6 and kv_scale = "node",
 //                   and partitions the mesh with BuildLtsAwarePartition
 //                   (both regimes then use that partition)
@@ -499,6 +501,7 @@ struct LtsConfig
    int cluster_cap = 4;
    int fault_buffer = 3;
    real_t fault_weight = 0.0;
+   bool static_split = false;  ///< NitscheLtsRun::SetStaticSplit (the w form)
    bool On() const { return mode == "rate2"; }
 };
 
@@ -1537,12 +1540,13 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
    {
       const std::string sec = "cycle.lts";
       const toml::value &l = cy.at("lts");
-      OnlyKeys(l, sec, {"mode", "cluster_cap", "fault_buffer", "fault_weight"});
+      OnlyKeys(l, sec, {"mode", "cluster_cap", "fault_buffer", "fault_weight", "static_split"});
       LtsConfig &lc = c.lts;
       lc.mode = Str(l, sec, "mode", lc.mode);
       lc.cluster_cap = Int(l, sec, "cluster_cap", lc.cluster_cap);
       lc.fault_buffer = Int(l, sec, "fault_buffer", lc.fault_buffer);
       lc.fault_weight = Real(l, sec, "fault_weight", lc.fault_weight);
+      lc.static_split = Bool(l, sec, "static_split", lc.static_split);
       MFEM_VERIFY(lc.mode == "off" || lc.mode == "rate2",
                   "[" << sec << "].mode must be \"off\" or \"rate2\"");
       MFEM_VERIFY(lc.cluster_cap >= 1 && lc.fault_buffer >= 0 && lc.fault_weight >= 0.0,

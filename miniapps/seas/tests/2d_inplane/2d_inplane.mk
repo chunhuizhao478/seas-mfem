@@ -1039,6 +1039,46 @@ test-pml-partition: seas_test_pml_partition
 	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_pml_partition < /dev/null || exit 1; \
 	done
 
+# [cycle.lts] static_split (NitscheLtsRun::SetStaticSplit; LTS with PML design
+# rev1, Section 4.1, piece P-a, the rest test R1): on 1 and 2 ranks, the
+# straight-fault deck of the simple cases without its band is loaded by
+# LTS_SPLIT_QD QD steps (global stepping and rate2: the mesh cut differs), then
+# restarted with V_on below the fault's max V, so the dynamic regime starts
+# from the loaded state with the fault at rest: global stepping
+# (LTS_SPLIT_STEPS steps), rate2 and rate2 with static_split = true
+# (LTS_SPLIT_STEPS / 8 sync intervals: 4 clusters).  The split must keep the
+# fault stresses of global stepping to 1e-7 MPa; rate2 alone must not
+# (tests/2d_inplane/lts_static_split_check.py).  Each restart stops at the
+# guard (exit 7) or at --max-dyn-steps.  The runs overwrite an earlier run's
+# files.
+LTS_SPLIT_TMP = $(or $(TMPDIR),/tmp)/seas_test_lts_static_split
+LTS_SPLIT_DECK = simple_cases/configs/D0_straight_hb_pml0p01.toml
+LTS_SPLIT_PREFIX = D0_straight_hb_pml0p01
+LTS_SPLIT_QD = 300
+LTS_SPLIT_STEPS = 1600
+test-lts-static-split: seas_fd_cycle_driver
+	@mkdir -p $(LTS_SPLIT_TMP); \
+	 python3 tests/2d_inplane/lts_static_split_check.py decks $(LTS_SPLIT_DECK) $(LTS_SPLIT_TMP) || exit 1; \
+	 for np in 1 2; do t=$(LTS_SPLIT_TMP)/np$$np; mkdir -p $$t; \
+	    for v in glob lts; do \
+	       $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_fd_cycle_driver -d $(LTS_SPLIT_TMP)/prep_$$v.toml \
+	          -o $$t/$$v --max-steps $(LTS_SPLIT_QD) --checkpoint-every $(LTS_SPLIT_QD) > $$t/prep_$$v.log 2>&1 \
+	          || { tail -15 $$t/prep_$$v.log; echo "  FAILED: $$np rank(s), QD loading ($$v)"; exit 1; }; \
+	    done; \
+	    mkdir -p $$t/split; cp $$t/lts/* $$t/split/; \
+	    for v in glob lts split; do n=$$(($(LTS_SPLIT_STEPS) / 8)); [ $$v = glob ] && n=$(LTS_SPLIT_STEPS); \
+	       $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_fd_cycle_driver -d $(LTS_SPLIT_TMP)/$$v.toml \
+	          -o $$t/$$v --restart $$t/$$v/$(LTS_SPLIT_PREFIX) --end-phase-after $$n --max-dyn-steps $$n \
+	          > $$t/$$v.log 2>&1; rc=$$?; \
+	       if [ $$rc -ne 0 ] && [ $$rc -ne 7 ]; then tail -15 $$t/$$v.log; \
+	          echo "  FAILED: $$np rank(s), restart $$v: exit $$rc"; exit 1; fi; \
+	    done; \
+	    grep -q "LTS rate2.*static split" $$t/split.log \
+	       || { echo "  FAILED: $$np rank(s): static_split did not reach the driver"; exit 1; }; \
+	    echo "  $$np rank(s):"; \
+	    python3 tests/2d_inplane/lts_static_split_check.py check $$t $(LTS_SPLIT_PREFIX) || exit 1; \
+	 done
+
 # fd_cycle --early-sync (NitscheWaveOperator::SetEarlySync, DenseBlockStiffness::
 # ExchangeHalo; speed-up options D0, 2026-11-11): the stiffness halo at the
 # start of a dynamic step and the fault record's reduction at its end.  It
@@ -1097,7 +1137,7 @@ test-qd-esdirk-cycle: seas_fd_cycle_driver
                 test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle \
                 test-fault-opening test-fault-contact test-fault-contact-dyn \
                 test-fault-contact-qd test-exact-retry test-qd-esdirk-points test-qd-implicit-green \
-                test-qd-esdirk-cycle test-par-dense-lu test-pml-partition test-early-sync
+                test-qd-esdirk-cycle test-par-dense-lu test-pml-partition test-early-sync test-lts-static-split
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
