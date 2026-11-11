@@ -362,13 +362,17 @@ public:
       // early step sync: the stiffness halo of this step's Acceleration_
       // now, while every rank is at the start of the step
       if (early_sync_ && UseDense_()) { dense_.ExchangeHalo(x, kv_ ? &dxdt : nullptr); }
-      if (pml_) { pml_->Advance(x, t); }
+      // early step sync: the fault first (its exchanges between the ranks
+      // that share fault faces, while every rank is at the start of the
+      // step), then the band; the two do not read each other's state
+      if (pml_ && !early_sync_) { pml_->Advance(x, t); }
       if (has_fault_)
       {
          in_implicit_solve_ = true;
          AdvanceFault_(x, t, &dxdt);
          in_implicit_solve_ = false;
       }
+      if (pml_ && early_sync_) { pml_->Advance(x, t); }
       if (damping_blocks_.empty())
       {
          // the Kelvin-Voigt layer needs Udot* (at t_{n+1/2}); without it
@@ -389,6 +393,7 @@ public:
          kv_tv_shift_ = 0.0;
       }
       if (has_fault_) { last_accel_ = k; }
+      kslip_cached_ = false;
       if (record_pending_) { FinishRecord_(); }
    }
 
@@ -1506,8 +1511,12 @@ private:
          const double tf0 = MPI_Wtime();
          if (UseFastFault_())
          {
-            ToKernelLocal_(*d, slip_k_);
-            elast_->AddSlipLoadFast(slip_k_, F_);
+            if (kslip_cached_ && d == &d_) { elast_->AddSlipLoadFast(slip_kd_, F_); }
+            else
+            {
+               ToKernelLocal_(*d, slip_k_);
+               elast_->AddSlipLoadFast(slip_k_, F_);
+            }
          }
          else
          {
@@ -1542,8 +1551,12 @@ private:
             const double tf0 = MPI_Wtime();
             if (UseFastFault_())
             {
-               ToKernelLocal_(V_, slip_k_);
-               kv_->AddSlipLoadFast(slip_k_, F_);
+               if (kslip_cached_) { kv_->AddSlipLoadFast(slip_kV_, F_); }
+               else
+               {
+                  ToKernelLocal_(V_, slip_k_);
+                  kv_->AddSlipLoadFast(slip_k_, F_);
+               }
             }
             else
             {
@@ -1818,7 +1831,16 @@ private:
       record_red_[3] = max_ratio;
       record_red_[4] = -min_pc;
       record_red_[5] = max_pc;
-      // early step sync: ImplicitSolve reduces at its end
+      // early step sync: ImplicitSolve reduces at its end, and the slip and
+      // slip rate of this step's loads go to the kernel layout now (an
+      // exchange between the ranks that share fault faces), not after the
+      // stiffness, where those ranks arrive at different times
+      if (early_sync_ && in_implicit_solve_ && UseFastFault_())
+      {
+         ToKernelLocal_(d_, slip_kd_);
+         if (kv_) { ToKernelLocal_(V_, slip_kV_); }
+         kslip_cached_ = true;
+      }
       if (early_sync_ && in_implicit_solve_) { record_pending_ = true; }
       else { FinishRecord_(); }
    }
@@ -2183,6 +2205,8 @@ private:
    Vector dstar_, psistar_, r0_, Town_, S_, Xlast_, siglast_;
    Vector Tk_, Tks_, Tkc_, jr_k_, snk_, Tloc_;
    mutable Vector dloc_, slip_k_, Gd_;
+   Vector slip_kd_, slip_kV_;    // early step sync: d and V in the kernel layout
+   bool kslip_cached_ = false;   // ... valid for this ImplicitSolve's loads
    Vector last_accel_;
 
    // Kelvin-Voigt damping

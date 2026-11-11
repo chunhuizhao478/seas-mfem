@@ -388,7 +388,11 @@ void ElasticityDomainOperator<MeshType>::ExpandOwnedToLocalFault(
       // Use FaultScatter to handle all point-to-point communication.
       FaultScatter scatter(shared_fault_comm_blocks_, mesh_.GetComm());
       scatter.BeginScatter(owned_data, comps_per_dof, nbf_per_face_);
-      scatter.WaitScatter();
+      {
+         // --rank-costs: this wait is the fault exchange's (w_fault)
+         const RankCosts::Scope wait(RankCosts::WFault);
+         scatter.WaitScatter();
+      }
 
       // Unpack received data with canonical→local DOF permutation.
       const int block_size = comps_per_dof * nbf_per_face_;
