@@ -21,10 +21,6 @@
 # Run from miniapps/seas (Vista: jobs/2d_inplane/vista_2d_cycle.sbatch):
 #   ibrun ./seas_fd_cycle_driver --deck config/fd_cycle/ucerf2d_saf_sjf_500m_R70_avg_tip_contact_pml0p01_quench_retry_esdirk_fast_pw2p6_100ev_fd.toml
 #
-[meta] description and the run line below.
-# Run from miniapps/seas (Vista: jobs/2d_inplane/vista_2d_cycle.sbatch; the
-# timing pair: jobs/2d_inplane/vista_dense_lu_timing.sbatch):
-#   ibrun ./seas_fd_cycle_driver --deck config/fd_cycle/ucerf2d_saf_sjf_500m_R70_avg_tip_contact_pml0p01_quench_retry_esdirk_fast_fd.toml
 #
 [meta]
 schema_version = 1
