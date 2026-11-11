@@ -326,8 +326,54 @@ public:
       Dispatch_<2>(u.HostRead(), v.HostRead(), y.HostWrite());
    }
 
+   /// The halo exchange of the next Mult, done now and completed here
+   /// (early step sync, NitscheWaveOperator::SetEarlyHalo): the next Mult
+   /// must get the same u (and v) and then does no MPI call.  Why: Mult
+   /// posts the exchange and waits for it after its interior sweep, so a
+   /// rank waits there until every neighbour has reached its own Mult; with
+   /// the exchange at the start of the step no rank waits for another's
+   /// work before the stiffness.  Same values, so Mult's result is the same
+   /// bit for bit.  Collective.
+   void ExchangeHalo(const Vector &u, const Vector *v) const
+   {
+      MFEM_VERIFY(ok_ && nm_ == (v ? 2 : 1), "DenseBlockStiffness::ExchangeHalo: u, v "
+                  "do not match Init");
+      MFEM_VERIFY(!halo_u_, "DenseBlockStiffness::ExchangeHalo: called twice before Mult");
+      const real_t *x[2] = {u.HostRead(), v ? v->HostRead() : nullptr};
+      const RankCosts::Scope wait(RankCosts::WStiff);
+      const int q = nm_ == 2 ? PostHalo_<2>(x) : PostHalo_<1>(x);
+      MPI_Waitall(q, reqs_.data(), MPI_STATUSES_IGNORE);
+      halo_u_ = x[0];
+      halo_v_ = x[1];
+   }
+
 private:
    static constexpr int kMaxNB = 168;   // 3 x 56 nodes: p = 5 tets
+
+   /// Posts the receives and sends of u (and v); returns the request count.
+   template <int NM>
+   int PostHalo_(const real_t *const *x) const
+   {
+      const int nsend = static_cast<int>(send_procs_.size());
+      const int nrecv = static_cast<int>(recv_procs_.size());
+      const int tag = 7322;
+      int q = 0;
+      for (int r = 0; r < nrecv; r++)
+      {
+         MPI_Irecv(recv_buf_.data() + NM * recv_starts_[r], NM * (recv_starts_[r + 1] - recv_starts_[r]),
+                   MPITypeMap<real_t>::mpi_type, recv_procs_[r], tag, comm_, &reqs_[q++]);
+      }
+      for (int s = 0; s < nsend; s++)
+      {
+         for (int i = send_starts_[s]; i < send_starts_[s + 1]; i++)
+         {
+            for (int m = 0; m < NM; m++) { send_buf_[NM * i + m] = x[m][send_map_[i]]; }
+         }
+         MPI_Isend(send_buf_.data() + NM * send_starts_[s], NM * (send_starts_[s + 1] - send_starts_[s]),
+                   MPITypeMap<real_t>::mpi_type, send_procs_[s], tag, comm_, &reqs_[q++]);
+      }
+      return q;
+   }
 
    /// True when every offd column of sub is an offd column of host.
    static bool Contains_(hypre_ParCSRMatrix *host, hypre_ParCSRMatrix *sub)
@@ -419,25 +465,13 @@ private:
       const int nb = NBC > 0 ? NBC : nb_;
       constexpr int L = NBC > 0 ? NBC : kMaxNB;
       const real_t *x[2] = {u, v};
-      // halo: post the exchange of u (and v), as FusedStiffnessPair
-      const int nsend = static_cast<int>(send_procs_.size());
-      const int nrecv = static_cast<int>(recv_procs_.size());
-      const int tag = 7322;
-      int q = 0;
-      for (int r = 0; r < nrecv; r++)
-      {
-         MPI_Irecv(recv_buf_.data() + NM * recv_starts_[r], NM * (recv_starts_[r + 1] - recv_starts_[r]),
-                   MPITypeMap<real_t>::mpi_type, recv_procs_[r], tag, comm_, &reqs_[q++]);
-      }
-      for (int s = 0; s < nsend; s++)
-      {
-         for (int i = send_starts_[s]; i < send_starts_[s + 1]; i++)
-         {
-            for (int m = 0; m < NM; m++) { send_buf_[NM * i + m] = x[m][send_map_[i]]; }
-         }
-         MPI_Isend(send_buf_.data() + NM * send_starts_[s], NM * (send_starts_[s + 1] - send_starts_[s]),
-                   MPITypeMap<real_t>::mpi_type, send_procs_[s], tag, comm_, &reqs_[q++]);
-      }
+      // halo: post the exchange of u (and v), as FusedStiffnessPair; with
+      // ExchangeHalo before this call the halo is already here
+      const bool early = (halo_u_ != nullptr);
+      MFEM_VERIFY(!early || (halo_u_ == u && halo_v_ == v), "DenseBlockStiffness: the "
+                  "Mult after ExchangeHalo must get the same u and v");
+      halo_u_ = halo_v_ = nullptr;
+      const int q = early ? 0 : PostHalo_<NM>(x);
       std::fill(y, y + n_, 0.0);
       // element-order sweep: when element e is reached, y_e holds the
       // transposed face terms of the lower elements; e adds its diagonal
@@ -502,6 +536,7 @@ private:
          }
          for (int a = 0; a < nb; a++) { y[ie[a]] = acc[a]; }
       }
+      if (!early)
       {
          const RankCosts::Scope wait(RankCosts::WStiff);
          MPI_Waitall(q, reqs_.data(), MPI_STATUSES_IGNORE);
@@ -536,6 +571,7 @@ private:
    std::vector<int> send_procs_, send_starts_, send_map_, recv_procs_, recv_starts_;
    mutable std::vector<real_t> send_buf_, recv_buf_;
    mutable std::vector<MPI_Request> reqs_;
+   mutable const real_t *halo_u_ = nullptr, *halo_v_ = nullptr;   ///< ExchangeHalo's
 };
 
 } // namespace seas

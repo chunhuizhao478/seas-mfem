@@ -1108,6 +1108,7 @@ int main(int argc, char *argv[])
    const char *green_cache = "";
    const char *green_hcache = "";
    bool rank_costs = false;
+   bool early_sync = false;
 
    OptionsParser args(argc, argv);
    args.AddOption(&deck, "-d", "--deck", "Cycle deck (TOML): [cycle] and the shared sections.");
@@ -1148,6 +1149,11 @@ int main(int argc, char *argv[])
                   "Switching on: at the end of every dynamic phase print each rank's "
                   "work and wait per step and write <prefix>_rank_costs_phase<k>.txt "
                   "(measures only; common/rank_costs.hpp).");
+   args.AddOption(&early_sync, "-es", "--early-sync", "-no-es", "--no-early-sync",
+                  "Switching on, global stepping: exchange the stiffness halo at the start "
+                  "of a dynamic step and reduce the fault record at its end, so the ranks "
+                  "do not wait for each other in between (same results bit for bit; "
+                  "NitscheWaveOperator::SetEarlySync).");
    args.Parse();
    if (!args.Good())
    {
@@ -1627,6 +1633,17 @@ int main(int argc, char *argv[])
                                                  qd.SubstrateShape(),
                                                  qd.PmlBandPtr(), qd.PmlWallSpeedFactor());
          if (cfg.Relaxation()) { dyn->SetNormalStressRelaxation(qd.Relaxation()->R()); }
+         if (early_sync)
+         {
+            MFEM_VERIFY(!lts.on, "--early-sync with [cycle.lts]: the LTS run has its own "
+                        "halo and record");
+            dyn->Op().SetEarlySync(true);
+            if (root)
+            {
+               std::cout << "  --early-sync: stiffness halo at the start of a dynamic step, "
+                         "fault record reduced at its end\n";
+            }
+         }
          PrintDynamicSetup(mpi, cfg, *dyn, MPI_Wtime() - w);
       }
       auto dynamic_phase = [&](real_t ts, real_t Vs)

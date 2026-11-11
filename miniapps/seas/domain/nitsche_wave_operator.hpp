@@ -359,8 +359,16 @@ public:
       last_solve_time_ = t;
       // PML memory (plan rev2 Section 3.6): every filter steps once, with
       // U^{n+1}, before the acceleration that reads it
+      // early step sync: the stiffness halo of this step's Acceleration_
+      // now, while every rank is at the start of the step
+      if (early_sync_ && UseDense_()) { dense_.ExchangeHalo(x, kv_ ? &dxdt : nullptr); }
       if (pml_) { pml_->Advance(x, t); }
-      if (has_fault_) { AdvanceFault_(x, t, &dxdt); }
+      if (has_fault_)
+      {
+         in_implicit_solve_ = true;
+         AdvanceFault_(x, t, &dxdt);
+         in_implicit_solve_ = false;
+      }
       if (damping_blocks_.empty())
       {
          // the Kelvin-Voigt layer needs Udot* (at t_{n+1/2}); without it
@@ -381,7 +389,20 @@ public:
          kv_tv_shift_ = 0.0;
       }
       if (has_fault_) { last_accel_ = k; }
+      if (record_pending_) { FinishRecord_(); }
    }
+
+   /// Early step sync (speed-up options D0, 2026-11-11): a rank's own work
+   /// in a step is unequal from part to part (band update, fault, stiffness)
+   /// even when the totals are equal, and each sync point between the parts
+   /// makes every rank wait for the slowest one there.  On: the stiffness
+   /// halo is exchanged at the start of ImplicitSolve and the fault record's
+   /// reduction moves to its end, so the ranks meet twice per step, at the
+   /// start and at the end, and not in between.  The values exchanged and
+   /// reduced are the same: results are bit for bit those of off (default).
+   /// Global stepping only (the LTS run has its own halo and record).
+   void SetEarlySync(bool on) { early_sync_ = on; }
+   bool EarlySync() const { return early_sync_; }
 
    const NitscheMaterialSample &Sample() const { return *sample_; }
 
@@ -1789,19 +1810,35 @@ private:
          }
          return;
       }
-      real_t red[4] = {-min_sig, max_sig, max_V, max_ratio};
+      record_.step = steps_;
+      record_.t = t;
+      record_red_[0] = -min_sig;
+      record_red_[1] = max_sig;
+      record_red_[2] = max_V;
+      record_red_[3] = max_ratio;
+      record_red_[4] = -min_pc;
+      record_red_[5] = max_pc;
+      // early step sync: ImplicitSolve reduces at its end
+      if (early_sync_ && in_implicit_solve_) { record_pending_ = true; }
+      else { FinishRecord_(); }
+   }
+
+   /// The step record over all ranks, from this rank's record_red_
+   /// (AdvanceFault_).  Collective.
+   void FinishRecord_()
+   {
+      record_pending_ = false;
+      real_t red[4] = {record_red_[0], record_red_[1], record_red_[2], record_red_[3]};
       const RankCosts::Scope wait(RankCosts::WSync);   // to the function's end
       MPI_Allreduce(MPI_IN_PLACE, red, 4, MPITypeMap<real_t>::mpi_type, MPI_MAX,
                     mesh_.GetComm());
-      record_.step = steps_;
-      record_.t = t;
       record_.min_sigma_eff = -red[0];
       record_.max_sigma_eff = red[1];
       record_.max_V = red[2];
       record_.max_V_dt_over_Dc = red[3];
       if (pc_)
       {
-         real_t rpc[2] = {-min_pc, max_pc};
+         real_t rpc[2] = {record_red_[4], record_red_[5]};
          MPI_Allreduce(MPI_IN_PLACE, rpc, 2, MPITypeMap<real_t>::mpi_type, MPI_MAX,
                        mesh_.GetComm());
          record_.min_sigma_pc = -rpc[0];
@@ -2136,6 +2173,10 @@ private:
    Vector nsm_tau_, nsm_V_;                      // its tau and |V| per owned DOF
    long steps_ = 0;
    NitscheStepRecord record_;
+   bool early_sync_ = false;         ///< SetEarlySync
+   bool in_implicit_solve_ = false;  ///< AdvanceFault_ called by ImplicitSolve
+   bool record_pending_ = false;     ///< record_red_ not yet reduced
+   real_t record_red_[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
    bool lts_defer_red_ = false;   // LtsDeferRecordReduce
    real_t lts_pend_[6] = {0, 0, 0, 0, 0, 0};
    std::unique_ptr<ParGridFunction> u_gf_;

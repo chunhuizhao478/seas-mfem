@@ -1039,6 +1039,36 @@ test-pml-partition: seas_test_pml_partition
 	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_pml_partition < /dev/null || exit 1; \
 	done
 
+# fd_cycle --early-sync (NitscheWaveOperator::SetEarlySync, DenseBlockStiffness::
+# ExchangeHalo; speed-up options D0, 2026-11-11): the stiffness halo at the
+# start of a dynamic step and the fault record's reduction at its end.  It
+# moves MPI calls only, so the map-view tensor deck with its event started at
+# t = 0 (the deck of test-handback-table), 200 dynamic steps, must write the
+# same fault table, global file and on-fault station files byte for byte with
+# the flag on and off, on 1, 2 and 4 ranks (each run stops at the guard, exit
+# 7, as in test-handback-table).  The runs overwrite an earlier run's files.
+EARLY_SYNC_TMP = $(or $(TMPDIR),/tmp)/seas_test_early_sync
+test-early-sync: seas_fd_cycle_driver
+	@mkdir -p $(EARLY_SYNC_TMP); \
+	 python3 tests/2d_inplane/handback_table_check.py decks $(HANDBACK_DECK) $(EARLY_SYNC_TMP) || exit 1; \
+	 for np in 1 2 4; do \
+	    for v in off on; do fl=; [ $$v = on ] && fl=--early-sync; d=$(EARLY_SYNC_TMP)/np$${np}_$$v; \
+	       $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_fd_cycle_driver -d $(EARLY_SYNC_TMP)/on.toml \
+	          -o $$d --end-phase-after $(HANDBACK_STEPS) $$fl > $$d.log 2>&1; rc=$$?; \
+	       if [ $$rc -ne 0 ] && [ $$rc -ne 7 ]; then tail -15 $$d.log; \
+	          echo "  FAILED: $$np rank(s), early sync $$v: exit $$rc"; exit 1; fi; \
+	    done; \
+	    grep -q -- "--early-sync: stiffness halo" $(EARLY_SYNC_TMP)/np$${np}_on.log \
+	       || { echo "  FAILED: $$np rank(s): the flag did not reach the operator"; exit 1; }; \
+	    n=0; for f in $(EARLY_SYNC_TMP)/np$${np}_off/*_fault.txt $(EARLY_SYNC_TMP)/np$${np}_off/*_global.txt \
+	                  $(EARLY_SYNC_TMP)/np$${np}_off/*_fltst_*.txt; do \
+	       cmp -s $$f $(EARLY_SYNC_TMP)/np$${np}_on/$$(basename $$f) \
+	          || { echo "  FAILED: $$np rank(s): $$(basename $$f) differs"; exit 1; }; n=$$((n + 1)); \
+	    done; \
+	    [ $$n -ge 3 ] || { echo "  FAILED: $$np rank(s): only $$n files compared"; exit 1; }; \
+	    echo "  PASSED: $$np rank(s): $$n fault files byte-identical with --early-sync on and off"; \
+	 done
+
 # Option I, phase I3: the implicit QD fault solve in the cycle driver
 # ([cycle.qd] integrator = "esdirk"; cycle/qd_phase.hpp).  The D9f contact
 # deck with the key on, 80 QD steps: a run stopped at step 40 and restarted
@@ -1067,7 +1097,7 @@ test-qd-esdirk-cycle: seas_fd_cycle_driver
                 test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle \
                 test-fault-opening test-fault-contact test-fault-contact-dyn \
                 test-fault-contact-qd test-exact-retry test-qd-esdirk-points test-qd-implicit-green \
-                test-qd-esdirk-cycle test-par-dense-lu test-pml-partition
+                test-qd-esdirk-cycle test-par-dense-lu test-pml-partition test-early-sync
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
