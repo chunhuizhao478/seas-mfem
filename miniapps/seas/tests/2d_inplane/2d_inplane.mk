@@ -1039,6 +1039,33 @@ test-pml-partition: seas_test_pml_partition
 	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_pml_partition < /dev/null || exit 1; \
 	done
 
+# [cycle.pml] dt_rule = "element" (cycle/dyn_phase.hpp, PmlDynamicTerms::
+# ElementKappa): the dynamic step from each element's own penalty factor
+# instead of the whole mesh's step / sqrt(kappa_max).  The straight-fault band
+# deck of the simple cases with an event started at t = 0 runs
+# PML_DT_RULE_TIME s with both rules on 1 rank (the default rule first; the
+# element rule takes sqrt(kappa_max) times fewer steps), and the fault
+# snapshots must agree as two step sizes do (tests/2d_inplane/
+# pml_dt_rule_check.py).  PML_DT_RULE_STEPS: the default rule's steps for
+# that time (dt 0.00136101 s); the element rule's are found from the two
+# steps in the first log.  Each run stops at the guard (exit 7) or at
+# --max-dyn-steps.  The runs overwrite an earlier run's files.
+PML_DT_RULE_TMP = $(or $(TMPDIR),/tmp)/seas_test_pml_dt_rule
+PML_DT_RULE_DECK = simple_cases/configs/D0_straight_hb_pml0p01.toml
+PML_DT_RULE_PREFIX = D0_straight_hb_pml0p01
+PML_DT_RULE_STEPS = 2205
+PML_DT_RULE_ESTEPS = 800
+test-pml-dt-rule: seas_fd_cycle_driver
+	@mkdir -p $(PML_DT_RULE_TMP); t=$(PML_DT_RULE_TMP); \
+	 python3 tests/2d_inplane/pml_dt_rule_check.py decks $(PML_DT_RULE_DECK) $$t || exit 1; \
+	 for v in max element; do n=$(PML_DT_RULE_STEPS); [ $$v = element ] && n=$(PML_DT_RULE_ESTEPS); \
+	    $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_fd_cycle_driver -d $$t/$$v.toml -o $$t/$$v \
+	       --end-phase-after $$n --max-dyn-steps $$n > $$t/$$v.log 2>&1; rc=$$?; \
+	    if [ $$rc -ne 0 ] && [ $$rc -ne 7 ]; then tail -15 $$t/$$v.log; \
+	       echo "  FAILED: dt_rule $$v: exit $$rc"; exit 1; fi; \
+	 done; \
+	 python3 tests/2d_inplane/pml_dt_rule_check.py check $$t $(PML_DT_RULE_PREFIX)
+
 # [cycle.lts] static_split (NitscheLtsRun::SetStaticSplit; LTS with PML design
 # rev1, Section 4.1, piece P-a, the rest test R1): on 1 and 2 ranks, the
 # straight-fault deck of the simple cases without its band is loaded by
@@ -1137,7 +1164,7 @@ test-qd-esdirk-cycle: seas_fd_cycle_driver
                 test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle \
                 test-fault-opening test-fault-contact test-fault-contact-dyn \
                 test-fault-contact-qd test-exact-retry test-qd-esdirk-points test-qd-implicit-green \
-                test-qd-esdirk-cycle test-par-dense-lu test-pml-partition test-early-sync test-lts-static-split
+                test-qd-esdirk-cycle test-par-dense-lu test-pml-partition test-early-sync test-lts-static-split test-pml-dt-rule
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \

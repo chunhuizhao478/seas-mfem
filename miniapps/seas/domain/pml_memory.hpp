@@ -133,6 +133,32 @@ public:
       return k;
    }
 
+   /// k(e): the largest kappa_gamma over the band's volume and face points of
+   /// local element e (both local sides of a face), 1 where the band adds
+   /// none.  The SIPG penalty of a face scales by kappa at its points, so
+   /// the stable step of e alone scales by about 1 / sqrt(k(e)).
+   void ElementKappa(Vector &k) const
+   {
+      k.SetSize(elast_.GetMesh().GetNE());
+      k = 1.0;
+      for (const VolElem &ve : vol_)
+      {
+         for (int q = 0; q < ve.nq; q++)
+         {
+            k(ve.e) = std::max(k(ve.e), bpt_[vpt_[ve.p0 + q].band].pp.kappa);
+         }
+      }
+      for (const Face &f : faces_)
+      {
+         for (int q = 0; q < f.nq; q++)
+         {
+            const real_t kq = bpt_[fpt_[f.p0 + q].band].pp.kappa;
+            k(f.e1) = std::max(k(f.e1), kq);
+            if (f.kind == 0) { k(f.e2) = std::max(k(f.e2), kq); }
+         }
+      }
+   }
+
    int NumBandElements() const { return static_cast<int>(vol_.size()); }
    int NumBandFaces() const { return static_cast<int>(faces_.size()); }
    size_t MemoryReals() const { return state_.size(); }

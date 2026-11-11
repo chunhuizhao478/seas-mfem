@@ -546,6 +546,12 @@ struct PmlConfig
    /// share the band's work in the dynamic regime; 0 = MFEM's default cut
    /// (Chunhui Zhao, 2026-11-10: speed-ups from the code).
    real_t partition_weight = 0.0;
+   /// dt_rule: the dynamic step with the band's penalty factor kappa.
+   /// "kappa_max" (default): the mesh's CFL step / sqrt(kappa_max), every
+   /// element pays for the band.  "element": min_e dt_e / sqrt(kappa_e) with
+   /// kappa_e the largest factor at element e's own band points (1 off the
+   /// band), so coarse band elements do not shrink the step of the fine ones.
+   std::string dt_rule = "kappa_max";
    bool On() const { return on; }
    bool Sponge() const { return on && kind == "sponge"; }
    bool Cfs() const { return on && kind == "cfs"; }
@@ -1772,7 +1778,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       const std::string sec = "cycle.pml";
       const toml::value &pt = cy.at("pml");
       OnlyKeys(pt, sec, {"on", "kind", "wall_attrs", "thickness_km", "power", "R0",
-                         "f_alpha_hz", "c_ref", "wall_speed_factor", "partition_weight"});
+                         "f_alpha_hz", "c_ref", "wall_speed_factor", "partition_weight", "dt_rule"});
       PmlConfig &P = c.pml;
       P.on = Bool(pt, sec, "on", false);
       P.kind = Str(pt, sec, "kind", P.kind);
@@ -1784,6 +1790,9 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       P.R0 = Real(pt, sec, "R0", P.R0);
       P.f_alpha = Real(pt, sec, "f_alpha_hz", 0.0, P.on && P.kind == "cfs");
       P.partition_weight = Real(pt, sec, "partition_weight", 0.0);
+      P.dt_rule = Str(pt, sec, "dt_rule", P.dt_rule);
+      MFEM_VERIFY(P.dt_rule == "kappa_max" || P.dt_rule == "element", "[" << sec
+                  << "].dt_rule must be \"kappa_max\" or \"element\"");
       MFEM_VERIFY(P.partition_weight >= 0.0 && P.partition_weight <= 100.0, "[" << sec
                   << "].partition_weight = " << P.partition_weight << " must be in [0, 100] "
                   "(0 = the default cut; the extra cost of a band element, in elements)");

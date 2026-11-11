@@ -422,8 +422,19 @@ void PrintDynamicSetup(const MPIContext &mpi, const cycle::CycleConfig &cfg,
    }
    if (dyn.HasPml())
    {
-      std::cout << "    PML band (dynamic): K_p (penalty x kappa), C_d and the memory terms; "
-                << "the CFL step divided by sqrt(kappa_max = " << dyn.PmlKappaMax() << ")\n";
+      if (dyn.PmlElementDtRule())
+      {
+         std::cout << "    PML band (dynamic): K_p (penalty x kappa), C_d and the memory terms; "
+                   << "dt_rule element: the step is min_e dt_e / sqrt(kappa_e) = "
+                   << dyn.PmlDtFactor() << " of the mesh's CFL step (kappa_max = "
+                   << dyn.PmlKappaMax() << " would give " << 1.0 / std::sqrt(dyn.PmlKappaMax())
+                   << ")\n";
+      }
+      else
+      {
+         std::cout << "    PML band (dynamic): K_p (penalty x kappa), C_d and the memory terms; "
+                   << "the CFL step divided by sqrt(kappa_max = " << dyn.PmlKappaMax() << ")\n";
+      }
    }
    if (dyn.HasSponge())
    {

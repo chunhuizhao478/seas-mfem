@@ -317,7 +317,38 @@ public:
          // largest eigenvalue grows by up to kappa_max: dt / sqrt(kappa_max)
          // (tests/pml/test_pml_dyn.cpp, CFL line, measures it)
          pml_kappa_max_ = W_->Pml()->KappaMax();
-         dt_cfl_ /= std::sqrt(pml_kappa_max_);
+         if (cfg.pml.dt_rule == "element")
+         {
+            // [cycle.pml] dt_rule = "element": each element's own step, the
+            // band's divided by sqrt(kappa_e) (ComputeMaxDt's rule per element)
+            Vector ke;
+            W_->Pml()->ElementKappa(ke);
+            const NitscheMaterialSample &sm = W_->Sample();
+            const ParFiniteElementSpace *sfes = sm.RhoGF().ParFESpace();
+            const real_t cfl = dc.cfl * ceig_ / (real_t(p) * real_t(p));
+            real_t dmin = std::numeric_limits<real_t>::infinity();
+            Array<int> dofs;
+            for (int e = 0; e < pmesh.GetNE(); e++)
+            {
+               sfes->GetElementDofs(e, dofs);
+               const real_t cp_e = std::sqrt((sm.LambdaGF()(dofs[0]) + 2.0 * sm.MuGF()(dofs[0]))
+                                             / sm.RhoGF()(dofs[0]));
+               dmin = std::min(dmin, cfl * NitscheElementLength(pmesh, e) / (cp_e * std::sqrt(ke(e))));
+            }
+            MPI_Allreduce(MPI_IN_PLACE, &dmin, 1, MPITypeMap<real_t>::mpi_type, MPI_MIN,
+                          pmesh.GetComm());
+            MFEM_VERIFY(dmin <= dt_cfl_ * (1.0 + 1e-12) && dmin > 0.0, "DynPhase: [cycle.pml] "
+                        "dt_rule = \"element\" gives " << dmin << " s, the mesh step is "
+                        << dt_cfl_ << " s");
+            pml_dt_factor_ = dmin / dt_cfl_;
+            pml_dt_element_ = true;
+            dt_cfl_ = dmin;
+         }
+         else
+         {
+            pml_dt_factor_ = 1.0 / std::sqrt(pml_kappa_max_);
+            dt_cfl_ /= std::sqrt(pml_kappa_max_);
+         }
       }
       if (cfg.finite_width.On())
       {
@@ -690,6 +721,10 @@ public:
    /// [cycle.pml]: the band's largest penalty factor (the CFL step is
    /// divided by its square root); 1 without the band.
    real_t PmlKappaMax() const { return pml_kappa_max_; }
+   /// The dynamic step over the mesh's CFL step without the band
+   /// (1 / sqrt(kappa_max), or the per-element rule's ratio).
+   real_t PmlDtFactor() const { return pml_dt_factor_; }
+   bool PmlElementDtRule() const { return pml_dt_element_; }
    bool HasPml() const { return pml_ != nullptr; }
    bool HasSponge() const { return sponge_; }
    long Steps() const { return steps_; }
@@ -972,6 +1007,8 @@ private:
    std::unique_ptr<NitscheWaveOperator> W_;
    std::shared_ptr<const PmlBand> pml_;   ///< [cycle.pml] (null: off)
    real_t pml_kappa_max_ = 1.0;
+   real_t pml_dt_factor_ = 1.0;
+   bool pml_dt_element_ = false;
    bool sponge_ = false;                  ///< [cycle.pml] kind = "sponge"
    // [cycle.quench]: the rate d in force for the run (the deck's number, or
    // "auto" = 2 pi c_s,min / L_max), what "auto" was built from, and the state
