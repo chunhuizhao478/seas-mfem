@@ -33,6 +33,7 @@
 #include "../fault/face_quadrature.hpp"
 #include "matrix_stats.hpp"
 #include "../common/stage_timers.hpp"
+#include "../common/rank_costs.hpp"
 #include "qd_stage_operators.hpp"
 #include "../solver/qd_linear_solver.hpp"
 

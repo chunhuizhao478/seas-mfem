@@ -65,6 +65,7 @@
 
 #include "mfem.hpp"
 #include "cycle_config.hpp"
+#include "../common/rank_costs.hpp"
 
 #include <algorithm>
 #include <array>
@@ -511,7 +512,10 @@ public:
    {
       const real_t dt_out = (Vmax > cfg_.fast_V) ? cfg_.dt_fast : cfg_.dt_slow;
       int due = (t - state_.last_write_time >= dt_out * kOutputTimeTolerance) ? 1 : 0;
-      MPI_Allreduce(MPI_IN_PLACE, &due, 1, MPI_INT, MPI_MAX, comm_);
+      {
+         const RankCosts::Scope wait(RankCosts::WOut);
+         MPI_Allreduce(MPI_IN_PLACE, &due, 1, MPI_INT, MPI_MAX, comm_);
+      }
       if (!due) { return false; }
       if (!owned_.empty())
       {

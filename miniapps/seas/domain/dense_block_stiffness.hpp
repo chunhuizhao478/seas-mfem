@@ -38,6 +38,7 @@
 // After Init the caller may free both HypreParMatrix objects.
 
 #include "mfem.hpp"
+#include "../common/rank_costs.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -501,7 +502,10 @@ private:
          }
          for (int a = 0; a < nb; a++) { y[ie[a]] = acc[a]; }
       }
-      MPI_Waitall(q, reqs_.data(), MPI_STATUSES_IGNORE);
+      {
+         const RankCosts::Scope wait(RankCosts::WStiff);
+         MPI_Waitall(q, reqs_.data(), MPI_STATUSES_IGNORE);
+      }
       const real_t *h = recv_buf_.data(), *Sp = S_.data();
       for (int s = 0; s < ns_; s++)
       {

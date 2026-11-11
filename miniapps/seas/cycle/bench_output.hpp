@@ -276,7 +276,10 @@ public:
       const real_t dt = (Vmax > out_.fast_V) ? cfg_.profile_dt_fast : cfg_.profile_dt_slow;
       int due = (force || t - state_.profile_last >= dt * FdCycleOutput::kOutputTimeTolerance)
                 ? 1 : 0;
-      MPI_Allreduce(MPI_IN_PLACE, &due, 1, MPI_INT, MPI_MAX, comm_);
+      {
+         const RankCosts::Scope wait(RankCosts::WOut);
+         MPI_Allreduce(MPI_IN_PLACE, &due, 1, MPI_INT, MPI_MAX, comm_);
+      }
       if (!due || t == state_.profile_last) { return false; }
       StationFields f;
       fill(f);

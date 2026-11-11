@@ -478,6 +478,95 @@ void PrintDynamicSetup(const MPIContext &mpi, const cycle::CycleConfig &cfg,
    }
 }
 
+/// --rank-costs: each rank's work and wait in one dynamic phase (speed-up
+/// options, D0 design rev1).  Collective.
+///
+/// Input: the phase's loop wall time, this rank's time in dyn.Step() and in
+/// the fault work (FaultSeconds), and the sums of common/rank_costs.hpp.
+/// Output: one screen row per rank (ms per step) and the same numbers in
+/// <prefix>_rank_costs_phase<k>.txt.
+///
+///   wait  = w_sync + w_pml + w_stiff + w_fault + w_out   (blocking MPI)
+///   busy  = loop - wait
+///   pml   = PML Advance + AddForce without w_pml
+///   stiff = the dense stiffness product without w_stiff
+///   fault = the fault advance and slip loads without w_fault
+///   rhs, damp, mass = wall loads, damping blocks, inverse mass
+///   other = busy - pml - stiff - fault - rhs - damp - mass  (vector
+///           updates, output, log)
+void ReportRankCosts(MPIContext &mpi, cycle::DynPhase &dyn, const std::string &prefix,
+                     int phase, const std::string &commit, double loop_s, double step_s,
+                     double fault_s)
+{
+   const double *S = RankCosts::Sum();
+   ParMesh &pm = dyn.Op().GetMesh();
+   const int NT = 15, NC = NT + 4;
+   double mine[NC];
+   const double wait = S[RankCosts::WSync] + S[RankCosts::WPml] + S[RankCosts::WStiff] +
+                       S[RankCosts::WFault] + S[RankCosts::WOut];
+   const double pml = S[RankCosts::Pml] - S[RankCosts::WPml];
+   const double stiff = S[RankCosts::Stiff] - S[RankCosts::WStiff];
+   const double fault = fault_s - S[RankCosts::WFault];
+   mine[0] = loop_s;
+   mine[1] = step_s;
+   mine[2] = S[RankCosts::WSync];
+   mine[3] = S[RankCosts::WPml];
+   mine[4] = S[RankCosts::WStiff];
+   mine[5] = S[RankCosts::WFault];
+   mine[6] = S[RankCosts::WOut];
+   mine[7] = loop_s - wait;
+   mine[8] = pml;
+   mine[9] = stiff;
+   mine[10] = fault;
+   mine[11] = S[RankCosts::Rhs];
+   mine[12] = S[RankCosts::Damp];
+   mine[13] = S[RankCosts::Mass];
+   mine[14] = mine[7] - pml - stiff - fault - mine[11] - mine[12] - mine[13];
+   mine[15] = pm.GetNE();
+   mine[16] = dyn.Op().Pml() ? dyn.Op().Pml()->NumBandElements() : 0;
+   mine[17] = dyn.Slip().Size() / 3;
+   mine[18] = pm.GetNSharedFaces();
+   const int np = mpi.Size();
+   std::vector<double> all(mpi.IsRoot() ? NC * np : 0);
+   MPI_Gather(mine, NC, MPI_DOUBLE, all.data(), NC, MPI_DOUBLE, 0, mpi.GetComm());
+   if (!mpi.IsRoot()) { return; }
+   const long steps = std::max(1L, static_cast<long>(dyn.Steps()));
+   const char *names[NC] = {"loop", "step", "w_sync", "w_pml", "w_stiff", "w_fault", "w_out",
+                            "busy", "pml", "stiff", "fault", "rhs", "damp", "mass", "other",
+                            "n_elem", "n_band", "n_fault_dofs", "n_shared_faces"
+                           };
+   const std::string file = prefix + "_rank_costs_phase" + std::to_string(phase) + ".txt";
+   std::ofstream f(file);
+   f << "# fd_cycle --rank-costs, dynamic phase " << phase << ", " << steps << " steps on "
+     << np << " ranks; commit " << commit << "\n# times in s summed over the phase; wait = "
+     "w_sync + w_pml + w_stiff + w_fault + w_out; busy = loop - wait; other = busy - pml - "
+     "stiff - fault - rhs - damp - mass\n# rank";
+   for (int c = 0; c < NC; c++) { f << " " << names[c]; }
+   f << "\n" << std::setprecision(9);
+   std::cout << "  rank costs, ms per step (wait = blocked in MPI; busy = loop - wait):\n"
+             << "  rank    loop    step |  w_sync   w_pml w_stiff w_fault   w_out |    busy"
+             "     pml   stiff   fault     rhs    damp    mass   other |   n_elem   n_band"
+             "  n_fdof n_shared\n";
+   for (int r = 0; r < np; r++)
+   {
+      const double *a = &all[NC * r];
+      f << r;
+      for (int c = 0; c < NT; c++) { f << " " << a[c]; }
+      for (int c = NT; c < NC; c++) { f << " " << static_cast<long>(a[c]); }
+      f << "\n";
+      std::cout << std::fixed << std::setprecision(3) << std::setw(6) << r;
+      for (int c = 0; c < NT; c++)
+      {
+         if (c == 2 || c == 7) { std::cout << " |"; }
+         std::cout << std::setw(8) << 1e3 * a[c] / steps;
+      }
+      std::cout << " |" << std::setw(9) << static_cast<long>(a[NT]) << std::setw(9)
+                << static_cast<long>(a[NT + 1]) << std::setw(8) << static_cast<long>(a[NT + 2])
+                << std::setw(9) << static_cast<long>(a[NT + 3]) << "\n";
+   }
+   std::cout << "  rank costs file: " << file << "\n" << std::flush;
+}
+
 /// One dynamic phase (plan 6.2, 6.3): from the QD balance at t_s (max V =
 /// Vstart > V_on, just solved) to the switch back.  Phase 1 at t = 0 is the
 /// first BP5-FD event (P2, P3); a later phase starts where the QD regime's
@@ -660,6 +749,8 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
    cycle::DynVerdict verdict = cycle::DynVerdict::Stay;
    bool step_cap = false;
    double step_s = 0.0, wall0 = MPI_Wtime();
+   RankCosts::Reset();   // --rank-costs: this phase's sums
+   const double fault_s0 = dyn.Op().FaultSeconds();
    // [cycle.quench] (quench plan rev1, Q4): on at the first step with max V
    // below V_q, off if it rises above V_q again; the counts for the summary
    const cycle::QuenchConfig &qc = cfg.quench;
@@ -775,6 +866,11 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
                    << "\n  files: " << prefix << "_{<stations>,global,catalog,switch}.txt, "
                    << fault_file << "\n"
                    << std::flush;
+      }
+      if (RankCosts::On())
+      {
+         ReportRankCosts(mpi, dyn, prefix, phase, commit, loop_s, step_s,
+                         dyn.Op().FaultSeconds() - fault_s0);
       }
       phase_over = true;
    };
@@ -1011,6 +1107,7 @@ int main(int argc, char *argv[])
    double wall_limit = -1.0;
    const char *green_cache = "";
    const char *green_hcache = "";
+   bool rank_costs = false;
 
    OptionsParser args(argc, argv);
    args.AddOption(&deck, "-d", "--deck", "Cycle deck (TOML): [cycle] and the shared sections.");
@@ -1047,12 +1144,17 @@ int main(int argc, char *argv[])
                   "[cycle.qd.green]: the dense G file (overrides the deck's cache).");
    args.AddOption(&green_hcache, "-ghc", "--qd-green-hcache",
                   "[cycle.qd.green]: the H-matrix file (overrides the deck's hcache).");
+   args.AddOption(&rank_costs, "-rc", "--rank-costs", "-no-rc", "--no-rank-costs",
+                  "Switching on: at the end of every dynamic phase print each rank's "
+                  "work and wait per step and write <prefix>_rank_costs_phase<k>.txt "
+                  "(measures only; common/rank_costs.hpp).");
    args.Parse();
    if (!args.Good())
    {
       if (root) { args.PrintUsage(std::cout); }
       return 1;
    }
+   RankCosts::On() = rank_costs;
 
    const double wall_start = MPI_Wtime();
    const std::string commit = cycle::BuildCommit();

@@ -48,6 +48,7 @@
 #include "mfem.hpp"
 #include "pml_band.hpp"
 #include "elasticity_operator.hpp"
+#include "../common/rank_costs.hpp"
 #include "../integrator/pml_elasticity_integrators.hpp"
 
 #include <cmath>
@@ -172,6 +173,7 @@ public:
    void Advance(const Vector &x, real_t t)
    {
       MFEM_VERIFY(entered_, "PmlDynamicTerms::Advance before Enter");
+      const RankCosts::Scope cost(RankCosts::Pml);
       w_ = x;
       w_ -= us_;
       Gather_(w_);
@@ -186,6 +188,7 @@ public:
    {
       MFEM_VERIFY(entered_, "PmlDynamicTerms::AddForce before Enter");
       MFEM_VERIFY(fcache_.Size() == F.Size(), "PmlDynamicTerms::AddForce: size");
+      const RankCosts::Scope cost(RankCosts::Pml);
       F += b_band_;
       F += fcache_;   // B + E of the stored state (UpdateAll_ / Enter)
    }
@@ -722,6 +725,7 @@ private:
    void Gather_(const Vector &u)
    {
       gf_->SetFromTrueDofs(u);   // DG: true dofs = local vdofs
+      const RankCosts::Scope wait(RankCosts::WPml);
       gf_->ExchangeFaceNbrData();
    }
 

@@ -331,7 +331,10 @@ void ElasticityDomainOperator<MeshType>::FaultNbrExchange_(const Vector &u) cons
          MPI_Isend(ffo_.send_buf.data() + b, n, MPITypeMap<real_t>::mpi_type, ffo_.send_ranks[k],
                    tag, comm, &ffo_.reqs[q++]);
       }
-      MPI_Waitall(q, ffo_.reqs.data(), MPI_STATUSES_IGNORE);
+      {
+         const RankCosts::Scope wait(RankCosts::WFault);
+         MPI_Waitall(q, ffo_.reqs.data(), MPI_STATUSES_IGNORE);
+      }
    }
 #else
    (void)u;

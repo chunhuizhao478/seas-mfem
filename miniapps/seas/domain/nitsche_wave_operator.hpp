@@ -1456,13 +1456,21 @@ private:
          if (kv_)
          {
             MFEM_VERIFY(v, "NitscheWaveOperator: Kelvin-Voigt needs the velocity");
+            const RankCosts::Scope cost(RankCosts::Stiff);
             dense_.Mult(x, *v, Kx_);   // K x + K_eta v
          }
-         else { dense_.Mult(x, Kx_); }
+         else
+         {
+            const RankCosts::Scope cost(RankCosts::Stiff);
+            dense_.Mult(x, Kx_);
+         }
       }
       else if (fuse) { fused_.Mult(x, *v, Kx_); }   // K x + K_eta v
       else { elast_->ApplyStiffness(x, Kx_); }
-      elast_->AssembleDirichletOnlyRHS(F_, GetTime());
+      {
+         const RankCosts::Scope cost(RankCosts::Rhs);
+         elast_->AssembleDirichletOnlyRHS(F_, GetTime());
+      }
       F_ -= Kx_;
       if (b_const_.Size() > 0) { F_ += b_const_; }   // hook H3
       if (pml_)
@@ -1489,6 +1497,7 @@ private:
       }
       if (!damping_blocks_.empty() && v)
       {
+         const RankCosts::Scope cost(RankCosts::Damp);
          ApplyDamping(*v, Cv_);
          F_ -= Cv_;
       }
@@ -1503,6 +1512,7 @@ private:
          }
          if (kv_vD_)
          {
+            const RankCosts::Scope cost(RankCosts::Rhs);
             kv_->AssembleDirichletOnlyRHS(FvD_, GetTime() - kv_tv_shift_);
             F_ += FvD_;
          }
@@ -1522,6 +1532,7 @@ private:
             fault_sec_ += MPI_Wtime() - tf0;
          }
       }
+      const RankCosts::Scope cost(RankCosts::Mass);
       Minv.Apply(F_, a);
    }
 
@@ -1779,6 +1790,7 @@ private:
          return;
       }
       real_t red[4] = {-min_sig, max_sig, max_V, max_ratio};
+      const RankCosts::Scope wait(RankCosts::WSync);   // to the function's end
       MPI_Allreduce(MPI_IN_PLACE, red, 4, MPITypeMap<real_t>::mpi_type, MPI_MAX,
                     mesh_.GetComm());
       record_.step = steps_;
