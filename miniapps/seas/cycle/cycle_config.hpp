@@ -120,7 +120,11 @@
 //                   rejected and shrunk), jacobian_reuse ["step"] ("step",
 //                   "stage" or "iteration": how long one LU factor is
 //                   kept), newton_local [true] (Newton on each point's own
-//                   stage equation)
+//                   stage equation), dense_lu ["serial"] ("serial": every
+//                   rank factors the Newton matrix, bit for bit as before;
+//                   "shared": one factor by all ranks together,
+//                   cycle/par_dense_lu.hpp, ScaLAPACK; the same solution to
+//                   round-off)
 //   [cycle.qd.green] the discrete Green's function stage (seas_bp5_full
 //                   --qd-green, items 3 and 4); present means on unless
 //                   enabled = false, and it needs operators = "matrix".
@@ -446,6 +450,7 @@ struct QDConfig
    int newton_max_it = 20;                ///< more: a failed solve
    std::string jacobian_reuse = "step";   ///< "step", "stage" or "iteration"
    bool newton_local = true;              ///< Newton on the point stage equations
+   std::string dense_lu = "serial";       ///< "serial" or "shared" (ScaLAPACK)
    bool Esdirk() const { return integrator == "esdirk"; }
    QDGreenDeck green;
 };
@@ -1115,7 +1120,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       OnlyKeys(q, "cycle.qd", {"solver", "blr_tol", "petsc_options", "ts_atol", "ts_rtol",
                                "operators", "green", "exact_retry", "integrator",
                                "esdirk_type", "newton_tol", "newton_max_it",
-                               "jacobian_reuse", "newton_local"});
+                               "jacobian_reuse", "newton_local", "dense_lu"});
       c.qd.solver = Str(q, "cycle.qd", "solver", c.qd.solver);
       c.qd.blr_tol = Real(q, "cycle.qd", "blr_tol", c.qd.blr_tol);
       c.qd.petsc_options = Str(q, "cycle.qd", "petsc_options", c.qd.petsc_options);
@@ -1128,7 +1133,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
                   "[cycle.qd].integrator = \"" << c.qd.integrator << "\"; use \"dp5\" "
                   "(the explicit RK of petsc_options) or \"esdirk\" (option I)");
       for (const char *k : {"esdirk_type", "newton_tol", "newton_max_it", "jacobian_reuse",
-                            "newton_local"})
+                            "newton_local", "dense_lu"})
       {
          MFEM_VERIFY(c.qd.Esdirk() || !q.contains(k), "[cycle.qd]." << k << " needs "
                      "[cycle.qd].integrator = \"esdirk\"");
@@ -1138,6 +1143,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       c.qd.newton_max_it = Int(q, "cycle.qd", "newton_max_it", c.qd.newton_max_it);
       c.qd.jacobian_reuse = Str(q, "cycle.qd", "jacobian_reuse", c.qd.jacobian_reuse);
       c.qd.newton_local = Bool(q, "cycle.qd", "newton_local", c.qd.newton_local);
+      c.qd.dense_lu = Str(q, "cycle.qd", "dense_lu", c.qd.dense_lu);
       if (q.contains("green"))
       {
          const std::string sec = "cycle.qd.green";
@@ -1196,6 +1202,9 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
                   c.qd.jacobian_reuse == "iteration", "[cycle.qd].jacobian_reuse = \""
                   << c.qd.jacobian_reuse << "\"; use \"step\", \"stage\" or "
                   "\"iteration\"");
+      MFEM_VERIFY(c.qd.dense_lu == "serial" || c.qd.dense_lu == "shared",
+                  "[cycle.qd].dense_lu = \"" << c.qd.dense_lu << "\"; use \"serial\" or "
+                  "\"shared\"");
    }
 
    if (cy.contains("switch"))

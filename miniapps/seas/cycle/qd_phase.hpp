@@ -1419,6 +1419,7 @@ private:
       set.newton_max_it = cfg_.qd.newton_max_it;
       set.jacobian_reuse = cfg_.qd.jacobian_reuse;
       set.newton_local = cfg_.qd.newton_local;
+      set.dense_lu = cfg_.qd.dense_lu;
       set.atol = cfg_.qd.ts_atol;
       set.rtol = cfg_.qd.ts_rtol;
       DomainOp *dom = dom_.get();
@@ -1435,7 +1436,8 @@ private:
                             / (1024.0 * 1024.0);
          std::cout << "  [cycle.qd] integrator esdirk (option I): arkimex " << set.esdirk_type
                    << " fully implicit on " << imp_->NumGlobal() << " fault points, dense LU "
-                   "on every rank (about " << std::setprecision(4) << mib << " MiB per rank "
+                   << (set.dense_lu == "shared" ? "shared by all ranks (ScaLAPACK), G "
+                       : "") << "on every rank (about " << std::setprecision(4) << mib << " MiB per rank "
                    "for G and the factor), newton_tol " << set.newton_tol << ", newton_max_it "
                    << set.newton_max_it << ", jacobian_reuse " << set.jacobian_reuse
                    << ", newton_local " << (set.newton_local ? "on" : "off") << "\n";

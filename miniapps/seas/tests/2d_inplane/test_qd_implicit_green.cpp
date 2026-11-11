@@ -70,6 +70,7 @@ int rank = 0, nranks = 1, fails = 0;
 std::string only;      ///< -only <letters>: run these tests only, e.g. -only 56 (development)
 bool trace = false;    ///< -trace: one line per accepted step of G6 (development)
 bool newton_local = QDImplicitSettings().newton_local;   ///< -qd_newton_local (cost study)
+std::string dense_lu = "serial";   ///< -qd_dense_lu shared: the whole suite on the shared LU
 
 bool Wanted(char c) { return only.empty() || only.find(c) != std::string::npos; }
 
@@ -564,6 +565,7 @@ void TestG3G4(Box &B, int p)
          in.floor_taper = m.taper;
          QDImplicitSettings set;
          set.newton_local = local;
+         set.dense_lu = dense_lu;
          QDImplicitFault f(comm, cycle::PlanarProblem(comm, G, in, UnitG(B.op.get())), set);
          f.EnsureColumn(ja);
          f.EnsureColumn(jb);
@@ -709,6 +711,7 @@ void TestG8(Box &B, int p)
    {
       QDImplicitSettings set;
       set.newton_local = local;
+      set.dense_lu = dense_lu;
       QDImplicitFault f(comm, cycle::PlanarProblem(comm, G, in, UnitG(B.op.get())), set);
       const std::string w = ps + (local ? ", newton_local" : ", F");
       std::vector<real_t> Uall(3 * N), Udall(3 * N, 0.0);
@@ -913,6 +916,7 @@ void TestG5(Box &B, int p)
       QDImplicitSettings set;
       set.esdirk_type = type;
       set.newton_local = newton_local;
+      set.dense_lu = dense_lu;
       QDImplicitFault f(comm, cycle::PlanarProblem(comm, G, in, UnitG(B.op.get())), set);
       std::vector<real_t> U0(3 * n, 0.0);
       for (int o = 0; o < n; o++) { U0[3 * o + 1] = ph.psi_ss(ph.Vpl); }
@@ -970,6 +974,7 @@ OpenRun OpeningRun(MPI_Comm comm, QDImplicitFault::Problem P, int N,
    OpenRun o;
    QDImplicitSettings set;
    set.newton_local = newton_local;
+   set.dense_lu = dense_lu;
    QDImplicitFault f(comm, P, set);
    std::vector<real_t> U0(3 * f.NumOwned(), 0.0);
    for (int k = 0; k < f.NumOwned(); k++) { U0[3 * k + 1] = ph.psi_ss(ph.Vpl); }
@@ -1249,6 +1254,12 @@ int main(int argc, char **argv)
    MFEM_VERIFY(PetscOptionsGetBool(nullptr, nullptr, "-qd_newton_local", &nl, &has_nl)
                == PETSC_SUCCESS, "-qd_newton_local");
    newton_local = (nl == PETSC_TRUE);
+   char dl[32] = "serial";
+   PetscBool has_dl = PETSC_FALSE;
+   MFEM_VERIFY(PetscOptionsGetString(nullptr, nullptr, "-qd_dense_lu", dl, sizeof(dl), &has_dl)
+               == PETSC_SUCCESS, "-qd_dense_lu");
+   dense_lu = dl;
+   if (has_dl) { Say("dense_lu " + dense_lu + " in every QDImplicitFault of this run (-qd_dense_lu)"); }
    if (has_nl) { Say(std::string("newton_local ") + (newton_local ? "on" : "off") +
                      " in G5, G6 (-qd_newton_local)"); }
    for (int p : {1, 2})

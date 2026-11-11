@@ -111,6 +111,15 @@
 // it (ESDIRK: one gamma_d).  The SNES Mat is a MATSHELL that is never
 // multiplied (KSP preonly + PCSHELL).
 //
+// [cycle.qd] dense_lu = "shared" (opt-in; "serial" is the default and the
+// path above, bit for bit): the same reduced matrix is factored once by all
+// ranks together (cycle/par_dense_lu.hpp, ScaLAPACK), each rank assembling
+// only the blocks it stores, and every solve goes through that factor.
+// Why: with "serial" every rank spends the same 2/3 (N + m)^3 flops on one
+// core (UCERF, N = 3,290, 144 ranks: about 5 factors of 0.8 s in a 4.8 s
+// step).  The solution agrees with the serial one to round-off, not bit for
+// bit, and depends on the rank count in the last digits.
+//
 // Newton on each point's own stage equation ([cycle.qd] newton_local, on by
 // default; phase I2, test G6).  Why: V* is exponential in tau / (a
 // sigma_law) (f ~ a ln V + psi), so Newton on F, which linearizes V* in the
@@ -197,6 +206,7 @@
 #include "mfem.hpp"
 #include "../friction/device_rate_state.hpp"
 #include "../domain/qd_green_operator.hpp"
+#include "par_dense_lu.hpp"
 
 #if defined(MFEM_USE_PETSC) && defined(MFEM_USE_MPI)
 #include "petsc.h"
@@ -205,6 +215,7 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -227,6 +238,8 @@ struct QDImplicitSettings
                                       ///< (file comment); false: on F as it stands
    int newton_max_it = 20;            ///< more: a failed solve, the step is rejected
    std::string jacobian_reuse = "step";   ///< "step", "stage" or "iteration"
+   std::string dense_lu = "serial";   ///< "serial" (every rank factors) or "shared"
+                                      ///< (one ScaLAPACK factor, cycle/par_dense_lu.hpp)
    real_t atol = 1e-7;                ///< the TS's absolute tolerance
    real_t rtol = 0.0;                 ///< the TS's relative tolerance
 };
@@ -293,6 +306,11 @@ public:
       MFEM_VERIFY(S_.jacobian_reuse == "step" || S_.jacobian_reuse == "stage" ||
                   S_.jacobian_reuse == "iteration", "QDImplicitFault: jacobian_reuse \""
                   << S_.jacobian_reuse << "\" (step, stage or iteration)");
+      MFEM_VERIFY(S_.dense_lu == "serial" || S_.dense_lu == "shared",
+                  "QDImplicitFault: dense_lu \"" << S_.dense_lu << "\" (serial or shared)");
+      MFEM_VERIFY(S_.dense_lu == "serial" || ParDenseLU::Available(),
+                  "QDImplicitFault: dense_lu = \"shared\" needs ScaLAPACK (a build with "
+                  "MFEM_USE_MUMPS, double precision)");
       MFEM_VERIFY(S_.newton_tol > 0.0 && S_.newton_max_it >= 1 && S_.newton_psi_scale > 0.0 &&
                   S_.newton_psi_cap >= S_.newton_psi_scale,
                   "QDImplicitFault: newton_tol > 0, newton_max_it >= 1, newton_psi_scale > 0, "
@@ -702,7 +720,13 @@ public:
          for (int l : gc) { r -= cols_s_[slot_[l]][j] * yg[l]; }
          z(N + k) = r;
       }
-      lu_.Solve(N + m, 1, z.GetData());
+      if (plu_)
+      {
+         Vector zz(N + m);
+         plu_->Solve(z.GetData(), zz.GetData());
+         z = zz;
+      }
+      else { lu_.Solve(N + m, 1, z.GetData()); }
       for (int k = 0; k < m; k++) { yg[fa_.O[k]] = z(N + k); }
       for (int o = 0; o < n; o++)
       {
@@ -1011,6 +1035,37 @@ private:
       const int N = P_.N;
       const int m = static_cast<int>(ev_.O.size());
       const int M = N + m;
+      if (S_.dense_lu == "shared")
+      {
+         // the entries of the loops below, one at a time: row i, column l
+         auto entry = [this, N](int i, int l) -> real_t
+         {
+            const int j = (i < N) ? i : ev_.O[i - N];   // the row's point
+            if (i < N)
+            {
+               const real_t fs = ev_.fs[j];
+               if (l < N)
+               {
+                  real_t v = P_.Gt[size_t(j) * N + l] + fs * P_.Gs[size_t(j) * N + l];
+                  if (l == j) { v += ev_.Dt[j]; }
+                  return v;
+               }
+               const int lo = ev_.O[l - N];
+               return cols_t_[slot_[lo]][j] + ((lo == j) ? 0.0 : fs * cols_s_[slot_[lo]][j]);
+            }
+            if (l < N) { return P_.Gs[size_t(j) * N + l]; }
+            return cols_s_[slot_[ev_.O[l - N]]][j];
+         };
+         if (!plu_) { plu_ = std::make_unique<ParDenseLU>(comm_); }
+         const bool ok = plu_->Factor(M, entry);
+         fa_ = ev_;
+         fa_.solve = solve_id_;
+         have_factor_ = ok;
+         slow_ = false;
+         counts_.factors++;
+         factor_singular_ = !ok;
+         return;
+      }
       lu_mat_.SetSize(M);
       lu_piv_.resize(M);
       real_t *a = lu_mat_.GetData();   // column-major
@@ -1338,6 +1393,7 @@ private:
    DenseMatrix lu_mat_;
    std::vector<int> lu_piv_;
    LUFactors lu_;
+   std::unique_ptr<ParDenseLU> plu_;   ///< dense_lu = "shared"
    bool have_factor_ = false, factor_singular_ = false, bad_jacobian_ = false;
    bool slope_mode_ = false, slow_ = false, clipped_ = false, prev_clipped_ = false;
    long solve_id_ = 0;
