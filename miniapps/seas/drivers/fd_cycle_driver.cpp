@@ -107,6 +107,7 @@
 #include "../cycle/regime_controller.hpp"
 #include "../cycle/state_bridge.hpp"
 #include "../cycle/dyn_phase.hpp"
+#include "../cycle/pml_partition.hpp"
 #include "../cycle/snapshots.hpp"
 #include "../cycle/bench_output.hpp"
 
@@ -1177,7 +1178,16 @@ int main(int argc, char *argv[])
       }
       // [cycle.lts] rate2: clusters and the LTS-aware cut, then the ParMesh.
       cycle::LtsLayout lts = cycle::DynPhase::PlanLts(*smesh, cfg, mpi.GetComm());
-      ParMesh pmesh(mpi.GetComm(), *smesh, lts.part.empty() ? nullptr : lts.part.data());
+      // [cycle.pml] partition_weight > 0: a cut that shares the band's work
+      // (cycle/pml_partition.hpp; never with [cycle.lts], which [cycle.pml]
+      // refuses).  Otherwise MFEM's default cut.
+      const cycle::PmlPartition pcut = cycle::PlanPmlPartition(*smesh, cfg, mpi.GetComm());
+      MFEM_VERIFY(lts.part.empty() || pcut.part.empty(), "two mesh cuts ([cycle.lts] and "
+                  "[cycle.pml] partition_weight)");
+      const int *cut = !lts.part.empty() ? lts.part.data()
+                       : (!pcut.part.empty() ? pcut.part.data() : nullptr);
+      ParMesh pmesh(mpi.GetComm(), *smesh, cut);
+      if (root && !pcut.report.empty()) { std::cout << "  " << pcut.report << "\n"; }
       cycle::DynPhase::MapLts(lts, *smesh, pmesh);
       if (root && lts.on) { std::cout << "  LTS: " << lts.report << "\n"; }
       smesh.reset();

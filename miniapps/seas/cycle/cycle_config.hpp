@@ -532,6 +532,11 @@ struct PmlConfig
    /// for "auto" (stored as 0, set by QDPhase from the band), or the number
    /// given; 1 = unchanged.
    real_t wall_speed_factor = 0.0;
+   /// partition_weight: > 0 cuts the mesh with METIS weights 1 + this on the
+   /// elements inside a band (cycle/pml_partition.hpp), so that the ranks
+   /// share the band's work in the dynamic regime; 0 = MFEM's default cut
+   /// (Chunhui Zhao, 2026-11-10: speed-ups from the code).
+   real_t partition_weight = 0.0;
    bool On() const { return on; }
    bool Sponge() const { return on && kind == "sponge"; }
    bool Cfs() const { return on && kind == "cfs"; }
@@ -1752,7 +1757,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       const std::string sec = "cycle.pml";
       const toml::value &pt = cy.at("pml");
       OnlyKeys(pt, sec, {"on", "kind", "wall_attrs", "thickness_km", "power", "R0",
-                         "f_alpha_hz", "c_ref", "wall_speed_factor"});
+                         "f_alpha_hz", "c_ref", "wall_speed_factor", "partition_weight"});
       PmlConfig &P = c.pml;
       P.on = Bool(pt, sec, "on", false);
       P.kind = Str(pt, sec, "kind", P.kind);
@@ -1763,6 +1768,10 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       P.power = Int(pt, sec, "power", P.power);
       P.R0 = Real(pt, sec, "R0", P.R0);
       P.f_alpha = Real(pt, sec, "f_alpha_hz", 0.0, P.on && P.kind == "cfs");
+      P.partition_weight = Real(pt, sec, "partition_weight", 0.0);
+      MFEM_VERIFY(P.partition_weight >= 0.0 && P.partition_weight <= 100.0, "[" << sec
+                  << "].partition_weight = " << P.partition_weight << " must be in [0, 100] "
+                  "(0 = the default cut; the extra cost of a band element, in elements)");
       const real_t lam = s.material_fallback.lambda, mu = s.material_fallback.mu;
       const real_t rho = s.material_fallback.rho;
       P.c_ref = Real(pt, sec, "c_ref", std::sqrt((lam + 2.0 * mu) / rho));

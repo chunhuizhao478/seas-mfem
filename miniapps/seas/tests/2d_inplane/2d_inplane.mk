@@ -39,6 +39,7 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-qd-implicit-green   # option I, I2 (on the planar Green's function)
 #   make -f tests/2d_inplane/2d_inplane.mk test-qd-esdirk-cycle     # option I, I3 (in the cycle driver: restart)
 #   make -f tests/2d_inplane/2d_inplane.mk test-par-dense-lu        # [cycle.qd] dense_lu = "shared" (ScaLAPACK LU)
+#   make -f tests/2d_inplane/2d_inplane.mk test-pml-partition       # [cycle.pml] partition_weight (band-weighted cut)
 #   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
 # The 3D parity set (every phase must leave it bit for bit unchanged) is the
 # script tests/2d_inplane/parity_3d.sh (see its header).  The tensor
@@ -1015,6 +1016,24 @@ test-par-dense-lu: seas_test_par_dense_lu
 	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_par_dense_lu < /dev/null || exit 1; \
 	done
 
+# cycle/pml_partition.hpp ([cycle.pml] partition_weight): the mesh cut that
+# shares the PML band's work between the ranks.
+TEST_PML_PARTITION_SRC = tests/2d_inplane/test_pml_partition.cpp
+TEST_PML_PARTITION_OBJ = $(TEST_PML_PARTITION_SRC:.cpp=.o)
+$(TEST_PML_PARTITION_OBJ): %.o: $(SRC)%.cpp cycle/pml_partition.hpp cycle/cycle_config.hpp \
+                            domain/pml_band.hpp dynamic/lts_partition.hpp $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
+
+seas_test_pml_partition: $(TEST_PML_PARTITION_OBJ) $(LTS_PARTITION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PML_PARTITION_OBJ) $(LTS_PARTITION_OBJ) $(CYCLE_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-pml-partition: seas_test_pml_partition
+	@for n in 1 2 4 8; do \
+	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_pml_partition < /dev/null || exit 1; \
+	done
+
 # Option I, phase I3: the implicit QD fault solve in the cycle driver
 # ([cycle.qd] integrator = "esdirk"; cycle/qd_phase.hpp).  The D9f contact
 # deck with the key on, 80 QD steps: a run stopped at step 40 and restarted
@@ -1043,7 +1062,7 @@ test-qd-esdirk-cycle: seas_fd_cycle_driver
                 test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle \
                 test-fault-opening test-fault-contact test-fault-contact-dyn \
                 test-fault-contact-qd test-exact-retry test-qd-esdirk-points test-qd-implicit-green \
-                test-qd-esdirk-cycle test-par-dense-lu
+                test-qd-esdirk-cycle test-par-dense-lu test-pml-partition
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
@@ -1052,4 +1071,4 @@ test-qd-esdirk-cycle: seas_fd_cycle_driver
         test-handback-table test-tip-zone test-sigma-floor test-relaxation test-2d5-width test-2d5-dyn-driver \
         test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle \
         test-fault-opening test-exact-retry test-qd-esdirk-points test-qd-implicit-green \
-        test-qd-esdirk-cycle test-par-dense-lu 2d-inplane-all
+        test-qd-esdirk-cycle test-par-dense-lu test-pml-partition 2d-inplane-all
