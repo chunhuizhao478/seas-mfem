@@ -240,6 +240,9 @@ struct QDImplicitSettings
    std::string jacobian_reuse = "step";   ///< "step", "stage" or "iteration"
    std::string dense_lu = "serial";   ///< "serial" (every rank factors) or "shared"
                                       ///< (one ScaLAPACK factor, cycle/par_dense_lu.hpp)
+   std::string stage_guess = "previous";   ///< where a stage's Newton starts: "previous"
+                                      ///< (the stage before) or "extrapolate" (the last
+                                      ///< step's dense output, SetupTS)
    real_t atol = 1e-7;                ///< the TS's absolute tolerance
    real_t rtol = 0.0;                 ///< the TS's relative tolerance
 };
@@ -308,6 +311,9 @@ public:
                   << S_.jacobian_reuse << "\" (step, stage or iteration)");
       MFEM_VERIFY(S_.dense_lu == "serial" || S_.dense_lu == "shared",
                   "QDImplicitFault: dense_lu \"" << S_.dense_lu << "\" (serial or shared)");
+      MFEM_VERIFY(S_.stage_guess == "previous" || S_.stage_guess == "extrapolate",
+                  "QDImplicitFault: stage_guess \"" << S_.stage_guess
+                  << "\" (previous or extrapolate)");
       MFEM_VERIFY(S_.dense_lu == "serial" || ParDenseLU::Available(),
                   "QDImplicitFault: dense_lu = \"shared\" needs ScaLAPACK (a build with "
                   "MFEM_USE_MUMPS, double precision)");
@@ -885,7 +891,8 @@ public:
    /// this object, SNES newtonls with a basic line search and this object's
    /// convergence test, KSP preonly with a PCSHELL (ApplyInverse), and
    /// -ts_max_snes_failures -1.  The TS adapt and tolerances are the
-   /// caller's.
+   /// caller's.  stage_guess = "extrapolate" switches on PETSc's
+   /// -ts_arkimex_initial_guess_extrapolate (StageGuessExtrapolate_).
    PetscErrorCode SetupTS(TS ts)
    {
       PetscFunctionBeginUser;
@@ -924,6 +931,37 @@ public:
       PetscCall(PCSetType(pc, PCSHELL));
       PetscCall(PCShellSetContext(pc, this));
       PetscCall(PCShellSetApply(pc, &QDImplicitFault::PCApply_));
+      if (S_.stage_guess == "extrapolate") { PetscCall(StageGuessExtrapolate_(ts)); }
+      PetscFunctionReturn(PETSC_SUCCESS);
+   }
+
+   /// stage_guess = "extrapolate": each implicit stage's Newton starts from
+   /// the dense output of the last accepted step, evaluated at the stage
+   /// time, instead of from the stage before.  PETSc does it (arkimex.c,
+   /// TSExtrapolate_ARKIMEX) and falls back to the stage before on the first
+   /// step, after TSRestartStep and on the retry of a step whose stage
+   /// solve failed.  Only the start of Newton moves: the stage equations,
+   /// the convergence test and the error control are the same.
+   ///
+   /// PETSc has no call for it, only the option, and the option is read by
+   /// TSSetFromOptions while the type is arkimex.  The caller's
+   /// TSSetFromOptions ran before SetupTS set the type, and running it again
+   /// would read the options file's -ts_type again.  So the option is set
+   /// and read under a prefix of its own that no other option carries: the
+   /// second TSSetFromOptions finds this one option and leaves every other
+   /// setting at its current value; the TS's prefix is put back after.
+   PetscErrorCode StageGuessExtrapolate_(TS ts)
+   {
+      PetscFunctionBeginUser;
+      const char *old = nullptr;
+      PetscCall(TSGetOptionsPrefix(ts, &old));
+      const std::string keep = old ? old : "";
+      PetscCall(PetscOptionsSetValue(nullptr,
+                                     "-qdimp_guess_ts_arkimex_initial_guess_extrapolate",
+                                     "true"));
+      PetscCall(TSSetOptionsPrefix(ts, "qdimp_guess_"));
+      PetscCall(TSSetFromOptions(ts));
+      PetscCall(TSSetOptionsPrefix(ts, keep.empty() ? nullptr : keep.c_str()));
       PetscFunctionReturn(PETSC_SUCCESS);
    }
 

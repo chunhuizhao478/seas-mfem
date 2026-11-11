@@ -1,0 +1,386 @@
+# ucerf2d_sjf1_500m_R70_avg_tip_contact_pml0p01_quench_retry_esdirk_sg_fd.toml
+# — the San Jacinto-alone implicit deck
+# (config/fd_cycle/ucerf2d_sjf1_500m_R70_avg_tip_contact_pml0p01_quench_retry_esdirk_fd.toml,
+# whose header describes the model) with [cycle.qd] stage_guess =
+# "extrapolate" (Chunhui Zhao, 2026-11-10: "let's proceed with the speedup
+# options"): the timing twin of that deck for the QD step.  The equations
+# and tolerances are the same; each stage's Newton starts from the last
+# step's dense output, so the results agree to within newton_tol.
+# Differences from that deck: stage_guess, the output prefix and this
+# header.
+# Run from miniapps/seas:
+#   mpirun -np 8 ./seas_fd_cycle_driver --deck config/fd_cycle/ucerf2d_sjf1_500m_R70_avg_tip_contact_pml0p01_quench_retry_esdirk_sg_fd.toml
+#
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "UCERF3 FM3.1 San Jacinto trace sjf1 alone (San Bernardino to Clark, 173 km) at 10 km, map view, plane strain, R 70 km smoothed traces (500 m), averaged vertex normals, VS tip zones, no sigma_n' relaxation, a 10 MPa floor (tapered), unilateral contact (fault opening B), CFS-PML band (0.01 Hz) instead of the absorbing faces, V_off 1e-3 m/s with a 300 s dwell under the quench (dynamic relaxation, d auto), exact retry of rejected QD steps, implicit QD fault solve (option I, esdirk), a reproducer of the QD failure at a closed point with sigma_n' near zero."
+
+# rho = 2670 kg/m^3, cs = 3.464 km/s, nu = 0.25 (lambda = mu), cp = 6 km/s.
+[material_constant_fallback]
+lambda = 32038120320.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+# Effective stresses go into [stress]; no pore pressure here.
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+# Fault trace: sjf1 of the full mesh (R = 70 km smoothed, 500 m), 347
+# vertices, 173.06 km, 2 free tips; the full mesh's tilted 1394 x 894 km
+# box; 500 m within 10 km of the fault, h = 500 m + 0.1 (d - 10 km) to
+# 5 km; 169,058 triangles, 346 fault edges
+# (ucerf2d/mesh/ucerf2d_sjf1_500m_tilted_D415km_R70.json).
+# Tags: 3 fault, 5 the two long walls, 1 the two ends.
+[mesh]
+path  = "ucerf2d/mesh/ucerf2d_sjf1_500m_tilted_D415km_R70.msh"
+order = 1
+
+[velocity]
+use_sidecar = false
+
+# Test stress (report section 4): SHmax N7E, effective principal stresses
+# from the gamma = 0.8, R0 = 0.8 recipe with the deviatoric part x1.3
+# (Chunhui Zhao 2026-10-29, the card "Raise shear: deviatoric x1.3": the
+# best-oriented sections start at tau0/sigma_n' 0.55-0.65, first event about
+# 10 kyr): S1 = 82.85, S2 = 52.33 (vertical), S3 = 21.82 MPa;
+# tension positive.
+[stress]
+kind        = "constant_tensor"
+sigma_xx_pa = -22723874.717053052
+sigma_yy_pa = -81940125.28294693
+sigma_zz_pa = -52331999.99999999
+sigma_xy_pa = -7382134.744727842
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+[numerics]
+cfl       = 0.5
+kv_eta    = 0.1
+kv_scale  = "node"
+kv_length = "inscribed"
+
+# Run length: 10 dynamic phases (max_dynamic_phases below; Chunhui Zhao,
+# 2026-11-01: "can we run for 10 events, which will pass previous stop point
+# if the fix works": run8 stopped at its first switch back, the 2.5D
+# 50-event run aborted in QD after event 5).  tfinal = 500,000 yr of 365
+# days is a backstop (run8's first event came at 12,630 yr; later events
+# about 18,000 yr apart at 0.56 kPa/yr, an estimate).
+[time]
+tfinal     = 7.72632e11   # 24,500 yr of 365 days (this deck; was 1.5768e13)
+dt_initial = 0.01
+
+[output]
+output_dir = "."
+
+[boundary]
+fault_attr    = 3
+natural_attrs = [1]
+
+[fault_geometry]
+ref_normal      = [0.5442133518280823, 0.8389468562978492]
+up              = [0.0, 0.0, 1.0]
+kind            = "vertical_strike_slip"
+orientation     = "propagated"
+pin_by          = "reference"
+tangent         = "pointwise"
+junction_policy = "refuse"
+pin_min_margin  = 0.1
+vertex_normals  = "averaged"   # averaged vertex normals (ucerf2d_saf_sjf_fd.toml: "face")
+
+# BP5's scalars; a = 0.004 everywhere (no tip zones for now), Dc = 0.47 m
+# uniform (keeps mu Dc / (b sigma_n') >= 6.07 km at sigma_n' up to 82.6 MPa),
+# sigma_n' from the tensor.
+[friction.rate_state]
+a_default       = 0.004
+b_default       = 0.03
+Dc_default      = 0.47
+V_0_default     = 1.0e-6
+f_0_default     = 0.6
+V_init_default  = 1.0e-9
+state_evolution = "aging_law"
+eta             = "auto"
+
+[cycle]
+ic                   = "scec_fd"
+switching            = true
+qd_radiation_damping = true
+mesh_scale           = 1.0
+plate_rate           = 1.0e-9
+penalty_factor       = 1.0
+# opt-in sigma_n' floor of the friction law in both regimes (Andy 10-30 card +
+# "okay continue"); 10 MPa here (Chunhui Zhao, 2026-11-02: "with 10MPa cap")
+sigma_n_floor_pa     = 10.0e6
+
+# Fault opening, version B (fault opening B plan rev 1.1; cycle/fault_opening.hpp):
+# full unilateral contact, g >= 0, sigma >= 0, g sigma = 0.  A DOF opens when
+# its elastic sigma_n' turns tensile, and carries a gap g: QD solves the open
+# set on G with the gap columns; the dynamic regime applies the per-point
+# projection (plan eq. 4.4) and the gap rides the fault state as d . n; the
+# gap crosses every regime switch and the checkpoint (V7).  Open DOFs leave
+# max V and the hand-back guard (as version A); [cycle.qd.green] below is
+# required.  floor_taper true: the whole-law taper (plan eq. 6.2, whole-law
+# form; RSLawSigmaN): below the floor the law's stress is scaled by
+# max(sigma_n', 0) / floor and never below min(floor, max(sigma_n', 0)), for
+# any relaxation r (r >= 0: eq. 6.2, as the D9f B6 deck
+# D9f_arc08L2p5_h250_avg_floor10_contact).
+[cycle.opening]
+mode        = "contact"
+floor_taper = true
+
+# Dynamic relaxation during the dwell (quench plan rev1; cycle/cycle_config.hpp
+# [cycle.quench], commit d9e5443e): once the phase's max V drops below V_q
+# (= V_off below) the damping C_q = d M_rho goes on in every element, with
+# d = "auto" = 2 pi c_s,min / L_max, the critical damping of the slowest
+# shear mode of the box (0.0156 1/s here: decay time 2/d = 128 s), off again
+# above V_q or at the phase end.  The term vanishes at rest (the static end
+# state is the same) and enters the implicit damped mass (the step is the
+# same).  D9f (2026-11-06): a quenched step costs the same; the 100 s dwell's
+# jump 1.8e-3 MPa against 5.0e-3 without.
+[cycle.quench]
+on      = true
+d_per_s = "auto"
+
+# The BP5-FD switch; stop after 10 dynamic phases.  T_max 3,600 s: the
+# first run of this deck at 52643d1d (Mac, 2026-11-01) stopped at T_max =
+# 1,200 s after event 1 (exit 4): afterslip in the NW tip zone of saf1 kept
+# max V at 1.74e-3 m/s > V_off, falling about 0.085% per second, so about
+# 1,850 s were needed (estimate); run8 (no tip zones) switched back at
+# 313.5 s (Chunhui Zhao, 2026-11-02: the card "Cap 3,600 s, 10 s volume,
+# 10 events").
+[cycle.switch]
+V_on               = 1.0e-2
+V_off              = 1.0e-3   # this deck: back to 1.0e-3 (the band deck: 1.0e-4); the dwell settles the box
+T_dwell            = 300.0   # this deck: 300 s (was 10): the D9f quench test, band + quench, 2026-11-06
+T_min              = 0.0
+T_max              = 7200.0   # this deck: room for the longer phases (was 3600.0)
+max_dynamic_phases = 0   # this deck: tfinal stops the run (was 10)
+
+# All four faces absorb in the dynamic regime; the long walls keep their
+# frozen load (H3).
+# This deck: off, the PML band below replaces the absorbing faces.
+[cycle.absorbing]
+faces = "off"
+
+# CFS-PML band (PML design plan rev2/rev3, fully-dynamic-pml P1-P4): the
+# same settings as the D9f band deck; the walls stay Dirichlet and
+# plate-loaded in both regimes.
+[cycle.pml]
+on           = true
+kind         = "cfs"
+wall_attrs   = [5, 1]
+thickness_km = 150.0   # 30 elements of 5 km
+power        = 2
+R0           = 1.0e-3
+f_alpha_hz   = 0.01
+wall_speed_factor = "auto"
+
+[cycle.qd]
+solver        = "mumps"
+# petsc_ts_rk45_tandem.cfg with dt_max 10 yr instead of 0.1 yr (Chunhui
+# Zhao 2026-10-29, the card "Raise the QD step cap to 10 yr"): the faults
+# start locked and load at about 0.6 kPa/yr, so 0.1 yr meant about 360k
+# steps to the first event; RK5(4) stays error controlled.
+petsc_options = "ucerf2d/petsc_ts_rk45_ucerf.cfg"
+ts_atol       = 1.0e-7
+ts_rtol       = 1.0e-50
+operators     = "matrix"
+# A rejected step's retry starts from a copy of the step's start state, not
+# from PETSc's rollback; the whole state is checked for NaN after each step
+# (cycle/exact_retry.hpp; this deck's header).
+exact_retry   = true
+# Option I (cycle/qd_implicit.hpp): the implicit QD fault solve, every
+# fault point implicit in every stage of PETSc's arkimex "3" run fully
+# implicit, the contact condition inside each stage solve, an open point
+# sliding at V = -tau / eta.  petsc_options then gives the step
+# controller's options only (its -ts_type is replaced).
+integrator    = "esdirk"
+# Each stage's Newton starts from the last step's dense output instead of
+# from the stage before (cycle/qd_implicit.hpp, StageGuessExtrapolate_).
+stage_guess   = "extrapolate"
+
+# Dense G on the strike slot: N_f = 692 at p = 1 (2 per fault edge; the full model: 3,290); built
+# at every start and restart (no cache in 2D); run8's mesh (N_f 3,288) took
+# 116 s on 8 ranks on the Mac.  Contact refuses the solve-path check (it
+# does not carry the open set's gap): check_every = 0 (the opening deck: 10000).
+[cycle.qd.green]
+check_every = 0
+block       = 8              # cloud check 10-29: block 64 ran out of memory at 13.2 GB (4 ranks); 8 peaks at 12.4 GB
+
+[cycle.prestress]
+V_background = 1.0e-9
+eta_V_init   = false
+
+# BP5 wall motion, no creep: the plane through the Parkfield tip along s
+# splits the walls; every wall node is >= 432 km from it.  Band 0: no
+# prescribed-slip segment (the faults end in the medium).
+[cycle.loading]
+kind         = "plate"
+plane_point  = [-117927.50429603623, -137890.50995349901]
+plane_normal = [-0.5442133518280823, -0.8389468562978492]
+slip_dir     = [-0.8389468562978492, 0.5442133518280823]
+band         = 0.0
+
+[cycle.fields]
+V_init_dip = 0.0
+
+# Velocity-strengthening tip zones (f7866c97): d = the distance along the
+# point's own fault to its nearer free tip; a = 0.08 for d <= 18 km, linear
+# to 0.004 at d = 20 km, 0.004 beyond (b = 0.03).  20 km: the 10-30 tip-zone
+# sweep (straight 100 km fault, plane strain, Dc 0.47) ruptured through
+# 10 and 15 km zones and stopped in 20 km ones; a = 0.08: the simple case
+# T1 (f7866c97), where it stopped all coseismic slip at the tips.  The
+# prestress comes from the tensor, not from a: tau0/sigma_n' is 0.05 to 0.57
+# in the zones against 0.255 at a = 0.08 and the plate rate, so the parts
+# above that creep at first.  saf2 (55.9 km) keeps
+# 15.9 km velocity weakening.
+[cycle.fields.a]
+kind   = "tip_zone"
+width  = 20.0e3
+taper  = 2.0e3
+inside = 0.004
+tip    = 0.08
+
+[cycle.fields.Dc]
+center  = [0.0, 0.0]
+axis1   = [1.0, 0.0]
+half1   = 0.0
+inside  = 0.47
+outside = 0.47
+
+[cycle.fields.V_init]
+center  = [0.0, 0.0]
+axis1   = [1.0, 0.0]
+half1   = 0.0
+inside  = 1.0e-9
+outside = 1.0e-9
+
+# Plane coordinates: x2 along e1 (SE, from the Parkfield tip), x3 along e2
+# (NE).  Rows every 10 yr while slow, every 0.1 s while max V > 1e-3 m/s.
+[cycle.output]
+prefix          = "ucerf2d_sjf1_500m_R70_avg_tip_contact_pml0p01_quench_esdirk_sg_fd"
+# both regimes per fault DOF at every switch back (the jump that stopped run8)
+handback_table  = true
+fast_V          = 1.0e-3
+dt_fast         = 0.1
+dt_slow         = 3.1536e8
+event_V         = 1.0e-3
+event_dwell     = 10.0
+plane_origin    = [-117927.50429603623, -137890.50995349901]
+plane_axis1     = [0.8389468562978492, -0.5442133518280823]
+plane_axis2     = [0.5442133518280823, 0.8389468562978492]
+station_sigma_n = true
+
+# On-fault stations: the base deck's 19 on sjf1 (2 km in from each tip and
+# every 10 km from the north end) and sjf1_026.0km, the failing point of the
+# UCERF runs; name = chain + km along it.
+[[cycle.output.station]]
+name = "sjf1_002.0km"
+x    = [162376.3, -331427.3]
+[[cycle.output.station]]
+name = "sjf1_010.0km"
+x    = [168056.2, -337059.5]
+[[cycle.output.station]]
+name = "sjf1_020.0km"
+x    = [174687.9, -344541.4]
+[[cycle.output.station]]
+name = "sjf1_026.0km"
+x    = [178415.0, -349254.0]
+[[cycle.output.station]]
+name = "sjf1_030.0km"
+x    = [180939.6, -352344.8]
+[[cycle.output.station]]
+name = "sjf1_040.0km"
+x    = [187974.7, -359442.4]
+[[cycle.output.station]]
+name = "sjf1_050.0km"
+x    = [195386.6, -366154.9]
+[[cycle.output.station]]
+name = "sjf1_060.0km"
+x    = [202488.4, -373191.6]
+[[cycle.output.station]]
+name = "sjf1_070.0km"
+x    = [209338.4, -380475.5]
+[[cycle.output.station]]
+name = "sjf1_080.0km"
+x    = [216660.0, -387283.6]
+[[cycle.output.station]]
+name = "sjf1_090.0km"
+x    = [224458.6, -393540.1]
+[[cycle.output.station]]
+name = "sjf1_100.0km"
+x    = [232545.7, -399420.9]
+[[cycle.output.station]]
+name = "sjf1_110.0km"
+x    = [240688.8, -405225.2]
+[[cycle.output.station]]
+name = "sjf1_120.0km"
+x    = [248831.9, -411029.6]
+[[cycle.output.station]]
+name = "sjf1_130.0km"
+x    = [257116.2, -416628.0]
+[[cycle.output.station]]
+name = "sjf1_140.0km"
+x    = [265761.1, -421650.1]
+[[cycle.output.station]]
+name = "sjf1_150.0km"
+x    = [274570.0, -426382.2]
+[[cycle.output.station]]
+name = "sjf1_160.0km"
+x    = [283075.3, -431637.6]
+[[cycle.output.station]]
+name = "sjf1_170.0km"
+x    = [291467.5, -437073.4]
+[[cycle.output.station]]
+name = "sjf1_171.1km"
+x    = [292361.2, -437638.3]
+# Off-fault stations (u and v along east and north): six cities (no basin
+# structure in the model).  Domain A of the source time series: sjf1, in
+# plane coordinates, with 20 km margins.  No profile (the fault is not
+# straight).
+[cycle.benchmark]
+region_x2       = [318000.0, 530000.0]
+region_x3       = [-50000.0, 11000.0]
+rupture_V       = 1.0e-3
+profile_dt_slow = 3.1536e9
+profile_dt_fast = 1.0
+profile_sigma_n = true
+volume_axes     = [[1.0, 0.0], [0.0, 1.0]]
+[[cycle.benchmark.volume_station]]
+name = "los_angeles"
+x    = [92755.0, -355098.2]
+[[cycle.benchmark.volume_station]]
+name = "san_bernardino"
+x    = [180548.4, -347516.4]
+[[cycle.benchmark.volume_station]]
+name = "palm_springs"
+x    = [249946.2, -376775.2]
+[[cycle.benchmark.volume_station]]
+name = "bakersfield"
+x    = [20975.3, -208654.3]
+[[cycle.benchmark.volume_station]]
+name = "lancaster"
+x    = [100223.4, -284446.1]
+[[cycle.benchmark.volume_station]]
+name = "san_diego"
+x    = [195617.5, -502107.4]
+
+[cycle.checkpoint]
+every_qd_steps = 1000
+
+# The fault every 100 yr and every 0.5 s in a dynamic phase.
+[cycle.snapshots.fault]
+dt_qd  = 3.1536e9
+dt_dyn = 0.5
+
+# Map view: the whole 2D domain is the horizontal plane, so the "surface"
+# output is the volume snapshot (displacement and velocity, east and north,
+# float64, 3 points per triangle).  Box = sjf1's extent plus 100 km; every
+# 10 s in a dynamic phase and every 10,000 yr in the QD regime.
+[cycle.snapshots.volume]
+dt_qd   = 3.1536e11
+dt_dyn  = 10.0
+box_min = [60000.0, -539000.0]
+box_max = [395000.0, -230000.0]

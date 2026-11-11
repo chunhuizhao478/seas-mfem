@@ -177,6 +177,7 @@
 #include "fault_opening.hpp"
 #include "exact_retry.hpp"
 #include "qd_implicit.hpp"
+#include "qd_timers.hpp"
 
 #include "../solver/seas_operator.hpp"
 #include "../domain/elasticity_operator.hpp"
@@ -1420,6 +1421,7 @@ private:
       set.jacobian_reuse = cfg_.qd.jacobian_reuse;
       set.newton_local = cfg_.qd.newton_local;
       set.dense_lu = cfg_.qd.dense_lu;
+      set.stage_guess = cfg_.qd.stage_guess;
       set.atol = cfg_.qd.ts_atol;
       set.rtol = cfg_.qd.ts_rtol;
       DomainOp *dom = dom_.get();
@@ -1440,7 +1442,10 @@ private:
                        : "") << "on every rank (about " << std::setprecision(4) << mib << " MiB per rank "
                    "for G and the factor), newton_tol " << set.newton_tol << ", newton_max_it "
                    << set.newton_max_it << ", jacobian_reuse " << set.jacobian_reuse
-                   << ", newton_local " << (set.newton_local ? "on" : "off") << "\n";
+                   << ", newton_local " << (set.newton_local ? "on" : "off")
+                   << (set.stage_guess == "extrapolate"
+                       ? ", stage_guess extrapolate (Newton starts from the last "
+                         "step's dense output)" : "") << "\n";
       }
    }
 
@@ -1535,7 +1540,12 @@ private:
    /// branch of the gap row; gap: max(g, 0) there, 0 elsewhere), and the
    /// same cleaned gap back into @a u.  Returns the DOFs whose flag
    /// changed, over all ranks.  Collective.
-   long UToState_(real_t t, real_t *u)
+   long UToState_(real_t t, real_t *u) { return UToState_(t, u, u, nullptr); }
+
+   /// The same from a read-only @a u.  @a u_out: where the cleaned gap is
+   /// written (null: nowhere).  @a dirty (when not null): the entries, over
+   /// all ranks, whose gap in @a u differs from the cleaned one.
+   long UToState_(real_t t, const real_t *u, real_t *u_out, long *dirty)
    {
       const int N = fault_->NumNodes();
       const int spn = FaultOp::StatePerNode, slot = open_->Slot();
@@ -1543,7 +1553,7 @@ private:
       std::vector<char> flags(static_cast<size_t>(N));
       std::vector<real_t> gap(static_cast<size_t>(N));
       const std::vector<char> &old = open_->Flags();
-      long changed = 0;
+      long changed = 0, ndirty = 0;
       state_.HostReadWrite();
       for (int o = 0; o < N; o++)
       {
@@ -1551,12 +1561,18 @@ private:
          const bool is_open = imp_open_[k] != 0 && u[3 * o + 2] > 0.0;
          flags[k] = is_open ? 1 : 0;
          gap[k] = is_open ? u[3 * o + 2] : 0.0;
-         u[3 * o + 2] = gap[k];
+         if (u[3 * o + 2] != gap[k]) { ndirty++; }
+         if (u_out) { u_out[3 * o + 2] = gap[k]; }
          if ((old[k] != 0) != is_open) { changed++; }
          state_(spn * o + FaultOp::SlipIndex + slot) = u[3 * o];
          state_(spn * o + FaultOp::PsiIndex) = u[3 * o + 1];
       }
       MPI_Allreduce(MPI_IN_PLACE, &changed, 1, MPI_LONG, MPI_SUM, mpi_.GetComm());
+      if (dirty)
+      {
+         MPI_Allreduce(MPI_IN_PLACE, &ndirty, 1, MPI_LONG, MPI_SUM, mpi_.GetComm());
+         *dirty = ndirty;
+      }
       if (changed > 0) { open_->SetFlags(flags); }
       open_->SetGap(gap);
       return changed;
@@ -1603,15 +1619,45 @@ private:
       Vec U;
       PetscCall(TSGetSolution(ts, &U));
       PetscScalar *a = nullptr;
-      PetscCall(VecGetArray(U, &a));
-      self->UToState_(static_cast<real_t>(t), reinterpret_cast<real_t *>(a));
-      PetscCall(VecRestoreArray(U, &a));
+      {
+         QDTimer tm("QDPostState");
+         if (self->cfg_.qd.stage_guess == "extrapolate")
+         {
+            // PETSc restarts the step (TSRestartStep: no stage history, so no
+            // extrapolated first guess) whenever PostStep touched the
+            // solution vector.  Read U, and write the cleaned gap back only
+            // on the steps where the cleaning changes an entry (then on
+            // every rank: PETSc's test is per rank and must agree).
+            const PetscScalar *ar = nullptr;
+            long dirty = 0;
+            PetscCall(VecGetArrayRead(U, &ar));
+            self->UToState_(static_cast<real_t>(t), reinterpret_cast<const real_t *>(ar),
+                            nullptr, &dirty);
+            PetscCall(VecRestoreArrayRead(U, &ar));
+            if (dirty > 0)
+            {
+               PetscCall(VecGetArray(U, &a));
+               const std::vector<real_t> &g = self->open_->Gap();
+               for (size_t o = 0; o < g.size(); o++) { a[3 * o + 2] = g[o]; }
+               PetscCall(VecRestoreArray(U, &a));
+            }
+         }
+         else
+         {
+            PetscCall(VecGetArray(U, &a));
+            self->UToState_(static_cast<real_t>(t), reinterpret_cast<real_t *>(a));
+            PetscCall(VecRestoreArray(U, &a));
+         }
+      }
       self->imp_steps_++;
       self->imp_t_last_ = static_cast<real_t>(t);
-      // the kernel's caches at the accepted state, for the monitor
-      self->op_->SetTime(static_cast<real_t>(t));
-      self->imp_rate_.SetSize(self->state_.Size());
-      self->op_->Mult(self->state_, self->imp_rate_);
+      {
+         // the kernel's caches at the accepted state, for the monitor
+         QDTimer tm("QDPostKernel");
+         self->op_->SetTime(static_cast<real_t>(t));
+         self->imp_rate_.SetSize(self->state_.Size());
+         self->op_->Mult(self->state_, self->imp_rate_);
+      }
       if (!self->CallMonitor_(static_cast<int>(step), static_cast<real_t>(t)))
       {
          PetscCall(TSSetConvergedReason(ts, TS_CONVERGED_USER));
@@ -1963,6 +2009,7 @@ private:
          skip_monitor_step_ = -1;
          return true;
       }
+      QDTimer tm("QDMonitor");
       if (monitor_ && !monitor_(step, t))
       {
          stopped_ = true;

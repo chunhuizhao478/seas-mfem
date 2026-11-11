@@ -124,7 +124,12 @@
 //                   rank factors the Newton matrix, bit for bit as before;
 //                   "shared": one factor by all ranks together,
 //                   cycle/par_dense_lu.hpp, ScaLAPACK; the same solution to
-//                   round-off)
+//                   round-off), stage_guess ["previous"] ("previous": each
+//                   stage's Newton starts from the stage before, bit for
+//                   bit as before; "extrapolate": from the last step's
+//                   dense output, PETSc's
+//                   -ts_arkimex_initial_guess_extrapolate; the converged
+//                   stages agree to within newton_tol)
 //   [cycle.qd.green] the discrete Green's function stage (seas_bp5_full
 //                   --qd-green, items 3 and 4); present means on unless
 //                   enabled = false, and it needs operators = "matrix".
@@ -451,6 +456,7 @@ struct QDConfig
    std::string jacobian_reuse = "step";   ///< "step", "stage" or "iteration"
    bool newton_local = true;              ///< Newton on the point stage equations
    std::string dense_lu = "serial";       ///< "serial" or "shared" (ScaLAPACK)
+   std::string stage_guess = "previous";  ///< "previous" or "extrapolate"
    bool Esdirk() const { return integrator == "esdirk"; }
    QDGreenDeck green;
 };
@@ -1125,7 +1131,8 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       OnlyKeys(q, "cycle.qd", {"solver", "blr_tol", "petsc_options", "ts_atol", "ts_rtol",
                                "operators", "green", "exact_retry", "integrator",
                                "esdirk_type", "newton_tol", "newton_max_it",
-                               "jacobian_reuse", "newton_local", "dense_lu"});
+                               "jacobian_reuse", "newton_local", "dense_lu",
+                               "stage_guess"});
       c.qd.solver = Str(q, "cycle.qd", "solver", c.qd.solver);
       c.qd.blr_tol = Real(q, "cycle.qd", "blr_tol", c.qd.blr_tol);
       c.qd.petsc_options = Str(q, "cycle.qd", "petsc_options", c.qd.petsc_options);
@@ -1138,7 +1145,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
                   "[cycle.qd].integrator = \"" << c.qd.integrator << "\"; use \"dp5\" "
                   "(the explicit RK of petsc_options) or \"esdirk\" (option I)");
       for (const char *k : {"esdirk_type", "newton_tol", "newton_max_it", "jacobian_reuse",
-                            "newton_local", "dense_lu"})
+                            "newton_local", "dense_lu", "stage_guess"})
       {
          MFEM_VERIFY(c.qd.Esdirk() || !q.contains(k), "[cycle.qd]." << k << " needs "
                      "[cycle.qd].integrator = \"esdirk\"");
@@ -1149,6 +1156,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       c.qd.jacobian_reuse = Str(q, "cycle.qd", "jacobian_reuse", c.qd.jacobian_reuse);
       c.qd.newton_local = Bool(q, "cycle.qd", "newton_local", c.qd.newton_local);
       c.qd.dense_lu = Str(q, "cycle.qd", "dense_lu", c.qd.dense_lu);
+      c.qd.stage_guess = Str(q, "cycle.qd", "stage_guess", c.qd.stage_guess);
       if (q.contains("green"))
       {
          const std::string sec = "cycle.qd.green";
@@ -1210,6 +1218,9 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       MFEM_VERIFY(c.qd.dense_lu == "serial" || c.qd.dense_lu == "shared",
                   "[cycle.qd].dense_lu = \"" << c.qd.dense_lu << "\"; use \"serial\" or "
                   "\"shared\"");
+      MFEM_VERIFY(c.qd.stage_guess == "previous" || c.qd.stage_guess == "extrapolate",
+                  "[cycle.qd].stage_guess = \"" << c.qd.stage_guess << "\"; use "
+                  "\"previous\" or \"extrapolate\"");
    }
 
    if (cy.contains("switch"))

@@ -1605,6 +1605,8 @@ int main(int argc, char *argv[])
       bool wall_stop = false;
       auto monitor = [&](int step, real_t tt) -> bool
       {
+         // cycle/qd_timers.hpp: the pieces of the monitor, for -log_view
+         cycle::QDTimer tm_scan("QDMonScan");
          const real_t Vmax = qd.MaxV();
          bool bad = !std::isfinite(Vmax);
          const Vector &st = qd.State();
@@ -1625,6 +1627,8 @@ int main(int argc, char *argv[])
             diverged = true;
             return false;
          }
+         tm_scan.Stop();
+         cycle::QDTimer tm_rows("QDMonRows");
          qd_vel_ok = false;
          const cycle::EventUpdate ev = out->UpdateEvents(tt, Vmax);
          if (bench) { bench->OnEvents(ev, tt, fill, speed_qd); }
@@ -1632,6 +1636,8 @@ int main(int argc, char *argv[])
          out->WriteGlobal(tt, Vmax);
          if (row && bench) { bench->Rows(tt, fill, vol_qd); }
          if (bench) { bench->Profiles(tt, Vmax, fill); }
+         tm_rows.Stop();
+         cycle::QDTimer tm_snaps("QDMonSnaps");
          const bool go = cfg.switching && ctl.GoDynamic(Vmax);
          snaps.QD(tt, step, ctl.Phases(),
                   go ? cycle::SnapReason::ToDynamic : cycle::SnapReason::Cadence, fill,
@@ -1644,6 +1650,8 @@ int main(int argc, char *argv[])
             to_dynamic = true;
             return false;
          }
+         tm_snaps.Stop();
+         cycle::QDTimer tm_ckpt("QDMonCkpt");
          const bool ckpt = cfg.checkpoint_every > 0 && step % cfg.checkpoint_every == 0;
          if (ckpt)
          {

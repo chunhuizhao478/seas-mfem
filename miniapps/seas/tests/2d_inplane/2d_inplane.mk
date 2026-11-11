@@ -997,6 +997,11 @@ test-qd-implicit-green: seas_test_qd_implicit_green
 	@for n in 1 2 4; do \
 	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_qd_implicit_green < /dev/null || exit 1; \
 	done
+	@echo "the same suite with [cycle.qd] stage_guess = extrapolate"
+	@for n in 1 2; do \
+	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_qd_implicit_green \
+	      -qd_stage_guess extrapolate < /dev/null || exit 1; \
+	done
 
 # cycle/par_dense_lu.hpp (ParDenseLU): the dense LU shared by all ranks
 # (ScaLAPACK) against the serial LU of the implicit QD fault solve, and the
