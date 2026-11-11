@@ -57,6 +57,8 @@ namespace seas
 class NitscheMass
 {
 public:
+   NitscheMass(const NitscheMass &) = delete;   // block_ptr_ points into block_inv_
+   NitscheMass &operator=(const NitscheMass &) = delete;
    NitscheMass(ParMesh &mesh, int order, const Vector &rho_per_elem,
                const std::map<int, DenseMatrix> *damping_blocks = nullptr,
                real_t half_dt = 0.0, const Vector *half_dt_per_elem = nullptr)
@@ -150,6 +152,10 @@ public:
          fes_.GetElementDofs(e, elem_dofs_[e]);
          inv_rho_(e) = 1.0 / rho_per_elem(e);
       }
+      // Apply's lookup: one pointer per element (null: undamped) instead of
+      // a map search per element and step; the map's nodes do not move
+      block_ptr_.assign(block_inv_.empty() ? 0 : ne, nullptr);
+      for (const auto &kv : block_inv_) { block_ptr_[kv.first] = &kv.second; }
    }
 
    /// a = M^{-1} r, component-wise.  Fixed operation order per element and
@@ -166,10 +172,10 @@ public:
       {
          const Array<int> &dofs = elem_dofs_[e];
          const int nd = dofs.Size();
-         if (!block_inv_.empty())
+         if (!block_ptr_.empty())
          {
-            auto it = block_inv_.find(static_cast<int>(e));
-            if (it != block_inv_.end())
+            const DenseMatrix *Binv = block_ptr_[e];
+            if (Binv)
             {
                // Damped element: (rho_e M_e (x) I_D + half_dt C_e)^{-1}.
                x.SetSize(dim_ * nd);
@@ -179,7 +185,7 @@ public:
                   {
                      x(c * nd + k) = r(c * ndofs_ + dofs[k]);
                   }
-               it->second.Mult(x, y);
+               Binv->Mult(x, y);
                for (int c = 0; c < dim_; ++c)
                   for (int k = 0; k < nd; ++k)
                   {
@@ -224,6 +230,7 @@ private:
    real_t half_dt_ = 0.0;
    Vector inv_rho_;
    std::map<int, DenseMatrix> block_inv_;
+   std::vector<const DenseMatrix *> block_ptr_;   ///< per element, into block_inv_
    std::vector<DenseMatrix> minv_;
    std::vector<Array<int>> elem_dofs_;
 };
