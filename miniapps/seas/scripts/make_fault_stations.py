@@ -38,8 +38,20 @@ Usage (from miniapps/seas):
     python3 scripts/make_fault_stations.py tpv205         # one problem
     python3 scripts/make_fault_stations.py --check        # files up to date?
 
+  tpv34   TPV34_Description_v10.pdf, Part 5 (thirty-five points: strike -12,
+          -6, 0, 6, 12 km x depth 0, 1, 2.4, 5, 7.5, 10, 12 km), named as the
+          description names them (faultst<strike>dp<depth>, units of 100 m)
+
+Off-fault stations ([output.body_stations]) go to
+<problem>/stations/<problem>_body_stations.csv, same columns:
+  tpv34   TPV34_Description_v10.pdf, Part 6 (fifty-six points: 28 boreholes,
+          each at the surface and at 2.4 km depth), named
+          body<normal>st<strike>dp<depth>, units of 100 m.  The description's
+          z (fault normal, positive on the far side) is the mesh Y.
+
 Scope: Chunhui Zhao, 2026-10-16 (TPV205/TPV104 plan rev 1.3, decision Q4); TPV6, TPV7
-and TPV31 added 2026-10-19 (TPV6/TPV7/TPV31 plan rev 1).
+and TPV31 added 2026-10-19 (TPV6/TPV7/TPV31 plan rev 1); TPV34 and the off-fault
+files added 2026-11-12 (TPV34 plan rev 2).
 """
 import argparse
 import os
@@ -53,6 +65,14 @@ _TPV205_POINTS = [(-12, 0), (-12, 7.5), (-7.5, 0), (-7.5, 7.5), (-4.5, 0), (-4.5
                   (7.5, 0), (7.5, 7.5), (12, 0), (12, 7.5)]
 _TPV6_POINTS = [(0, 0), (-12, 0), (12, 0), (-12, 7.5), (12, 7.5)]
 _TPV31_POINTS = [(s, d) for s in (0, 6, 12) for d in (0, 0.2, 0.5, 1, 2.4, 3, 5, 7.5, 10, 12)]
+_TPV34_POINTS = [(s, d) for s in (-12, -6, 0, 6, 12) for d in (0, 1, 2.4, 5, 7.5, 10, 12)]
+# off-fault: (fault normal km, strike km, depth km), description Part 6
+_TPV34_BODY = [(n, s, d)
+               for n, strikes in ((-15, (-15, 0, 15)), (-9, (-20, -10, 0, 10, 20)),
+                                  (-3, (-20, -10, 0, 10, 20)), (0, (-20, 20)),
+                                  (3, (-20, -10, 0, 10, 20)), (9, (-20, -10, 0, 10, 20)),
+                                  (15, (-15, 0, 15)))
+               for s in strikes for d in (0, 2.4)]
 
 
 def _km(v):
@@ -69,6 +89,22 @@ def scec_name(s, d):
     return f"x2_{_km(s)}_x3_{_km(d)}"
 
 
+def _h(v, signed=True):
+    """SCEC station-name field: units of 100 m, three digits, minus sign when negative."""
+    n = int(round(10 * abs(v)))
+    return ("-" if (signed and v < 0) else "") + f"{n:03d}"
+
+
+def faultst_name(s, d):
+    """faultst<strike>dp<depth>, as the TPV34 description names the on-fault stations."""
+    return f"faultst{_h(s)}dp{_h(d, False)}"
+
+
+def body_name(n, s, d):
+    """body<normal>st<strike>dp<depth>, as the TPV34 description names the off-fault stations."""
+    return f"body{_h(n)}st{_h(s)}dp{_h(d, False)}"
+
+
 PROBLEMS = {
     "tpv102": ("SCEC TPV102 on-fault stations", [(flt_name(s, d), s, d) for s, d in _TPV102_POINTS]),
     "tpv104": ("SCEC TPV104 on-fault stations", [(scec_name(s, d), s, d) for s, d in _TPV102_POINTS]),
@@ -76,6 +112,13 @@ PROBLEMS = {
     "tpv6": ("SCEC TPV6 on-fault stations", [(scec_name(s, d), s, d) for s, d in _TPV6_POINTS]),
     "tpv7": ("SCEC TPV7 on-fault stations", [(scec_name(s, d), s, d) for s, d in _TPV6_POINTS]),
     "tpv31": ("SCEC TPV31 on-fault stations", [(scec_name(s, d), s, d) for s, d in _TPV31_POINTS]),
+    "tpv34": ("SCEC TPV34 on-fault stations", [(faultst_name(s, d), s, d) for s, d in _TPV34_POINTS]),
+}
+
+# Off-fault stations: (name, strike km, fault normal km, depth km).
+BODY = {
+    "tpv34": ("SCEC TPV34 off-fault stations",
+              [(body_name(n, s, d), s, n, d) for n, s, d in _TPV34_BODY]),
 }
 
 
@@ -94,8 +137,18 @@ def render(problem):
     return "\n".join(out) + "\n"
 
 
-def target(root, problem):
-    return os.path.join(root, problem, "stations", f"{problem}_fault_stations.csv")
+def render_body(problem):
+    title, rows = BODY[problem]
+    out = [f"# {title}, written by scripts/make_fault_stations.py; do not edit by hand.",
+           "# Global frame of the mesh: X along strike, Y fault normal, Z up (m); fault on Y = 0.",
+           "name,x,y,z"]
+    for name, s, n, d in rows:
+        out.append(f"{name},{_num(1000.0 * s)},{_num(1000.0 * n)},{_num(0.0 - 1000.0 * d)}")
+    return "\n".join(out) + "\n"
+
+
+def target(root, problem, kind="fault"):
+    return os.path.join(root, problem, "stations", f"{problem}_{kind}_stations.csv")
 
 
 def main():
@@ -108,17 +161,20 @@ def main():
     for p in a.problems:
         if p not in PROBLEMS:
             sys.exit(f"unknown problem {p!r}; known: {', '.join(sorted(PROBLEMS))}")
-        path = os.path.normpath(target(a.out_root, p))
-        text = render(p)
-        if a.check:
-            same = os.path.exists(path) and open(path).read() == text
-            print(f"{'ok     ' if same else 'DIFFERS'} {path}")
-            bad += 0 if same else 1
-            continue
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(text)
-        print(f"wrote {path} ({len(PROBLEMS[p][1])} stations)")
+        files = [(os.path.normpath(target(a.out_root, p)), render(p), len(PROBLEMS[p][1]))]
+        if p in BODY:
+            files.append((os.path.normpath(target(a.out_root, p, "body")), render_body(p),
+                          len(BODY[p][1])))
+        for path, text, count in files:
+            if a.check:
+                same = os.path.exists(path) and open(path).read() == text
+                print(f"{'ok     ' if same else 'DIFFERS'} {path}")
+                bad += 0 if same else 1
+                continue
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write(text)
+            print(f"wrote {path} ({count} stations)")
     sys.exit(1 if bad else 0)
 
 

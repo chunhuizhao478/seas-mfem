@@ -272,10 +272,13 @@ void DataField3D::load_(const std::string& sidecar_path,
                  << "', expected 'data_projection_v1'");
    }
    crs_ = read_string_attr_(file, "crs");
-   if (crs_ != "EPSG:32611")
+   // "mesh-local": the axes are the coordinates of the consumer's own frame
+   // (scripts/cvm/build_cvm_table.py tables with a frame); the reader never
+   // used the CRS beyond this gate.
+   if (crs_ != "EPSG:32611" && crs_ != "mesh-local")
    {
       H5Fclose(file);
-      MFEM_ABORT("DataField3D: only crs='EPSG:32611' supported, got '"
+      MFEM_ABORT("DataField3D: only crs='EPSG:32611' or 'mesh-local' supported, got '"
                  << crs_ << "' in '" << sidecar_path << "'");
    }
    const std::string units_root = read_string_attr_(file, "units");

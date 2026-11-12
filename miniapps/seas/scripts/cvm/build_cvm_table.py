@@ -33,8 +33,9 @@ Two steps, so that the machine with the model needs numpy only:
          rules, floored points, command, sha256 of the .npz).
   pack   build_cvm_table.py pack TABLE.npz TABLE.h5        (needs h5py)
          writes the HDF5 table in the data_projection_v1 layout
-         (document/features_dev/data_projection_schema_v1.md) with the
-         preset's "table_crs" label, the frame and the rules as attributes,
+         (document/features_dev/data_projection_schema_v1.md; fields Vp,
+         Vs, density) with the preset's "table_crs" label, the frame and the
+         rules as attributes,
          and TABLE.h5.sha256.
 
 Presets: tpv34/configs/tpv34_cvm_table.json (SCEC TPV34, CVM-H 15.1.0).
@@ -185,10 +186,12 @@ def cmd_pack(a):
         f.attrs["npz_sha256"] = sha256(a.npz)
         for k in ("x", "y", "z"):
             f.create_dataset("/grid/" + k, data=t[k].astype("f8"))
-        for k, unit in (("vp", "m/s"), ("vs", "m/s"), ("rho", "kg/m3")):
+        # field names of the existing velocity tables (spatial_velocity.cpp)
+        for k, name, unit in (("vp", "Vp", "m/s"), ("vs", "Vs", "m/s"),
+                              ("rho", "density", "kg/m3")):
             v = t[k].astype("f8")
             assert v.shape == (len(t["x"]), len(t["y"]), len(t["z"])) and np.isfinite(v).all()
-            ds = f.create_dataset("/fields/" + k, data=v)
+            ds = f.create_dataset("/fields/" + name, data=v)
             ds.attrs["units"] = unit
             ds.attrs["min_value"] = float(v.min())
             ds.attrs["max_value"] = float(v.max())

@@ -1,0 +1,173 @@
+# =====================================================================
+#  SCEC TPV34 (Imperial Fault, Model 1): vertical strike-slip fault in the
+#  3-D CVM-H 15.1.0 medium, linear slip weakening with shallow cohesion,
+#  run through the Nitsche dynamic-rupture driver
+#  (seas_nitsche_dyn_driver; TPV34 plan rev 2).
+#
+#  TPV34 is TPV31 with a 3-D material: the fault, friction, prestress rule
+#  and nucleation are those of tpv31/configs/tpv31_nitsche.toml.  Values
+#  from tpv34/benchmark_document/TPV34_Description_v10.pdf, in the code
+#  frame of the other Nitsche benchmarks (X along strike, Y fault normal,
+#  Z up; the description's x = X, y = -Z (depth), z = Y).
+#
+#   - Material: [material] sidecar_hdf5, a 3-D table of Vp, Vs and density
+#     read with trilinear interpolation and sampled once per element at its
+#     centroid.  The table is built from CVM-H by
+#     scripts/cvm/build_cvm_table.py with the preset
+#     tpv34/configs/tpv34_cvm_table.json (the description's rotation into
+#     UTM 11, minimum query depth 100 m, and the floor Vp 2984, Vs 1400,
+#     rho 2220.34 where Vp <= 2984 or Vs <= 1400).  It is already in the
+#     mesh frame, so no [material.frame] is needed.  The table is not
+#     committed (444 MB): pass its path with --material-table, or put it at
+#     the path below.  outside_table = "abort": the table covers the whole
+#     mesh box, so a point outside it is an error.
+#   - Prestress: sigma = (mu(x) / mu_0) S with mu_0 = 32.03812032 GPa and S
+#     the global tensor below, tension positive: sigma_XX = sigma_YY =
+#     -60 MPa, sigma_XY = +30 MPa ([stress_scale_by_mu]); mu(x) is the
+#     table value at the fault point.
+#   - Nucleation: instantaneous circular overstress, 4.95 MPa mu/mu_0 inside
+#     1400 m of (0, 0, -7500), cosine taper to zero at 2000 m, from t = 0.
+#   - Friction: mu_s 0.58, mu_d 0.45, d_0 0.18 m; cohesion 0.000425 MPa/m x
+#     (2400 m - depth) above 2400 m depth (1.02 MPa at the surface).
+#   - The fault ends at the 30 x 15 km area (welded outside).
+#   - Stations: tpv34/stations/tpv34_fault_stations.csv (35 points: strike
+#     -12, -6, 0, 6, 12 km x depth 0, 1, 2.4, 5, 7.5, 10, 12 km).
+#   - Run time 20 s.
+#
+#  Regularization: Kelvin-Voigt (eta_bar 0.1) and Prakash-Clifton
+#  (v* = 1 m/s, L = 0.01 m) as in the TPV205 and TPV31 gold decks.
+#
+#  Meshes are generated, not committed (from miniapps/seas):
+#    gmsh -3 tpv34/mesh/tpv34_nitsche_1000m.geo -format msh22 -o tpv34/mesh/tpv34_nitsche_1000m.msh
+#    gmsh -3 tpv34/mesh/tpv34_nitsche_200m.geo  -format msh22 -o tpv34/mesh/tpv34_nitsche_200m.msh
+#
+#  Scope: Chunhui Zhao, 2026-11-12.
+# =====================================================================
+
+[meta]
+schema_version = 1
+law            = "slip_weakening"
+description    = "SCEC TPV34 (Imperial Fault, 3-D CVM-H medium, linear slip weakening) via the Nitsche dynamic-rupture driver."
+
+[problem]
+tag = "tpv34"
+
+[material]
+kind          = "sidecar_hdf5"
+sidecar_path  = "tpv34/material/tpv34_cvmh_table.h5"
+outside_table = "abort"
+
+# Not used by the table material; kept because the loader requires it.
+[material_constant_fallback]
+lambda = 32043759360.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+[mesh]
+# 1000 m smoke mesh; production overrides with --mesh (200 m).
+path  = "tpv34/mesh/tpv34_nitsche_1000m.msh"
+order = 1
+
+[velocity]
+use_sidecar = false
+
+# Global Cauchy tensor at mu = mu_0, TENSION POSITIVE; [stress_scale_by_mu]
+# multiplies it by mu(x) / mu_0 at every fault point.
+[stress]
+kind        = "constant_tensor"
+sigma_xx_pa = -60.0e6
+sigma_yy_pa = -60.0e6
+sigma_zz_pa = 0.0
+sigma_xy_pa = 30.0e6
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+[stress_scale_by_mu]
+mu_ref_pa = 32.03812032e9   # mu_0 of the description
+
+[nucleation]
+kind = "instantaneous_overstress_circular"
+
+[nucleation.instantaneous_overstress_circular]
+center_x_m   = 0.0
+center_y_m   = 0.0
+center_z_m   = -7500.0
+radius_m     = 1400.0
+taper_m      = 600.0
+delta_tau_pa = 4.95e6
+mu_ref_pa    = 32.03812032e9
+
+[numerics]
+cfl            = 0.5
+penalty_factor = 1.0
+kv_eta    = 0.1
+kv_scale  = "node"
+kv_length = "inscribed"
+
+[time]
+tfinal     = "20s"
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.05s"
+
+[output]
+output_dir     = "output_tpv34_nitsche"
+restart_prefix = "cp"
+paraview_enabled       = true
+paraview_fault         = "hdf5"
+paraview_fault_dt      = "0.05s"
+paraview_fault_zfp_tol = 0.0
+paraview_fault_deflate_level = 1
+paraview_free_surface  = "off"
+
+[output.stations]
+file             = "tpv34/stations/tpv34_fault_stations.csv"
+snap_tolerance_m = 700.0
+
+[friction.slip_weakening]
+mu_s_default     = 0.58
+mu_d_default     = 0.45
+d_c_default      = 0.18
+cohesion_default = 0.0
+
+[[friction.slip_weakening.spatial]]
+kind                   = "depth"
+z_min_m                = -2400.0
+z_max_m                =     0.0
+cohesion_taper_axis    = "z"
+cohesion_ref_depth_m   = 2400.0
+cohesion_grad_pa_per_m = 425.0    # 0.000425 MPa/m
+cohesion_floor_pa      = 0.0
+
+[boundary]
+fault_attr      = 103
+natural_attrs   = [101]
+absorbing_attrs = [105]
+
+[fault_geometry]
+ref_normal        = [0.0, -1.0, 0.0]
+up                = [0.0,  0.0, 1.0]
+kind              = "vertical_strike_slip"
+orientation       = "propagated"
+pin_by            = "reference"
+tangent           = "pointwise"
+junction_policy   = "refuse"
+pin_min_margin    = 0.1
+
+[hypocenter]
+x_m                 = 0.0
+y_m                 = 0.0
+z_m                 = -7500.0
+nucleation_radius_m = 2000.0
+
+[diagnostics]
+energy_balance = false
+
+[friction.prakash_clifton]
+v_star = 1.0      # m/s
+length = 0.01     # m

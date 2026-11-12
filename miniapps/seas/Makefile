@@ -3227,6 +3227,8 @@ $(TEST_NITSCHE_TPV_SETUP_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
                              dynamic/fault_side_stations.hpp \
                              dynamic/fault_station_file.hpp \
                              dynamic/nitsche_deck_fields.hpp \
+                             dynamic/nitsche_table_material.hpp \
+                             io/data_field_3d.hpp \
                              dynamic/heterogeneous_material.hpp \
                              friction/slip_weakening_closure.hpp \
                              solver/nitsche_cfl.hpp \
@@ -3237,11 +3239,36 @@ $(TEST_NITSCHE_TPV_SETUP_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
 	    -c $< -o $@
 
 seas_test_nitsche_tpv_setup: $(TEST_NITSCHE_TPV_SETUP_OBJ) $(SPATIAL_FRICTION_OBJ) \
-                             $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+                             $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+                             $(DATA_FIELD_3D_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
 	    $(TEST_NITSCHE_TPV_SETUP_OBJ) $(SPATIAL_FRICTION_OBJ) $(SPATIAL_NUCLEATION_OBJ) \
-	    $(HETEROGENEOUS_MATERIAL_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	    $(HETEROGENEOUS_MATERIAL_OBJ) $(DATA_FIELD_3D_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# The 3-D table material of the Nitsche driver (TPV34 plan rev 2, step S2,
+# Chunhui Zhao 2026-11-12): dynamic/nitsche_table_material.hpp.
+TEST_NITSCHE_TABLE_MATERIAL_SRC = tests/unit/test_nitsche_table_material.cpp
+TEST_NITSCHE_TABLE_MATERIAL_OBJ = $(TEST_NITSCHE_TABLE_MATERIAL_SRC:.cpp=.o)
+$(TEST_NITSCHE_TABLE_MATERIAL_OBJ): %.o: $(SRC)%.cpp \
+                             domain/nitsche_material_sample.hpp \
+                             dynamic/nitsche_table_material.hpp \
+                             dynamic/heterogeneous_material.hpp \
+                             io/data_field_3d.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_table_material: $(TEST_NITSCHE_TABLE_MATERIAL_OBJ) \
+                                  $(HETEROGENEOUS_MATERIAL_OBJ) $(DATA_FIELD_3D_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_NITSCHE_TABLE_MATERIAL_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) $(DATA_FIELD_3D_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-table-material: seas_test_nitsche_table_material
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_table_material
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_table_material
 
 test-nitsche-tpv-setup: seas_test_nitsche_tpv_setup
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_tpv_setup
@@ -3523,6 +3550,8 @@ $(NITSCHE_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
                              dynamic/fault_station_file.hpp \
                              dynamic/fault_side_stations.hpp \
                              dynamic/nitsche_deck_fields.hpp \
+                             dynamic/nitsche_table_material.hpp \
+                             io/data_field_3d.hpp \
                              dynamic/heterogeneous_material.hpp \
                              dynamic/station_copy_average.hpp \
                              dynamic/mesh_parts.hpp \
@@ -3536,10 +3565,11 @@ $(NITSCHE_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
 
 seas_nitsche_dyn_driver: $(NITSCHE_DYN_DRIVER_OBJ) $(SPATIAL_FRICTION_OBJ) \
                          $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
-                         $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ)
+                         $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ) $(DATA_FIELD_3D_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(NITSCHE_DYN_DRIVER_OBJ) \
 	    $(SPATIAL_FRICTION_OBJ) $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
-	    $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ) $(MFEM_LIBS)
+	    $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ) $(DATA_FIELD_3D_OBJ) $(MFEM_LIBS) \
+	    $(HDF5_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Speed-next profiling (Chunhui Zhao, 2026-10-20): the same driver with debug
@@ -3554,10 +3584,11 @@ $(NITSCHE_DYN_DRIVER_G_OBJ): $(SRC)$(NITSCHE_DYN_DRIVER_SRC) $(NITSCHE_DYN_DRIVE
 
 seas_nitsche_dyn_driver_g: $(NITSCHE_DYN_DRIVER_G_OBJ) $(SPATIAL_FRICTION_OBJ) \
                            $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
-                           $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ)
+                           $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ) $(DATA_FIELD_3D_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(NITSCHE_DYN_DRIVER_G_OBJ) \
 	    $(SPATIAL_FRICTION_OBJ) $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
-	    $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ) $(MFEM_LIBS)
+	    $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ) $(DATA_FIELD_3D_OBJ) $(MFEM_LIBS) \
+	    $(HDF5_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # P6 long checks (minutes each; np=8 unless noted): T-15 energy balance and

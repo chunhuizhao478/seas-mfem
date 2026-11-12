@@ -109,12 +109,22 @@
 //
 // Material (TPV6/TPV7/TPV31 plan rev 1, Chunhui Zhao, 2026-10-19): [material]
 // kind constant, depth_profile_1d or halfspace_across_fault (the shared
-// loader's tables; dynamic/nitsche_deck_fields.hpp).  The operator samples the
+// loader's tables; dynamic/nitsche_deck_fields.hpp), or sidecar_hdf5 (below).  The operator samples the
 // material once per element at its centroid, so every surface where it jumps
 // (the halfspace plane, a depth where the layer table jumps) must be a mesh
 // surface: the run aborts, naming the surface, when an element has vertices
-// strictly on both sides.  The sidecar material is not wired; the rate-and-
-// state laws take the constant material only.
+// strictly on both sides.  The rate-and-state laws take the constant material
+// only.
+//
+// Table material (TPV34 plan rev 2, Chunhui Zhao, 2026-11-12): [material] kind
+// = "sidecar_hdf5" reads Vp, Vs and density from the 3-D table sidecar_path (a
+// data_projection_v1 HDF5 file, e.g. from scripts/cvm/build_cvm_table.py;
+// --material-table PATH replaces the deck's path), one copy per node.
+// outside_table = "abort" | "edge_value" says what a mesh point outside the
+// table does (typed, no default).  The optional [material.frame] maps a mesh
+// point to the table point: q_xy = origin_m + x_axis X + y_axis Y, q_z = Z
+// (three 2-vectors, all typed); without it the table is in the mesh frame.
+// The table is smooth: no jump surfaces to check.
 //
 // Shear-modulus scaling (same plan, TPV31): optional top-level
 // [stress_scale_by_mu] mu_ref_pa multiplies the prestress (background and
@@ -935,7 +945,13 @@ int main(int argc, char *argv[])
    if (cfg.material.kind != spatial::MaterialKind::Constant)
    {
       const toml::value &tm = root.at("material");
-      RefuseUnknownKeys(tm, "[material]", {"kind", "depth_axis", "halfspace_across_fault"});
+      RefuseUnknownKeys(tm, "[material]", {"kind", "depth_axis", "halfspace_across_fault",
+                                           "sidecar_path", "outside_table", "frame"});
+      MFEM_VERIFY(cfg.material.kind == spatial::MaterialKind::SidecarHDF5
+                  || !(tm.contains("sidecar_path") || tm.contains("outside_table")
+                       || tm.contains("frame")),
+                  "[material] sidecar_path, outside_table and frame belong to kind "
+                  "\"sidecar_hdf5\" only");
       auto require_all = [](const toml::value &tb, const std::string &where,
                             const std::vector<std::string> &keys) {
          RefuseUnknownKeys(tb, where, keys);
@@ -964,7 +980,55 @@ int main(int argc, char *argv[])
          }
       }
    }
-   NitscheDeckMaterial deck_material = BuildNitscheDeckMaterial(cfg);
+   TableFrame table_frame;
+   bool table_clamp = false;
+   MPI_Comm table_node_comm = MPI_COMM_NULL;
+   if (cfg.material.kind == spatial::MaterialKind::SidecarHDF5)
+   {
+      const toml::value &tm = root.at("material");
+      cfg.material.sidecar_path = ArgStr(argc, argv, "--material-table", cfg.material.sidecar_path);
+      MFEM_VERIFY(tm.contains("outside_table"), "[material] outside_table (\"abort\" or "
+                  "\"edge_value\") is required with kind sidecar_hdf5 (no default)");
+      const std::string ot = tm.at("outside_table").as_string();
+      MFEM_VERIFY(ot == "abort" || ot == "edge_value", "[material] outside_table must be "
+                  "\"abort\" or \"edge_value\"; got '" << ot << "'");
+      table_clamp = (ot == "edge_value");
+      if (tm.contains("frame"))
+      {
+         const toml::value &tf = tm.at("frame");
+         RefuseUnknownKeys(tf, "[material.frame]", {"origin_m", "x_axis", "y_axis"});
+         auto vec2 = [&tf](const char *key, real_t out[2]) {
+            MFEM_VERIFY(tf.contains(key) && tf.at(key).is_array() && tf.at(key).size() == 2,
+                        "[material.frame] needs " << key << " = [a, b] (no defaults)");
+            for (int c = 0; c < 2; c++)
+            {
+               const auto &v = tf.at(key).at(c);
+               MFEM_VERIFY(v.is_floating() || v.is_integer(), "[material.frame] " << key
+                           << " must hold two numbers");
+               out[c] = v.is_floating() ? static_cast<real_t>(v.as_floating())
+                                        : static_cast<real_t>(v.as_integer());
+            }
+         };
+         vec2("origin_m", table_frame.origin);
+         vec2("x_axis", table_frame.x_axis);
+         vec2("y_axis", table_frame.y_axis);
+         MFEM_VERIFY(std::abs(table_frame.x_axis[0] * table_frame.y_axis[1]
+                              - table_frame.x_axis[1] * table_frame.y_axis[0]) > 1e-12,
+                     "[material.frame] x_axis and y_axis are parallel");
+      }
+      {
+         std::ifstream tfile(cfg.material.sidecar_path);
+         MFEM_VERIFY(tfile.good(), "[material] sidecar_path: cannot open the table '"
+                     << cfg.material.sidecar_path << "' (--material-table PATH replaces the "
+                     "deck's path)");
+      }
+      // one copy of the table per node (DataField3D's shared-memory mode)
+      MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, g_rank, MPI_INFO_NULL,
+                          &table_node_comm);
+   }
+   NitscheDeckMaterial deck_material = BuildNitscheDeckMaterial(cfg, table_frame, table_clamp,
+                                                                table_node_comm);
+   if (table_node_comm != MPI_COMM_NULL) { MPI_Comm_free(&table_node_comm); }
    MaterialField material = deck_material.field;
    // The LTS clusters (plan item 7) are sized with one wave speed, the
    // constant material's (cfg.material_fallback): refuse the other kinds.
@@ -1314,6 +1378,19 @@ int main(int argc, char *argv[])
       MPI_Allreduce(MPI_IN_PLACE, across.data(), static_cast<int>(across.size()), MPI_LONG_LONG,
                     MPI_SUM, MPI_COMM_WORLD);
       if (g_rank == 0) { std::cout << deck_material.log << std::flush; }
+      if (deck_material.table && !table_clamp)
+      {
+         // every mesh point must lie in the table (a clean message before the
+         // first out-of-table query aborts)
+         Vector lo, hi;
+         pmesh.GetBoundingBox(lo, hi);
+         MFEM_VERIFY(deck_material.table->ContainsMeshBox(lo.GetData(), hi.GetData()),
+                     "[material] sidecar_hdf5: the mesh box x [" << lo(0) << ", " << hi(0)
+                     << "] y [" << lo(1) << ", " << hi(1) << "] z [" << lo(2) << ", " << hi(2)
+                     << "] m (through [material.frame]) is not inside the table "
+                     << cfg.material.sidecar_path << "; extend the table or set outside_table "
+                     "= \"edge_value\"");
+      }
       const MaterialJumps &J = deck_material.jumps;
       MFEM_VERIFY(across[0] == 0, "[material] halfspace_across_fault: " << across[0]
                   << " elements have vertices on both sides of the plane x0 (" << J.x0[0] << ", "

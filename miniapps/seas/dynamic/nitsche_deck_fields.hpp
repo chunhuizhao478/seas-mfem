@@ -5,8 +5,9 @@
 // Chunhui Zhao, 2026-10-19).
 //
 //   NitscheDeckMaterial / BuildNitscheDeckMaterial
-//       the MaterialField of [material] kind constant, depth_profile_1d or
-//       halfspace_across_fault, the wrappers that own its coefficients, and
+//       the MaterialField of [material] kind constant, depth_profile_1d,
+//       halfspace_across_fault or sidecar_hdf5 (a 3-D table,
+//       nitsche_table_material.hpp; TPV34 plan rev 2), the wrappers that own its coefficients, and
 //       mu_at(x), the shear modulus at a point where it is single valued
 //       (empty for halfspace_across_fault: mu jumps across the fault).
 //   MaterialJumps / CountElementsAcrossJumps
@@ -32,6 +33,7 @@
 
 #include "mfem.hpp"
 #include "heterogeneous_material.hpp"
+#include "nitsche_table_material.hpp"
 #include "spatial_nucleation.hpp"
 #include "../fault/fault_orientation.hpp"
 #include "../spatial/code/spatial_friction.hpp"
@@ -68,6 +70,7 @@ struct NitscheDeckMaterial
 {
    std::unique_ptr<DepthProfile1DMaterial> depth;
    std::unique_ptr<HalfspaceAcrossFaultMaterial> halfspace;
+   std::unique_ptr<NitscheTableMaterial> table;
    MaterialField field;
    ShearModulusFn mu_at;   ///< empty when mu is not single valued on the fault
    MaterialJumps jumps;
@@ -89,17 +92,26 @@ inline void DeckPointAtDepth(real_t d, int axis, real_t x[3])
    x[axis] = (axis == 2) ? -d : d;
 }
 
-/// The material of the deck.  Refuses the sidecar kind (not wired in the
-/// Nitsche driver).  Each layer top below the surface is a jump when the
+/// The material of the deck.  [material] kind sidecar_hdf5 reads the table
+/// cfg.material.sidecar_path through `table_frame` (identity: the table is in
+/// the mesh frame), clamping outside it when `table_clamp`; `node_comm` as
+/// MakeNitscheTableMaterial's.  Each layer top below the surface is a jump when the
 /// material just above it differs from the material just below it, judged
 /// with the profile's own evaluator.
-inline NitscheDeckMaterial BuildNitscheDeckMaterial(const spatial::SpatialFrictionConfig &cfg)
+inline NitscheDeckMaterial BuildNitscheDeckMaterial(const spatial::SpatialFrictionConfig &cfg,
+                                                    const TableFrame &table_frame = TableFrame(),
+                                                    bool table_clamp = false
+#ifdef MFEM_USE_MPI
+                                                    , MPI_Comm node_comm = MPI_COMM_NULL
+#endif
+                                                   )
 {
    NitscheDeckMaterial m;
    std::ostringstream log;
    log << std::setprecision(10);
    MFEM_VERIFY(!cfg.velocity.use_sidecar,
-               "Nitsche driver: the sidecar material ([velocity] use_sidecar = true) is not wired");
+               "Nitsche driver: [velocity] use_sidecar must be false; a table material is "
+               "[material] kind = \"sidecar_hdf5\" with sidecar_path");
    switch (cfg.material.kind)
    {
       case spatial::MaterialKind::Constant:
@@ -182,8 +194,40 @@ inline NitscheDeckMaterial BuildNitscheDeckMaterial(const spatial::SpatialFricti
              << ", rho " << hs.rho_far << ", mu " << hs.rho_far * hs.vs_far * hs.vs_far << "\n";
          break;
       }
+      case spatial::MaterialKind::SidecarHDF5:
+      {
+         m.table = MakeNitscheTableMaterial(cfg.material.sidecar_path, table_frame, table_clamp
+#ifdef MFEM_USE_MPI
+                                            , node_comm
+#endif
+                                           );
+         m.field = m.table->field;
+         const NitscheTableMaterial *tm = m.table.get();
+         m.mu_at = [tm](const real_t *x) {
+            real_t l, mu, r;
+            tm->eval_at_xyz(x, l, mu, r);
+            return mu;
+         };
+         const std::array<real_t, 6> &b = tm->vp->BBox();
+         log << "  material: sidecar_hdf5, table " << cfg.material.sidecar_path << " (crs "
+             << tm->vp->Crs() << ")\n"
+             << "    table box x [" << b[0] << ", " << b[1] << "] y [" << b[2] << ", " << b[3]
+             << "] z [" << b[4] << ", " << b[5] << "] m; outside it: "
+             << (table_clamp ? "edge value" : "abort") << "\n"
+             << "    Vp [" << tm->vp->MinValue() << ", " << tm->vp->MaxValue() << "] m/s, Vs ["
+             << tm->vs->MinValue() << ", " << tm->vs->MaxValue() << "] m/s, density ["
+             << tm->rho->MinValue() << ", " << tm->rho->MaxValue() << "] kg/m3\n";
+         if (table_frame.IsIdentity()) { log << "    frame: identity (table in the mesh frame)\n"; }
+         else
+         {
+            log << "    frame: origin (" << table_frame.origin[0] << ", " << table_frame.origin[1]
+                << "), x_axis (" << table_frame.x_axis[0] << ", " << table_frame.x_axis[1]
+                << "), y_axis (" << table_frame.y_axis[0] << ", " << table_frame.y_axis[1] << ")\n";
+         }
+         break;
+      }
       default:
-         MFEM_ABORT("Nitsche driver: [material] kind sidecar_hdf5 is not wired");
+         MFEM_ABORT("Nitsche driver: unknown [material] kind");
    }
    m.log = log.str();
    return m;
