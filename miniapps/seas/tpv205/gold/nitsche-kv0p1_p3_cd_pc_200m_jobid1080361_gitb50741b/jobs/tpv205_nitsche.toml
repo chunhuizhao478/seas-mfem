@@ -1,0 +1,190 @@
+# =====================================================================
+#  SCEC TPV205 — linear slip weakening, run through the Nitsche
+#  dynamic-rupture driver (seas_nitsche_dyn_driver; benchmark plan rev 1.3,
+#  phase B4).
+#
+#  Built from tpv102/configs/tpv102_nitsche_pc_p1_kv0p1.toml (the validated
+#  damped TPV102 deck) with the TPV205 values of the benchmark description
+#  (tpv205/benchmark_document/TPV5_forwebsite.pdf):
+#
+#   - [meta] law = "slip_weakening": SlipWeakeningClosure, mu from |slip| at
+#     the start of the step (decisions Q2/Q3), starting at rest.
+#   - Prestress: background global tensor sigma_XY = +70 MPa,
+#     sigma_YY = -120 MPa (tension positive, spec I1; with nhat = (0,-1,0)
+#     the SCEC along-strike shear is +70 MPa and sigma_n = 120 MPa), and
+#     three [[stress_region]] boxes, the 3 km x 3 km patches at 7.5 km depth:
+#     X = 0: 81.6 MPa (above the static yield 0.677 x 120 = 81.24 MPa, so the
+#     patch nucleates at t = 0); X = -7.5 km: 78.0 MPa; X = +7.5 km: 62.0 MPa.
+#     The patch edges are element edges of the TPV205 meshes (conforming
+#     sub-surfaces), so each fault face gets exactly one value.
+#   - No nucleation table: the 81.6 MPa patch is static.
+#   - No barrier rules (plan R1): the meshes end the fault at the 30 x 15 km
+#     area, which locks it outside; the SAFS deck's inclusive barrier rules
+#     would lock every Nitsche node on the fault's edges.
+#   - Boundary attributes of the TPV205 meshes: free 101, fault 103,
+#     absorbing 105.
+#   - Stations: tpv205/stations/tpv205_fault_stations.csv (16 points).
+#
+#  Regularization: Kelvin-Voigt (eta_bar 0.1) and Prakash-Clifton
+#  (v* = 1 m/s, L = 0.01 m) are switched on as in the validated TPV102 deck;
+#  remove [friction.prakash_clifton] or set kv_eta = 0 to switch either off
+#  for a given run.
+#
+#  Meshes are generated, not committed (from miniapps/seas, pythonenv):
+#    gmsh -3 tpv205/mesh/tpv2053d_1000m.geo -format msh22 -o tpv205/mesh/tpv2053d_1000m.msh
+#    gmsh -3 tpv205/mesh/tpv2053d_200m.geo  -format msh22 -o tpv205/mesh/tpv2053d_200m.msh
+#  The 1000 m mesh does not resolve the cohesive zone (Lambda_0 ~ 620 m):
+#  smoke runs only.  Production uses --mesh with the 200 m (or 100 m) mesh.
+#
+#  Scope: Chunhui Zhao, 2026-10-16.
+# =====================================================================
+
+[meta]
+schema_version = 1
+law            = "slip_weakening"
+description    = "SCEC TPV205 (linear slip weakening) via the Nitsche dynamic-rupture driver — global prestress tensor and stress regions."
+
+[problem]
+tag = "tpv205"   # output file prefix; the stations come from [output.stations]
+
+# Material: homogeneous, rho = 2670, cs = 3464, cp = 6000:
+#   mu = rho cs^2, lambda = rho (cp^2 - 2 cs^2).
+[material_constant_fallback]
+lambda = 32043759360.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0     # sigma_min of the Nitsche sigma_n_eff range check
+
+[mesh]
+# 1000 m smoke mesh; production overrides with --mesh (200 m, 100 m).
+path  = "tpv205/mesh/tpv2053d_1000m.msh"
+order = 1
+
+[velocity]
+use_sidecar = false
+
+# Background prestress, global Cauchy tensor in the code frame (X along
+# strike, Y fault normal, Z up), TENSION POSITIVE.
+[stress]
+kind        = "constant_tensor"
+sigma_xx_pa = 0.0
+sigma_yy_pa = -120.0e6
+sigma_zz_pa = 0.0
+sigma_xy_pa = 70.0e6
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+# The three TPV205 patches (3 km squares centred at 7.5 km depth).  Each box
+# replaces the background tensor inside it; the last match wins (the boxes
+# are disjoint).  Y is left open: any fault face inside the X-Z box counts.
+[[stress_region]]           # nucleation patch, X = 0
+x_min_m     = -1500.0
+x_max_m     =  1500.0
+z_min_m     = -9000.0
+z_max_m     = -6000.0
+sigma_xx_pa = 0.0
+sigma_yy_pa = -120.0e6
+sigma_zz_pa = 0.0
+sigma_xy_pa = 81.6e6
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+[[stress_region]]           # X = -7.5 km
+x_min_m     = -9000.0
+x_max_m     = -6000.0
+z_min_m     = -9000.0
+z_max_m     = -6000.0
+sigma_xx_pa = 0.0
+sigma_yy_pa = -120.0e6
+sigma_zz_pa = 0.0
+sigma_xy_pa = 78.0e6
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+[[stress_region]]           # X = +7.5 km
+x_min_m     = 6000.0
+x_max_m     = 9000.0
+z_min_m     = -9000.0
+z_max_m     = -6000.0
+sigma_xx_pa = 0.0
+sigma_yy_pa = -120.0e6
+sigma_zz_pa = 0.0
+sigma_xy_pa = 62.0e6
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+[numerics]
+cfl            = 0.5        # fraction of C(p) (P3)
+penalty_factor = 1.0        # IP penalty scale (Nitsche driver only)
+# Kelvin-Voigt damping (Day et al. 2005 A8): beta_e = kv_eta (1/3) (h_e/p) / c_s,e, h_e = 6V/A
+kv_eta    = 0.1
+kv_scale  = "node"
+kv_length = "inscribed"
+
+[time]
+tfinal     = "12s"
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.05s"
+
+[output]
+output_dir     = "output_tpv205_nitsche"
+restart_prefix = "cp"
+# Fault ParaView output: ONE <output_dir>/fault.vtkhdf per run.
+paraview_enabled       = true
+paraview_fault         = "hdf5"
+paraview_fault_dt      = "0.02s"
+paraview_fault_zfp_tol = 0.0
+paraview_fault_deflate_level = 1
+paraview_free_surface  = "off"   # the Nitsche driver writes no free-surface slice
+
+# On-fault stations: the committed station file (scripts/make_fault_stations.py),
+# each station snapped to the nearest fault node in 3-D; the run aborts if that
+# node is farther than snap_tolerance_m.  700 m covers the 1000 m mesh at
+# p = 1, whose farthest station (the centre of a 3 km patch) is 634 m from its
+# node; finer meshes snap closer (<prefix>_station_snap.txt lists them).
+[output.stations]
+file             = "tpv205/stations/tpv205_fault_stations.csv"
+snap_tolerance_m = 700.0
+
+# Linear slip weakening: mu = mu_s - (mu_s - mu_d) min(|slip|/d_c, 1).
+# No [[friction.slip_weakening.spatial]] barrier rules (see the header).
+[friction.slip_weakening]
+mu_s_default     = 0.677
+mu_d_default     = 0.525
+d_c_default      = 0.40
+cohesion_default = 0.0
+
+[boundary]
+fault_attr      = 103
+natural_attrs   = [101]
+absorbing_attrs = [105]
+
+[fault_geometry]
+ref_normal        = [0.0, -1.0, 0.0]
+up                = [0.0,  0.0, 1.0]
+kind              = "vertical_strike_slip"
+orientation       = "propagated"
+pin_by            = "reference"
+tangent           = "pointwise"
+junction_policy   = "refuse"
+pin_min_margin    = 0.1
+
+[hypocenter]
+x_m                 = 0.0
+y_m                 = 0.0
+z_m                 = -7500.0
+nucleation_radius_m = 1500.0
+
+[diagnostics]
+energy_balance = false
+
+# Prakash-Clifton regularization of the normal stress the law sees
+# (SeisSol TPV6/7 values, as the validated TPV102 deck).
+[friction.prakash_clifton]
+v_star = 1.0      # m/s
+length = 0.01     # m

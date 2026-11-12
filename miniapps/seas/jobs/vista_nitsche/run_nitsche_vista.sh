@@ -1,7 +1,8 @@
 #!/bin/bash
 # Shared body of the Vista benchmark jobs (Chunhui Zhao, 2026-10-16).  Sourced by
-# tpv{205,104}_200m_p{1,2}.sbatch, tpv{205,104}_100m_p1.sbatch and tpv{205,104}_mirror_*.sbatch, which set
-# PROB, DECK, MESH, ORDER, TFINAL and RES (default 200m).
+# tpv{205,104}_200m_p{1,2,3}.sbatch, tpv102_200m_p3.sbatch, tpv{205,104}_100m_p1.sbatch,
+# tpv{205,104}_mirror_*.sbatch, tpv{6,7}_100m_p{1,2,3}.sbatch and tpv31_200m_p{1,2,3}.sbatch, which
+# set PROB, DECK, MESH, ORDER, TFINAL and RES (default 200m).
 # Runs only from a clean pushed checkout (repo CLAUDE.md guard) whose driver was built at
 # the same commit (build_verify_vista.sbatch writes miniapps/seas/BUILD_COMMIT_VISTA) and
 # whose mesh checksum is in MESH_SHA256_VISTA or MESH_SHA256_MIRROR_VISTA (meshes made on Vista by
@@ -31,7 +32,7 @@ echo "host $(hostname)  nodes $SLURM_JOB_NUM_NODES  ranks $SLURM_NTASKS"
 [ -x ./seas_nitsche_dyn_driver ] || { echo "ERROR: seas_nitsche_dyn_driver not built"; exit 2; }
 [ "$(cat BUILD_COMMIT_VISTA 2>/dev/null)" = "$HEAD" ] \
    || { echo "ERROR: driver built at '$(cat BUILD_COMMIT_VISTA 2>/dev/null)', checkout is $HEAD; rerun build_verify_vista.sbatch"; exit 2; }
-[ -f "$MESH" ] || { echo "ERROR: $MESH missing; build_verify_vista.sbatch generates the 200 m meshes, make_mirror_meshes_vista.sbatch the mirror ones, the 100 m ones are copied in"; exit 2; }
+[ -f "$MESH" ] || { echo "ERROR: $MESH missing; build_verify_vista.sbatch generates the 200 m meshes and the TPV6 100 m one, make_mirror_meshes_vista.sbatch the mirror ones, the TPV205 and TPV104 100 m ones are copied in"; exit 2; }
 SHA=$(sha256sum "$MESH" | cut -d' ' -f1)
 grep -q "^$SHA  $MESH\$" MESH_SHA256_VISTA MESH_SHA256_MIRROR_VISTA jobs/vista_nitsche/meshes.sha256 2>/dev/null \
    || { echo "ERROR: $MESH sha256 $SHA not in MESH_SHA256_VISTA, MESH_SHA256_MIRROR_VISTA or jobs/vista_nitsche/meshes.sha256"; exit 2; }
@@ -44,10 +45,18 @@ OUT=$SCRATCH/nitsche_benchmarks/${PROB}_${RES:-200m}_p${ORDER}_$SLURM_JOB_ID
 mkdir -p $OUT
 cp "$DECK" $OUT/
 { echo "commit $HEAD"; echo "mesh $MESH $SHA"; echo "deck $DECK"; echo "job $SLURM_JOB_ID nodes $SLURM_JOB_NUM_NODES ranks $SLURM_NTASKS"; } > $OUT/RUN_INFO.txt
+# Memory on the first node, 2 s samples, for the speed record: time MemTotal MemAvailable CommitLimit
+# Committed_AS (kB).  Vista compute nodes use strict overcommit, so allocations fail once
+# Committed_AS reaches CommitLimit (half the RAM), well before MemAvailable runs out.
+( while :; do echo "$(date +%s) $(awk '/^MemTotal|^MemAvailable|^CommitLimit|^Committed_AS/{print $2}' /proc/meminfo | tr '\n' ' ')"; sleep 2; done ) > $OUT/meminfo_kB.log &
+MON=$!
 T0=$(date +%s)
 ibrun ./seas_nitsche_dyn_driver --config "$DECK" --mesh "$MESH" --order $ORDER --tfinal $TFINAL \
       --output-dir $OUT --log-every 1000 > $OUT/driver.log 2>&1
 rc=$?
+kill $MON 2>/dev/null; wait $MON 2>/dev/null
 echo "driver exit $rc after $(( $(date +%s) - T0 )) s"; grep "=== done" $OUT/driver.log || tail -20 $OUT/driver.log
+grep -a "time in ode.Step per rank\|fault work:\|fault ParaView output: [0-9]* frames" $OUT/driver.log
+awk '{u=($2-$3)/1048576; if(u>m)m=u; t=$2/1048576; if($5/1048576>c)c=$5/1048576; l=$4/1048576} END{printf "first node memory: peak in use %.1f GB of %.1f GB, peak committed %.1f of %.1f GiB (2 s samples)\n", m, t, c, l}' $OUT/meminfo_kB.log
 du -sh $OUT
 exit $rc
