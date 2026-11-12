@@ -32,6 +32,8 @@
 #   - The fault ends at the 30 x 15 km area (welded outside).
 #   - Stations: tpv34/stations/tpv34_fault_stations.csv (35 points: strike
 #     -12, -6, 0, 6, 12 km x depth 0, 1, 2.4, 5, 7.5, 10, 12 km).
+#   - Off-fault stations: tpv34/stations/tpv34_body_stations.csv (56 points:
+#     28 map positions at 0 and 2.4 km depth), [output.body_stations].
 #   - Run time 20 s.
 #
 #  Regularization: Kelvin-Voigt (eta_bar 0.1) and Prakash-Clifton
@@ -128,6 +130,15 @@ paraview_free_surface  = "off"
 [output.stations]
 file             = "tpv34/stations/tpv34_fault_stations.csv"
 snap_tolerance_m = 700.0
+
+# Off-fault stations (56: 28 surface points and the same points at 2.4 km
+# depth).  Components in the description's frame: h along strike (+x = +X),
+# v vertical, positive down (+y = -Z), n fault normal (+z = +Y).
+[output.body_stations]
+file   = "tpv34/stations/tpv34_body_stations.csv"
+h_axis = [1.0, 0.0,  0.0]
+v_axis = [0.0, 0.0, -1.0]
+n_axis = [0.0, 1.0,  0.0]
 
 [friction.slip_weakening]
 mu_s_default     = 0.58

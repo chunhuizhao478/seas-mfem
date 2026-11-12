@@ -169,6 +169,20 @@
 // log10 theta (aging law, with V_0, f_0, b from [friction.rate_state]), psi
 // (strong rate weakening) or the slip path (slip weakening).
 //
+// Off-fault stations (TPV34 plan rev 2, step S3; Chunhui Zhao, 2026-11-12):
+// [output.body_stations] file = "..." (CSV name,x,y,z in the mesh frame,
+// written by scripts/make_fault_stations.py) and h_axis, v_axis, n_axis
+// (three orthogonal unit vectors of the mesh frame; all four keys are
+// required, there are no defaults).  Each station writes
+// <prefix>_offfault_<name>.dat with columns t h_disp h_vel v_disp v_vel n_disp
+// n_vel (the SCEC off-fault layout): the displacement and the velocity at
+// the point, along the three axes, as the mean over the element(s) holding
+// the point (dynamic/body_station_writer.hpp).  Rows are taken every
+// --station-every steps and reach the files every --station-flush-every
+// rows and at the end; a killed run loses the rows since the last flush.  A
+// station outside the mesh stops the run.  No table, no files, and the run
+// is the same bit for bit.
+//
 // --lts-report 1 (plan item 7, local time stepping, phase P0): rank 0 prints
 // the rate-2 cluster report of solver/nitsche_lts_setup.hpp for the serial
 // mesh and the run stops before the partition.  --lts-report-cap n picks the
@@ -208,6 +222,7 @@
 #include "../dynamic/spatial_nucleation.hpp"
 #include "../dynamic/fault_station_file.hpp"
 #include "../dynamic/fault_side_stations.hpp"
+#include "../dynamic/body_station_writer.hpp"
 #include "../dynamic/nitsche_deck_fields.hpp"
 #include "../dynamic/station_copy_average.hpp"
 #include "../dynamic/lts_partition.hpp"   // METIS with element weights (plan item 6)
@@ -766,6 +781,8 @@ int main(int argc, char *argv[])
    const toml::value *t_out = DeckTable(root, "output");
    const toml::value *t_st = (t_out && t_out->contains("stations"))
                              ? &t_out->at("stations") : nullptr;
+   const toml::value *t_bst = (t_out && t_out->contains("body_stations"))
+                              ? &t_out->at("body_stations") : nullptr;
 
    const std::string mesh_path = ArgStr(argc, argv, "--mesh", cfg.mesh.path);
    const int p = ArgInt(argc, argv, "--order", cfg.mesh.order);
@@ -2079,6 +2096,71 @@ int main(int argc, char *argv[])
    {
       std::cout << "  no [output.stations] table: no station files\n";
    }
+   // off-fault stations (header, "Off-fault stations")
+   std::unique_ptr<BodyStationWriter> body_stations;
+   if (t_bst)
+   {
+      MFEM_VERIFY(t_bst->is_table() && t_bst->contains("file") && t_bst->contains("h_axis")
+                  && t_bst->contains("v_axis") && t_bst->contains("n_axis"),
+                  "[output.body_stations] needs file (the station CSV) and h_axis, v_axis, n_axis "
+                  "(unit vectors of the mesh frame); there are no defaults");
+      RefuseUnknownKeys(*t_bst, "[output.body_stations]", {"file", "h_axis", "v_axis", "n_axis"});
+      real_t axes[3][3];
+      const char *an[3] = {"h_axis", "v_axis", "n_axis"};
+      for (int a = 0; a < 3; a++)
+      {
+         const toml::value &v = t_bst->at(an[a]);
+         MFEM_VERIFY(v.is_array() && v.as_array().size() == 3, "[output.body_stations] " << an[a]
+                     << " must be a list of 3 numbers");
+         for (int d = 0; d < 3; d++)
+         {
+            const toml::value &x = v.as_array()[d];
+            MFEM_VERIFY(x.is_floating() || x.is_integer(), "[output.body_stations] " << an[a]
+                        << " must be a list of 3 numbers");
+            axes[a][d] = x.is_floating() ? real_t(x.as_floating()) : real_t(x.as_integer());
+         }
+      }
+      for (int a = 0; a < 3; a++)
+      {
+         for (int b = a; b < 3; b++)
+         {
+            const real_t dot = axes[a][0] * axes[b][0] + axes[a][1] * axes[b][1]
+                               + axes[a][2] * axes[b][2];
+            MFEM_VERIFY(std::fabs(dot - (a == b ? 1.0 : 0.0)) <= 1e-6, "[output.body_stations] "
+                        << an[a] << " . " << an[b] << " = " << dot << "; the three axes must be "
+                        "orthogonal unit vectors");
+         }
+      }
+      const std::string bst_path = TomlStr(t_bst, "file", "");
+      const std::vector<FaultStation> bst_list = ReadFaultStationFile(bst_path);
+      const NitscheMaterialSample &smp = op.Sample();
+      body_stations = std::make_unique<BodyStationWriter>(
+         op.Elasticity().GetFESpace(), bst_list, axes, out_dir, prefix, station_flush_every,
+         [&smp](int e, real_t &vp, real_t &vs, real_t &rho) {
+            const real_t lam = smp.LambdaGF()(e), mu = smp.MuGF()(e);
+            rho = smp.RhoGF()(e);
+            vp = std::sqrt((lam + 2.0 * mu) / rho);
+            vs = std::sqrt(mu / rho);
+         });
+      if (g_rank == 0)
+      {
+         int cmin = 1 << 30, cmax = 0;
+         for (int s = 0; s < body_stations->NumStations(); s++)
+         {
+            cmin = std::min(cmin, body_stations->NumCopies(s));
+            cmax = std::max(cmax, body_stations->NumCopies(s));
+         }
+         std::cout << "  off-fault stations from " << bst_path << " (" << bst_list.size()
+                   << "): displacement and velocity at the point, mean over the " << cmin
+                   << " to " << cmax << " element(s) holding it; files " << prefix
+                   << "_offfault_<name>.dat, rows every " << station_every << " step(s), written "
+                   "every " << station_flush_every << " row(s) and at the end\n";
+      }
+   }
+   else if (g_rank == 0)
+   {
+      std::cout << "  no [output.body_stations] table: no off-fault station files\n";
+   }
    std::vector<DOFData> dofdata(no);
    auto fill_dofdata = [&]() {
       const Vector &d = op.Slip(), &V = op.SlipRate(), &psi = op.State();
@@ -2310,6 +2392,7 @@ int main(int argc, char *argv[])
       stations->WriteStep(t, dofdata);
       if (side_stations) { side_stations->WriteStep(t, U, Ud, dofdata); }
    }
+   if (body_stations) { body_stations->WriteStep(t, U, Ud); }
    real_t max_ratio_run = 0.0, max_V_run = 0.0, min_sig_run = 1e300, max_sig_run = -1e300;
    real_t min_pc_run = 1e300, max_pc_run = -1e300;
    // this rank's time inside ode.Step; step 1 is kept apart because it also
@@ -2369,6 +2452,7 @@ int main(int argc, char *argv[])
          stations->WriteStep(t, dofdata);
          if (side_stations) { side_stations->WriteStep(t, U, Ud, dofdata); }
       }
+      if (body_stations && s % station_every == 0) { body_stations->WriteStep(t, U, Ud); }
       if (stations && !station_signal_seen && StationSignal() != 0)
       {
          // header, "Station output cost": this rank's files, from here every row
@@ -2438,6 +2522,7 @@ int main(int argc, char *argv[])
    }
    if (stations) { stations->Close(); }
    if (side_stations) { side_stations->Close(); }
+   if (body_stations) { body_stations->Close(); }
    if (mon && g_rank == 0)
    {
       std::cout << std::setprecision(6) << "  energy balance: sum rho = " << mon->SumRho()

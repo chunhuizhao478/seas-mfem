@@ -3225,6 +3225,7 @@ TEST_NITSCHE_TPV_SETUP_OBJ = $(TEST_NITSCHE_TPV_SETUP_SRC:.cpp=.o)
 $(TEST_NITSCHE_TPV_SETUP_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
                              domain/nitsche_wave_operator.hpp \
                              dynamic/fault_side_stations.hpp \
+                             dynamic/body_station_writer.hpp \
                              dynamic/fault_station_file.hpp \
                              dynamic/nitsche_deck_fields.hpp \
                              dynamic/nitsche_table_material.hpp \
@@ -3269,6 +3270,26 @@ seas_test_nitsche_table_material: $(TEST_NITSCHE_TABLE_MATERIAL_OBJ) \
 test-nitsche-table-material: seas_test_nitsche_table_material
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_table_material
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_table_material
+
+# Off-fault ("body") station writer of the Nitsche driver (TPV34 plan rev 2,
+# step S3; Chunhui Zhao 2026-11-12): dynamic/body_station_writer.hpp.
+TEST_BODY_STATIONS_SRC = tests/unit/test_body_stations.cpp
+TEST_BODY_STATIONS_OBJ = $(TEST_BODY_STATIONS_SRC:.cpp=.o)
+$(TEST_BODY_STATIONS_OBJ): %.o: $(SRC)%.cpp \
+                             dynamic/body_station_writer.hpp \
+                             dynamic/fault_station_file.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+seas_test_body_stations: $(TEST_BODY_STATIONS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_BODY_STATIONS_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-body-stations: seas_test_body_stations
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_body_stations
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_body_stations
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 3 ./seas_test_body_stations
 
 test-nitsche-tpv-setup: seas_test_nitsche_tpv_setup
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_tpv_setup
@@ -3549,6 +3570,7 @@ $(NITSCHE_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
                              spatial/code/spatial_friction.hpp \
                              dynamic/fault_station_file.hpp \
                              dynamic/fault_side_stations.hpp \
+                             dynamic/body_station_writer.hpp \
                              dynamic/nitsche_deck_fields.hpp \
                              dynamic/nitsche_table_material.hpp \
                              io/data_field_3d.hpp \
