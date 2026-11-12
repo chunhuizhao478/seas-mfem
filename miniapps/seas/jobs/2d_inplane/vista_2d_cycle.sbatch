@@ -139,29 +139,31 @@ srun --overlap -N "$SLURM_NNODES" -n "$SLURM_NNODES" --ntasks-per-node=1 \
    "$ROOT/miniapps/seas/jobs/fd_cycle/vista_memlog.sh" 60 > "$OUT/memlog_$SLURM_JOB_ID.txt" 2>&1 &
 MEMLOG=$!
 trap 'kill $MEMLOG 2>/dev/null' EXIT
+# grep -a below: an MPI warning with NUL bytes in the log (knem, job 1139596)
+# makes grep call the log binary and print no lines.
 s=$(date +%s)
 ibrun ./seas_fd_cycle_driver \
    --deck "$DECK" --output-dir "$OUT" "${RESTART[@]}" "${EXTRA[@]}" \
    --wall-limit "$WALL" --log-every 1000 > "$LOG" 2>&1
 rc=$?
 echo "seas_fd_cycle_driver exit $rc after $(( $(date +%s) - s )) s"
-grep -E "restarted from|QD stages|Green|snapshots:|absorbing boundary:|dynamic stepping|sigma_n' (floor|relaxation)|wall limit .* reached" "$LOG"
-grep -A12 "dynamic phase [0-9]* summary" "$LOG"
-grep -E "QD -> dynamic at|back to QD at|STOP" "$LOG"
+grep -a -E "restarted from|QD stages|Green|snapshots:|absorbing boundary:|dynamic stepping|sigma_n' (floor|relaxation)|wall limit .* reached" "$LOG"
+grep -a -A12 "dynamic phase [0-9]* summary" "$LOG"
+grep -a -E "QD -> dynamic at|back to QD at|STOP" "$LOG"
 for f in switch catalog events; do echo "--- ${PREFIX}_$f.txt"; cat "$OUT/${PREFIX}_$f.txt" 2>/dev/null; done
-grep -A12 "=== fd_cycle summary" "$LOG"
+grep -a -A12 "=== fd_cycle summary" "$LOG"
 ls -la "$OUT"/*.vtkhdf 2>/dev/null
 du -sh "$OUT"
 # The outcome from the log as well as the exit code, which comes through
 # ibrun and mpirun (as vista_bp3_fd.sbatch): a wall-limit stop is exit 8
 # whatever code arrives, and exit 0 counts as the end only when the summary
 # says "status: done" or "stopped in dynamic phase N (exit 0)".
-if [ $rc -ne 8 ] && grep -q "s reached at step .*checkpoint written, stopping" "$LOG"; then
+if [ $rc -ne 8 ] && grep -a -q "s reached at step .*checkpoint written, stopping" "$LOG"; then
    echo "the log shows the wall-limit stop (exit code $rc): treated as exit 8"; rc=8
 fi
 if [ $rc -eq 0 ]; then
-   grep -E "^  (final time|dynamic phases|events|status): " "$LOG"
-   grep -q -E "^  status: (done|stopped in dynamic phase [0-9]+ \(exit 0\))$" "$LOG" \
+   grep -a -E "^  (final time|dynamic phases|events|status): " "$LOG"
+   grep -a -q -E "^  status: (done|stopped in dynamic phase [0-9]+ \(exit 0\))$" "$LOG" \
       || { echo "ERROR: exit 0 but the summary says neither 'done' nor the last dynamic phase"; rc=9; }
 fi
 if [ $rc -eq 0 ]; then

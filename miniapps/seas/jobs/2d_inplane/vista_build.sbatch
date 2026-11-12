@@ -121,9 +121,11 @@ mpirun -n 2 ./seas_fd_cycle_driver --deck "$S4/d60_1km.toml" --output-dir "$S4/b
    > "$S4/b/run2.log" 2>&1
 rb2=$?
 echo "snapshot runs: A exit $ra, B exit $rb1 then $rb2 (restart), $(( $(date +%s) - s )) s"
-grep -E "snapshots:|absorbing boundary:|QD -> dynamic|end: " "$S4/a/run.log"
-grep -E "restarted from" "$S4/b/run2.log"
-DT=$(grep -m1 -oE "steps of [0-9.e+-]+ s" "$S4/a/run.log" | awk '{print $3}')
+grep -a -E "snapshots:|absorbing boundary:|QD -> dynamic|end: " "$S4/a/run.log"
+grep -a -E "restarted from" "$S4/b/run2.log"
+# grep -a: an MPI warning with NUL bytes in the log (knem, node i618-143, job
+# 1139596) made grep call it binary and DT came back empty.
+DT=$(grep -a -m1 -oE "steps of [0-9.e+-]+ s" "$S4/a/run.log" | awk '{print $3}')
 rc=1
 if [ $ra -eq 0 ] && [ $rb1 -eq 0 ] && [ $rb2 -eq 0 ] && [ -n "$DT" ]; then
    python3 tests/cycle/check_snapshots.py --dir "$S4/a" --prefix $P --deck "$S4/d60_1km.toml" \
