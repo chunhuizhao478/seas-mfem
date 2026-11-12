@@ -15,7 +15,8 @@
 # CYCLE_DECK (required, relative to miniapps/seas).  One node, in a chain of
 # 24 h jobs that all write one run folder (as vista_bp3_fd.sbatch):
 #   first link (no argument):  a fresh run from t = 0 in
-#                              <checkout>-runs/<prefix>_<job id>
+#                              <run root>/<prefix>_<job id>; the run root is
+#                              <checkout>-runs, or CYCLE_RUN_ROOT (below)
 #   later links ($1 = that folder): --restart from its last checkpoint, in
 #                                   place (the files are trimmed to the
 #                                   checkpoint and continued)
@@ -43,6 +44,14 @@
 # <run>/memlog_<job id>.txt.
 # Disk: the UCERF decks' volume snapshots, about 35 MB each every 10 s of a
 # dynamic phase: about 6.5 GB per 1,850 s phase (the deck's note).
+# CYCLE_RUN_ROOT (optional; Chunhui Zhao, 2026-11-11: "i still need volume
+# output, so put results on scratch"): an absolute path under which the first
+# link makes its run folder instead of <checkout>-runs, e.g.
+# CYCLE_RUN_ROOT=$SCRATCH/seas-mfem-fully-dynamic-fault-opening-runs for a
+# run with volume snapshots (40 events: about 190 GB).  The folder is made if
+# it is missing.  Later links take the run folder as $1 as before.  TACC
+# purges scratch files that were not accessed for some days (the user guide's
+# purge policy): copy what must be kept out of scratch after the run.
 # Cost: 1 node x <= 24 h per link on gg = <= 8 SU per link (EAR20006).
 # CYCLE_DRIVER_ARGS (optional): more driver options for this link, e.g.
 # --allow-other-commit for a restart from a checkpoint another commit wrote
@@ -93,7 +102,12 @@ git ls-files --error-unmatch "$MESH" > /dev/null 2>&1 \
 # ---- this link: fresh, or a restart in place ----
 RESTART=()
 if [ -z "$RUN" ]; then
-   OUT=$ROOT-runs/${PREFIX}_$SLURM_JOB_ID
+   RUNROOT=${CYCLE_RUN_ROOT:-$ROOT-runs}
+   case "$RUNROOT" in
+      /*) ;;
+      *) echo "ERROR: CYCLE_RUN_ROOT '$RUNROOT' is not an absolute path"; exit 2 ;;
+   esac
+   OUT=$RUNROOT/${PREFIX}_$SLURM_JOB_ID
    [ ! -e "$OUT" ] || { echo "ERROR: $OUT exists"; exit 2; }
    mkdir -p "$OUT" || exit 2
    echo "first link: a fresh run in $OUT"

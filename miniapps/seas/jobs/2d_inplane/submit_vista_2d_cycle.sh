@@ -24,6 +24,11 @@
 # binaries are already built at this code (BUILD_COMMIT_VISTA), no build.
 # CYCLE_NTASKS: ranks per run (default 144, one gg node); CYCLE_WALL_S the
 # driver's wall limit (vista_2d_cycle.sbatch).
+# CYCLE_RUN_ROOT: an absolute path for the run folders instead of
+# <checkout>-runs, e.g. $SCRATCH/seas-mfem-fully-dynamic-fault-opening-runs
+# for a run with volume snapshots; CYCLE_DRIVER_ARGS: more driver options for
+# every link, e.g. "--early-sync --rank-costs" (both: vista_2d_cycle.sbatch;
+# they reach the jobs through the environment, --export=ALL).
 # Cost: build <= 1.3 SU, <= 8 SU per link (EAR20006, gg, 0.33 SU per
 # node-hour).
 # Submit only on Chunhui Zhao's typed go for these jobs.
@@ -38,6 +43,15 @@ git -C "$ROOT" fetch -q origin || { echo "ERROR: git fetch failed"; exit 2; }
 [ -n "$(git -C "$ROOT" branch -r --contains HEAD)" ] \
    || { echo "ERROR: HEAD $(git -C "$ROOT" rev-parse --short HEAD) is not on GitHub"; exit 2; }
 echo "commit $(git -C "$ROOT" rev-parse HEAD)"
+RUNROOT=${CYCLE_RUN_ROOT:-$ROOT-runs}
+case "$RUNROOT" in
+   /*) ;;
+   *) echo "ERROR: CYCLE_RUN_ROOT '$RUNROOT' is not an absolute path"; exit 2 ;;
+esac
+mkdir -p "$RUNROOT" || { echo "ERROR: cannot make the run root $RUNROOT"; exit 2; }
+export CYCLE_RUN_ROOT=$RUNROOT
+[ -z "${CYCLE_DRIVER_ARGS:-}" ] || export CYCLE_DRIVER_ARGS
+echo "run root $RUNROOT, driver args ${CYCLE_DRIVER_ARGS:-none}"
 [[ $NTASKS =~ ^[0-9]+$ ]] && [ "$NTASKS" -ge 1 ] && [ "$NTASKS" -le 144 ] \
    || { echo "ERROR: CYCLE_NTASKS '$NTASKS' is not 1 to 144"; exit 2; }
 for d in $DECKS; do
@@ -76,7 +90,7 @@ for d in $DECKS; do
    else
       j1=$(sub -n "$NTASKS" "$EXP" vista_2d_cycle.sbatch) || exit 1
    fi
-   RUN=$ROOT-runs/${P}_$j1
+   RUN=$RUNROOT/${P}_$j1
    echo "$d"
    echo "  link 1 $j1${jb:+  (after $jb)}, $NTASKS ranks, run folder $RUN"
    prev=$j1
