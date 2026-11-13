@@ -1776,9 +1776,6 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
                   "[" << sec << "]: the 2.5D term is for map-view decks ([fault_geometry] up "
                   "= [0, 0, +-1] on a 2-D mesh); up = (" << up[0] << ", " << up[1] << ", "
                   << up[2] << ")");
-      MFEM_VERIFY(!c.lts.On(), "[" << sec << "] with [cycle.lts] mode = \"rate2\": the LTS "
-                  "run integrates its own element matrices, without beta; use global "
-                  "stepping");
    }
 
    // ---- [cycle.pml] (PML design plan rev2, P1) ----

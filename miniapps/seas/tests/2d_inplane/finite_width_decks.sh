@@ -55,8 +55,6 @@ refuse badsub "$MAP" "${H}W_m = 15.0e3\nsubstrate = \"plate\"\n" \
        "use \"loading_plane\" or \"locked_reference\""
 refuse key    "$MAP" "${H}W_m = 15.0e3\nwidth = 1.0\nsubstrate = \"loading_plane\"\n" \
        "[cycle.finite_width] has an unknown key 'width'"
-refuse lts    "$MAP" "${H}W_m = 15.0e3\nsubstrate = \"loading_plane\"\n\n[cycle.lts]\nmode = \"rate2\"\n" \
-       "[cycle.finite_width] with [cycle.lts] mode = \"rate2\""
 refuse bp3    "$BP3" "${H}W_m = 15.0e3\nsubstrate = \"locked_reference\"\n" \
        "the 2.5D term is for map-view decks"
 

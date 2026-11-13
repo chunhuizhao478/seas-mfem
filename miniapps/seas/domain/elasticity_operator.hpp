@@ -418,6 +418,12 @@ public:
    const Vector &SubstrateShape() const { return substrate_shape_; }
    /// M_beta U_pl1 (vdofs): the substrate load at physical time 1.
    const Vector &SubstrateLoad() const { return substrate_load_; }
+   /// beta(x) = (beta / mu) mu(x), the coefficient of M_beta (null without
+   /// SetFiniteWidth), and the load's time offset t_off (local time stepping:
+   /// NitscheLtsRun adds M_beta to each element's own block and the load to
+   /// the element's own cluster, piece F-c).
+   Coefficient *FiniteWidthBeta() const { return beta_coef_.get(); }
+   real_t SubstrateTimeOffset() const { return substrate_t_off_ ? *substrate_t_off_ : 0.0; }
    /// rhs += (t_off + time) M_beta U_pl1 (nothing without SetFiniteWidth).
    void AddSubstrateLoad(Vector &rhs, real_t time) const
    {

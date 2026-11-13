@@ -1211,6 +1211,32 @@ test-lts-contact: seas_fd_cycle_driver
 	    python3 tests/2d_inplane/lts_contact_check.py check $$t $(LTS_AVG_PREFIX) || exit 1; \
 	 done
 
+# [cycle.finite_width] with [cycle.lts] rate2 (2.5D finite width with PML,
+# quench and LTS, plan rev1, piece F-c).  On 1 and 2 ranks the straight-fault
+# deck of the simple cases without its band (the piece stands alone;
+# LTS_2D5_BAND=band keeps the band: pieces F-a and F-c together), with an
+# event started at t = 0 and W = 15 km, runs LTS_2D5_STEPS steps (24 s) with
+# global stepping, with rate2 and same_step = true, with rate2, and with
+# global stepping without the 2.5D term (the control).
+# tests/2d_inplane/lts_2d5_check.py compares them.  About 20 minutes.  The
+# runs overwrite an earlier run's files.
+LTS_2D5_TMP = $(or $(TMPDIR),/tmp)/seas_test_lts_2d5
+LTS_2D5_STEPS = 6400
+LTS_2D5_BAND =
+test-lts-2d5: seas_fd_cycle_driver
+	@mkdir -p $(LTS_2D5_TMP); \
+	 python3 tests/2d_inplane/lts_2d5_check.py decks $(LTS_QUENCH_DECK) $(LTS_2D5_TMP) $(LTS_2D5_BAND) || exit 1; \
+	 for np in 1 2; do t=$(LTS_2D5_TMP)/np$$np; mkdir -p $$t; \
+	    for v in off glob same lts; do n=$(LTS_2D5_STEPS); [ $$v = lts ] && n=$$(($(LTS_2D5_STEPS) / 8)); \
+	       $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_fd_cycle_driver -d $(LTS_2D5_TMP)/$$v.toml \
+	          -o $$t/$$v --end-phase-after $$n --max-dyn-steps $$n --max-steps 3 > $$t/$$v.log 2>&1; rc=$$?; \
+	       if [ $$rc -ne 0 ] && [ $$rc -ne 7 ]; then tail -15 $$t/$$v.log; \
+	          echo "  FAILED: $$np rank(s), $$v: exit $$rc"; exit 1; fi; \
+	    done; \
+	    echo "  $$np rank(s):"; \
+	    python3 tests/2d_inplane/lts_2d5_check.py check $$t $(LTS_QUENCH_PREFIX) || exit 1; \
+	 done
+
 # fd_cycle --early-sync (NitscheWaveOperator::SetEarlySync, DenseBlockStiffness::
 # ExchangeHalo; speed-up options D0, 2026-11-11): the stiffness halo at the
 # start of a dynamic step and the fault record's reduction at its end.  It
@@ -1269,7 +1295,7 @@ test-qd-esdirk-cycle: seas_fd_cycle_driver
                 test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle \
                 test-fault-opening test-fault-contact test-fault-contact-dyn \
                 test-fault-contact-qd test-exact-retry test-qd-esdirk-points test-qd-implicit-green \
-                test-qd-esdirk-cycle test-par-dense-lu test-pml-partition test-early-sync test-lts-static-split test-pml-dt-rule test-lts-pml-band test-lts-quench test-lts-avg-normals test-lts-contact
+                test-qd-esdirk-cycle test-par-dense-lu test-pml-partition test-early-sync test-lts-static-split test-pml-dt-rule test-lts-pml-band test-lts-quench test-lts-avg-normals test-lts-contact test-lts-2d5
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \

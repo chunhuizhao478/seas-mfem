@@ -73,6 +73,7 @@
 // W.SetFiniteWidth with the QD regime's U_pl1 before the first step, so K
 // carries M_beta and F the substrate load at t0 + tau; the Kelvin-Voigt
 // copy damps K alone; dt_cfl is cut by 1 / sqrt(1 + beta dt^2 / (4 rho)).
+// With [cycle.lts] rate2 PlanLts applies that cut to each element's step.
 //
 // Station fields in the dynamic regime use the kernel components of the
 // end-of-step traction X* + gamma V (the friction strength along -V, as the
@@ -309,8 +310,6 @@ public:
          MFEM_VERIFY(substrate != nullptr && substrate->Size() == W_->Height(),
                      "DynPhase: [cycle.finite_width] needs the QD regime's substrate shape "
                      "(QDPhase::SubstrateShape) with " << W_->Height() << " entries");
-         MFEM_VERIFY(!(lts != nullptr && lts->on), "DynPhase: [cycle.finite_width] with "
-                     "local time stepping");
          W_->SetFiniteWidth(cfg.finite_width.BetaOverMu(), *substrate, t0_);
       }
       BuildFrames_();
@@ -641,7 +640,10 @@ public:
                                          std::numeric_limits<real_t>::infinity(),
                                          cfg.lts.cluster_cap, cfg.lts.fault_buffer,
                                          factor.empty() ? nullptr : &factor,
-                                         pinned.empty() ? nullptr : &pinned);
+                                         pinned.empty() ? nullptr : &pinned,
+                                         cfg.finite_width.On()
+                                            ? cfg.finite_width.BetaOverMu() * mf.mu / mf.rho
+                                            : 0.0);
          hdr[0] = asg.num_clusters;
          hdr[1] = asg.fault_cluster;
          hdr[2] = asg.passes;

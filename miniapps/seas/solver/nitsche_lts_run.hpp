@@ -110,6 +110,14 @@
 // over the clusters is unchanged, so with one cluster or same_step this is
 // the scheme above up to round-off; at rest r_c - s_c is exactly zero (the
 // same kernels on the same data).  Off (the default): nothing changes.
+//
+// 2.5D finite width (the operator's SetFiniteWidth before this run is built;
+// the cycle's [cycle.finite_width] with [cycle.lts], piece F-c): M_beta has
+// no face term, so it joins each element's own block of K^(c_e), and the
+// substrate load (t_off + t) M_beta U_pl1 goes into r_(c_e) at that cluster's
+// time.  The band's part of the term (PmlDynamicTerms::SetFiniteWidth) is in
+// the band force of c_P above.  BuildNitscheLtsAssignment's beta_over_rho
+// applies rule C6 to each element's step.  Without the term nothing changes.
 
 #ifndef MFEM_SEAS_NITSCHE_LTS_RUN_HPP
 #define MFEM_SEAS_NITSCHE_LTS_RUN_HPP
@@ -161,11 +169,14 @@ struct NitscheLtsAssignment
 /// CFL step (the PML band: 1 / sqrt(kappa_e)).  `pinned` (optional, per
 /// element): a second set that must sit in one cluster, c_P = the fastest
 /// one any of its elements is in (the elements the band terms touch).
+/// `beta_over_rho` (2.5D finite width, 0 = off): each element's step, after
+/// dt_factor, is divided by sqrt(1 + beta_over_rho dt_e^2 / 4) (rule C6).
 inline NitscheLtsAssignment BuildNitscheLtsAssignment(Mesh &mesh, int order, real_t cfl_eff,
                                                       real_t cp, int fault_attr, real_t dt_max,
                                                       int cap, int buffer,
                                                       const std::vector<double> *dt_factor = nullptr,
-                                                      const std::vector<char> *pinned = nullptr)
+                                                      const std::vector<char> *pinned = nullptr,
+                                                      double beta_over_rho = 0.0)
 {
    NitscheLtsMesh m = BuildNitscheLtsMesh(mesh, order, cfl_eff, cp, fault_attr);
    const int ne = static_cast<int>(m.dt.size());
@@ -179,6 +190,14 @@ inline NitscheLtsAssignment BuildNitscheLtsAssignment(Mesh &mesh, int order, rea
          MFEM_VERIFY(f > 0.0 && f <= 1.0, "BuildNitscheLtsAssignment: step factor " << f
                      << " of element " << e << " is outside (0, 1]");
          m.dt[e] *= f;
+      }
+   }
+   if (beta_over_rho > 0.0)
+   {
+      // rule C6 per element: omega_e^2 + beta / rho with dt_e = 2 / omega_e
+      for (int e = 0; e < ne; e++)
+      {
+         m.dt[e] *= 1.0 / std::sqrt(1.0 + 0.25 * beta_over_rho * m.dt[e] * m.dt[e]);   // as DynPhase
       }
    }
    MFEM_VERIFY(!pinned || static_cast<int>(pinned->size()) == ne, "BuildNitscheLtsAssignment: "
@@ -282,7 +301,7 @@ public:
    void Build(ParFiniteElementSpace &fes, Coefficient &lam, Coefficient &mu, Coefficient *klam,
               Coefficient *kmu, const Array<int> &dir_marker, real_t penalty,
               const std::vector<int> &cl, const std::vector<int> &cl_nbr, int nc,
-              const PmlBand *band = nullptr)
+              const PmlBand *band = nullptr, Coefficient *beta = nullptr)
    {
       MFEM_VERIFY((klam == nullptr) == (kmu == nullptr), "NitscheLtsBlocks: give both "
                   "Kelvin-Voigt moduli or neither");
@@ -469,6 +488,16 @@ public:
             ElasticityIntegrator &vi = (m == 0) ? vol : *kvol;
             vi.AssembleElementMatrix(*fes.GetFE(e), *fes.GetElementTransformation(e), elmat);
             AddDiag_(cl[e], pos[cl[e]][e], elmat, 0, m);
+         }
+         if (beta)
+         {
+            // 2.5D finite width: + M_beta on the element's own block of K
+            // (the integrator of ElasticityOperator::NewBetaMassIntegrator_
+            // with the dynamic band; no face term, so no other block)
+            VectorMassIntegrator mb(*beta);
+            mb.SetVDim(dim);
+            mb.AssembleElementMatrix(*fes.GetFE(e), *fes.GetElementTransformation(e), elmat);
+            AddDiag_(cl[e], pos[cl[e]][e], elmat, 0, 0);
          }
       }
       for (int be = 0; be < pm.GetNBE(); be++)
@@ -986,7 +1015,9 @@ public:
       }
       blocks_.Build(fes, sample.Lambda(), sample.Mu(), op.KelvinVoigtLambda(),
                     op.KelvinVoigtMu(), dir, penalty, cl, cl_nbr, nc_,
-                    op.Pml() ? op.Elasticity().GetPmlBand() : nullptr);
+                    op.Pml() ? op.Elasticity().GetPmlBand() : nullptr,
+                    op.Elasticity().FiniteWidthBeta());
+      fw_ = op.Elasticity().HasFiniteWidth();
       kv_ = blocks_.NumMatrices() == 2;
       nb_ = blocks_.BlockSize();
       const int ne = pm.GetNE();
@@ -1308,6 +1339,18 @@ private:
             for (int k = 0; k < nb_; k++) { a(ie[k]) += FD_(ie[k]); }
          }
       }
+      if (fw_)
+      {
+         // 2.5D finite width: + (t_off + t) M_beta U_pl1 on the cluster's own
+         // elements (M_beta is element-diagonal), at the cluster's own time
+         const Vector &L = op_.Elasticity().SubstrateLoad();
+         const real_t tt = op_.Elasticity().SubstrateTimeOffset() + t;
+         for (int e : own_[c])
+         {
+            const int *ie = blocks_.ElementDofs(e);
+            for (int k = 0; k < nb_; k++) { a(ie[k]) += tt * L(ie[k]); }
+         }
+      }
       auto it = abs_elems_.find(c);
       if (it != abs_elems_.end())
       {
@@ -1429,6 +1472,7 @@ private:
    mutable Vector pml_f_;
    real_t dt0_ = 0.0;
    bool same_ = false, kv_ = false, has_dirichlet_ = false;
+   bool fw_ = false;              ///< 2.5D finite width (the operator's SetFiniteWidth)
    MPI_Comm comm_ = MPI_COMM_NULL;
    NitscheLtsBlocks blocks_;
    std::vector<std::vector<int>> own_, dir_elems_;

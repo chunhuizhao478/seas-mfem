@@ -47,8 +47,9 @@
 // (normal direction), however this could be important"; the note's Step 7:
 // with "wa2020" the fault-normal stiffness sqrt(M beta) / 2 is about 1.20 x
 // the 3D mode I value, a known model error).  Map view only (a
-// 2-D mesh with [fault_geometry] up = (0, 0, +-1)); not with [cycle.lts]
-// rate2.
+// 2-D mesh with [fault_geometry] up = (0, 0, +-1)).  With [cycle.lts] rate2
+// the LTS run carries M_beta in each element's own block and the substrate
+// load in the element's own cluster (solver/nitsche_lts_run.hpp, piece F-c).
 //
 // Both regimes take the term through ElasticityDomainOperator::
 // SetFiniteWidth with one U_pl1 (the interpolant of u_pl(x, 1)), built once
