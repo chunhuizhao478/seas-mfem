@@ -183,6 +183,9 @@ public:
             penalty = (side_ == 1)
                       ? ComputeSidePenalty(el1, el2, detJ1, lam1, mu1, nl_q)
                       : ComputeSidePenalty(el1, el2, detJ2, lam2, mu2, nl_q);
+            // a side's share of a band face's penalty (the two shares sum
+            // to kappa_gamma P, as above)
+            if (band_face) { penalty *= kappa_face; }
          }
 
          // Coefficients matching Tandem's assembleSurface

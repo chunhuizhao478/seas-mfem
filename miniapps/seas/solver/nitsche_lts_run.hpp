@@ -82,6 +82,21 @@
 // cluster steps at dt0 and ends at every tick; equal to global stepping up to
 // round-off.
 //
+// PML band (the cycle's [cycle.pml] with [cycle.lts]; LTS with PML design
+// rev1, Section 4.2, piece P-b).  Plan: BuildNitscheLtsAssignment takes a
+// per-element factor on dt_e (1 / sqrt(kappa_e): the band's SIPG penalty is
+// kappa times the plain one) and a second pinned set, the elements the band
+// terms touch, which go into one cluster c_P as the fault tets go into c_F.
+// Run: K^(c) is split from K_p (the band penalty in the face integrator, as
+// NitscheWaveOperator::SetPml gives the assembled K); the band's memory
+// steps once per step of c_P with that step's coefficients
+// (PmlDynamicTerms::SetTimeStep(dt_(c_P)), Advance after the drift of a
+// tick where c_P ends, before the forces, as ImplicitSolve does), its force
+// b_band + B + E goes into r_(c_P) alone, and C_d is in the operator's
+// damping blocks, so it joins B_top as C_e does.  Every element the band
+// terms touch must be in c_P (checked on all ranks).  With same_step this is
+// global stepping up to round-off.  Without a band nothing changes.
+//
 // Static split (SetStaticSplit, the cycle's [cycle.lts] static_split; LTS
 // with PML design rev1, Section 4.1, piece P-a): a cycle's dynamic phase
 // starts from a loaded static state (u_s, d_s, t_s) whose total force R =
@@ -129,6 +144,8 @@ struct NitscheLtsAssignment
    std::vector<int> cluster;        ///< per serial element
    int num_clusters = 1;
    int fault_cluster = 0;           ///< c_F
+   int pml_cluster = -1;            ///< c_P (-1: no pinned band set)
+   long long pml_cells = 0;         ///< elements pinned into c_P
    double dt0 = 0.0;                ///< cluster 0's step (s)
    double ideal = 1.0;              ///< element updates, global over clustered
    int passes = 0;                  ///< clusterings until the fault sat in one cluster
@@ -140,12 +157,32 @@ struct NitscheLtsAssignment
 
 /// See the file comment.  cap: hard cluster cap (<= 0: none); buffer: the
 /// layers of face neighbours of the fault tets that go into c_F with them.
+/// `dt_factor` (optional, per element, in (0, 1]): multiplies the element's
+/// CFL step (the PML band: 1 / sqrt(kappa_e)).  `pinned` (optional, per
+/// element): a second set that must sit in one cluster, c_P = the fastest
+/// one any of its elements is in (the elements the band terms touch).
 inline NitscheLtsAssignment BuildNitscheLtsAssignment(Mesh &mesh, int order, real_t cfl_eff,
                                                       real_t cp, int fault_attr, real_t dt_max,
-                                                      int cap, int buffer)
+                                                      int cap, int buffer,
+                                                      const std::vector<double> *dt_factor = nullptr,
+                                                      const std::vector<char> *pinned = nullptr)
 {
    NitscheLtsMesh m = BuildNitscheLtsMesh(mesh, order, cfl_eff, cp, fault_attr);
    const int ne = static_cast<int>(m.dt.size());
+   if (dt_factor)
+   {
+      MFEM_VERIFY(static_cast<int>(dt_factor->size()) == ne, "BuildNitscheLtsAssignment: "
+                  << dt_factor->size() << " step factors for " << ne << " elements");
+      for (int e = 0; e < ne; e++)
+      {
+         const double f = (*dt_factor)[e];
+         MFEM_VERIFY(f > 0.0 && f <= 1.0, "BuildNitscheLtsAssignment: step factor " << f
+                     << " of element " << e << " is outside (0, 1]");
+         m.dt[e] *= f;
+      }
+   }
+   MFEM_VERIFY(!pinned || static_cast<int>(pinned->size()) == ne, "BuildNitscheLtsAssignment: "
+               "the pinned set does not have one flag per element");
    std::vector<double> dt = m.dt;
    for (double &d : dt) { d = std::min(d, static_cast<double>(dt_max)); }
    std::vector<char> on_fault(ne, 0);
@@ -183,12 +220,34 @@ inline NitscheLtsAssignment BuildNitscheLtsAssignment(Mesh &mesh, int order, rea
          cmax = std::max(cmax, cl.cluster[e]);
       }
       a.fault_cluster = (cmax < 0) ? 0 : cmin;
-      if (cmax < 0 || cmin == cmax) { break; }
-      MFEM_VERIFY(a.passes < 64, "BuildNitscheLtsAssignment: the fault tets do not "
-                  "settle in one cluster after " << a.passes << " clusterings");
-      const double dtf = std::ldexp(cl.dt_base, cmin);
-      for (int e = 0; e < ne; e++) { if (in_fc[e]) { dt[e] = std::min(dt[e], dtf); } }
+      int pmin = INT_MAX, pmax = -1;
+      if (pinned)
+      {
+         for (int e = 0; e < ne; e++)
+         {
+            if (!(*pinned)[e]) { continue; }
+            pmin = std::min(pmin, cl.cluster[e]);
+            pmax = std::max(pmax, cl.cluster[e]);
+         }
+      }
+      a.pml_cluster = (pmax < 0) ? -1 : pmin;
+      const bool fault_ok = (cmax < 0 || cmin == cmax), pin_ok = (pmax < 0 || pmin == pmax);
+      if (fault_ok && pin_ok) { break; }
+      MFEM_VERIFY(a.passes < 64, "BuildNitscheLtsAssignment: the fault tets "
+                  << (pinned ? "and the pinned set " : "") << "do not settle in one cluster "
+                  << (pinned ? "each " : "") << "after " << a.passes << " clusterings");
+      if (!fault_ok)
+      {
+         const double dtf = std::ldexp(cl.dt_base, cmin);
+         for (int e = 0; e < ne; e++) { if (in_fc[e]) { dt[e] = std::min(dt[e], dtf); } }
+      }
+      if (!pin_ok)
+      {
+         const double dtp = std::ldexp(cl.dt_base, pmin);
+         for (int e = 0; e < ne; e++) { if ((*pinned)[e]) { dt[e] = std::min(dt[e], dtp); } }
+      }
    }
+   if (pinned) { for (char f : *pinned) { a.pml_cells += f ? 1 : 0; } }
    a.cluster = cl.cluster;
    a.num_clusters = cl.num_clusters;
    a.dt0 = cl.dt_base;
@@ -217,9 +276,13 @@ public:
    /// cl: cluster of each local element; cl_nbr: of each face-neighbour
    /// element (ParMesh::ExchangeFaceNbrData order); klam, kmu: the Kelvin-
    /// Voigt moduli (both null: no K_eta).  Collective.
+   /// band (optional): the PML band of the operator (ElasticityDomainOperator::
+   /// GetPmlBand with penalty_only): K is K_p, the penalty times kappa_gamma on
+   /// band faces; K_eta keeps the plain penalty, as the assembled one.
    void Build(ParFiniteElementSpace &fes, Coefficient &lam, Coefficient &mu, Coefficient *klam,
               Coefficient *kmu, const Array<int> &dir_marker, real_t penalty,
-              const std::vector<int> &cl, const std::vector<int> &cl_nbr, int nc)
+              const std::vector<int> &cl, const std::vector<int> &cl_nbr, int nc,
+              const PmlBand *band = nullptr)
    {
       MFEM_VERIFY((klam == nullptr) == (kmu == nullptr), "NitscheLtsBlocks: give both "
                   "Kelvin-Voigt moduli or neither");
@@ -390,6 +453,7 @@ public:
       const int dim = pm.Dimension();
       ElasticityIntegrator vol(lam, mu);
       DGElasticityIPCombinedIntegrator face(lam, mu, dim, -1.0, penalty);   // SIPG: epsilon -1
+      if (band) { face.SetPmlBand(band, /*penalty_only=*/true); }   // K_p
       std::unique_ptr<ElasticityIntegrator> kvol;
       std::unique_ptr<DGElasticityIPCombinedIntegrator> kface;
       if (nm_ == 2)
@@ -921,7 +985,8 @@ public:
          has_dirichlet_ = !op.Boundary().dirichlet_attrs.empty();
       }
       blocks_.Build(fes, sample.Lambda(), sample.Mu(), op.KelvinVoigtLambda(),
-                    op.KelvinVoigtMu(), dir, penalty, cl, cl_nbr, nc_);
+                    op.KelvinVoigtMu(), dir, penalty, cl, cl_nbr, nc_,
+                    op.Pml() ? op.Elasticity().GetPmlBand() : nullptr);
       kv_ = blocks_.NumMatrices() == 2;
       nb_ = blocks_.BlockSize();
       const int ne = pm.GetNE();
@@ -943,6 +1008,34 @@ public:
             if (e1 >= 0 && e2 < 0 && !pm.FaceIsInterior(f)) { isd[e1] = 1; }
          }
          for (int e = 0; e < ne; e++) { if (isd[e]) { dir_elems_[cl_[e]].push_back(e); } }
+      }
+
+      // the PML band (file header): every element its terms touch in one
+      // cluster c_P; the memory steps with dt_(c_P)
+      if (op.Pml())
+      {
+         MFEM_VERIFY(op.Elasticity().GetPmlBand() && op.Elasticity().PmlPenaltyOnly(),
+                     "NitscheLtsRun: the operator's band is not the dynamic one (K_p)");
+         std::vector<char> touched;
+         op.Pml()->TouchedElements(touched);
+         int g[2] = {-INT_MAX, -1};   // (-min, max) of the touched elements' clusters
+         for (int e = 0; e < ne; e++)
+         {
+            if (!touched[e]) { continue; }
+            pml_elems_.push_back(e);
+            g[0] = std::max(g[0], -cl_[e]);
+            g[1] = std::max(g[1], cl_[e]);
+         }
+         MPI_Allreduce(MPI_IN_PLACE, g, 2, MPI_INT, MPI_MAX, comm_);
+         if (g[1] >= 0)
+         {
+            MFEM_VERIFY(-g[0] == g[1], "NitscheLtsRun: the elements the PML band touches "
+                        "are in clusters " << -g[0] << " to " << g[1] << "; they must be in "
+                        "one (BuildNitscheLtsAssignment's pinned set)");
+            cp_ = g[1];
+            op.Pml()->SetTimeStep(Dt_(cp_));   // after the operator's SetTimeStep(dt_F)
+            pml_f_.SetSize(op.Height());
+         }
       }
 
       // the fault: every fault tet in c_F (design §3.4 step 4)
@@ -1016,6 +1109,8 @@ public:
 
    int NumClusters() const { return nc_; }
    int FaultCluster() const { return cf_; }
+   /// The PML band's cluster c_P (-1: no band).
+   int PmlCluster() const { return cp_; }
    real_t Dt0() const { return dt0_; }
    /// Step of cluster c.
    real_t ClusterDt(int c) const { return Dt_(c); }
@@ -1101,6 +1196,9 @@ private:
       if (same_) { top = L_; }
       else { while (top < L_ && (m_ + 1) % (1 << (top + 1)) == 0) { top++; } }
       blocks_.PostHalo(top, u, kv_ ? &v : nullptr);
+      // the band's memory: one step of c_P, with u at its new time, before
+      // the forces that read it (collective: every rank has the same top)
+      if (cp_ >= 0 && cp_ <= top) { op_.Pml()->Advance(u, t); }
       if (op_.HasFault() && cf_ <= top) { op_.LtsAdvanceFault(u, t, kv_ ? &v : nullptr); }
       for (int c = 0; c <= top; c++) { blocks_.MultInterior(c, u, kv_ ? &v : nullptr, a_[c]); }
       blocks_.WaitHalo();
@@ -1126,6 +1224,17 @@ private:
          for (int k = 0; k < nb_; k++) { a(ie[k]) = -a(ie[k]); }
       }
       if (op_.HasFault() && c == cf_) { op_.LtsAddFaultLoads(a); }
+      if (c == cp_)
+      {
+         // - (b_band + B + E) of the band's stored state, on its own rows
+         pml_f_ = 0.0;
+         op_.Pml()->AddForce(pml_f_);
+         for (int e : pml_elems_)
+         {
+            const int *ie = blocks_.ElementDofs(e);
+            for (int k = 0; k < nb_; k++) { a(ie[k]) -= pml_f_(ie[k]); }
+         }
+      }
       if (has_dirichlet_)
       {
          if (top < 0) { op_.Elasticity().AssembleDirichletOnlyRHS(FD_, t); }
@@ -1231,6 +1340,9 @@ private:
    NitscheWaveOperator &op_;
    std::vector<int> cl_;
    int nc_ = 1, L_ = 0, cf_ = 0, nb_ = 0, nd_ = 0, dim_ = 3;
+   int cp_ = -1;                  ///< the PML band's cluster (-1: none)
+   std::vector<int> pml_elems_;   ///< local elements the band terms touch
+   mutable Vector pml_f_;
    real_t dt0_ = 0.0;
    bool same_ = false, kv_ = false, has_dirichlet_ = false;
    MPI_Comm comm_ = MPI_COMM_NULL;

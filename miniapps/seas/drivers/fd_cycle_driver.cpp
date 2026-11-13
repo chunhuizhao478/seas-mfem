@@ -1300,8 +1300,8 @@ int main(int argc, char *argv[])
       // [cycle.lts] rate2: clusters and the LTS-aware cut, then the ParMesh.
       cycle::LtsLayout lts = cycle::DynPhase::PlanLts(*smesh, cfg, mpi.GetComm());
       // [cycle.pml] partition_weight > 0: a cut that shares the band's work
-      // (cycle/pml_partition.hpp; never with [cycle.lts], which [cycle.pml]
-      // refuses).  Otherwise MFEM's default cut.
+      // (cycle/pml_partition.hpp; with [cycle.lts] the LTS cut carries the
+      // band weight and this one is empty).  Otherwise MFEM's default cut.
       const cycle::PmlPartition pcut = cycle::PlanPmlPartition(*smesh, cfg, mpi.GetComm());
       MFEM_VERIFY(lts.part.empty() || pcut.part.empty(), "two mesh cuts ([cycle.lts] and "
                   "[cycle.pml] partition_weight)");

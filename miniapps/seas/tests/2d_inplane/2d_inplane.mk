@@ -1106,6 +1106,35 @@ test-lts-static-split: seas_fd_cycle_driver
 	    python3 tests/2d_inplane/lts_static_split_check.py check $$t $(LTS_SPLIT_PREFIX) || exit 1; \
 	 done
 
+# [cycle.pml] with [cycle.lts] rate2 (LTS with PML design rev1, piece P-b):
+# the band's elements in one cluster, the band's memory stepped once per step
+# of that cluster, the band elements' steps scaled by 1 / sqrt(kappa_e)
+# (dt_rule = "element").  On 1 and 2 ranks the straight-fault band deck of the
+# simple cases, with an event started at t = 0, runs LTS_PML_STEPS steps (20 s:
+# the P wave is in the band from 15 s) with global stepping, with rate2 and
+# the test key same_step = true (the LTS run's clusters at one step: global
+# stepping to round-off) and with rate2 (LTS_PML_STEPS / 8 sync intervals).
+# tests/2d_inplane/lts_pml_band_check.py compares them.  --max-steps keeps
+# the QD regime after the phase short.  About 15 minutes.  The runs overwrite
+# an earlier run's files.
+LTS_PML_TMP = $(or $(TMPDIR),/tmp)/seas_test_lts_pml_band
+LTS_PML_DECK = simple_cases/configs/D0_straight_hb_pml0p01.toml
+LTS_PML_PREFIX = D0_straight_hb_pml0p01
+LTS_PML_STEPS = 5336
+test-lts-pml-band: seas_fd_cycle_driver
+	@mkdir -p $(LTS_PML_TMP); \
+	 python3 tests/2d_inplane/lts_pml_band_check.py decks $(LTS_PML_DECK) $(LTS_PML_TMP) || exit 1; \
+	 for np in 1 2; do t=$(LTS_PML_TMP)/np$$np; mkdir -p $$t; \
+	    for v in glob same lts; do n=$(LTS_PML_STEPS); [ $$v = lts ] && n=$$(($(LTS_PML_STEPS) / 8)); \
+	       $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_fd_cycle_driver -d $(LTS_PML_TMP)/$$v.toml \
+	          -o $$t/$$v --end-phase-after $$n --max-dyn-steps $$n --max-steps 3 > $$t/$$v.log 2>&1; rc=$$?; \
+	       if [ $$rc -ne 0 ] && [ $$rc -ne 7 ]; then tail -15 $$t/$$v.log; \
+	          echo "  FAILED: $$np rank(s), $$v: exit $$rc"; exit 1; fi; \
+	    done; \
+	    echo "  $$np rank(s):"; \
+	    python3 tests/2d_inplane/lts_pml_band_check.py check $$t $(LTS_PML_PREFIX) || exit 1; \
+	 done
+
 # fd_cycle --early-sync (NitscheWaveOperator::SetEarlySync, DenseBlockStiffness::
 # ExchangeHalo; speed-up options D0, 2026-11-11): the stiffness halo at the
 # start of a dynamic step and the fault record's reduction at its end.  It
@@ -1164,7 +1193,7 @@ test-qd-esdirk-cycle: seas_fd_cycle_driver
                 test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle \
                 test-fault-opening test-fault-contact test-fault-contact-dyn \
                 test-fault-contact-qd test-exact-retry test-qd-esdirk-points test-qd-implicit-green \
-                test-qd-esdirk-cycle test-par-dense-lu test-pml-partition test-early-sync test-lts-static-split test-pml-dt-rule
+                test-qd-esdirk-cycle test-par-dense-lu test-pml-partition test-early-sync test-lts-static-split test-pml-dt-rule test-lts-pml-band
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \

@@ -263,7 +263,13 @@
 //                   [3] (layers of tets around the fault in its cluster),
 //                   fault_weight [0] (METIS weight per fault-face side),
 //                   static_split [false] (step the change from the state
-//                   handed over at the switch: NitscheLtsRun::SetStaticSplit).
+//                   handed over at the switch: NitscheLtsRun::SetStaticSplit),
+//                   same_step [false] (test only: the same clusters and
+//                   split, every cluster stepping at dt0, which is global
+//                   stepping to round-off).
+//                   With [cycle.pml] (kind "cfs", dt_rule "element"): the
+//                   band's elements sit in one cluster and its memory
+//                   steps at that cluster's step.
 //                   rate2 needs [numerics] cfl <= 0.6 and kv_scale = "node",
 //                   and partitions the mesh with BuildLtsAwarePartition
 //                   (both regimes then use that partition)
@@ -502,6 +508,7 @@ struct LtsConfig
    int fault_buffer = 3;
    real_t fault_weight = 0.0;
    bool static_split = false;  ///< NitscheLtsRun::SetStaticSplit (the w form)
+   bool same_step = false;     ///< test only: every cluster steps at dt0
    bool On() const { return mode == "rate2"; }
 };
 
@@ -1546,13 +1553,15 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
    {
       const std::string sec = "cycle.lts";
       const toml::value &l = cy.at("lts");
-      OnlyKeys(l, sec, {"mode", "cluster_cap", "fault_buffer", "fault_weight", "static_split"});
+      OnlyKeys(l, sec, {"mode", "cluster_cap", "fault_buffer", "fault_weight", "static_split",
+                         "same_step"});
       LtsConfig &lc = c.lts;
       lc.mode = Str(l, sec, "mode", lc.mode);
       lc.cluster_cap = Int(l, sec, "cluster_cap", lc.cluster_cap);
       lc.fault_buffer = Int(l, sec, "fault_buffer", lc.fault_buffer);
       lc.fault_weight = Real(l, sec, "fault_weight", lc.fault_weight);
       lc.static_split = Bool(l, sec, "static_split", lc.static_split);
+      lc.same_step = Bool(l, sec, "same_step", lc.same_step);
       MFEM_VERIFY(lc.mode == "off" || lc.mode == "rate2",
                   "[" << sec << "].mode must be \"off\" or \"rate2\"");
       MFEM_VERIFY(lc.cluster_cap >= 1 && lc.fault_buffer >= 0 && lc.fault_weight >= 0.0,
@@ -1833,8 +1842,11 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
          MFEM_VERIFY(!c.absorbing.On(), "[" << sec << "] with [cycle.absorbing] faces = \""
                      << c.absorbing.faces << "\": the PML keeps the walls Dirichlet; use "
                      "faces = \"off\"");
-         MFEM_VERIFY(!c.lts.On(), "[" << sec << "] with [cycle.lts]: not implemented "
-                     "(plan rev2, Section 7.3); use global stepping");
+         // with [cycle.lts] (LTS with PML design rev1, piece P-b): the CFS
+         // band in one cluster, each element at its own step
+         MFEM_VERIFY(!c.lts.On() || (P.Cfs() && P.dt_rule == "element"), "[" << sec
+                     << "] with [cycle.lts] needs kind = \"cfs\" and dt_rule = "
+                     "\"element\" (the clusters use each element's own step)");
          MFEM_VERIFY(!c.finite_width.On(), "[" << sec << "] with [cycle.finite_width]: "
                      "not implemented");
          MFEM_VERIFY(P.wall_speed_factor == 1.0 || c.loading.Plate(), "[" << sec

@@ -58,7 +58,8 @@ inline PmlPartition PlanPmlPartition(Mesh &smesh, const CycleConfig &cfg, MPI_Co
    int rank = 0, nranks = 1;
    MPI_Comm_rank(comm, &rank);
    MPI_Comm_size(comm, &nranks);
-   if (!P.On() || P.partition_weight <= 0.0 || nranks == 1) { return R; }
+   // with [cycle.lts] the LTS cut carries the band weight (DynPhase::PlanLts)
+   if (!P.On() || P.partition_weight <= 0.0 || nranks == 1 || cfg.lts.On()) { return R; }
    const int ne = smesh.GetNE(), dim = smesh.Dimension();
    R.part.assign(ne, 0);
    if (rank == 0)

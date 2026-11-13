@@ -159,6 +159,21 @@ public:
       }
    }
 
+   /// t(e) = 1 for the local elements whose rows the band terms reach
+   /// (AddForce) or whose values they read: the elements with a band volume
+   /// point and the local sides of every band face.  Local time stepping
+   /// (NitscheLtsRun) keeps all of them in one cluster.
+   void TouchedElements(std::vector<char> &t) const
+   {
+      t.assign(elast_.GetMesh().GetNE(), 0);
+      for (const VolElem &ve : vol_) { t[ve.e] = 1; }
+      for (const Face &f : faces_)
+      {
+         t[f.e1] = 1;
+         if (f.kind == 0) { t[f.e2] = 1; }
+      }
+   }
+
    int NumBandElements() const { return static_cast<int>(vol_.size()); }
    int NumBandFaces() const { return static_cast<int>(faces_.size()); }
    size_t MemoryReals() const { return state_.size(); }

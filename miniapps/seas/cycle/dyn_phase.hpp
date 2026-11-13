@@ -140,6 +140,7 @@ struct LtsLayout
    bool on = false;
    int num_clusters = 1;
    int fault_cluster = 0;        ///< c_F
+   int pml_cluster = -1;         ///< c_P: the [cycle.pml] band's cluster (-1: no band)
    real_t dt0 = 0.0;             ///< cluster 0's step [s]
    std::vector<int> part;        ///< serial element -> rank (empty: MFEM's cut)
    std::vector<int> cluster;     ///< per serial element (cleared by MapLts)
@@ -195,9 +196,14 @@ public:
       {
          // the [cycle.pml] refusals of the deck reader, repeated for callers
          // that build the configuration by hand
-         MFEM_VERIFY(!cfg.absorbing.On() && !(lts != nullptr && lts->on) &&
-                     !cfg.finite_width.On(), "DynPhase: [cycle.pml] with "
-                     "[cycle.absorbing], [cycle.lts] or [cycle.finite_width]");
+         MFEM_VERIFY(!cfg.absorbing.On() && !cfg.finite_width.On(), "DynPhase: [cycle.pml] "
+                     "with [cycle.absorbing] or [cycle.finite_width]");
+         // with [cycle.lts]: the CFS band, with each element's own step
+         // (PlanLts scales the band's steps by 1 / sqrt(kappa_e))
+         MFEM_VERIFY(!(lts != nullptr && lts->on) ||
+                     (cfg.pml.Cfs() && cfg.pml.dt_rule == "element"),
+                     "DynPhase: [cycle.pml] with [cycle.lts] needs kind = \"cfs\" and "
+                     "dt_rule = \"element\"");
       }
       {
          // [cycle.loading], as QD (with the band: the same D3 wall factor)
@@ -366,7 +372,8 @@ public:
          MFEM_VERIFY(dt_scale == 1.0, "DynPhase: dt_scale with local time stepping");
          MFEM_VERIFY(lts->dt0 <= dt_cfl_ * (1.0 + 1e-12), "DynPhase: the LTS step dt0 = "
                      << lts->dt0 << " s is above the global CFL step " << dt_cfl_ << " s");
-         dt_ = std::ldexp(lts->dt0, lts->fault_cluster);   // the fault cluster's step
+         // the fault cluster's step (dt0 with the test key same_step)
+         dt_ = cfg.lts.same_step ? lts->dt0 : std::ldexp(lts->dt0, lts->fault_cluster);
       }
       else { dt_ = dt_scale * dt_cfl_; }
       W_->SetTimeStep(dt_);
@@ -395,8 +402,11 @@ public:
          // After Kelvin-Voigt: its blocks hold K_eta (collective).
          lts_ = std::make_unique<NitscheLtsRun>(*W_, lts->cl, lts->cl_nbr, lts->num_clusters,
                                                 lts->fault_cluster, lts->dt0,
-                                                cfg.penalty_factor);
+                                                cfg.penalty_factor, cfg.lts.same_step);
          lts_->SetStaticSplit(cfg.lts.static_split);
+         MFEM_VERIFY(lts_->PmlCluster() == (pml_ ? lts->pml_cluster : -1), "DynPhase: the "
+                     "band's cluster is " << lts_->PmlCluster() << " on the mesh, "
+                     << lts->pml_cluster << " in the plan");
       }
 
       if (cfg.quench.On())
@@ -570,22 +580,70 @@ public:
       MPI_Comm_size(comm, &nranks);
       const int p = cfg.shared.mesh.order;
       const int ne = smesh.GetNE();
-      int hdr[4] = {0, 0, 0, 0};
+      int hdr[5] = {0, 0, 0, 0, -1};
       double dt0 = 0.0;
       NitscheLtsAssignment asg;
       std::ostringstream rep;
+      std::vector<char> in_band;   // rank 0: elements with their centroid in a band
       if (rank == 0)
       {
          const auto &mf = cfg.shared.material_fallback;
          const real_t cp = std::sqrt((mf.lambda + 2.0 * mf.mu) / mf.rho);
          const real_t ceig = NitscheStableConstant(smesh.Dimension(), p);
+         // [cycle.pml]: the band of the serial mesh (as PlanPmlPartition).
+         // Step factor 1 / sqrt(kappa_e) with kappa_e the largest kappa at
+         // the element's vertices (kappa grows with the depth into a band, so
+         // this bounds PmlDynamicTerms::ElementKappa from above); pinned: the
+         // elements with a vertex inside a band, which holds every element
+         // the band terms touch (NitscheLtsRun checks that on the mesh).
+         std::vector<double> factor;
+         std::vector<char> pinned;
+         real_t kmax = 1.0;
+         if (cfg.pml.On())
+         {
+            const PmlConfig &P = cfg.pml;
+            PmlBandParams prm;
+            prm.thickness = P.thickness;
+            prm.power = P.power;
+            prm.R0 = P.R0;
+            prm.f_alpha = P.Sponge() ? 1.0 : P.f_alpha;
+            prm.c_ref = P.c_ref;
+            const PmlBand band(smesh, P.wall_attrs, prm);
+            const int sdim = smesh.SpaceDimension();
+            factor.assign(ne, 1.0);
+            pinned.assign(ne, 0);
+            in_band.assign(ne, 0);
+            Array<int> v;
+            Vector c(smesh.Dimension());
+            for (int e = 0; e < ne; e++)
+            {
+               smesh.GetElementVertices(e, v);
+               real_t ke = 1.0;
+               for (int k = 0; k < v.Size(); k++)
+               {
+                  real_t x[3] = {0.0, 0.0, 0.0};
+                  for (int d = 0; d < sdim; d++) { x[d] = smesh.GetVertex(v[k])[d]; }
+                  const PmlPoint pt = band.At(x);
+                  if (pt.nact > 0) { pinned[e] = 1; ke = std::max(ke, pt.kappa); }
+               }
+               factor[e] = 1.0 / std::sqrt(ke);
+               kmax = std::max(kmax, ke);
+               smesh.GetElementCenter(e, c);
+               real_t x[3] = {0.0, 0.0, 0.0};
+               for (int d = 0; d < smesh.Dimension(); d++) { x[d] = c(d); }
+               in_band[e] = band.InBand(x) ? 1 : 0;
+            }
+         }
          asg = BuildNitscheLtsAssignment(smesh, p, cfg.dyn.cfl * ceig, cp, cfg.fault_attr,
                                          std::numeric_limits<real_t>::infinity(),
-                                         cfg.lts.cluster_cap, cfg.lts.fault_buffer);
+                                         cfg.lts.cluster_cap, cfg.lts.fault_buffer,
+                                         factor.empty() ? nullptr : &factor,
+                                         pinned.empty() ? nullptr : &pinned);
          hdr[0] = asg.num_clusters;
          hdr[1] = asg.fault_cluster;
          hdr[2] = asg.passes;
          hdr[3] = static_cast<int>(asg.fault_pairs.size());
+         hdr[4] = asg.pml_cluster;
          dt0 = asg.dt0;
          rep << std::setprecision(6) << "rate2, " << asg.num_clusters << " clusters (cap "
              << cfg.lts.cluster_cap << "), dt0 = " << dt0 << " s; tets per cluster";
@@ -594,14 +652,20 @@ public:
              << asg.buffer_tets << " buffer tets in " << cfg.lts.fault_buffer
              << " layer(s)) in cluster " << asg.fault_cluster << " after " << asg.passes
              << " clustering(s)";
+         if (cfg.pml.On())
+         {
+            rep << "; PML band (" << asg.pml_cells << " elements with a vertex in a band, "
+                << "kappa up to " << kmax << ") in cluster " << asg.pml_cluster;
+         }
       }
-      MPI_Bcast(hdr, 4, MPI_INT, 0, comm);
+      MPI_Bcast(hdr, 5, MPI_INT, 0, comm);
       MPI_Bcast(&dt0, 1, MPI_DOUBLE, 0, comm);
       L.cluster.resize(ne);
       if (rank == 0) { L.cluster = asg.cluster; }
       MPI_Bcast(L.cluster.data(), ne, MPI_INT, 0, comm);
       L.num_clusters = hdr[0];
       L.fault_cluster = hdr[1];
+      L.pml_cluster = hdr[4];
       L.dt0 = static_cast<real_t>(dt0);
       MFEM_VERIFY(hdr[3] > 0, "[cycle.lts] rate2: the mesh has no fault faces (attribute "
                   << cfg.fault_attr << ")");
@@ -611,14 +675,21 @@ public:
          if (rank == 0)
          {
             std::vector<double> cost;
-            if (cfg.lts.fault_weight > 0.0)
+            const real_t band_weight = cfg.pml.On() ? cfg.pml.partition_weight : 0.0;
+            if (cfg.lts.fault_weight > 0.0 || band_weight > 0.0)
             {
                // integer METIS weights: 100 per tet + 100 w per fault-face side
+               // + 100 w_band per element with its centroid in a band
+               // ([cycle.pml] partition_weight, as PlanPmlPartition)
                cost.assign(ne, 100.0);
                for (const auto &pr : asg.fault_pairs)
                {
                   cost[pr.first] += 100.0 * cfg.lts.fault_weight;
                   cost[pr.second] += 100.0 * cfg.lts.fault_weight;
+               }
+               if (band_weight > 0.0)
+               {
+                  for (int e = 0; e < ne; e++) { if (in_band[e]) { cost[e] += 100.0 * band_weight; } }
                }
             }
             const Table &e2e = smesh.ElementToElementTable();
@@ -640,7 +711,8 @@ public:
                asg.cluster, asg.num_clusters, L.part, nranks, cost.empty() ? nullptr : &cost,
                asg.fault_pairs);
             rep << std::setprecision(4) << "; partition BuildLtsAwarePartition (fault weight "
-                << cfg.lts.fault_weight << "), max/mean overall " << imb.overall
+                << cfg.lts.fault_weight << ", band weight " << band_weight
+                << "), max/mean overall " << imb.overall
                 << ", per cluster";
             for (double x : imb.per_cluster) { rep << " " << x; }
             rep << ", fault tets " << imb.fault;
