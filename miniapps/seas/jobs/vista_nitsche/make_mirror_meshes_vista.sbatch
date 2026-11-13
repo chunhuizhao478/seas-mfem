@@ -29,7 +29,7 @@ echo "commit $(git rev-parse HEAD)"
 module purge; module load TACC
 module swap nvidia gcc/14.2.0 2>/dev/null || module load gcc/14.2.0
 # same modules as build_verify_vista.sbatch (gmsh is the one used here)
-module load cuda/12.6 openmpi/5.0.5 hypre/2.31.0 metis/5.1.0.3 phdf5/1.14.6 gmsh/4.15.0
+module load openmpi/5.0.11 hypre/2.31.0 metis/5.1.0.3 phdf5/1.14.6 gmsh/4.15.0
 cd miniapps/seas
 T0=$(date +%s)
 SHA_FILE=MESH_SHA256_MIRROR_VISTA bash scripts/make_mirror_meshes.sh 200 100

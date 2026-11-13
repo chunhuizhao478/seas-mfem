@@ -62,7 +62,7 @@ rc=$?; echo "build_vista.sh exit $rc after $(( $(date +%s) - T0 )) s"; tail -20 
 # same module environment for the runs below
 module purge; module load TACC
 module swap nvidia gcc/14.2.0 2>/dev/null || module load gcc/14.2.0
-module load cuda/12.6 openmpi/5.0.5 hypre/2.31.0 metis/5.1.0.3 phdf5/1.14.6 gmsh/4.15.0
+module load openmpi/5.0.11 hypre/2.31.0 metis/5.1.0.3 phdf5/1.14.6 gmsh/4.15.0
 cd miniapps/seas
 echo "=== meshes (gmsh $(gmsh --version 2>&1)) ==="
 for g in tpv205/mesh/tpv2053d_1000m tpv205/mesh/tpv2053d_200m tpv104/mesh/tpv104_200m \
