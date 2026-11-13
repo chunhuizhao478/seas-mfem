@@ -1884,8 +1884,12 @@ private:
       MFEM_VERIFY(inside == 0, "[cycle.pml]: " << inside << " interior faces (fault or "
                   "prescribed slip) have a vertex inside a band; thin the band or "
                   "move the walls");
-      // [cycle.finite_width]: the walls move with the substrate (factor 1)
-      if (P.Sponge() || P.wall_speed_factor == 1.0 || cfg_.finite_width.On())
+      // [cycle.finite_width] with substrate = "loading_plane": the walls move
+      // with the substrate (factor 1).  With "locked_reference" the walls do
+      // the loading as without the term (U_pl1 is the locked solve with these
+      // walls), so the factor is the deck's, as in plane strain.
+      if (P.Sponge() || P.wall_speed_factor == 1.0 ||
+          (cfg_.finite_width.On() && cfg_.finite_width.substrate == "loading_plane"))
       { pml_wall_factor_ = 1.0; }
       else if (P.AutoWallSpeed())
       {
