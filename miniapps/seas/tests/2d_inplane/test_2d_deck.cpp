@@ -28,7 +28,7 @@
 //       CycleFrameConfig, CheckDimension(2) passes; the keys left out:
 //       "face" and 5 deg
 //
-// Modes: (default) K1-K5;  --refuse N (N = 1..14) loads a deck and checks
+// Modes: (default) K1-K5;  --refuse N (N = 1..13) loads a deck and checks
 // it against a dimension, which must abort (the makefile checks the exit
 // status and the message):
 //    1 3-D, ref_normal [nx, ny]                   "ref_normal has 2 entries, but the mesh is 3-D"
@@ -42,12 +42,13 @@
 //    9 a 4-entry [fault_geometry] vector          "must be a 2- or 3-element array"
 //   10 a 4-entry cycle vector                     "must be an array of 3 numbers (2 on a 2-D mesh)"
 //   (vertex-normal plan rev1, 2026-11-01: the [fault_geometry] keys
-//   vertex_normals and vertex_normal_max_turn_deg; 12-14 refused while
+//   vertex_normals and vertex_normal_max_turn_deg; 12-13 refused while
 //   parsing, 11 by the check against the dimension; phase P3)
 //   11 3-D, vertex_normals = "averaged"           "is implemented for 2-D meshes only"
 //   12 vertex_normals = "smooth"                  "\"face\" or \"averaged\""
 //   13 vertex_normal_max_turn_deg = 0             "vertex_normal_max_turn_deg must be > 0"
-//   14 2-D, "averaged" with [cycle.lts] rate2     "with [fault_geometry] vertex_normals = \"averaged\""
+//   ("averaged" with [cycle.lts] rate2 was case 14 until piece P-d of the
+//   LTS work accepted it, caf10f60; make test-lts-avg-normals covers it)
 // The make target also runs the two drivers on a 3-D mesh with a 2-entry
 // ref_normal, which they must refuse right after reading the mesh.
 //
@@ -298,11 +299,7 @@ static int Refuse(int n)
       case 11: text = ReplaceLine(deck, kRef3, kRef3 + "\nvertex_normals = \"averaged\""); break;
       case 12: text = ReplaceLine(deck, kRef3, kRef3 + "\nvertex_normals = \"smooth\""); break;
       case 13: text = ReplaceLine(deck, kRef3, kRef3 + "\nvertex_normal_max_turn_deg = 0.0"); break;
-      case 14: text = ReplaceLine(d2, "ref_normal      = [0.0, -1.0]",
-                                  "ref_normal      = [0.0, -1.0]\nvertex_normals = \"averaged\"")
-                      + "\n[cycle.lts]\nmode = \"rate2\"\n";
-               dim = 2; break;
-      default: MFEM_ABORT("--refuse N: N = 1..14");
+      default: MFEM_ABORT("--refuse N: N = 1..13");
    }
    if (g_rank == 0) { std::cout << "--refuse " << n << ": a " << dim << "-D check\n"; }
    const cycle::CycleConfig c = LoadText("refuse" + std::to_string(n), text);

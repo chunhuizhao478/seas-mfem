@@ -282,7 +282,7 @@ seas_test_2d_deck: $(TEST_2D_DECK_OBJ) $(CYCLE_LINK_OBJS)
 # both drivers, given a 3-D mesh and a 2-entry [fault_geometry].ref_normal,
 # must refuse right after reading the mesh (the Nitsche deck's fault
 # ParaView output off, so that an MFEM without HDF5 gets that far).
-DECK_2D_REFUSALS = 1:ref_normal has 2 entries, but the mesh is 3-D|2:up has 2 entries, but the mesh is 3-D|3:x has 2 entries, but the mesh is 3-D|4:plane_origin has 3 entries, but the mesh is 2-D|5:up is required on a 2-D mesh|6:must be [0, 0, +-1]|7:ref_normal has 3 entries, but the mesh is 2-D|8:ref_normal is required on a 2-D mesh|9:must be a 2- or 3-element array|10:must be an array of 3 numbers (2 on a 2-D mesh)|11:is implemented for 2-D meshes only|12:"face" or "averaged"|13:vertex_normal_max_turn_deg must be > 0|14:with [fault_geometry] vertex_normals = "averaged"
+DECK_2D_REFUSALS = 1:ref_normal has 2 entries, but the mesh is 3-D|2:up has 2 entries, but the mesh is 3-D|3:x has 2 entries, but the mesh is 3-D|4:plane_origin has 3 entries, but the mesh is 2-D|5:up is required on a 2-D mesh|6:must be [0, 0, +-1]|7:ref_normal has 3 entries, but the mesh is 2-D|8:ref_normal is required on a 2-D mesh|9:must be a 2- or 3-element array|10:must be an array of 3 numbers (2 on a 2-D mesh)|11:is implemented for 2-D meshes only|12:"face" or "averaged"|13:vertex_normal_max_turn_deg must be > 0
 DECK_2D_TMP = $(or $(TMPDIR),/tmp)/seas_test_2d_deck_drivers
 DECK_2D_DRIVER_MSG = ref_normal has 2 entries, but the mesh is 3-D
 test-2d-deck: seas_test_2d_deck seas_fd_cycle_driver seas_nitsche_dyn_driver
