@@ -1909,11 +1909,10 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
 
    if (c.lts.On())
    {
-      // vertex-normal plan rev1, D3: the LTS run is not checked with
-      // per-DOF frames
-      MFEM_VERIFY(!c.dyn.averaged_vertex_normals, "[cycle.lts] mode = \"rate2\" with "
-                  "[fault_geometry] vertex_normals = \"averaged\": not implemented "
-                  "(vertex-normal plan rev1, D3); use global stepping");
+      // [fault_geometry] vertex_normals = "averaged" runs under rate2 (LTS
+      // with PML design rev1, piece P-d): the per-DOF frames are an input of
+      // the fault closure, and every fault tet sits in the fault cluster
+      // (make test-lts-avg-normals).
       // The Nitsche driver's --lts rate2 conditions (nitsche_lts_run.hpp)
       MFEM_VERIFY(c.dyn.cfl <= 0.6, "[cycle.lts] mode = \"rate2\" needs [numerics].cfl "
                   "<= 0.6 (the rate-2 clusters' stability margin); got " << c.dyn.cfl);
