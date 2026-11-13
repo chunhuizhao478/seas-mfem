@@ -427,6 +427,8 @@ public:
       MFEM_VERIFY(dt_ == 0.0 && !mass_damped_, "SetPml before SetTimeStep");
       MFEM_VERIFY(dense_state_ == 0 && fused_state_ == 0,
                   "SetPml after the dense or fused stiffness read K");
+      MFEM_VERIFY(!elast_->HasFiniteWidth(), "SetPml after SetFiniteWidth (the band "
+                  "needs the 2.5D term: SetPml first)");
       elast_->SetPmlBand(band, /*penalty_only=*/true);
       // element and face-neighbour material
       auto values = [&](const ParGridFunction &src, Vector &own, Vector &nbr)
@@ -607,11 +609,14 @@ public:
    /// (the derivation note's rule C3).  Before the first step (the dense
    /// and fused paths read K once); not with local time stepping, whose run
    /// integrates its own element matrices (solver/nitsche_lts_run.hpp).
+   /// With the PML band (SetPml, before this call) the band adds its part
+   /// of the term (PmlDynamicTerms::SetFiniteWidth); before PmlEnter.
    void SetFiniteWidth(real_t beta_over_mu, const Vector &U_pl1,
                        std::shared_ptr<const real_t> t_offset)
    {
       MFEM_VERIFY(dense_state_ == 0 && fused_state_ == 0, "NitscheWaveOperator::"
                   "SetFiniteWidth after the dense or fused stiffness read K");
+      if (pml_) { pml_->SetFiniteWidth(beta_over_mu, U_pl1, t_offset); }
       elast_->SetFiniteWidth(beta_over_mu, U_pl1, std::move(t_offset));
    }
    const NitscheMass &Mass() const { return *mass_; }

@@ -362,16 +362,8 @@ public:
       ReleaseStiffness();
       beta_over_mu_ = beta_over_mu;
       beta_coef_ = std::make_unique<ProductCoefficient>(beta_over_mu_, *mu_ptr_);
-      // f_hat = M_beta U_pl1 with the integrator K gets; M_beta is block
-      // diagonal (no face term), so the local product is exact.
-      BilinFormType mb(fes_.get());
-      auto *mi = new VectorMassIntegrator(*beta_coef_);
-      mi->SetVDim(dim_);
-      mb.AddDomainIntegrator(mi);
-      mb.Assemble(0);
-      mb.Finalize();
-      substrate_load_.SetSize(U_pl1.Size());
-      mb.SpMat().Mult(U_pl1, substrate_load_);
+      substrate_shape_ = U_pl1;
+      RebuildSubstrateLoad_();
       substrate_t_off_ = std::move(t_offset);
    }
    bool HasFiniteWidth() const { return beta_over_mu_ > 0.0; }
@@ -381,9 +373,15 @@ public:
    /// zero-frequency band tensor C0 on band elements and band faces, and the
    /// shared penalty kappa_gamma P on band faces, so every QD solve uses K0
    /// (Section 4.3).  Fault paths are untouched (no fault face may lie in a
-   /// band; the caller checks).  IP only, no 2.5D term; before BuildQDGreen;
-   /// a K assembled before (and its factorization) is dropped.  nullptr
-   /// turns it off.  Without this call nothing changes (T0).
+   /// band; the caller checks).  IP only; before BuildQDGreen; a K assembled
+   /// before (and its factorization) is dropped.  nullptr turns it off.
+   /// Without this call nothing changes (T0).
+   ///
+   /// With the 2.5D term (SetFiniteWidth, before or after this call; 2.5D
+   /// with the PML, piece F-a): M_beta and the substrate load carry the
+   /// weight S0 on band elements (PmlBandBetaMassIntegrator), the stretch of
+   /// the inertia term at zero frequency.  penalty_only keeps the plain
+   /// M_beta (the dynamic band adds its part: PmlDynamicTerms::SetFiniteWidth).
    ///
    /// penalty_only (P2, Section 3.5): K_p of the dynamic phase instead: plain
    /// C everywhere, the penalty times kappa_gamma on band faces (matrix and
@@ -393,8 +391,6 @@ public:
       MFEM_VERIFY(method_ == DGMethod::IP, "SetPmlBand: IP only");
       MFEM_VERIFY(!band || band->Dim() == dim_, "SetPmlBand: band dimension "
                   << band->Dim() << ", mesh " << dim_);
-      MFEM_VERIFY(!band || beta_over_mu_ == 0.0, "SetPmlBand: not with the 2.5D "
-                  "finite-width term");
 #ifdef MFEM_USE_MPI
       MFEM_VERIFY(!qd_green_, "SetPmlBand after BuildQDGreen: G was built without "
                   "the band");
@@ -403,6 +399,7 @@ public:
       ReleaseStiffness();
       pml_band_ = std::move(band);
       pml_penalty_only_ = penalty_only;
+      if (beta_over_mu_ > 0.0) { RebuildSubstrateLoad_(); }
    }
    const PmlBand *GetPmlBand() const { return pml_band_.get(); }
    bool PmlPenaltyOnly() const { return pml_penalty_only_; }
@@ -417,6 +414,8 @@ public:
    void EvalDirichlet(int attr, const Vector &x, real_t t, Vector &u_D) const
    { EvalDirichletFunc(attr, x, t, u_D); }
    real_t FiniteWidthBetaOverMu() const { return beta_over_mu_; }
+   /// U_pl1 of SetFiniteWidth (vdofs).
+   const Vector &SubstrateShape() const { return substrate_shape_; }
    /// M_beta U_pl1 (vdofs): the substrate load at physical time 1.
    const Vector &SubstrateLoad() const { return substrate_load_; }
    /// rhs += (t_off + time) M_beta U_pl1 (nothing without SetFiniteWidth).
@@ -850,7 +849,33 @@ private:
    real_t beta_over_mu_ = 0.0;
    std::unique_ptr<Coefficient> beta_coef_;
    Vector substrate_load_;
+   Vector substrate_shape_;   ///< U_pl1 (kept: SetPmlBand rebuilds the load)
    std::shared_ptr<const real_t> substrate_t_off_;
+
+   /// The M_beta integrator of K and of the substrate load: MFEM's
+   /// VectorMassIntegrator; with the QD band (not penalty-only) the band
+   /// elements carry the weight S0.
+   BilinearFormIntegrator *NewBetaMassIntegrator_() const
+   {
+      if (pml_band_ && !pml_penalty_only_)
+      {
+         return new PmlBandBetaMassIntegrator(*beta_coef_, *pml_band_, dim_);
+      }
+      auto *mi = new VectorMassIntegrator(*beta_coef_);
+      mi->SetVDim(dim_);
+      return mi;
+   }
+   /// substrate_load_ = M_beta U_pl1 with the integrator K gets; M_beta is
+   /// block diagonal (no face term), so the local product is exact.
+   void RebuildSubstrateLoad_()
+   {
+      BilinFormType mb(fes_.get());
+      mb.AddDomainIntegrator(NewBetaMassIntegrator_());
+      mb.Assemble(0);
+      mb.Finalize();
+      substrate_load_.SetSize(substrate_shape_.Size());
+      mb.SpMat().Mult(substrate_shape_, substrate_load_);
+   }
 
    // Solver
    mutable std::unique_ptr<Solver> solver_;

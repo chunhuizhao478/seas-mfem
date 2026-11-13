@@ -34,6 +34,15 @@
 // zero-frequency gain exactly: b_band + B -> (K0 - K_p) U at rest
 // (Proposition 3 holds for the discrete operators).
 //
+// 2.5D finite width (SetFiniteWidth; 2.5D with the PML, piece F-a): the term
+// beta (u - u_pl) of rho u'' = div sigma - beta (u - u_pl) gets the mass-side
+// stretch S.  K_p + M_beta and the substrate load already hold the plain
+// term, so the band adds, at its volume points,
+//   beta [ (S0 - 1) (u_s - u_pl(t)) + (y_J - w) ],   y_J - w = sum_a chi_a,
+// S0 = prod_a (1 + d_a / alpha) the zero-frequency value of S and u_pl(t) =
+// (t_off + t) U_pl1.  At rest y_J = S0 w, so the total is beta S0 (U - u_pl):
+// the QD band's term (PmlBandBetaMassIntegrator).  No new state.
+//
 // Faces: interior and shared faces with a quadrature point inside a band,
 // and Dirichlet wall faces inside a band.  Each side of a face keeps its own
 // two pipelines (its material); a rank adds only its own side's test terms
@@ -178,6 +187,23 @@ public:
    int NumBandFaces() const { return static_cast<int>(faces_.size()); }
    size_t MemoryReals() const { return state_.size(); }
 
+   /// The 2.5D term in the band (header): beta = beta_over_mu mu_e, U_pl1 the
+   /// substrate displacement at physical time 1 (vdofs), t_offset the
+   /// physical time of the operator's t = 0 (null = 0), as
+   /// ElasticityDomainOperator::SetFiniteWidth.  Before Enter.  Collective.
+   void SetFiniteWidth(real_t beta_over_mu, const Vector &U_pl1,
+                       std::shared_ptr<const real_t> t_offset)
+   {
+      MFEM_VERIFY(!entered_, "PmlDynamicTerms::SetFiniteWidth after Enter");
+      MFEM_VERIFY(std::isfinite(beta_over_mu) && beta_over_mu > 0.0,
+                  "PmlDynamicTerms::SetFiniteWidth: beta / mu = " << beta_over_mu);
+      beta_over_mu_ = beta_over_mu;
+      beta_t_off_ = std::move(t_offset);
+      Gather_(U_pl1);
+      BetaStatic_(fb1_);
+   }
+   bool HasFiniteWidth() const { return beta_over_mu_ > 0.0; }
+
    /// Entry at the switch (Section 3.1, Proposition 2): memory to zero,
    /// u_s kept, b_band = band terms of (C0 - C) on u_s with the wall jump
    /// u_s - g(t_s); t: the operator's time at entry.  Collective (face
@@ -203,6 +229,8 @@ public:
       b_band_ = 0.0;
       Gather_(u_s);
       Terms_(b_band_, /*static_mode=*/true, t, /*jump_from_gs=*/true);
+      if (beta_over_mu_ > 0.0) { BetaStatic_(fbs_); }   // beta (S0 - 1) u_s
+      t_last_ = t;
       fcache_.SetSize(u_s.Size());
       fcache_ = 0.0;
       ForceFromState_(fcache_);
@@ -232,6 +260,12 @@ public:
       const RankCosts::Scope cost(RankCosts::Pml);
       F += b_band_;
       F += fcache_;   // B + E of the stored state (UpdateAll_ / Enter)
+      if (beta_over_mu_ > 0.0)
+      {
+         // 2.5D: beta (S0 - 1) (u_s - u_pl(t)); the chi part is in fcache_
+         F += fbs_;
+         F.Add(-((beta_t_off_ ? *beta_t_off_ : 0.0) + t_last_), fb1_);
+      }
    }
 
    const Vector &BandLoad() const { return b_band_; }
@@ -244,6 +278,12 @@ public:
       out = 0.0;
       Gather_(u);
       Terms_(out, true, t, false);
+      if (beta_over_mu_ > 0.0)
+      {
+         Vector fb;
+         BetaStatic_(fb);   // 2.5D: + beta (S0 - 1) u
+         out += fb;
+      }
    }
 
 private:
@@ -332,6 +372,11 @@ private:
    std::vector<int> vdofs_, nbr_vdofs_;   // element vdofs, cached by Build_
 
    Vector us_, w_, b_band_;
+   // 2.5D finite width (SetFiniteWidth; 0 = off): int beta (S0 - 1) f . v
+   // on the band points for f = u_s (fbs_) and f = U_pl1 (fb1_)
+   real_t beta_over_mu_ = 0.0;
+   std::shared_ptr<const real_t> beta_t_off_;
+   Vector fbs_, fb1_;
    Vector fcache_;   // B(w, Phi) + E(w, chi) of the stored state
    mutable Vector ue_, u1_, u2_, r_, r1_, r2_;   // scratch (per element / face)
    std::unique_ptr<ParGridFunction> gf_;   // values with face-neighbour data
@@ -552,6 +597,48 @@ private:
             y[i] += chi[i];
          }
          f += 2 * D;
+      }
+   }
+
+   /// y_J - w = sum_a chi_a from the stored mass state (2.5D term).
+   void MassChi_(const BandPt &bp, const real_t *st, real_t X[3]) const
+   {
+      const int D = D_;
+      for (int i = 0; i < D; i++) { X[i] = 0.0; }
+      const real_t *f = st + D;
+      for (int k = 0; k < bp.nact; k++)
+      {
+         for (int i = 0; i < D; i++) { X[i] += f[i]; }
+         f += 2 * D;
+      }
+   }
+
+   /// out = int beta (S0 - 1) u . v over the band's volume points, u the
+   /// gathered field (2.5D term, static part).
+   void BetaStatic_(Vector &out)
+   {
+      const int D = D_;
+      Vector &ue = ue_, &r = r_;
+      real_t uv[3];
+      out.SetSize(elast_.GetFESpace().GetVSize());
+      out = 0.0;
+      for (const VolElem &ve : vol_)
+      {
+         const int nd = ve.nd;
+         OwnValues_(ve.vd, D * nd, ue);
+         r.SetSize(D * nd);
+         r = 0.0;
+         for (int q = 0; q < ve.nq; q++)
+         {
+            const VolPt &p = vpt_[ve.p0 + q];
+            if (p.nact == 0) { continue; }
+            const real_t *sh = &vshape_[p.shape];
+            ValAt_(D, nd, ue, sh, uv);
+            const real_t s = p.wdet * beta_over_mu_ * ve.mu * (bpt_[p.band].pp.S0 - 1.0);
+            for (int k = 0; k < nd; k++)
+               for (int c = 0; c < D; c++) { r(c * nd + k) += s * uv[c] * sh[k]; }
+         }
+         AddElem_(ve.vd, D * nd, r, out);
       }
    }
 
@@ -984,6 +1071,7 @@ private:
             const real_t *sh = &vshape_[p.shape];
             for (int k = 0; k < nd; k++)
                for (int c = 0; c < D; c++) { r(c * nd + k) += p.wdet * ve.rho * E[c] * sh[k]; }
+            if (beta_over_mu_ > 0.0) { AddBetaChi_(ve, p, nd, r); }
          }
          AddElem_(ve.vd, D * nd, r, fcache_);
       }
@@ -1020,6 +1108,18 @@ private:
       const real_t *sh = &vshape_[p.shape];
       for (int k = 0; k < nd; k++)
          for (int c = 0; c < D; c++) { r(c * nd + k) += p.wdet * ve.rho * E[c] * sh[k]; }
+      if (beta_over_mu_ > 0.0) { AddBetaChi_(ve, p, nd, r); }
+   }
+
+   /// 2.5D term, memory part: r += int beta (y_J - w) . v at one point.
+   void AddBetaChi_(const VolElem &ve, const VolPt &p, int nd, Vector &r) const
+   {
+      real_t X[3];
+      MassChi_(bpt_[p.band], &state_[p.st_m], X);
+      const real_t s = p.wdet * beta_over_mu_ * ve.mu;
+      const real_t *sh = &vshape_[p.shape];
+      for (int k = 0; k < nd; k++)
+         for (int c = 0; c < D_; c++) { r(c * nd + k) += s * X[c] * sh[k]; }
    }
 
    /// B + E from the stored state into out (at Enter; UpdateAll_ forms the

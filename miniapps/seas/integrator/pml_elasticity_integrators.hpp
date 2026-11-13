@@ -108,6 +108,63 @@ private:
    ElasticityIntegrator plain_;
 };
 
+/// The 2.5D finite-width mass term inside the QD band (2.5D with the PML,
+/// piece F-a): int beta S0 u . v on band elements, S0 the zero-frequency
+/// value of the mass-side stretch S = prod_a s_a (the term beta (u - u_pl)
+/// gets the stretch of the inertia term).  The rule is the band rule 2p + N
+/// of PmlBandElasticityIntegrator and of the dynamic band's volume points,
+/// so the dynamic M_beta + band part at rest equals this matrix to
+/// rounding.  Elements with no vertex inside a band are handed to MFEM's
+/// VectorMassIntegrator unchanged.
+class PmlBandBetaMassIntegrator : public BilinearFormIntegrator
+{
+public:
+   PmlBandBetaMassIntegrator(Coefficient &beta, const PmlBand &band, int vdim)
+      : beta_(beta), band_(band), vdim_(vdim), plain_(beta)
+   { plain_.SetVDim(vdim); }
+
+   void AssembleElementMatrix(const FiniteElement &el, ElementTransformation &Tr,
+                              DenseMatrix &elmat) override
+   {
+      const Mesh *mesh = Tr.mesh;
+      MFEM_VERIFY(mesh, "PmlBandBetaMassIntegrator: no mesh on the transformation");
+      if (!PmlBandElement(*mesh, Tr.ElementNo, band_))
+      {
+         plain_.AssembleElementMatrix(el, Tr, elmat);   // outside the bands
+         return;
+      }
+      const int D = el.GetDim();
+      const int nd = el.GetDof();
+      MFEM_VERIFY(D == band_.Dim() && vdim_ == D, "PmlBandBetaMassIntegrator: dimension");
+      elmat.SetSize(D * nd);
+      elmat = 0.0;
+      const int order = 2 * el.GetOrder() + band_.Params().power;
+      const IntegrationRule &ir = IntRules.Get(el.GetGeomType(), order);
+      Vector shape(nd), x(D);
+      for (int q = 0; q < ir.GetNPoints(); q++)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         Tr.SetIntPoint(&ip);
+         el.CalcPhysShape(Tr, shape);
+         Tr.Transform(ip, x);
+         const PmlPoint p = band_.At(x);
+         const real_t w = ip.weight * Tr.Weight() * beta_.Eval(Tr, ip) * p.S0;
+         for (int k = 0; k < nd; k++)
+            for (int l = 0; l < nd; l++)
+            {
+               const real_t v = w * shape(k) * shape(l);
+               for (int c = 0; c < D; c++) { elmat(c * nd + k, c * nd + l) += v; }
+            }
+      }
+   }
+
+private:
+   Coefficient &beta_;
+   const PmlBand &band_;
+   int vdim_;
+   VectorMassIntegrator plain_;
+};
+
 } // namespace seas
 } // namespace mfem
 

@@ -196,8 +196,12 @@ public:
       {
          // the [cycle.pml] refusals of the deck reader, repeated for callers
          // that build the configuration by hand
-         MFEM_VERIFY(!cfg.absorbing.On() && !cfg.finite_width.On(), "DynPhase: [cycle.pml] "
-                     "with [cycle.absorbing] or [cycle.finite_width]");
+         MFEM_VERIFY(!cfg.absorbing.On(), "DynPhase: [cycle.pml] with [cycle.absorbing]");
+         // with [cycle.finite_width] (2.5D with the PML, piece F-a): the CFS
+         // band, the walls at the substrate's speed
+         MFEM_VERIFY(!cfg.finite_width.On() || (cfg.pml.Cfs() && pml_wall_factor == 1.0),
+                     "DynPhase: [cycle.pml] with [cycle.finite_width] needs kind = \"cfs\" "
+                     "and the wall speed factor 1");
          // with [cycle.lts]: the CFS band, with each element's own step
          // (PlanLts scales the band's steps by 1 / sqrt(kappa_e))
          MFEM_VERIFY(!(lts != nullptr && lts->on) ||

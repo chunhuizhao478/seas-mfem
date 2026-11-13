@@ -1847,8 +1847,15 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
          MFEM_VERIFY(!c.lts.On() || (P.Cfs() && P.dt_rule == "element"), "[" << sec
                      << "] with [cycle.lts] needs kind = \"cfs\" and dt_rule = "
                      "\"element\" (the clusters use each element's own step)");
-         MFEM_VERIFY(!c.finite_width.On(), "[" << sec << "] with [cycle.finite_width]: "
-                     "not implemented");
+         // with [cycle.finite_width] (2.5D with the PML, piece F-a): the CFS
+         // band stretches the 2.5D term; the walls follow the substrate, so
+         // the wall speed factor is 1 ("auto" gives 1)
+         MFEM_VERIFY(!c.finite_width.On() || P.Cfs(), "[" << sec << "] with "
+                     "[cycle.finite_width] needs kind = \"cfs\"");
+         MFEM_VERIFY(!c.finite_width.On() || P.AutoWallSpeed() || P.wall_speed_factor == 1.0,
+                     "[" << sec << "].wall_speed_factor = " << P.wall_speed_factor
+                     << " with [cycle.finite_width]: the walls move with the substrate "
+                     "(use 1 or \"auto\")");
          MFEM_VERIFY(P.wall_speed_factor == 1.0 || c.loading.Plate(), "[" << sec
                      << "].wall_speed_factor needs [cycle.loading] kind = \"plate\"");
       }

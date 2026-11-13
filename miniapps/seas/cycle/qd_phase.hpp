@@ -1884,7 +1884,9 @@ private:
       MFEM_VERIFY(inside == 0, "[cycle.pml]: " << inside << " interior faces (fault or "
                   "prescribed slip) have a vertex inside a band; thin the band or "
                   "move the walls");
-      if (P.Sponge() || P.wall_speed_factor == 1.0) { pml_wall_factor_ = 1.0; }
+      // [cycle.finite_width]: the walls move with the substrate (factor 1)
+      if (P.Sponge() || P.wall_speed_factor == 1.0 || cfg_.finite_width.On())
+      { pml_wall_factor_ = 1.0; }
       else if (P.AutoWallSpeed())
       {
          const auto &m = cfg_.loading.plane_normal;

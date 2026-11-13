@@ -60,6 +60,24 @@ test-pml-dyn: seas_test_pml_dyn
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_pml_dyn
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_pml_dyn --only S0,S1,T2,T2KV
 
+# 2.5D with the PML, piece F-a: the finite-width term inside the band
+# (F0, F1, F2 on 1 and 2 ranks; the pulse runs F3, F4 on 1 rank)
+TEST_PML_2D5_SRC = tests/pml/test_pml_2d5.cpp
+TEST_PML_2D5_OBJ = $(TEST_PML_2D5_SRC:.cpp=.o)
+$(TEST_PML_2D5_OBJ): %.o: $(SRC)%.cpp $(PML_HEADERS) $(SEAS_HEADERS) $(INPLANE_HEADERS) \
+                     $(NITSCHE_2D_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI -c $< -o $@
+
+seas_test_pml_2d5: $(TEST_PML_2D5_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PML_2D5_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-2d5-pml: seas_test_pml_2d5
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_pml_2d5
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_pml_2d5 --only F0,F1,F2
+
 TEST_PML_SWITCH_SRC = tests/pml/test_pml_switch.cpp
 TEST_PML_SWITCH_OBJ = $(TEST_PML_SWITCH_SRC:.cpp=.o)
 $(TEST_PML_SWITCH_OBJ): %.o: $(SRC)%.cpp $(PML_HEADERS) $(CYCLE_HEADERS) $(CYCLE_STAMP) \

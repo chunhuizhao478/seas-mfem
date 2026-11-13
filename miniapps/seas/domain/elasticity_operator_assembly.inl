@@ -49,9 +49,7 @@
       // the substrate load
       if (beta_over_mu_ > 0.0)
       {
-         auto *mi = new VectorMassIntegrator(*beta_coef_);
-         mi->SetVDim(dim_);
-         cached_a_->AddDomainIntegrator(mi);
+         cached_a_->AddDomainIntegrator(NewBetaMassIntegrator_());
       }
 
       if (method_ == DGMethod::BR2)
