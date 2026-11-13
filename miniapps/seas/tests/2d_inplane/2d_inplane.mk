@@ -1135,6 +1135,33 @@ test-lts-pml-band: seas_fd_cycle_driver
 	    python3 tests/2d_inplane/lts_pml_band_check.py check $$t $(LTS_PML_PREFIX) || exit 1; \
 	 done
 
+# [cycle.quench] with [cycle.lts] rate2 (LTS with PML design rev1, piece P-c;
+# NitscheLtsRun::SetQuench).  On 1 and 2 ranks the straight-fault deck of the
+# simple cases without its band (the piece stands alone; LTS_QUENCH_BAND=band
+# keeps the band), with an event started at t = 0 and a quench of d = 0.5 1/s
+# below V_q = V_on, runs LTS_QUENCH_STEPS steps (24 s; the quench is on from
+# about 19.6 s) with global stepping, with rate2 and same_step = true and
+# with rate2.  tests/2d_inplane/lts_quench_check.py compares them.  About 15
+# minutes.  The runs overwrite an earlier run's files.
+LTS_QUENCH_TMP = $(or $(TMPDIR),/tmp)/seas_test_lts_quench
+LTS_QUENCH_DECK = simple_cases/configs/D0_straight_hb_pml0p01.toml
+LTS_QUENCH_PREFIX = D0_straight_hb_pml0p01
+LTS_QUENCH_STEPS = 6400
+LTS_QUENCH_BAND =
+test-lts-quench: seas_fd_cycle_driver
+	@mkdir -p $(LTS_QUENCH_TMP); \
+	 python3 tests/2d_inplane/lts_quench_check.py decks $(LTS_QUENCH_DECK) $(LTS_QUENCH_TMP) $(LTS_QUENCH_BAND) || exit 1; \
+	 for np in 1 2; do t=$(LTS_QUENCH_TMP)/np$$np; mkdir -p $$t; \
+	    for v in glob same lts; do n=$(LTS_QUENCH_STEPS); [ $$v = lts ] && n=$$(($(LTS_QUENCH_STEPS) / 8)); \
+	       $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_fd_cycle_driver -d $(LTS_QUENCH_TMP)/$$v.toml \
+	          -o $$t/$$v --end-phase-after $$n --max-dyn-steps $$n --max-steps 3 > $$t/$$v.log 2>&1; rc=$$?; \
+	       if [ $$rc -ne 0 ] && [ $$rc -ne 7 ]; then tail -15 $$t/$$v.log; \
+	          echo "  FAILED: $$np rank(s), $$v: exit $$rc"; exit 1; fi; \
+	    done; \
+	    echo "  $$np rank(s):"; \
+	    python3 tests/2d_inplane/lts_quench_check.py check $$t $(LTS_QUENCH_PREFIX) || exit 1; \
+	 done
+
 # fd_cycle --early-sync (NitscheWaveOperator::SetEarlySync, DenseBlockStiffness::
 # ExchangeHalo; speed-up options D0, 2026-11-11): the stiffness halo at the
 # start of a dynamic step and the fault record's reduction at its end.  It
@@ -1193,7 +1220,7 @@ test-qd-esdirk-cycle: seas_fd_cycle_driver
                 test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle \
                 test-fault-opening test-fault-contact test-fault-contact-dyn \
                 test-fault-contact-qd test-exact-retry test-qd-esdirk-points test-qd-implicit-green \
-                test-qd-esdirk-cycle test-par-dense-lu test-pml-partition test-early-sync test-lts-static-split test-pml-dt-rule test-lts-pml-band
+                test-qd-esdirk-cycle test-par-dense-lu test-pml-partition test-early-sync test-lts-static-split test-pml-dt-rule test-lts-pml-band test-lts-quench
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \

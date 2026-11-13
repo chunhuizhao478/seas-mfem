@@ -412,7 +412,6 @@ public:
       if (cfg.quench.On())
       {
          // [cycle.quench] (quench plan rev1, Q3): the rate d for the run
-         MFEM_VERIFY(!lts_on, "DynPhase: [cycle.quench] with local time stepping");
          if (cfg.quench.AutoRate())
          {
             // d_auto = 2 pi c_s,min / L_max, the critical damping of the
@@ -809,14 +808,16 @@ public:
    {
       MFEM_VERIFY(cfg_.quench.On() && quench_d_ > 0.0, "DynPhase::SetQuench without "
                   "[cycle.quench]");
-      MFEM_VERIFY(entered_ && !lts_, "DynPhase::SetQuench before Enter or with local time "
-                  "stepping");
-      W_->SetQuench(quench_d_);
+      MFEM_VERIFY(entered_, "DynPhase::SetQuench before Enter");
+      // under local time stepping the LTS run holds the step's matrices
+      if (lts_) { lts_->SetQuench(quench_d_); }
+      else { W_->SetQuench(quench_d_); }
       quench_on_ = true;
    }
    void ClearQuench()
    {
-      W_->ClearQuench();
+      if (lts_) { lts_->ClearQuench(); }
+      else { W_->ClearQuench(); }
       quench_on_ = false;
    }
    bool Quenched() const { return quench_on_; }

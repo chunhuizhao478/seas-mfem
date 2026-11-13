@@ -1125,6 +1125,70 @@ public:
    /// work count of the element updates.
    long long PatchUpdates() const { return patch_updates_; }
 
+   /// The quench (NitscheWaveOperator::SetQuench under local time stepping):
+   /// C_q = d rho M_e on every element, treated as the absorbing blocks
+   /// are: - C_q v on an element's own rows and (B + 1/2 dt_(c_e) C_q)^{-1}
+   /// where B_top applies.  With same_step this is global stepping with
+   /// the quench to round-off.  At a sync point only; ClearQuench puts the
+   /// step back as it was.
+   void SetQuench(real_t d)
+   {
+      MFEM_VERIFY(d > 0.0 && std::isfinite(d), "NitscheLtsRun::SetQuench: d = " << d);
+      MFEM_VERIFY(!quench_, "NitscheLtsRun::SetQuench: the quench is already on");
+      MFEM_VERIFY(m_ == 0, "NitscheLtsRun::SetQuench: not at a sync point (tick " << m_ << ")");
+      const int ne = static_cast<int>(cl_.size());
+      if (mq_.empty())
+      {
+         // rho M_e from the stored inverse (once)
+         mq_.resize(static_cast<std::size_t>(ne) * nd_ * nd_);
+         DenseMatrix Mi(nd_), Me(nd_);
+         for (int e = 0; e < ne; e++)
+         {
+            const real_t *src = minv_.data() + static_cast<std::size_t>(e) * nd_ * nd_;
+            for (int k = 0; k < nd_; k++)
+               for (int l = 0; l < nd_; l++) { Mi(k, l) = src[k * nd_ + l]; }
+            Me = Mi;
+            Me.Invert();
+            const real_t rho = 1.0 / inv_rho_[e];
+            real_t *dst = mq_.data() + static_cast<std::size_t>(e) * nd_ * nd_;
+            for (int k = 0; k < nd_; k++)
+               for (int l = 0; l < nd_; l++) { dst[k * nd_ + l] = rho * Me(k, l); }
+         }
+      }
+      // absorbing elements: ((1 + 1/2 dt d) rho M_e + 1/2 dt C_e)^{-1}
+      binvq_.assign(binv_.size(), 0.0);
+      DenseMatrix B(nb_);
+      for (int e = 0; e < ne; e++)
+      {
+         if (absorb_[e] < 0) { continue; }
+         const real_t hdt = 0.5 * Dt_(cl_[e]);
+         const std::size_t off = static_cast<std::size_t>(absorb_[e]) * nb_ * nb_;
+         const real_t *C = cblk_.data() + off;
+         const real_t *Mq = mq_.data() + static_cast<std::size_t>(e) * nd_ * nd_;
+         for (int i = 0; i < nb_; i++)
+            for (int j = 0; j < nb_; j++) { B(i, j) = hdt * C[i * nb_ + j]; }
+         for (int comp = 0; comp < dim_; comp++)
+            for (int k = 0; k < nd_; k++)
+               for (int l = 0; l < nd_; l++)
+               {
+                  B(comp * nd_ + k, comp * nd_ + l) += (1.0 + hdt * d) * Mq[k * nd_ + l];
+               }
+         B.Invert();
+         for (int i = 0; i < nb_; i++)
+            for (int j = 0; j < nb_; j++) { binvq_[off + i * nb_ + j] = B(i, j); }
+      }
+      qd_ = d;
+      quench_ = true;
+   }
+   void ClearQuench()
+   {
+      MFEM_VERIFY(quench_, "NitscheLtsRun::ClearQuench: the quench is off");
+      MFEM_VERIFY(m_ == 0, "NitscheLtsRun::ClearQuench: not at a sync point (tick " << m_ << ")");
+      quench_ = false;
+      qd_ = 0.0;
+   }
+   bool Quenched() const { return quench_; }
+
    /// The static split (file header): on, the next Init takes its state (u,
    /// the operator's slip, t; v must be zero) as the static state.  Before
    /// Init.  Off by default.
@@ -1259,6 +1323,22 @@ private:
             }
          }
       }
+      if (quench_)
+      {
+         // - C_q v = - d rho M_e v on the cluster's own elements
+         for (int e : own_[c])
+         {
+            const int *ie = blocks_.ElementDofs(e);
+            const real_t *Mq = mq_.data() + static_cast<std::size_t>(e) * nd_ * nd_;
+            for (int comp = 0; comp < dim_; comp++)
+               for (int i = 0; i < nd_; i++)
+               {
+                  real_t s = 0.0;
+                  for (int j = 0; j < nd_; j++) { s += Mq[i * nd_ + j] * v(ie[comp * nd_ + j]); }
+                  a(ie[comp * nd_ + i]) -= qd_ * s;
+               }
+         }
+      }
       if (capture_)
       {
          // Init with the static split: keep the share, sum the residual
@@ -1298,7 +1378,8 @@ private:
          for (int k = 0; k < nb_; k++) { x[k] = a(ie[k]); }
          if (top >= 0 && absorb_[e] >= 0 && cl_[e] <= top)
          {
-            const real_t *B = binv_.data() + static_cast<std::size_t>(absorb_[e]) * nb_ * nb_;
+            const real_t *B = (quench_ ? binvq_.data() : binv_.data())
+                              + static_cast<std::size_t>(absorb_[e]) * nb_ * nb_;
             for (int i = 0; i < nb_; i++)
             {
                real_t s = 0.0;
@@ -1309,6 +1390,9 @@ private:
             continue;
          }
          const real_t *Mi = minv_.data() + static_cast<std::size_t>(e) * nd_ * nd_;
+         // the quench where B_top applies: ((1 + 1/2 dt_(c_e) d) rho M_e)^{-1}
+         const real_t w = (quench_ && top >= 0 && cl_[e] <= top)
+                          ? inv_rho_[e] / (1.0 + 0.5 * Dt_(cl_[e]) * qd_) : inv_rho_[e];
          for (int comp = 0; comp < dim_; comp++)
          {
             const real_t *xc = x + comp * nd_;
@@ -1316,7 +1400,7 @@ private:
             {
                real_t s = 0.0;
                for (int j = 0; j < nd_; j++) { s += Mi[i * nd_ + j] * xc[j]; }
-               a(ie[comp * nd_ + i]) = s * inv_rho_[e];
+               a(ie[comp * nd_ + i]) = s * w;
             }
          }
       }
@@ -1351,6 +1435,9 @@ private:
    std::map<int, std::vector<int>> abs_elems_;   ///< cluster -> its absorbing elements
    std::vector<int> absorb_;                    ///< element -> absorbing block, or -1
    std::vector<real_t> minv_, inv_rho_, binv_, cblk_;
+   std::vector<real_t> mq_, binvq_;   ///< SetQuench: rho M_e; the quenched B^{-1}
+   bool quench_ = false;
+   real_t qd_ = 0.0;                  ///< the quench rate d [1/s]
    std::vector<Vector> a_;
    std::vector<Vector> s_;   ///< static split: r_c at the static state, per cluster
    Vector R_;                ///< static split: sum_c s_c, the static residual

@@ -1883,8 +1883,6 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
          MFEM_VERIFY(Q.V_q > 0.0 && std::isfinite(Q.V_q) && Q.V_q <= c.switch_cfg.V_on,
                      "[" << sec << "].V_q = " << Q.V_q << " m/s must be in (0, V_on = "
                      << c.switch_cfg.V_on << " m/s] (0 or absent = V_off)");
-         MFEM_VERIFY(!c.lts.On(), "[" << sec << "] with [cycle.lts]: the LTS run integrates "
-                     "its own element matrices; use global stepping");
       }
    }
 
