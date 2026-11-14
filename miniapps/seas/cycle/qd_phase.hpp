@@ -150,9 +150,18 @@
 //   they are frozen): the switch and the hand-back guard see closed DOFs.
 //   Start, switch back: the consistent start (plan 2.10; ConsistentStart:
 //   the gap rows at fixed slip and psi) takes the place of the settle.
-//   No relaxation (refused), no post-step settle, no reset of the step to
-//   dt_initial after a flip (the flip happened inside an error-controlled
-//   stage solve).
+//   No relaxation (refused) unless [cycle.relaxation] opening = "relaxed"
+//   (below), no post-step settle, no reset of the step to dt_initial after
+//   a flip (the flip happened inside an error-controlled stage solve).
+//   [cycle.relaxation] opening = "relaxed" (Chunhui Zhao, 2026-11-13;
+//   cycle/normal_stress_relaxation.hpp): the stage solves take red(t) of the
+//   last accepted step off every point's normal stress (QDImplicitFault::
+//   Problem::normal_reduction = ReductionAt), so the law and the gap row
+//   read the relaxed stress; after the kernel evaluation of an accepted
+//   step the relaxation accepts it (r at t, dsig that evaluation's elastic
+//   normal traction, gap terms included), before the monitor.  The kernel
+//   evaluation tapers on the relaxed stress too (SetRelaxedOpening), so its
+//   slip rate is the stage solves'.  r is not frozen at open DOFs.
 //   The checkpoint is unchanged (version 7 already carries the flags and
 //   the gap); a checkpoint step restarts the stage and drops the LU factor
 //   in the running run as in the restarted one.
@@ -356,6 +365,9 @@ public:
          fault_->SetSigmaNReduction(&relax_->Reduction());
          NormalStressRelaxation *rx = relax_.get();
          op_->SetFrictionStageHook([rx](real_t t) { rx->Fill(t); });
+         // opening = "relaxed": the kernel's tapered floor on the relaxed
+         // stress, as the option I stage solves have it
+         if (cfg_.RelaxedOpening()) { fault_->SetRelaxedOpening(true); }
       }
       // QD speed items 1, 3, 4 (seas_bp5_full --qd-operators, --qd-green*):
       // after SetElasticSigmaN, which they build N_u, N_delta for.
@@ -1400,7 +1412,8 @@ private:
                   "[cycle.qd.green]");
       MFEM_VERIFY(pmesh_.Dimension() == 2, "[cycle.qd].integrator = \"esdirk\": a 2-D "
                   "mesh only (option I, decision P5)");
-      MFEM_VERIFY(!relax_, "[cycle.qd].integrator = \"esdirk\" with the relaxation");
+      MFEM_VERIFY(!relax_ || cfg_.RelaxedOpening(), "[cycle.qd].integrator = \"esdirk\" "
+                  "with the relaxation needs [cycle.relaxation] opening = \"relaxed\"");
       const QDGreenOperator *G = dom_->GetQDGreen();
       MFEM_VERIFY(G, "[cycle.qd].integrator = \"esdirk\": no Green's function");
       PlanarFaultInputs in;
@@ -1425,11 +1438,18 @@ private:
       set.atol = cfg_.qd.ts_atol;
       set.rtol = cfg_.qd.ts_rtol;
       DomainOp *dom = dom_.get();
-      imp_ = std::make_unique<QDImplicitFault>(
-         mpi_.GetComm(),
+      QDImplicitFault::Problem prob =
          PlanarProblem(mpi_.GetComm(), *G, in,
                        [dom](const Vector &e, Vector &T, Vector &Tn)
-      { dom->QDUnitColumn(e, T, &Tn); }), set);
+      { dom->QDUnitColumn(e, T, &Tn); });
+      if (relax_)
+      {
+         // [cycle.relaxation] opening = "relaxed": every stage's normal
+         // stress less red(t) of the last accepted step (ReductionAt)
+         const NormalStressRelaxation *rx = relax_.get();
+         prob.normal_reduction = [rx](real_t t, int o) { return rx->ReductionAt(t, o); };
+      }
+      imp_ = std::make_unique<QDImplicitFault>(mpi_.GetComm(), std::move(prob), set);
       MFEM_VERIFY(imp_->NumOwned() == fault_->NumNodes(), "option I: " << imp_->NumOwned()
                   << " points for " << fault_->NumNodes() << " owned fault DOFs");
       if (mpi_.Rank() == 0)
@@ -1657,6 +1677,13 @@ private:
          self->op_->SetTime(static_cast<real_t>(t));
          self->imp_rate_.SetSize(self->state_.Size());
          self->op_->Mult(self->state_, self->imp_rate_);
+      }
+      if (self->relax_)
+      {
+         // [cycle.relaxation] opening = "relaxed": accept the step (r at t,
+         // dsig the accepted state's elastic normal traction), as the DP5
+         // path does in its post-step
+         self->relax_->Accept(static_cast<real_t>(t), self->RelaxDelta_());
       }
       if (!self->CallMonitor_(static_cast<int>(step), static_cast<real_t>(t)))
       {

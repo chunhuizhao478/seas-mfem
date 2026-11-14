@@ -540,7 +540,9 @@ public:
    /// [cycle.relaxation]: the law sees sigma_eff - r(j) at owned DOF j (r
    /// on the QD table's owned DOFs, held by the caller, unchanged during a
    /// phase).  Once per run, before the first Enter.
-   void SetNormalStressRelaxation(const Vector &r)
+   /// relaxed_opening ([cycle.relaxation] opening = "relaxed"): the contact
+   /// condition reads sigma_eff - r too (NitscheWaveOperator::SetRelaxedContact).
+   void SetNormalStressRelaxation(const Vector &r, bool relaxed_opening = false)
    {
       MFEM_VERIFY(!relax_mod_, "DynPhase::SetNormalStressRelaxation: already set");
       MFEM_VERIFY(!W_->HasPrakashClifton(), "DynPhase: [cycle.relaxation] with "
@@ -550,6 +552,7 @@ public:
       relax_r_ = &r;
       relax_mod_ = std::make_unique<FrozenNormalStressReduction>(r);
       W_->SetNormalStressModifier(relax_mod_.get());
+      if (relaxed_opening) { W_->SetRelaxedContact(true); }
    }
 
    /// [cycle.opening]: the open flags per owned DOF (1 open; the last step's,

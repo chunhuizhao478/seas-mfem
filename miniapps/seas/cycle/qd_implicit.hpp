@@ -15,7 +15,8 @@
 // (PETSc arkimex, fully implicit; P2), contact is decided inside each stage
 // solve (P1), an open point's slip row is the radiation row tau + eta V = 0
 // (P3), the Newton matrix is factored densely on every rank (P4), on a 2-D
-// planar dense G (P5), with the relaxation off (P6: r = 0).
+// planar dense G (P5), with the relaxation off (P6: r = 0) unless
+// [cycle.relaxation] opening = "relaxed" (below).
 //
 // State per point j (global index, owned by one rank), 3 TS entries:
 //
@@ -32,6 +33,13 @@
 // Gt, Gs: the in-plane shear and normal rows of the planar G (in-plane slip
 // columns); Ggt, Ggs: the gap columns (traction per unit opening), fetched
 // once per point the first time it is on the open branch (D-B6) and kept.
+//
+// [cycle.relaxation] opening = "relaxed" (Problem::normal_reduction): sigma_j
+// above less red_j(t), the relaxed part of the normal stress, a given
+// function of time inside a step (it follows the elastic change of the last
+// accepted step; cycle/normal_stress_relaxation.hpp).  Everything below
+// (the law, s_j, the gap row, the consistent start) then reads the relaxed
+// stress, and the Newton matrix is the same.
 //
 // Residual F(t, U, Udot) = 0, the form PETSc's fully implicit arkimex solves
 // (plan Section 2, with V eliminated point by point):
@@ -272,6 +280,13 @@ public:
       /// Global point l: its gap column, Ggt(:, l) and Ggs(:, l), both of
       /// length N (global).  Collective: every rank calls it with the same l.
       std::function<void(int l, std::vector<real_t> &t, std::vector<real_t> &s)> gap_column;
+      /// [cycle.relaxation] opening = "relaxed": the relaxed part of the
+      /// normal stress at time t on owned point o [Pa] (cycle/
+      /// normal_stress_relaxation.hpp, ReductionAt), taken off sigma_j, so the
+      /// law and the gap row both see the relaxed stress.  It does not depend
+      /// on U inside a step (the Newton matrix is unchanged).  Empty (the
+      /// default): r = 0, every bit unchanged.
+      std::function<real_t(real_t t, int o)> normal_reduction;
       /// Optional extra loading at time t on global point j (tests only).
       std::function<void(real_t t, int j, real_t &dtau, real_t &dsig)> extra_load;
    };
@@ -479,7 +494,8 @@ public:
       return e;
    }
 
-   /// tau and sigma at the owned points from the gathered delta and g.
+   /// tau and sigma at the owned points from the gathered delta and g (sigma
+   /// less Problem::normal_reduction when set).
    void Tractions(real_t t, std::vector<real_t> &tau, std::vector<real_t> &sig) const
    {
       const int N = P_.N, n = P_.n;
@@ -532,6 +548,7 @@ public:
          if (P_.extra_load) { P_.extra_load(t, j, et, es); }
          tau[o] = P_.tau_pre[o] + st + t * P_.TDt[j] + et;
          sig[o] = P_.sigma0[o] + ss + t * P_.TDs[j] + es;
+         if (P_.normal_reduction) { sig[o] -= P_.normal_reduction(t, o); }
       }
    }
 

@@ -43,6 +43,22 @@
 // sigma_eff - r, then the floor.  The switch back keeps r and restarts the
 // clock at the re-entry time (Restart), with dsig from the re-entry solve.
 //
+// [cycle.relaxation] opening = "relaxed" (Chunhui Zhao, 2026-11-13: "bring
+// the relaxation review"; with [cycle.qd] integrator = "esdirk" only): the
+// relaxed stress sigma0 + dsig - r is the fault's normal stress for the
+// opening rule too, not only for the strength.  A point opens where the
+// relaxed stress would go below zero, and at an open point the relaxed
+// stress is 0 (the elastic one is r).  r keeps following dsig at open
+// points (nothing is frozen), so an open point's gap closes again over t_r
+// once the unclamping stops.  Why: on a non-planar trace the uniform plate
+// loading changes the elastic normal stress of every locked section at a
+// constant rate set by its strike (UCERF 2.5D, Vista 1142230: -0.7 MPa per
+// kyr at strike 142 deg, +0.75 at 90-105 deg, slip direction 123 deg), so
+// with the opening rule on the elastic stress every section turned one way
+// opens after sigma0 / rate (52 MPa: about 73 kyr), whatever the strength
+// law sees.  With the rule on the relaxed stress the change is bounded by
+// rate * t_r.  The default "elastic" is the rule above, every bit unchanged.
+//
 // No solver header (rule M4).
 
 #ifndef MFEM_SEAS_CYCLE_NORMAL_STRESS_RELAXATION_HPP
@@ -106,6 +122,18 @@ public:
          const real_t *f = frozen_->HostRead();
          for (int i = 0; i < n; i++) { if (f[i] != 0.0) { red[i] = r[i]; } }
       }
+   }
+
+   /// red of one DOF at time t >= t_n, the same expression as Fill's (and
+   /// its frozen rule), without touching Reduction().  For the stage solves
+   /// of [cycle.qd] integrator = "esdirk" (cycle/qd_implicit.hpp), which
+   /// ask per point and stage time.
+   real_t ReductionAt(real_t t, int i) const
+   {
+      const real_t r = r_(i);
+      if (frozen_ && (*frozen_)(i) != 0.0) { return r; }
+      const real_t E = -std::expm1(-(t - t_n_) / t_r_);
+      return r + (d_(i) - r) * E;
    }
 
    /// [cycle.opening] (fault opening design rev 1.1, decision D5): r does not

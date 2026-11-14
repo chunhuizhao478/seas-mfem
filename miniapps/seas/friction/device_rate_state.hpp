@@ -382,6 +382,11 @@ struct RSFaultInputs
    /// per-node amount taken off sigma_n_eff before the floor (Pa,
    /// compression positive), or nullptr (the default: nothing)
    const Vector *sigma_red = nullptr;
+   /// [cycle.relaxation] opening = "relaxed": the taper's sigma_n_true is the
+   /// relaxed stress too (sigma_n_eff - sigma_red[i]), so the law is
+   /// RSLawSigmaN(s, s) of the relaxed s, as the option I stage solves use
+   /// it.  false (the default): every bit unchanged.
+   bool red_in_true = false;
    /// per-node flag, != 0: the node is open (V = 0, dpsi/dt = 0, not
    /// solved), or nullptr (the default: every node solved)
    const Vector *frozen = nullptr;
@@ -469,6 +474,7 @@ inline RSReduceValue RSFaultRHS(int N, bool use_dev, const RSDeviceParams &prm,
    const real_t fl = in.sigma_floor;
    const bool tp = in.floor_taper;
    const real_t *RED = in.sigma_red ? in.sigma_red->Read(use_dev) : nullptr;
+   const bool rt = in.red_in_true;
    const real_t *FZ = in.frozen ? in.frozen->Read(use_dev) : nullptr;
 
    RSReduceValue res;
@@ -494,8 +500,9 @@ inline RSReduceValue RSFaultRHS(int N, bool use_dev, const RSDeviceParams &prm,
       const real_t sigma_n_true = TN ? sigma_n_pre + TN[i] : sigma_n_pre;
       real_t sigma_n_el = sigma_n_true;
       if (RED) { sigma_n_el -= RED[i]; }
-      const real_t sigma_n_eff = RSLawSigmaN(sigma_n_el, sigma_n_true, fl, tp,
-                                             status);
+      const real_t sigma_n_eff = RSLawSigmaN(sigma_n_el,
+                                             rt ? sigma_n_el : sigma_n_true,
+                                             fl, tp, status);
       real_t V_0, V_1, dpsi;
       const real_t V_abs = RSNodeRHS(psi, tau0, tau1, sigma_n_eff, A[i],
                                      ETA[i], DC[i], p, V_0, V_1, dpsi, status);
@@ -530,6 +537,7 @@ inline int RSFaultSlipRate(int N, bool use_dev, real_t V0,
    const real_t fl = in.sigma_floor;
    const bool tp = in.floor_taper;
    const real_t *RED = in.sigma_red ? in.sigma_red->Read(use_dev) : nullptr;
+   const bool rt = in.red_in_true;
    const real_t *FZ = in.frozen ? in.frozen->Read(use_dev) : nullptr;
 
    RSReduceValue res;
@@ -551,8 +559,9 @@ inline int RSFaultSlipRate(int N, bool use_dev, real_t V0,
       const real_t sigma_n_true = TN ? sigma_n_pre + TN[i] : sigma_n_pre;
       real_t sigma_n_el = sigma_n_true;
       if (RED) { sigma_n_el -= RED[i]; }
-      const real_t sigma_n_eff = RSLawSigmaN(sigma_n_el, sigma_n_true, fl, tp,
-                                             status);
+      const real_t sigma_n_eff = RSLawSigmaN(sigma_n_el,
+                                             rt ? sigma_n_el : sigma_n_true,
+                                             fl, tp, status);
       real_t V_0, V_1;
       RSSolveSlipRateVectorPsi(tau0, tau1, psi, sigma_n_eff, ETA[i], A[i], V0,
                                V_0, V_1, status);

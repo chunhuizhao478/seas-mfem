@@ -846,6 +846,20 @@ public:
       open_.assign(no_, char(0));
    }
    bool ContactOpening() const { return contact_; }
+   /// [cycle.relaxation] opening = "relaxed" (cycle/normal_stress_relaxation.hpp;
+   /// with SetContactOpening and the normal-stress hook): the contact
+   /// condition and the tapered floor read the relaxed stress sigma - r, r =
+   /// NormalStressReduction(j): g^{n+1} = max(0, g* - (dt/2)(sigma^X - r) /
+   /// gamma); open: the bulk's sigma is r (the relaxed one 0); closed: the
+   /// law sees sigma^X + gamma V_g - r >= 0.  The recorded sigma_eff stays
+   /// the bulk's, which may be below sigma_min (the range check then acts on
+   /// the law's stress only).  Off (the default): every bit unchanged.
+   void SetRelaxedContact(bool on)
+   {
+      MFEM_VERIFY(!on || contact_, "SetRelaxedContact: needs SetContactOpening");
+      relaxed_contact_ = on;
+   }
+   bool RelaxedContact() const { return relaxed_contact_; }
    /// [cycle.opening] mode = "contact" (fault opening plan rev 1, eq. 6.2,
    /// D-B2, whole-law form): the law sees max((sigma - r) w, min(floor,
    /// max(sigma, 0))), w = min(1, max(sigma, 0) / floor) (RSLawSigmaN), and
@@ -963,8 +977,16 @@ public:
          // g sigma = 0 at t^{n+1} gives
          //   g^{n+1} = max(0, g* - (dt/2) sigma^X / gamma).
          const real_t gamma = ClosureGamma(j);
-         const real_t gnew = std::max(real_t(0),
-                                      gap - 0.5 * dt_ * sigma_eff / gamma);
+         // SetRelaxedContact: the complementarity is on the relaxed stress
+         // sigma - r (r the hook's reduction, fixed during a phase):
+         // g >= 0, sigma - r >= 0, g (sigma - r) = 0, so the trial is
+         // sigma^X - r and an open point's bulk sigma is r.
+         const real_t rc = (relaxed_contact_ && nsm_) ? nsm_->NormalStressReduction(j)
+                                                      : real_t(0);
+         const real_t gnew = relaxed_contact_
+                             ? std::max(real_t(0), gap - 0.5 * dt_ * (sigma_eff - rc) / gamma)
+                             : std::max(real_t(0),
+                                        gap - 0.5 * dt_ * sigma_eff / gamma);
          Vg = 2.0 * (gnew - gap) / dt_;
          if (gnew > 0.0)
          {
@@ -972,7 +994,7 @@ public:
             // X + gamma V_t = 0 (as version A's open rule)
             fault_frame::Embed(-X[0] / gamma, -X[1] / gamma, dv, sv, V);
             for (int c = 0; c < 3; c++) { V[c] += Vg * n[c]; }
-            sigma_eff = 0.0;
+            sigma_eff = relaxed_contact_ ? rc : 0.0;
             if (open) { *open = true; }
             return;
          }
@@ -996,7 +1018,7 @@ public:
                      "finite on rank " << Mpi::WorldRank() << ", owned fault DOF " << j
                      << ", step " << steps_ << ": " << sigma_eff);
       }
-      else if (!(sigma_eff >= sigma_min_))
+      else if (!relaxed_contact_ && !(sigma_eff >= sigma_min_))
       {
          MFEM_ABORT("NitscheWaveOperator: sigma_n_eff left its range on rank "
                     << Mpi::WorldRank() << ", owned fault DOF " << j
@@ -1019,6 +1041,9 @@ public:
          // normal-stress hook (SetNormalStressModifier), e.g. p(0) - p_ini
          const real_t red = nsm_->NormalStressReduction(j);
          sig_law -= red;
+         // SetRelaxedContact: the projection left sigma - r >= 0 at a closed
+         // DOF up to rounding (the two expressions differ in their last bits)
+         if (relaxed_contact_) { sig_law = std::max(sig_law, real_t(0)); }
          if (sigma_floor_ == 0.0 && !(sig_law >= sigma_min_))
          {
             MFEM_ABORT("NitscheWaveOperator: the normal stress the law sees left its "
@@ -1029,6 +1054,9 @@ public:
                        << sig_law << " < sigma_min = " << sigma_min_);
          }
       }
+      // the stress the taper weighs: the bulk's, or with SetRelaxedContact
+      // the relaxed one (the contact condition's)
+      const real_t sig_tap = relaxed_contact_ ? sig_law : sigma_eff;
       if (sigma_floor_ > 0.0)
       {
          // the opt-in floor (file comment); with SetFloorTaper the arm is
@@ -1038,7 +1066,7 @@ public:
          // point approaches opening for any relaxation; count once per DOF
          // and step
          const real_t arm =
-            floor_taper_ ? std::min(sigma_floor_, std::max(sigma_eff, real_t(0)))
+            floor_taper_ ? std::min(sigma_floor_, std::max(sig_tap, real_t(0)))
                          : sigma_floor_;
          if (!(sig_law >= arm))
          {
@@ -1046,11 +1074,11 @@ public:
             floor_hits_++;
             floored_[j] = 1;
          }
-         else if (floor_taper_ && sigma_eff < sigma_floor_ && sig_law > arm)
+         else if (floor_taper_ && sig_tap < sigma_floor_ && sig_law > arm)
          {
             // the whole-law taper: the part above the arm that the
             // relaxation holds (r < 0) falls to zero with the weight
-            const real_t w = std::max(sigma_eff, real_t(0)) / sigma_floor_;
+            const real_t w = std::max(sig_tap, real_t(0)) / sigma_floor_;
             sig_law = std::max(sig_law * w, arm);
             floor_hits_++;
             floored_[j] = 1;
@@ -2182,6 +2210,7 @@ private:
    mutable std::vector<char> floored_;   ///< per owned DOF: the floor acted
    bool opening_ = false;                ///< SetShearFreeOpening or SetContactOpening
    bool contact_ = false;                ///< SetContactOpening (version B, B2)
+   bool relaxed_contact_ = false;        ///< SetRelaxedContact
    std::vector<char> open_;              ///< per owned DOF: open at the last step
    std::function<real_t(real_t)> nuc_temporal_;
    std::shared_ptr<const FaultFrameField> frames_;   ///< census + N-09 frames (phase A)

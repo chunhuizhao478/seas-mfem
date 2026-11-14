@@ -27,6 +27,12 @@
 //          g^{n+1} sigma^{n+1} = 0 across tension/compression x gaps.
 //   D3  version A untouched: SetShearFreeOpening still gives V = -X/gamma
 //       with a GLUED normal (V . n = 0) and sigma_eff = the trial value.
+//   D4  [cycle.relaxation] opening = "relaxed" (SetRelaxedContact with the
+//       normal-stress hook holding a fixed r per DOF): CloseDOF at a trial
+//       sigma^X is CloseDOF of the plain contact operator at sigma^X - r
+//       (the same V; the returned bulk sigma_eff is that one's plus r; the
+//       same open flag), over tension/compression x gaps x r of both
+//       signs; and with r = 0 it is the plain contact operator bit for bit.
 //
 // Usage (from miniapps/seas): mpirun -np N ./seas_test_fault_contact_dyn
 
@@ -35,6 +41,7 @@
 #include "../../solver/nitsche_cfl.hpp"
 #include "../../friction/slip_weakening_closure.hpp"
 #include "../../config/tpv102_params.hpp"
+#include "../../cycle/normal_stress_relaxation.hpp"
 
 #include <cmath>
 #include <iostream>
@@ -348,6 +355,75 @@ int main(int argc, char *argv[])
                      "D3 p = " << p << ": version A's open rule unchanged "
                      "(glued normal " << em[0] << ", sigma_eff = trial to "
                      << em[1] << " Pa abs, V_t = -X/gamma " << em[2] << ")");
+      }
+
+      // ---- D4: the contact condition on the relaxed stress ----
+      if (s_plus)
+      {
+         NitscheFaultSetup f_rc = FaultSetup(cl), f_r0 = FaultSetup(cl);
+         NitscheWaveOperator rc(pm, p, mat, bc, DomainConfig{}, &f_rc);
+         NitscheWaveOperator r0(pm, p, mat, bc, DomainConfig{}, &f_r0);
+         Vector rv(no), zv(no);
+         zv = 0.0;
+         for (int j = 0; j < no; j++) { rv(j) = (j % 2 == 0) ? -8.0e6 : 4.0e6; }
+         cycle::FrozenNormalStressReduction mod(rv), mod0(zv);
+         for (NitscheWaveOperator *op : {&rc, &r0})
+         {
+            op->SetContactOpening(true);
+            op->SetTimeStep(dt);
+         }
+         rc.SetNormalStressModifier(&mod);
+         r0.SetNormalStressModifier(&mod0);
+         rc.SetRelaxedContact(true);
+         r0.SetRelaxedContact(true);
+         Vector S;
+         ct.BackgroundTraction(0.0, S);
+         long bad_flag = 0, bad_bits = 0, n_open = 0, n_closed = 0;
+         real_t eV = 0.0, eS = 0.0;
+         for (int j = 0; j < no; j++)
+         {
+            const real_t gamma = ct.ClosureGamma(j);
+            for (real_t st : {-5.0e6, -1.0e5, 0.0, 1.0e5, 5.0e6, 2.0e7})
+            {
+               for (real_t g0 : {0.0, 1.0e-6, 1.0e-3})
+               {
+                  real_t TS[3], TR[3], Va[3], Vb[3], Xa[2], Xb[2], sa, sb;
+                  bool oa = false, ob = false;
+                  // relaxed trial st: the bulk's trial is st + r
+                  MovedTraction(ct, S, j, st, TS);
+                  MovedTraction(ct, S, j, st + rv(j), TR);
+                  ct.CloseDOF(j, TS, 0.0, Va, sa, Xa, nullptr, 0.0, 1.0, 0.0, &oa, g0);
+                  rc.CloseDOF(j, TR, 0.0, Vb, sb, Xb, nullptr, 0.0, 1.0, 0.0, &ob, g0);
+                  if (oa != ob) { bad_flag++; }
+                  (oa ? n_open : n_closed)++;
+                  const real_t vs = std::max(real_t(1e-12), std::sqrt(Dot3(Va, Va)));
+                  for (int c = 0; c < 3; c++)
+                  {
+                     eV = std::max(eV, std::abs(Va[c] - Vb[c]) / vs);
+                  }
+                  eS = std::max(eS, std::abs(sb - (sa + rv(j))) /
+                                std::max(real_t(1.0e6), gamma * vs));
+                  // r = 0: the plain contact operator, bit for bit
+                  real_t Vc[3], Xc[2], sc;
+                  bool oc = false;
+                  r0.CloseDOF(j, TS, 0.0, Vc, sc, Xc, nullptr, 0.0, 1.0, 0.0, &oc, g0);
+                  if (oc != oa || sc != sa || Vc[0] != Va[0] || Vc[1] != Va[1] ||
+                      Vc[2] != Va[2] || Xc[0] != Xa[0] || Xc[1] != Xa[1]) { bad_bits++; }
+               }
+            }
+         }
+         long nn[4] = {bad_flag, bad_bits, n_open, n_closed};
+         MPI_Allreduce(MPI_IN_PLACE, nn, 4, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
+         real_t em[2] = {eV, eS};
+         MPI_Allreduce(MPI_IN_PLACE, em, 2, MPITypeMap<real_t>::mpi_type,
+                       MPI_MAX, MPI_COMM_WORLD);
+         TEST_ASSERT(nn[0] == 0 && nn[2] > 0 && nn[3] > 0 && em[0] <= 1e-9 && em[1] <= 1e-9,
+                     "D4 p = " << p << ": relaxed contact at sigma^X = plain contact at "
+                     "sigma^X - r (flags; V rel " << em[0] << "; bulk sigma_eff = that "
+                     "one's + r, rel " << em[1] << "); " << nn[2] << " open, " << nn[3]
+                     << " closed cases");
+         TEST_ASSERT(nn[1] == 0, "D4 p = " << p << ": with r = 0 the plain contact "
+                     "operator bit for bit (V, sigma_eff, X, flag)");
       }
    }
 

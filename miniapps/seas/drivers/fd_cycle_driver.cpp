@@ -1401,6 +1401,11 @@ int main(int argc, char *argv[])
          std::cout << "  sigma_n' relaxation: t_r = " << cfg.relax_t / BP5Params::seconds_per_year
                    << " yr ([cycle.relaxation]); the law sees sigma0 + dsig - r, dr/dt = "
                    << "(dsig - r) / t_r in the QD regime, r frozen in the dynamic regime\n";
+         if (cfg.RelaxedOpening())
+         {
+            std::cout << "  sigma_n' relaxation: opening = \"relaxed\": the opening rule reads "
+                      << "sigma0 + dsig - r in both regimes, r is not frozen at open DOFs\n";
+         }
       }
       qd.Setup(par, pre);
 
@@ -1645,7 +1650,7 @@ int main(int argc, char *argv[])
                                                  qd.Domain().FrameField(),
                                                  qd.SubstrateShape(),
                                                  qd.PmlBandPtr(), qd.PmlWallSpeedFactor());
-         if (cfg.Relaxation()) { dyn->SetNormalStressRelaxation(qd.Relaxation()->R()); }
+         if (cfg.Relaxation()) { dyn->SetNormalStressRelaxation(qd.Relaxation()->R(), cfg.RelaxedOpening()); }
          if (early_sync)
          {
             MFEM_VERIFY(!lts.on, "--early-sync with [cycle.lts]: the LTS run has its own "

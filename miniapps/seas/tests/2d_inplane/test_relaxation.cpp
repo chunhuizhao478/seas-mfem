@@ -11,6 +11,12 @@
 //       floor F as well, at max((SN + TN) - R, F) (the floor acts after the
 //       reduction); a node that the reduction takes below F sets
 //       kRSSigmaNFloored; a null reduction changes no bit.
+//   K2  [cycle.relaxation] opening = "relaxed" (RSFaultInputs::red_in_true)
+//       with the tapered floor: the kernels with the reduction R give, bit
+//       for bit, what they give without it at sigma_n = (SN + TN) - R with
+//       the same tapered floor (the taper reads the relaxed stress); with
+//       the flag off the result differs (the taper reads the elastic one);
+//       without the taper the flag changes no bit.
 //   R1  NormalStressRelaxation against the exact solution for a linear
 //       dsig = a t: r = a (t - t_r (1 - exp(-t / t_r))), stepped with
 //       accepted steps h; the error is O(h): below a h / 2 + 1e-12 |r| and
@@ -24,6 +30,8 @@
 //       is r_{n+1}.
 //   R4  FrozenNormalStressReduction: NumPoints, the reduction is r(j) and
 //       follows the vector it holds; Advance changes nothing.
+//   R5  ReductionAt(t, i) = Fill(t)'s Reduction()(i), bit for bit, with and
+//       without a frozen mask (the option I stage solves read it per point).
 //
 // Refusals (--refuse n, each must abort with its message):
 //   1  t_relax = 0
@@ -182,6 +190,56 @@ static void TestKernels()
                SameBits(Sc, Vc, 2, n) && sa == sb && (sc & kRSSigmaNFloored) && sd == 0,
                "K1 RSFaultSlipRate: the same, with and without the floor, and = RSFaultRHS's "
                "slip rate");
+
+   // K2: red_in_true with the tapered floor
+   {
+      // elastic stress and reduction: above the floor, relaxed below the
+      // floor, elastic below the floor with a negative reduction (the
+      // relaxed one above it), relaxed into tension, elastic in tension
+      // with the relaxed one in compression
+      const std::vector<real_t> sg = {80.0e6, 30.0e6, 4.0e6, 20.0e6, -3.0e6, 6.0e6, 15.0e6, 2.0e6};
+      const std::vector<real_t> rd = {0.0, 25.0e6, -30.0e6, 25.0e6, -8.0e6, -1.0e6, 4.0e6, 1.5e6};
+      KernelInputs q = k;
+      for (int i = 0; i < n; i++)
+      {
+         q.SN(i) = sg[i] - q.TN(i);
+         q.RED(i) = rd[i];
+      }
+      KernelInputs qm = q;
+      for (int i = 0; i < n; i++)
+      {
+         real_t sr = q.SN(i) + q.TN(i);
+         sr -= q.RED(i);
+         qm.SN(i) = sr;
+      }
+      RSFaultInputs on = q.In(kF, true, true), off = q.In(kF, true, true),
+                    ref = qm.In(kF, false, false), nt_on = q.In(kF, true, true),
+                    nt_off = q.In(kF, true, true);
+      on.floor_taper = off.floor_taper = ref.floor_taper = true;
+      on.red_in_true = nt_on.red_in_true = true;
+      Vector R1(3 * n), V1(2 * n), R2(3 * n), V2(2 * n), R3(3 * n), V3(2 * n);
+      const RSReduceValue x1 = RSFaultRHS(n, false, prm, on, q.DC, R1, V1, ws);
+      const RSReduceValue x2 = RSFaultRHS(n, false, prm, ref, qm.DC, R2, V2, ws);
+      const RSReduceValue x3 = RSFaultRHS(n, false, prm, off, q.DC, R3, V3, ws);
+      TEST_ASSERT(SameBits(R1, R2, 3, n) && SameBits(V1, V2, 2, n) && x1.first == x2.first &&
+                  x1.second == x2.second,
+                  "K2 RSFaultRHS: red_in_true with the tapered floor = the tapered law at "
+                  "(SN + TN) - R, bit for bit (rate, slip rate, max V, status)");
+      TEST_ASSERT(!SameBits(V1, V3, 2, n),
+                  "K2 RSFaultRHS: with the flag off the taper reads the elastic stress (a "
+                  "different slip rate)");
+      Vector S1(2 * n), S2(2 * n);
+      const int y1 = RSFaultSlipRate(n, false, prm.V0, on, S1, ws);
+      const int y2 = RSFaultSlipRate(n, false, prm.V0, ref, S2, ws);
+      TEST_ASSERT(SameBits(S1, S2, 2, n) && SameBits(S1, V1, 2, n) && y1 == y2,
+                  "K2 RSFaultSlipRate: the same, and = RSFaultRHS's slip rate");
+      Vector R4(3 * n), V4(2 * n), R5(3 * n), V5(2 * n);
+      const RSReduceValue x4 = RSFaultRHS(n, false, prm, nt_on, q.DC, R4, V4, ws);
+      const RSReduceValue x5 = RSFaultRHS(n, false, prm, nt_off, q.DC, R5, V5, ws);
+      TEST_ASSERT(SameBits(R4, R5, 3, n) && SameBits(V4, V5, 2, n) && x4.first == x5.first &&
+                  x4.second == x5.second,
+                  "K2 RSFaultRHS: without the taper the flag changes no bit");
+   }
 }
 
 // ---------------------------------------------------------------- R1-R4
@@ -315,6 +373,34 @@ static void TestRelaxation()
       ok = ok && mod.NormalStressReduction(1) == 7.0e6;
       TEST_ASSERT(ok, "R4: FrozenNormalStressReduction gives r(j), follows its vector, "
                   "Advance changes nothing");
+   }
+
+   // R5: ReductionAt = Fill, per point
+   {
+      NormalStressRelaxation rx(4, tr);
+      Vector d(4), mask(4);
+      d(0) = -40.0e6; d(1) = 3.0e6; d(2) = 0.25e6; d(3) = -7.0e6;
+      mask = 0.0;
+      mask(2) = 1.0;
+      rx.SetDelta(d);
+      rx.Accept(2.0e9, d);
+      d(0) -= 3.0e6; d(3) += 1.0e6;
+      rx.Accept(5.0e9, d);
+      bool ok = true;
+      for (int pass = 0; pass < 2; pass++)
+      {
+         rx.SetFrozen(pass == 0 ? nullptr : &mask);
+         for (real_t tt : {5.0e9, 5.0e9 + 1.0, 6.3e9, 5.0e9 + 30.0 * tr})
+         {
+            rx.Fill(tt);
+            for (int i = 0; i < 4; i++)
+            {
+               ok = ok && rx.ReductionAt(tt, i) == rx.Reduction()(i);
+            }
+         }
+      }
+      TEST_ASSERT(ok, "R5: ReductionAt(t, i) = Fill(t)'s Reduction()(i), bit for bit, with "
+                  "and without a frozen mask");
    }
 }
 

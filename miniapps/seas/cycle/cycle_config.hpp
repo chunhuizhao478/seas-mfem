@@ -64,6 +64,13 @@
 //                   dynamic one.  t_relax_yr > 0 (years of 365.25 days).
 //                   Refused with [friction.prakash_clifton]; outputs keep
 //                   the elastic sigma_n' (the fault snapshots add r).
+//                   opening = "elastic" (the default) | "relaxed": which
+//                   normal stress the opening rule of [cycle.opening] mode =
+//                   "contact" reads.  "relaxed" (Chunhui Zhao, 2026-11-13;
+//                   [cycle.qd] integrator = "esdirk" only, which refuses the
+//                   relaxation otherwise): a point opens where sigma0 + dsig
+//                   - r would go below 0, an open point holds it at 0, and r
+//                   keeps following dsig there (the gap closes over t_r).
 //   [cycle.opening] mode: opt-in fault opening at tensile points [absent =
 //                   off] (Chunhui Zhao, 2026-11-04: "start version A"; fault
 //                   opening design rev 1.1, cycle/fault_opening.hpp).  mode =
@@ -697,6 +704,10 @@ struct CycleConfig
    real_t sigma_n_floor = 0.0;    ///< [cycle].sigma_n_floor_pa [Pa]; 0 = off
    real_t relax_t = 0.0;          ///< [cycle.relaxation].t_relax_yr [s]; 0 = off
    bool Relaxation() const { return relax_t > 0.0; }
+   /// [cycle.relaxation].opening: "elastic" (the default) or "relaxed"
+   /// (cycle/normal_stress_relaxation.hpp; with integrator = "esdirk" only)
+   std::string relax_opening = "elastic";
+   bool RelaxedOpening() const { return Relaxation() && relax_opening == "relaxed"; }
    OpeningConfig opening;         ///< [cycle.opening] (default: off)
 
    QDConfig qd;
@@ -1105,12 +1116,18 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
    {
       const std::string sec = "cycle.relaxation";
       const toml::value &rx = cy.at("relaxation");
-      OnlyKeys(rx, sec, {"t_relax_yr"});
+      OnlyKeys(rx, sec, {"t_relax_yr", "opening"});
       const real_t ty = Real(rx, sec, "t_relax_yr", 0.0, true);
       MFEM_VERIFY(std::isfinite(ty) && ty > 0.0,
                   "[" << sec << "].t_relax_yr = " << ty << " must be > 0 (leave the "
                   "section out for no relaxation)");
       c.relax_t = ty * 365.25 * 24.0 * 3600.0;   // BP5Params::seconds_per_year
+      c.relax_opening = Str(rx, sec, "opening", c.relax_opening);
+      MFEM_VERIFY(c.relax_opening == "elastic" || c.relax_opening == "relaxed",
+                  "[" << sec << "].opening = \"" << c.relax_opening << "\"; use "
+                  "\"elastic\" (the default: the opening rule reads the elastic normal "
+                  "stress) or \"relaxed\" (it reads the relaxed one; [cycle.qd] "
+                  "integrator = \"esdirk\" only)");
    }
    if (cy.contains("opening"))
    {
@@ -1208,6 +1225,9 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
    MFEM_VERIFY(!c.qd.green.enabled || c.qd.operators == "matrix",
                "[cycle.qd.green] needs [cycle.qd].operators = \"matrix\" (the Green's "
                "function is built from the stage operators)");
+   MFEM_VERIFY(!c.RelaxedOpening() || c.qd.Esdirk(), "[cycle.relaxation] opening = "
+               "\"relaxed\" needs [cycle.qd] integrator = \"esdirk\" (the DP5 path's "
+               "opening rule reads the elastic normal stress)");
    if (c.qd.Esdirk())
    {
       // option I, decisions P1, P2, P5, P6 (plan "Option I: implementation
@@ -1219,8 +1239,9 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       MFEM_VERIFY(c.qd.green.enabled && c.qd.green.compress == 0.0, sec << " needs the "
                   "dense [cycle.qd.green] (no compress): its Newton matrix is G plus a "
                   "diagonal, factored densely");
-      MFEM_VERIFY(!c.Relaxation(), sec << " with [cycle.relaxation]: option I runs "
-                  "without the sigma_n' relaxation (decision P6); leave the table out");
+      MFEM_VERIFY(!c.Relaxation() || c.RelaxedOpening(), sec << " with "
+                  "[cycle.relaxation]: option I runs without the sigma_n' relaxation "
+                  "(decision P6) or with [cycle.relaxation] opening = \"relaxed\"");
       MFEM_VERIFY(c.qd.esdirk_type == "3" || c.qd.esdirk_type == "4" ||
                   c.qd.esdirk_type == "5", "[cycle.qd].esdirk_type = \"" << c.qd.esdirk_type
                   << "\"; use \"3\", \"4\" or \"5\" (PETSc arkimex types that are "

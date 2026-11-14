@@ -38,6 +38,7 @@
 #   make -f tests/2d_inplane/2d_inplane.mk test-qd-esdirk-points    # option I, I1 (implicit QD fault system)
 #   make -f tests/2d_inplane/2d_inplane.mk test-qd-implicit-green   # option I, I2 (on the planar Green's function)
 #   make -f tests/2d_inplane/2d_inplane.mk test-qd-esdirk-cycle     # option I, I3 (in the cycle driver: restart)
+#   make -f tests/2d_inplane/2d_inplane.mk test-qd-esdirk-relax     # option I with [cycle.relaxation] opening = "relaxed"
 #   make -f tests/2d_inplane/2d_inplane.mk test-par-dense-lu        # [cycle.qd] dense_lu = "shared" (ScaLAPACK LU)
 #   make -f tests/2d_inplane/2d_inplane.mk test-pml-partition       # [cycle.pml] partition_weight (band-weighted cut)
 #   make -f tests/2d_inplane/2d_inplane.mk 2d-inplane-all            # every test above
@@ -1287,6 +1288,24 @@ test-qd-esdirk-cycle: seas_fd_cycle_driver
 	      $(QD_ESDIRK_CYCLE_TMP)_np$$n 40 $$n || exit 1; \
 	done
 
+# [cycle.relaxation] opening = "relaxed" with option I (Chunhui Zhao,
+# 2026-11-13; cycle/normal_stress_relaxation.hpp): the deck refusals and the
+# accepted deck (tests/2d_inplane/relaxed_opening_decks.sh), then the restart
+# test of test-qd-esdirk-cycle on the D9f deck with the relaxation on (80 QD
+# steps, stopped at 40 and restarted: bit for bit, 1 and 2 ranks).  The
+# point test is T1e of test-qd-esdirk-points, the dynamic contact rule D4 of
+# test-fault-contact-dyn.
+QD_ESDIRK_RELAX_TMP ?= /tmp/seas_qd_esdirk_relax
+test-qd-esdirk-relax: seas_fd_cycle_driver
+	MPIEXEC="$(MFEM_MPIEXEC)" MPIEXEC_NP="$(MFEM_MPIEXEC_NP)" tests/2d_inplane/relaxed_opening_decks.sh
+	@for n in 1 2; do \
+	   MPIRUN="$(MFEM_MPIEXEC)" OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+	   GREEN_FILE=$$((n > 1)) VOLUME_TOL=1e-6 \
+	   bash tests/cycle/test_cycle_restart.sh \
+	      simple_cases/configs/D9f_arc08L2p5_h250_avg_floor10_contact_esdirk_relax5k.toml \
+	      $(QD_ESDIRK_RELAX_TMP)_np$$n 40 $$n || exit 1; \
+	done
+
 2d-inplane-all: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
                 test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
                 test-normal-stress-hook test-2d-driver-tp test-2d-dislocation test-prestress-bp3 \
@@ -1295,7 +1314,7 @@ test-qd-esdirk-cycle: seas_fd_cycle_driver
                 test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle \
                 test-fault-opening test-fault-contact test-fault-contact-dyn \
                 test-fault-contact-qd test-exact-retry test-qd-esdirk-points test-qd-implicit-green \
-                test-qd-esdirk-cycle test-par-dense-lu test-pml-partition test-early-sync test-lts-static-split test-pml-dt-rule test-lts-pml-band test-lts-quench test-lts-avg-normals test-lts-contact test-lts-2d5
+                test-qd-esdirk-cycle test-qd-esdirk-relax test-par-dense-lu test-pml-partition test-early-sync test-lts-static-split test-pml-dt-rule test-lts-pml-band test-lts-quench test-lts-avg-normals test-lts-contact test-lts-2d5
 
 .PHONY: test-fault-frame-field test-plate-loading test-okada-dislocation test-2d-fault-layout \
         test-2d-deck test-2d-nitsche test-2d-driver test-thermal-pressurization \
@@ -1304,4 +1323,4 @@ test-qd-esdirk-cycle: seas_fd_cycle_driver
         test-handback-table test-tip-zone test-sigma-floor test-relaxation test-2d5-width test-2d5-dyn-driver \
         test-vertex-normals test-vertex-normal-kernels test-vertex-normal-cycle \
         test-fault-opening test-exact-retry test-qd-esdirk-points test-qd-implicit-green \
-        test-qd-esdirk-cycle test-par-dense-lu test-pml-partition 2d-inplane-all
+        test-qd-esdirk-cycle test-qd-esdirk-relax test-par-dense-lu test-pml-partition 2d-inplane-all

@@ -329,6 +329,13 @@ public:
       sigma_red_ = red;
    }
    const Vector *SigmaNReduction() const { return sigma_red_; }
+   /// [cycle.relaxation] opening = "relaxed" (cycle/normal_stress_relaxation.hpp):
+   /// the tapered floor reads the relaxed stress sigma_n_eff - red(i) where
+   /// it read the elastic one (RSFaultInputs::red_in_true), so the kernel's
+   /// law is the one of the option I stage solves.  Needs SetSigmaNReduction
+   /// when it is used.  false (the default): every bit unchanged.
+   void SetRelaxedOpening(bool on) { relaxed_opening_ = on; }
+   bool RelaxedOpening() const { return relaxed_opening_; }
 
    /// Opt-in frozen nodes (Chunhui Zhao, 2026-11-04: "start version A",
    /// cycle/fault_opening.hpp): with `mask` non-null (NumNodes() values), a
@@ -1330,6 +1337,7 @@ private:
       in.sigma_floor = sigma_floor_;
       in.floor_taper = floor_taper_;
       in.sigma_red = sigma_red_;
+      in.red_in_true = relaxed_opening_;
       in.frozen = frozen_;
       return in;
    }
@@ -1354,7 +1362,7 @@ private:
          // the kernel's own test (RSLawSigmaN): the hard floor, or with
          // SetFloorTaper the tapered arm and the whole-law taper
          int st = 0;
-         RSLawSigmaN(s, s_true, sigma_floor_, floor_taper_, st);
+         RSLawSigmaN(s, relaxed_opening_ ? s : s_true, sigma_floor_, floor_taper_, st);
          if (st & kRSSigmaNFloored)
          {
             n++;
@@ -1426,8 +1434,9 @@ private:
             normal_traction ? s_pre + (*normal_traction)(i) : s_pre;
          const real_t red = sigma_red_ ? (*sigma_red_)(i) : 0.0;
          int st = 0;
-         const real_t s_law = RSLawSigmaN(s_true - red, s_true, sigma_floor_,
-                                          floor_taper_, st);
+         const real_t s_law = RSLawSigmaN(s_true - red,
+                                          relaxed_opening_ ? s_true - red : s_true,
+                                          sigma_floor_, floor_taper_, st);
          real_t v0 = 0.0, v1 = 0.0, dpsi = 0.0;
          RSNodeRHS(psi, tau0, tau1, s_law, A[i], ETA[i], Dc_values_(i), prm,
                    v0, v1, dpsi, st);
@@ -1539,7 +1548,7 @@ private:
             // SetSigmaNFloor / SetFloorTaper: the law's floor, as in the kernel
             {
                int fstat = 0;
-               const real_t s_true =
+               const real_t s_true = relaxed_opening_ ? sigma_n_eff :
                   sigma_n_eff + (sigma_red_ ? (*sigma_red_)(i) : 0.0);
                sigma_n_eff = RSLawSigmaN(sigma_n_eff, s_true,
                                                    sigma_floor_, floor_taper_,
@@ -1631,7 +1640,7 @@ private:
             // SetSigmaNFloor / SetFloorTaper: the law's floor, as in the kernel
             {
                int fstat = 0;
-               const real_t s_true =
+               const real_t s_true = relaxed_opening_ ? sigma_n_eff :
                   sigma_n_eff + (sigma_red_ ? (*sigma_red_)(i) : 0.0);
                sigma_n_eff = RSLawSigmaN(sigma_n_eff, s_true,
                                                    sigma_floor_, floor_taper_,
@@ -1657,6 +1666,8 @@ private:
    mutable long nonfinite_rate_lines_ = 0;
    /// SetSigmaNReduction (null = off; not owned).
    const Vector *sigma_red_ = nullptr;
+   /// SetRelaxedOpening.
+   bool relaxed_opening_ = false;
    /// SetFrozenNodes (null = off; not owned).
    const Vector *frozen_ = nullptr;
    mutable FloorStats floor_stats_;

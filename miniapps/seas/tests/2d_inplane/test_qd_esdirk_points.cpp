@@ -29,11 +29,24 @@
 //        (atol 1e-7): the event time within 1% of an RK 5dp reference with
 //        atol 1e-11.
 //
+//   T1e  [cycle.relaxation] opening = "relaxed" (Problem::normal_reduction
+//        with cycle/normal_stress_relaxation.hpp, accepted after each step
+//        as QDPhase does): one point unclamped at a constant rate rho.
+//        (a) rho t_r = sigma0 / 2: the elastic stress goes to -2 sigma0, the
+//        relaxed one follows sigma0 - rho t_r (1 - exp(-t / t_r)) and the
+//        point never opens.  (b) rho t_r = 2 sigma0 until T/4, then no
+//        change: it opens at t* = -t_r ln(1 - sigma0 / (rho t_r)), the gap
+//        grows at (rho - sigma0 / t_r) / gamma, shrinks at sigma0 / (t_r
+//        gamma) after T/4 and closes; g >= 0, s >= 0, g s = 0 at every
+//        accepted state (s the relaxed stress); s is back above 0.9 sigma0
+//        at the end.
+//
 // Run on 1, 2 and 4 ranks (make -f tests/2d_inplane/2d_inplane.mk
 // test-qd-esdirk-points).
 
 #include "mfem.hpp"
 #include "../../cycle/qd_implicit.hpp"
+#include "../../cycle/normal_stress_relaxation.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -1006,6 +1019,108 @@ void TestT0c()
 
 } // namespace
 
+// ---- T1e ---------------------------------------------------------------------------
+
+void TestT1e(MPI_Comm comm)
+{
+   Say("T1e: [cycle.relaxation] opening = \"relaxed\": one point unclamped at a constant rate");
+   const double k = 5e7, gam = 2.0 * k, T = 4e6, t_r = 2e5;
+   const double tau_pre = -0.5e6, sigma0 = 10e6;
+   for (int c = 0; c < 2; c++)
+   {
+      const double rho = (c == 0 ? 0.5 : 2.0) * sigma0 / t_r;      // Pa/s
+      const double T1 = (c == 0) ? T : 0.25 * T;                   // the load stops at T1
+      auto load = [=](double t) { return -rho * std::min(t, T1); };
+      QDImplicitFault::Problem P = OnePoint(comm, k, tau_pre, sigma0, 0.0, 0.1 * k, gam);
+      P.extra_load = [=](real_t t, int, real_t &dt, real_t &ds)
+      {
+         dt = 0.0;
+         ds = load(t);
+      };
+      seas::cycle::NormalStressRelaxation relax(P.n, t_r);
+      P.normal_reduction = [&relax](real_t t, int o) { return relax.ReductionAt(t, o); };
+      QDImplicitSettings set;
+      set.newton_tol = newton_tol;
+      QDImplicitFault f(comm, P, set);
+      std::vector<real_t> U0;
+      if (f.NumOwned() == 1) { U0 = {0.0, 0.6, 0.0}; }
+      double min_s = 1e30, min_g = 1e30, max_g = 0.0, max_gs = 0.0, max_serr = 0.0;
+      double min_el = 1e30, t_open = -1.0, t_close = -1.0, g_T1 = -1.0, s_end = 0.0;
+      double prev_g = 0.0;
+      RunSpec spec;
+      spec.h0 = T / 4000.0;
+      spec.tmax = T;
+      spec.adaptive = false;
+      spec.post = [&](TS, QDImplicitFault &ff, double t, const std::vector<real_t> &all)
+      {
+         std::vector<real_t> V, tau, sig;
+         std::vector<char> open;
+         const std::vector<real_t> own = Owned(ff, all);
+         ff.Evaluate(t, own.data(), V, tau, sig, open);   // sig: the relaxed stress
+         // accept the step as QDPhase does: r at t, dsig the elastic change
+         Vector dsig(ff.NumOwned());
+         for (int o = 0; o < ff.NumOwned(); o++)
+         {
+            dsig(o) = sig[o] + relax.ReductionAt(t, o) - sigma0;
+         }
+         std::vector<real_t> el(ff.NumOwned());
+         for (int o = 0; o < ff.NumOwned(); o++) { el[o] = sigma0 + dsig(o); }
+         relax.Accept(t, dsig);
+         const double sr = GatherAll(ff.Comm(), sig.data(), ff.NumOwned())[0];
+         const double se = GatherAll(ff.Comm(), el.data(), ff.NumOwned())[0];
+         const double g = all[2];
+         min_s = std::min(min_s, sr);
+         min_el = std::min(min_el, se);
+         min_g = std::min(min_g, g);
+         max_g = std::max(max_g, g);
+         max_gs = std::max(max_gs, std::abs(g * sr));
+         if (c == 0)
+         {
+            const double exact = sigma0 - rho * t_r * (1.0 - std::exp(-t / t_r));
+            max_serr = std::max(max_serr, std::abs(sr - exact));
+         }
+         if (g > 0.0 && t_open < 0.0) { t_open = t; }
+         if (t_open >= 0.0 && prev_g > 0.0 && g == 0.0 && t_close < 0.0) { t_close = t; }
+         if (g_T1 < 0.0 && t >= T1 * (1.0 - 1e-12)) { g_T1 = g; }
+         prev_g = g;
+         s_end = sr;
+      };
+      const RunOut r = Run(f, U0, spec);
+      Say("    case " + std::string(c == 0 ? "(a)" : "(b)") + ": " + Summary(r));
+      Say("    relaxed stress min " + Fmt(min_s, 6) + " Pa, at the end " + Fmt(s_end, 6) +
+          " Pa; elastic stress min " + Fmt(min_el, 6) + " Pa; max g " + Fmt(max_g, 6) +
+          " m, min g " + Fmt(min_g, 3) + ", max |g s| " + Fmt(max_gs, 3) + " N/m");
+      const std::string w = std::string("T1e ") + (c == 0 ? "(a)" : "(b)");
+      Check(r.reason == TS_CONVERGED_TIME && AllFinite(r.final_all), w + " reaches T, finite");
+      if (c == 0)
+      {
+         Say("    max |s - exact| " + Fmt(max_serr, 4) + " Pa (rho t_r = " + Fmt(rho * t_r, 4) +
+             " Pa)");
+         Check(max_g == 0.0 && r.counts.columns == 0, w + " never opens (no gap column)");
+         Check(min_el < -1.9 * sigma0, w + " the elastic stress goes below -1.9 sigma0");
+         Check(max_serr <= 0.01 * rho * t_r,
+               w + " relaxed stress = sigma0 - rho t_r (1 - exp(-t / t_r)) to 1% of rho t_r");
+      }
+      else
+      {
+         const double ts = -t_r * std::log(1.0 - sigma0 / (rho * t_r));
+         const double gx = (rho - sigma0 / t_r) * (T1 - ts) / gam;
+         const double tc = T1 + gx * gam * t_r / sigma0;
+         Say("    opened at " + Fmt(t_open, 6) + " s (t* = " + Fmt(ts, 6) + "), g(T1) " +
+             Fmt(g_T1, 6) + " m (" + Fmt(gx, 6) + " expected), closed at " + Fmt(t_close, 6) +
+             " s (" + Fmt(tc, 6) + " expected)");
+         Check(min_s >= -1e-9 * sigma0 && min_g >= -1e-15 && max_gs <= 1e-9 * sigma0 * max_g,
+               w + " s >= 0, g >= 0, g s = 0 at every accepted state");
+         Check(std::abs(t_open - ts) <= 3.0 * spec.h0, w + " opens at t* within 3 steps");
+         Check(std::abs(g_T1 - gx) <= 0.02 * gx, w + " gap at T1 within 2% of the expected one");
+         Check(t_close > 0.0 && std::abs(t_close - tc) <= 0.02 * (tc - T1) + 3.0 * spec.h0,
+               w + " closes again at the expected time (2%)");
+         Check(r.final_all[2] == 0.0 && s_end > 0.9 * sigma0,
+               w + " closed at T with the relaxed stress back above 0.9 sigma0");
+      }
+   }
+}
+
 int main(int argc, char **argv)
 {
    Mpi::Init(argc, argv);
@@ -1031,6 +1146,7 @@ int main(int argc, char **argv)
    TestT1b(MPI_COMM_WORLD);
    TestT1c(MPI_COMM_WORLD);
    TestT1d(MPI_COMM_WORLD);
+   TestT1e(MPI_COMM_WORLD);
    TestT0c();
 
    Say(fails ? "test_qd_esdirk_points: " + std::to_string(fails) + " FAILED" :
