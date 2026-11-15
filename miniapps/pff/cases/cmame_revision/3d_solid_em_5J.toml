@@ -1,0 +1,59 @@
+# CMAME revision, 3D pure solid, 5 J pulses.
+#   farms@cdms pulsepower/cmame_revision/3d_solid/em_5J/elasticity.i + fracture.i
+# Pierced cylinder, outer radius 12.5 mm, hole radius 1.6 mm, height 60 mm
+# (3d_mesh/cylinder_sample.geo, h = 0.2 mm); dashpots on outer, top and bottom.
+
+[case]
+name = "cmame_3d_solid_em_5J"
+model = "solid"
+source = "pulsepower/cmame_revision/3d_solid/em_5J/elasticity.i"
+
+[mesh]
+file = "../3d_mesh/cylinder_sample.msh"  # physical: volume 1, Bottom 2, Inner 3, Outer 4, Upper 5
+dim = 3
+corner = [0.1, 0.1, 0.0]
+
+[boundaries]
+pressure = [3]
+absorbing = [4, 5, 2]
+
+[material]
+E = 50e9
+nu = 0.373
+density = 2600
+
+[phase_field]
+model = "AT1"
+Gc = 40
+l = 2e-4
+eta = 1e-6
+p = 2
+decomposition = "spectral"
+driving = "active"
+# fracture.i sets initial_damage_aux = 0 on the box block too: no seeded damage
+
+[pulse]
+shape_alpha = 4.658e5
+shape_beta = 4.661e5
+rise_time = 3e-6
+pulse_duration = 1e-5
+EM = 0.005
+gap = 0.008
+efficiency = 1.0
+kappa = 0.35
+m_exp = 0.25
+base_factor = 8000
+center = [0.0, 0.0, 0.03]
+num_pulses = 10
+
+[time]
+end_time = 10e-5
+cfl = 0.4
+
+[output]
+directory = "out/cmame_3d_solid_em_5J"
+interval = 100
+fields = ["d", "vel_mag"]
+
+[metrics]
+r_hole = 1.6e-3

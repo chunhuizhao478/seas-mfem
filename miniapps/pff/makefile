@@ -1,142 +1,51 @@
-# Copyright (c) 2010-2025, Lawrence Livermore National Security, LLC. Produced
-# at the Lawrence Livermore National Laboratory. All Rights reserved. See files
-# LICENSE and NOTICE for details. LLNL-CODE-806117.
+# Copyright (c) 2010-2026, Lawrence Livermore National Security, LLC.
 #
-# This file is part of the MFEM library. For more information and source code
-# availability visit https://mfem.org.
+# Dynamic phase-field fracture (pff) miniapp makefile, laid out like
+# miniapps/seas/Makefile: it reads the MFEM build's config.mk.
 #
-# MFEM is free software; you can redistribute it and/or modify it under the
-# terms of the BSD-3 license. We welcome feedback and contributions, see file
-# CONTRIBUTING.md for details.
+#   make test                       build and run the unit tests
+#   make MFEM_BUILD_DIR=/path test  against an out-of-tree MFEM build (CMake or make)
+#
+# Targets are added phase by phase (see PLAN.md).
 
-# Phase Field Fracture (PFF) miniapp makefile
-
-# Use the MFEM build directory
 MFEM_DIR ?= ../..
 MFEM_BUILD_DIR ?= ../..
 MFEM_INSTALL_DIR ?= ../../mfem
-SRC = $(if $(MFEM_DIR:../..=),$(MFEM_DIR)/miniapps/pff/,)
 CONFIG_MK = $(or $(wildcard $(MFEM_BUILD_DIR)/config/config.mk),\
    $(wildcard $(MFEM_INSTALL_DIR)/share/mfem/config.mk))
 
 MFEM_LIB_FILE = mfem_is_not_built
 -include $(CONFIG_MK)
 
-# Source files
-UNIT_TESTS_PHASE1_SRC = tests/unit_tests_phase1.cpp
-UNIT_TESTS_PHASE2_SRC = tests/unit_tests_phase2.cpp
-UNIT_TESTS_PHASE3_SRC = tests/unit_tests_phase3.cpp
-UNIT_TESTS_PHASE4_SRC = tests/unit_tests_phase4.cpp
+PFF_INC = -I. -Iextern/toml11
+CXXFLAGS_PFF = $(MFEM_FLAGS) $(PFF_INC)
+LIBS_PFF = $(MFEM_LIBS)
 
-# Object files
-UNIT_TESTS_PHASE1_OBJ = $(UNIT_TESTS_PHASE1_SRC:.cpp=.o)
-UNIT_TESTS_PHASE2_OBJ = $(UNIT_TESTS_PHASE2_SRC:.cpp=.o)
-UNIT_TESTS_PHASE3_OBJ = $(UNIT_TESTS_PHASE3_SRC:.cpp=.o)
-UNIT_TESTS_PHASE4_OBJ = $(UNIT_TESTS_PHASE4_SRC:.cpp=.o)
+# -----------------------------------------------------------------------------
+# Unit tests (serial, no mesh): tests/unit/test_*.cpp, one executable each
+# -----------------------------------------------------------------------------
+UNIT_TESTS = test_phase_field_functions test_strain_split test_poro_damage \
+             test_pulse_load test_config
+UNIT_BINS = $(addprefix tests/unit/,$(UNIT_TESTS))
 
-# Header dependencies
-PFF_HEADERS = materials/degradation_function.hpp \
-              materials/spectral_decomposition.hpp \
-              materials/pff_material.hpp \
-              integrators/degraded_elasticity_integrator.hpp \
-              integrators/damage_diffusion_integrator.hpp \
-              integrators/damage_source_integrator.hpp \
-              operators/elasticity_operator.hpp \
-              operators/damage_operator.hpp \
-              pff_solver.hpp
+HEADERS = $(wildcard common/*.hpp config/*.hpp materials/*.hpp loading/*.hpp \
+                     tests/*.hpp)
 
-# Targets
-SEQ_MINIAPPS = pff_unit_tests_phase1 pff_unit_tests_phase2 pff_unit_tests_phase3 pff_unit_tests_phase4 pff
-PAR_MINIAPPS =
+.PHONY: all test clean
 
-ifeq ($(MFEM_USE_MPI),NO)
-   MINIAPPS = $(SEQ_MINIAPPS)
-else
-   MINIAPPS = $(PAR_MINIAPPS) $(SEQ_MINIAPPS)
-endif
+all: $(UNIT_BINS)
 
-MFEM_TESTS = MINIAPPS
+tests/unit/%: tests/unit/%.cpp $(HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	$(MFEM_CXX) $(CXXFLAGS_PFF) $< -o $@ $(LIBS_PFF)
 
-.SUFFIXES:
-.SUFFIXES: .o .cpp .mk
-.PHONY: all clean clean-build clean-exec test test-phase1 test-phase2 test-phase3 test-phase4
+test: $(UNIT_BINS)
+	@fail=0; for t in $(UNIT_BINS); do \
+	   echo "=== $$t"; ./$$t > $$t.log 2>&1 && tail -1 $$t.log || { cat $$t.log; fail=1; }; \
+	done; exit $$fail
 
-all: $(MINIAPPS)
+clean:
+	rm -f $(UNIT_BINS) tests/unit/*.log
 
-# Remove built-in rules
-%: %.cpp
-%.o: %.cpp
-
-PFF_INCLUDES = $(if $(SRC),-I$(MFEM_DIR))
-
-# Phase 1 unit tests
-pff_unit_tests_phase1: $(UNIT_TESTS_PHASE1_OBJ)
-	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(UNIT_TESTS_PHASE1_OBJ) $(MFEM_LIBS)
-
-# Phase 2 unit tests
-pff_unit_tests_phase2: $(UNIT_TESTS_PHASE2_OBJ)
-	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(UNIT_TESTS_PHASE2_OBJ) $(MFEM_LIBS)
-
-# Phase 3 unit tests
-pff_unit_tests_phase3: $(UNIT_TESTS_PHASE3_OBJ)
-	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(UNIT_TESTS_PHASE3_OBJ) $(MFEM_LIBS)
-
-# Phase 4 unit tests
-pff_unit_tests_phase4: $(UNIT_TESTS_PHASE4_OBJ)
-	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(UNIT_TESTS_PHASE4_OBJ) $(MFEM_LIBS)
-
-# Phase 5 main driver
-pff: pff.o
-	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ pff.o $(MFEM_LIBS)
-
-# Object file rules
-$(UNIT_TESTS_PHASE1_OBJ): %.o: $(SRC)%.cpp $(PFF_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
-	@mkdir -p $(@D)
-	$(MFEM_CXX) $(MFEM_FLAGS) $(PFF_INCLUDES) -c $< -o $@
-
-$(UNIT_TESTS_PHASE2_OBJ): %.o: $(SRC)%.cpp $(PFF_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
-	@mkdir -p $(@D)
-	$(MFEM_CXX) $(MFEM_FLAGS) $(PFF_INCLUDES) -c $< -o $@
-
-$(UNIT_TESTS_PHASE3_OBJ): %.o: $(SRC)%.cpp $(PFF_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
-	@mkdir -p $(@D)
-	$(MFEM_CXX) $(MFEM_FLAGS) $(PFF_INCLUDES) -c $< -o $@
-
-$(UNIT_TESTS_PHASE4_OBJ): %.o: $(SRC)%.cpp $(PFF_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
-	@mkdir -p $(@D)
-	$(MFEM_CXX) $(MFEM_FLAGS) $(PFF_INCLUDES) -c $< -o $@
-
-pff.o: $(SRC)pff.cpp $(PFF_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
-	@mkdir -p $(@D)
-	$(MFEM_CXX) $(MFEM_FLAGS) $(PFF_INCLUDES) -c $< -o $@
-
-# Testing targets
-test: test-phase1 test-phase2 test-phase3 test-phase4
-
-test-phase1: pff_unit_tests_phase1
-	./pff_unit_tests_phase1
-
-test-phase2: pff_unit_tests_phase2
-	./pff_unit_tests_phase2
-
-test-phase3: pff_unit_tests_phase3
-	./pff_unit_tests_phase3
-
-test-phase4: pff_unit_tests_phase4
-	./pff_unit_tests_phase4
-
--include $(MFEM_TEST_MK)
-
-# Generate an error message if the MFEM library is not built and exit
+# Make sure the MFEM library is built
 $(MFEM_LIB_FILE):
-	$(error The MFEM library is not built)
-
-clean: clean-build clean-exec
-
-clean-build:
-	rm -f *.o *~ $(SEQ_MINIAPPS) $(PAR_MINIAPPS)
-	rm -f tests/*.o
-	rm -rf *.dSYM *.TVD.*breakpoints
-
-clean-exec:
-	@rm -rf mesh.* sol.* ParaView
+	@echo "MFEM is not built: build it first, or set MFEM_BUILD_DIR"; exit 1

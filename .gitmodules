@@ -1,0 +1,3 @@
+[submodule "miniapps/pff/extern/toml11"]
+	path = miniapps/pff/extern/toml11
+	url = https://github.com/ToruNiina/toml11.git

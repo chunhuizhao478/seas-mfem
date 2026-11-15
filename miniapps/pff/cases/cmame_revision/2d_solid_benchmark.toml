@@ -1,0 +1,70 @@
+# CMAME revision, 2D pure solid, benchmark case (two crossing pre-damaged slots).
+#   farms@cdms pulsepower/cmame_revision/2d_solid/benchmark/elasticity.i + fracture.i
+# Disc of radius 12.5 mm with a 2 mm hole (2d_mesh/2d_mesh.geo, h = 0.2 mm),
+# plane strain, 100 pulses of 5 J, 1 MPa confinement, dashpots on the outer edge.
+
+[case]
+name = "cmame_2d_solid_benchmark"
+model = "solid"
+source = "pulsepower/cmame_revision/2d_solid/benchmark/elasticity.i"
+
+[mesh]
+file = "../2d_mesh/2d_mesh.msh"         # physical curves: OuterBoundary 1, RefinedBoundary 2, HoleBoundary 3
+dim = 2
+corner = [0.01, 0.01, 0.0]               # ExtraNodesetGenerator corner_ptr (closest node)
+
+[boundaries]
+pressure = [3]
+confinement = [1]
+absorbing = [1]
+
+[material]
+E = 50e9
+nu = 0.3
+density = 2600
+
+[phase_field]
+model = "AT1"
+Gc = 100
+l = 2e-4
+eta = 1e-6
+p = 2
+decomposition = "spectral"
+driving = "active"
+# initial_damage_aux = 0.9 on the SubdomainBoundingBoxGenerator block 1; nodes shared
+# with blocks 4 5 are written last with 0 (ConstantAux order), so only nodes
+# interior to the box elements carry 0.9
+initial_damage = [
+  { lo = [-0.0025, -3e-4, 0.0], hi = [0.0025, 3e-4, 0.0], value = 0.9 },
+  { lo = [-3e-4, -0.0025, 0.0], hi = [3e-4, 0.0025, 0.0], value = 0.9 },
+]
+
+[pulse]
+shape_alpha = 4.658e5
+shape_beta = 4.661e5
+rise_time = 3e-6
+pulse_duration = 1e-5
+EM = 0.005
+gap = 0.008
+efficiency = 1.0
+kappa = 0.35
+m_exp = 0.25
+base_factor = 8000
+center = [0.0, 0.0, 0.0]
+num_pulses = 100
+
+[confinement]
+pressure = 1e6
+
+[time]
+end_time = 100e-5
+cfl = 0.4
+dt_max = 5e-8                            # MOOSE: fixed dt = 5e-8
+
+[output]
+directory = "out/cmame_2d_solid_benchmark"
+interval = 100
+fields = ["d", "vel_mag"]
+
+[metrics]
+r_hole = 2e-3

@@ -1,0 +1,84 @@
+# CMAME revision, 2D hydromechanical (u-p Biot, undrained borehole), benchmark case.
+#   farms@cdms pulsepower/cmame_revision/2d_hydromech/benchmark/elasticity_E1d25.i
+#   + fracture_E1d25.i; initial state from static_solve.i (SolutionUserObject).
+# Darcy-Poiseuille permeability with w_c = Gc / ft, ft from the AT1 relation.
+
+[case]
+name = "cmame_2d_hydromech_benchmark"
+model = "hydromech"
+source = "pulsepower/cmame_revision/2d_hydromech/benchmark/elasticity_E1d25.i"
+
+[mesh]
+file = "../2d_mesh/2d_mesh.msh"
+dim = 2
+corner = [0.01, 0.01, 0.0]
+
+[boundaries]
+pressure = [3]
+confinement = [1]
+absorbing = [1]
+# drained variants set p = pulse on the hole: drained = [3]
+
+[material]
+E = 50e9
+nu = 0.3
+density = 2600
+
+[phase_field]
+model = "AT1"
+Gc = 100
+l = 2e-4
+eta = 1e-6
+p = 2
+decomposition = "spectral"
+driving = "half_history_enhanced"        # psi = alpha Gc/c0/l + 0.5 g H, H = ElkPorousFlowHistoryEnergyEnhanced
+initial_damage = [
+  { lo = [-0.0025, -3e-4, 0.0], hi = [0.0025, 3e-4, 0.0], value = 0.9 },
+  { lo = [-3e-4, -0.0025, 0.0], hi = [3e-4, 0.0025, 0.0], value = 0.9 },
+]
+
+[pulse]
+shape_alpha = 4.658e5
+shape_beta = 4.661e5
+rise_time = 3e-6
+pulse_duration = 1e-5
+EM = 0.005
+gap = 0.008
+efficiency = 1.0
+kappa = 0.35
+m_exp = 0.25
+base_factor = 8000
+center = [0.0, 0.0, 0.0]
+num_pulses = 100
+
+[confinement]
+pressure = 1e6
+
+[time]
+end_time = 100e-5
+cfl = 0.4
+dt_max = 1e-8                            # MOOSE: fixed dt = 1e-8
+
+[poro]
+K_s = 50e9
+K_f = 2.24e9
+phi0 = 0.008
+phi_lb = 0.008
+phi_ub = 0.999
+g_min = 1e-6
+viscosity = 1e-3
+fluid_density = 1000
+initial_pore_pressure = 0.0              # taken from static_solve_out.e in MOOSE
+porosity_model = "damage"
+permeability_model = "darcy_poiseuille"
+k0 = 5e-19
+perm_exponent = 10
+# wc defaults to Gc / ft = Gc / sqrt(3 E Gc / (8 l))
+
+[output]
+directory = "out/cmame_2d_hydromech_benchmark"
+interval = 100
+fields = ["d", "vel_mag", "pp"]
+
+[metrics]
+r_hole = 2e-3

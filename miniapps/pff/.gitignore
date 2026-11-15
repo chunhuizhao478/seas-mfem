@@ -1,0 +1,5 @@
+tests/unit/test_*
+!tests/unit/test_*.cpp
+tests/unit/*.log
+out/
+*.o
