@@ -1,13 +1,13 @@
 // Copyright (c) 2010-2026, Lawrence Livermore National Security, LLC.
 //
-// Unit tests of the tension/compression split (materials/strain_split.hpp):
+// Unit tests of the tension/compression split (constitutive/strain_split.hpp):
 //  - psi+ + psi- = psi0 and sigma(g = 1) = sigma0 for every decomposition
 //  - sigma = d psi / d eps (central differences at fixed g) on random strains
 //  - limiting states: pure tension, pure compression, repeated eigenvalues
 //  - plane-strain padding: lambda = K - 2G/3 as with LIBMESH_DIM = 3 in MOOSE
 
 #include "mfem.hpp"
-#include "../../materials/strain_split.hpp"
+#include "../../constitutive/strain_split.hpp"
 #include "../test_framework.hpp"
 
 #include <random>

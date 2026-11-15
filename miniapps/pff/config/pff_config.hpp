@@ -4,7 +4,7 @@
 // miniapp, read from TOML (toml11, as miniapps/seas/config/seas_config_parser.hpp).
 //
 // One TOML file describes one MOOSE case of farms branch cdms; the case files
-// live in cases/<model>/ and cite the MOOSE input they reproduce.  Tables:
+// live in <model>/configs/ and cite the MOOSE input they reproduce.  Tables:
 //
 //   [case]         name, model = "solid" | "hydromech", source (MOOSE input path)
 //   [mesh]         file, dim, uniform_refinements, corner point
@@ -30,8 +30,8 @@
 
 #include "mfem.hpp"
 #include "../common/pff_types.hpp"
-#include "../materials/phase_field_functions.hpp"
-#include "../materials/poro_damage.hpp"
+#include "../phasefield/phase_field_functions.hpp"
+#include "../multiphysics/poroelastic/poro_damage.hpp"
 #include "../loading/pulse_load.hpp"
 
 #include <array>

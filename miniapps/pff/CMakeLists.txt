@@ -10,7 +10,7 @@
 # CONTRIBUTING.md for details.
 
 # pff: dynamic phase-field fracture (port of farms@cdms spe_hftc and
-# cmame_revision). The primary build is the makefile (`make test`); this file
+# cmame_revision). The primary build is the Makefile (`make test`); this file
 # builds the same unit tests under CMake. The quasi-static prototype in
 # archive/qs_prototype is not built.
 
@@ -29,7 +29,7 @@ foreach(test ${PFF_UNIT_TESTS})
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/extern/toml11)
   if (MFEM_ENABLE_TESTING)
-    # test_config reads cases/ relative to the miniapp directory.
+    # test_config reads <model>/configs/ relative to the miniapp directory.
     add_test(NAME pff_${test} COMMAND $<TARGET_FILE:pff_${test}>
              WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   endif()

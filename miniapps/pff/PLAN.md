@@ -37,45 +37,54 @@ This file is the working plan.
 
 ## Phases
 
-Each phase lists its directory and its gate.
+Order: R first (quasi-static benchmarks), then the CPU phases C1–C5, each
+followed by its GPU phase G1–G5 on the same source (`--device cuda`, Vista
+GH200). The CPU result is the reference of each GPU gate.
 
-1. **Pointwise kernels** (done in this commit): `materials/`, `loading/`,
-   `config/`, `io/gmsh_physical_names.hpp`, `tests/unit/`. Gate: `make test`.
-   The split satisfies σ = ∂ψ/∂ε to 1e-9 on 1000 random strains. The pulse
-   peak matches the write-up's 206/215/223 MPa. The rates match the input
-   comments. The poro laws match the Elk formulas.
-2. **Explicit elastodynamics, no damage**: `integrators/split_elasticity_integrator.hpp`,
-   `integrators/dashpot_integrator.hpp`, `domain/explicit_elasticity_operator.hpp`,
-   `solver/cfl.hpp`, `drivers/pff_driver.cpp`. Gates:
-    - With ζ = 0 and free faces, energy conserves to 0.1 %.
-    - The early-time hoop stress matches the pressurised cavity (spe_hftc PLAN A.8).
-    - Dashpot reflection is under 2 %.
-    - v_max(t) of the 2D section matches MOOSE with d frozen at 0.
-3. **Damage**: `domain/damage_operator.hpp`, `solver/bound_constrained_solver.hpp`.
-   Gates:
-    - The RACCOON quasi-static gold cases on the branch (`cdm_examples/pf_raccoon_examples`) reproduce.
-    - spe_hftc 2D, one pulse to 10 µs: η = 1 gives d > 0.5 out to 1.76 mm and 77 J/m; η = 0.3 gives d_max = 0.18.
-    - cmame 2D solid benchmark: the first pulse matches the MOOSE extent and energies.
-4. **Pulse trains and the quench**: the 20-pulse spe_hftc 2D η sweep (Vista
-   results) and 100 pulses of the cmame 2D solid benchmark. Gate: extents per
-   pulse within one element, and the energy budget closes.
-5. **Hydromech**: `domain/pressure_operator.hpp`, `materials/poro_damage.hpp`
-   (done), the static initial state (one implicit solve with confinement and
-   p0, as `static_solve.i`). Gates:
-    - Terzaghi and Mandel (analytic).
-    - The undrained wave speed in a 1D column.
-    - cmame 2D hydromech benchmark: pp(t) at the hole and the damage pattern
-      against MOOSE; the fluid energy terms of the MOOSE CSV.
-6. **3D and performance**: per-rank mesh files or parallel refinement,
-   HMIS AMG (MFEM's default), skipping the damage solve when ψ⁺ ≤ ψ⁺ of the
-   last solve everywhere, and timing against the Vista/LS6 numbers. Gates:
-    - spe_hftc cube and cmame 3D em_5J, first pulses against MOOSE.
-    - A wall-time table.
-7. **Optional**: GPU kernels (partial assembly of the split force), AMR,
-   Weibull/Gaussian Gc fields, the other permeability and porosity variants of
-   `cmame_revision/2d_hydromech/permeability_formula/`.
+0. **Pointwise kernels** (done): `constitutive/`, `phasefield/`, `loading/`,
+   `config/`, `multiphysics/poroelastic/poro_damage.hpp`,
+   `io/gmsh_physical_names.hpp`, `tests/unit/`. Gate: `make test`. The split
+   satisfies σ = ∂ψ/∂ε to 1e-9 on 1000 random strains; the pulse peak matches
+   206/215/223 MPa; the poro laws match the Elk formulas.
+   **C0** (done): layout restructure; the same 98 checks pass.
+1. **R: RACCOON quasi-static benchmarks** (`raccoon/`), RACCOON 9fd3a6f:
+    - R1 `tutorials/mode1_brittle_fracture`: AT2, no split, 30×15 QUAD4 with
+      two initial refinements in [0.4,1]×[0,0.05]. Gates: 888 elements and
+      994 nodes as in the gold; the 2 gold steps (Fy = 5.69042, 11.38077)
+      and fields within relative 1e-4; the full Fy–u curve against a MOOSE
+      run.
+    - R2 `tutorials/mode2_brittle_fracture`: spectral split (Newton,
+      analytic tangent checked by finite differences), slit mesh of two
+      stitched halves. Gates: 2826 elements and 3026 nodes; Fx = 0.923682,
+      1.847363 at the 2 gold steps; the full curve against MOOSE.
+    - R3 three-point bending: deferred (RACCOON's case is finite-strain J2
+      elastoplastic), revisited after R1 and R2.
+2. **C1/G1 explicit elastodynamics, no damage**: force kernel, lumped mass,
+   dashpots, central difference, CFL. Gates: energy conserved to 0.1 % with
+   ζ = 0; the cavity hoop stress (spe_hftc PLAN A.8); dashpot reflection
+   under 2 %; v_max(t) of the 2D section against MOOSE with d = 0. G1: one
+   step matches CPU to 1e-12, no state-sized copies inside a step.
+3. **C2/G2 damage**: native active-set solver against PETSc VI to 1e-8;
+   spe_hftc 2D one pulse to 10 µs (η = 1: d > 0.5 out to 1.76 mm and
+   77 J/m; η = 0.3: d_max = 0.18); cmame 2D solid first pulse. G2: d matches
+   the CPU solver to 1e-8.
+4. **C3/G3 pulse trains and the quench**: 20-pulse spe_hftc 2D η sweep and
+   100 pulses of the cmame 2D solid benchmark; extents per pulse within one
+   element, the energy budget closes.
+5. **C4/G4 hydromech** (`multiphysics/poroelastic/`): Terzaghi, Mandel, the
+   undrained column speed; cmame 2D hydromech pp(t) and damage pattern; the
+   static initial state uses the phase-R quasi-static solver.
+6. **C5/G5 3D and timing**: spe_hftc cube and cmame 3D em_5J first pulses
+   against MOOSE; a wall-time table against Vista/LS6 MOOSE and between CPU
+   and GPU.
+7. **Optional**: AMR, Weibull/Gaussian Gc fields, the other permeability and
+   porosity variants.
 
 ## Parity details to keep (not to "fix")
+
+- RACCOON transfers `psie_active` to the fracture app as a CONSTANT
+  MONOMIAL, so the damage source sees the element average of ψ_active, not
+  its quadrature-point values. Phase R reproduces this.
 
 - The driving-energy conventions differ. spe_hftc: ψ = αGc/(c0 l) + g ψ⁺ with
   no history. cmame hydromech: ψ = αGc/(c0 l) + ½ g H with

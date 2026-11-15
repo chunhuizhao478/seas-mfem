@@ -25,9 +25,9 @@ kernels and case files, no mesh needed).
 
 ## Cases
 
-`cases/<model>/*.toml`, one file per MOOSE case. Each file's header names the
+`<model>/configs/*.toml`, one file per MOOSE case. Each file's header names the
 MOOSE input it reproduces, and the values are copied from it. See
-[cases/README.md](cases/README.md).
+[spe_hftc/README.md](spe_hftc/README.md) and [cmame_revision/README.md](cmame_revision/README.md).
 
 The quasi-static AT2 prototype that used to live here is in
 `archive/qs_prototype/`, kept for reference. Its `CONVERGENCE_DEBUG.md` lists

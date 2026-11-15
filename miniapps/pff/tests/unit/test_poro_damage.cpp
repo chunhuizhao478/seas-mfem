@@ -1,10 +1,10 @@
 // Copyright (c) 2010-2026, Lawrence Livermore National Security, LLC.
 //
-// Unit tests of the damaged poroelastic properties (materials/poro_damage.hpp)
+// Unit tests of the damaged poroelastic properties (multiphysics/poroelastic/poro_damage.hpp)
 // with the cmame_revision 3d_hydromech/em_5J parameters.
 
 #include "mfem.hpp"
-#include "../../materials/poro_damage.hpp"
+#include "../../multiphysics/poroelastic/poro_damage.hpp"
 #include "../test_framework.hpp"
 
 using namespace mfem;

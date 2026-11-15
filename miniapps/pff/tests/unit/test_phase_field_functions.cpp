@@ -4,7 +4,7 @@
 // against the values of the MOOSE inputs (farms branch cdms).
 
 #include "mfem.hpp"
-#include "../../materials/phase_field_functions.hpp"
+#include "../../phasefield/phase_field_functions.hpp"
 #include "../test_framework.hpp"
 
 using namespace mfem;

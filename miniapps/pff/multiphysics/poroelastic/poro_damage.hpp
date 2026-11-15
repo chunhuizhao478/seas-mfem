@@ -35,8 +35,8 @@
 #define MFEM_PFF_PORO_DAMAGE_HPP
 
 #include "mfem.hpp"
-#include "../../../linalg/kernels.hpp" // mfem::kernels::CalcEigenvalues<3>
-#include "../common/pff_types.hpp"
+#include "../../../../linalg/kernels.hpp" // mfem::kernels::CalcEigenvalues<3>
+#include "../../common/pff_types.hpp"
 
 #include <algorithm>
 #include <cmath>

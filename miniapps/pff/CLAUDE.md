@@ -13,6 +13,15 @@ script, debugging behaviour). In addition, for pff:
   g_min = 1e-6 in the Biot coefficient, and the 1e-20 floor of 1/M). A
   difference you believe is a MOOSE bug gets reported and discussed, not
   silently fixed. See "Parity details" in PLAN.md.
+- Phase R (quasi-static benchmarks) reproduces RACCOON at the commit pinned
+  by the farms@cdms `raccoon` submodule (hugary1995/raccoon 9fd3a6f,
+  `tutorials/`). Same rule: inputs ported exactly, the input cited.
+
+## Standalone
+
+- pff shares no code with `miniapps/seas` and includes nothing from it.
+  Follow a seas pattern by writing it in pff.
+- Hydromech code lives in `multiphysics/poroelastic/`.
 
 ## Numerics that must not regress
 

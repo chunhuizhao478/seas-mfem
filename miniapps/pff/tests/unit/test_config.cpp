@@ -1,10 +1,10 @@
 // Copyright (c) 2010-2026, Lawrence Livermore National Security, LLC.
 //
-// Unit tests of the case configuration: every case file in cases/ parses, the
+// Unit tests of the case configuration: every case file in <model>/configs/ parses, the
 // derived values match the MOOSE inputs, unknown keys are refused, and Gmsh
 // physical names resolve to attributes.
 //
-// Run from miniapps/pff (the makefile's `make test` does).
+// Run from miniapps/pff (the Makefile's `make test` does).
 
 #include "mfem.hpp"
 #include "../../config/pff_config_parser.hpp"
@@ -19,7 +19,7 @@ using namespace mfem::pff;
 static void TestSpe()
 {
    std::cout << "\n[spe_hftc cube case]\n";
-   const CaseConfig c = CaseConfigParser::ParseFile("cases/spe_hftc/cube_homog_eta0p45_absorb.toml");
+   const CaseConfig c = CaseConfigParser::ParseFile("spe_hftc/configs/cube_homog_eta0p45_absorb.toml");
    TEST_ASSERT(c.model == CaseModel::Solid, "model = solid");
    TEST_NEAR(c.pf.Gc, 2720.5714285714284, 1e-9, "Gc derived from ft = 69 MPa at l = 0.6 mm");
    TEST_NEAR(c.Cp(), 1943.0, 1.0, "c_p = 1943 m/s (formulation write-up)");
@@ -27,14 +27,14 @@ static void TestSpe()
    TEST_NEAR(c.end_time, 20 * 6e-5, 1e-15, "end_time defaults to Np Tw");
    TEST_ASSERT(c.absorbing_bdr.size() == 4 && c.fixed_z_bdr.size() == 2, "boundary names read");
    TEST_ASSERT(c.pf.driving == DrivingEnergy::Active, "driving = active");
-   const CaseConfig s = CaseConfigParser::ParseFile("cases/spe_hftc/section_homog_eta0p45_absorb.toml");
+   const CaseConfig s = CaseConfigParser::ParseFile("spe_hftc/configs/section_homog_eta0p45_absorb.toml");
    TEST_ASSERT(s.dim == 2 && s.fixed_z_bdr.empty(), "2D section: dim 2, no end faces");
 }
 
 static void TestCmame()
 {
    std::cout << "\n[cmame_revision cases]\n";
-   const CaseConfig s2 = CaseConfigParser::ParseFile("cases/cmame_revision/2d_solid_benchmark.toml");
+   const CaseConfig s2 = CaseConfigParser::ParseFile("cmame_revision/configs/2d_solid_benchmark.toml");
    TEST_ASSERT(s2.initial_damage.size() == 2, "two seeded slots");
    TEST_NEAR(s2.initial_damage[0].value, 0.9, 0.0, "seed value 0.9");
    // ft = sqrt(3/8 E Gc / l) = 96.8 MPa for E = 50 GPa, Gc = 100, l = 0.2 mm.
@@ -44,7 +44,7 @@ static void TestCmame()
              "2D solid: AT1 strength 96.8 MPa");
    TEST_NEAR(s2.confinement_pressure, 1e6, 0.0, "1 MPa confinement");
 
-   const CaseConfig h2 = CaseConfigParser::ParseFile("cases/cmame_revision/2d_hydromech_benchmark.toml");
+   const CaseConfig h2 = CaseConfigParser::ParseFile("cmame_revision/configs/2d_hydromech_benchmark.toml");
    TEST_ASSERT(h2.model == CaseModel::Hydromech, "model = hydromech");
    TEST_ASSERT(h2.poro.perm_model == PermeabilityModel::DarcyPoiseuille, "darcy_poiseuille");
    TEST_REL(h2.poro.wc, 100.0 / std::sqrt(3.0 / 8.0 * 50e9 * 100.0 / 2e-4), 1e-12,
@@ -52,12 +52,12 @@ static void TestCmame()
    TEST_REL(h2.poro.K, 50e9 / 3.0 / (1.0 - 0.6), 1e-14, "poro K = intact drained bulk modulus");
    TEST_ASSERT(h2.pf.driving == DrivingEnergy::HalfHistoryEnhanced, "driving = half_history_enhanced");
 
-   const CaseConfig h3 = CaseConfigParser::ParseFile("cases/cmame_revision/3d_hydromech_em_5J.toml");
+   const CaseConfig h3 = CaseConfigParser::ParseFile("cmame_revision/configs/3d_hydromech_em_5J.toml");
    TEST_ASSERT(h3.poro.perm_model == PermeabilityModel::NormalStrain, "normal_strain permeability");
    TEST_NEAR(h3.initial_pore_pressure, 0.0965e6, 0.0, "p0 = 0.0965 MPa");
    TEST_NEAR(h3.end_time, 50e-5, 1e-18, "end_time 50e-5");
 
-   const CaseConfig s3 = CaseConfigParser::ParseFile("cases/cmame_revision/3d_solid_em_5J.toml");
+   const CaseConfig s3 = CaseConfigParser::ParseFile("cmame_revision/configs/3d_solid_em_5J.toml");
    TEST_ASSERT(s3.absorbing_bdr.size() == 3 && s3.absorbing_bdr[0] == "4", "3D solid dashpots on 4 5 2");
 }
 

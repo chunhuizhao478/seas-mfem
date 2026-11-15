@@ -28,7 +28,8 @@ UNIT_TESTS = test_phase_field_functions test_strain_split test_poro_damage \
              test_pulse_load test_config
 UNIT_BINS = $(addprefix tests/unit/,$(UNIT_TESTS))
 
-HEADERS = $(wildcard common/*.hpp config/*.hpp materials/*.hpp loading/*.hpp \
+HEADERS = $(wildcard common/*.hpp config/*.hpp constitutive/*.hpp phasefield/*.hpp \
+                     loading/*.hpp io/*.hpp multiphysics/poroelastic/*.hpp \
                      tests/*.hpp)
 
 .PHONY: all test clean
