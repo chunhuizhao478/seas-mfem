@@ -738,10 +738,14 @@ x    = [195617.5, -502107.4]
 [cycle.checkpoint]
 every_qd_steps = 1000
 
-# The fault every 100 yr and every 2 s in a dynamic phase.
+# The fault every 100 yr and every 0.5 s in a dynamic phase (was 2 s through
+# Vista 1143856; Chunhui Zhao, 2026-11-15: "our snapshot is NOT capturing
+# dynamic phase at all, we should consider increase the sampling frequnecy in
+# dynamic during rupture propagation"): about 0.26 MB each, about 6 GB for 40
+# events.
 [cycle.snapshots.fault]
 dt_qd  = 3.1536e9
-dt_dyn = 2.0
+dt_dyn = 0.5
 
 # Map view: the whole 2D domain is the horizontal plane, so the "surface"
 # output is the volume snapshot (displacement and velocity, east and north,
@@ -750,8 +754,12 @@ dt_dyn = 2.0
 # in a dynamic phase and every 10,000 yr in the QD regime (the table of the
 # fast 24,500 yr deck; Vista 1133708 wrote 14.2 GB in its three events, so
 # about 190 GB for 40 events: the run folder goes on scratch).
+# From 2026-11-15 every 2 s in a dynamic phase (was 10 s through Vista
+# 1143856, where a rupture front moved about 30 km between two snapshots):
+# 1143856 wrote 1,974 dynamic snapshots, so about 9,900 here, about 350 GB for
+# 40 events, on scratch.
 [cycle.snapshots.volume]
 dt_qd   = 3.1536e11
-dt_dyn  = 10.0
+dt_dyn  = 2.0
 box_min = [-217000.0, -578000.0]
 box_max = [430000.0, -39000.0]

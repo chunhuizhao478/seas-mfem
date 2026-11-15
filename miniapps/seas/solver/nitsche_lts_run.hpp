@@ -1039,6 +1039,7 @@ public:
             if (e1 >= 0 && e2 < 0 && !pm.FaceIsInterior(f)) { isd[e1] = 1; }
          }
          for (int e = 0; e < ne; e++) { if (isd[e]) { dir_elems_[cl_[e]].push_back(e); } }
+         is_dir_ = isd;
       }
 
       // the PML band (file header): every element its terms touch in one
@@ -1342,11 +1343,18 @@ private:
       if (fw_)
       {
          // 2.5D finite width: + (t_off + t) M_beta U_pl1 on the cluster's own
-         // elements (M_beta is element-diagonal), at the cluster's own time
+         // elements (M_beta is element-diagonal), at the cluster's own time.
+         // Not on the Dirichlet elements: F_D above (AssembleDirichletOnlyRHS
+         // = AssembleDirichletLoading) already carries the substrate load on
+         // every row, and those elements took their rows from it.  Adding it
+         // again doubled the load there: an acceleration (beta / rho) u_pl at
+         // the walls at every switch, growing with the model time (the bright
+         // corners of Vista runs 1142230 and 1143856).
          const Vector &L = op_.Elasticity().SubstrateLoad();
          const real_t tt = op_.Elasticity().SubstrateTimeOffset() + t;
          for (int e : own_[c])
          {
+            if (!is_dir_.empty() && is_dir_[e]) { continue; }
             const int *ie = blocks_.ElementDofs(e);
             for (int k = 0; k < nb_; k++) { a(ie[k]) += tt * L(ie[k]); }
          }
@@ -1476,6 +1484,7 @@ private:
    MPI_Comm comm_ = MPI_COMM_NULL;
    NitscheLtsBlocks blocks_;
    std::vector<std::vector<int>> own_, dir_elems_;
+   std::vector<char> is_dir_;     ///< 1: the element has a Dirichlet face (rows in F_D)
    std::map<int, std::vector<int>> abs_elems_;   ///< cluster -> its absorbing elements
    std::vector<int> absorb_;                    ///< element -> absorbing block, or -1
    std::vector<real_t> minv_, inv_rho_, binv_, cblk_;

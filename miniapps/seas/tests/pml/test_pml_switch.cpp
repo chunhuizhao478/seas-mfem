@@ -17,6 +17,14 @@
 // --parse-only only reads it.  --kind sponge (the comparator: no QD band, wall factor 1, no b_band,
 // the plain step) and --kv-eta 0.1 (Kelvin-Voigt as the simple-case decks).
 //   steps      n dynamic steps finite; the band DOFs' max |U - u_s| printed
+// --t-switch t_s, --finite-width <substrate> (2.5D, W = 15 km) and --lts same |
+// split | rate2 (local time stepping; dt_rule "element"): a late switch with
+// the 2.5D term under local time stepping.
+//   rest after one step   max |U'| on the band DOFs <= 1e-9 /s x max |u_s|
+//              there (global stepping, same and split).  At t_s = 3e11 s the
+//              substrate load is as large as M_beta u_s (636 m); the load
+//              counted twice on the Dirichlet elements (NitscheLtsRun before
+//              this check; Vista runs 1142230, 1143856) gave 9e-3 /s.
 // --quench d (quench plan rev1, T-Q1 at the phase level): with [cycle.quench]
 // d_per_s = d, the round trip DynPhase::SetQuench + ClearQuench at step n/2
 // leaves the run bit for bit the plain run's (U and U'); Enter clears a
@@ -61,6 +69,9 @@ real_t GMax(MPIContext &mpi, real_t v)
 
 int main(int argc, char *argv[])
 {
+   real_t ts_opt = 1.0e8;
+   const char *fw_sub = "";
+   const char *lts_mode = "";
    MPIContext mpi(&argc, &argv);
    const char *deck = "simple_cases/configs/D0_straight.toml";
    int n_dyn = 200;
@@ -77,6 +88,11 @@ int main(int argc, char *argv[])
    args.AddOption(&kv, "-kv", "--kv-eta", "Kelvin-Voigt eta_bar of the dynamic phase (0: off).");
    args.AddOption(&deck, "-d", "--deck", "2-D switching deck with loaded walls (attribute 5).");
    args.AddOption(&n_dyn, "-n", "--dyn-steps", "Dynamic steps after the switch.");
+   args.AddOption(&ts_opt, "-ts", "--t-switch", "Switch time t_s [s].");
+   args.AddOption(&fw_sub, "-fw", "--finite-width", "[cycle.finite_width] substrate (W = 15 km, "
+                  "wa2020): loading_plane or locked_reference; empty: off.");
+   args.AddOption(&lts_mode, "-lts", "--lts", "[cycle.lts] rate2 as: same (same_step), split "
+                  "(static_split) or rate2; empty: global stepping.");
    args.AddOption(&quench_d, "-q", "--quench",
                   "[cycle.quench] d_per_s for the round-trip check (0: off).");
    args.Parse();
@@ -124,6 +140,25 @@ int main(int argc, char *argv[])
    }
    cfg.pml.wall_speed_factor = cfg.pml.Sponge() ? 1.0 : 0.0;   // "auto" for the CFS-PML
    }
+   const std::string fws(fw_sub), ltss(lts_mode);
+   if (!fws.empty())
+   {
+      // [cycle.finite_width] W_m = 15e3, calibration "wa2020": c = (1 - nu) pi / 2
+      const auto &m = cfg.shared.material_fallback;
+      const real_t nu = 0.5 * m.lambda / (m.lambda + m.mu);
+      cfg.finite_width.W = 15e3;
+      cfg.finite_width.calibration = "wa2020";
+      cfg.finite_width.c = 0.5 * M_PI * (1.0 - nu);
+      cfg.finite_width.substrate = fws;
+   }
+   if (!ltss.empty())
+   {
+      MFEM_VERIFY(ltss == "same" || ltss == "split" || ltss == "rate2", "--lts " << ltss);
+      cfg.lts.mode = "rate2";
+      cfg.lts.same_step = (ltss == "same");
+      cfg.lts.static_split = (ltss == "split");
+      cfg.pml.dt_rule = "element";   // DynPhase: the band with [cycle.lts] needs it
+   }
    if (quench_d > 0.0)
    {
       cfg.quench.on = true;
@@ -134,7 +169,10 @@ int main(int argc, char *argv[])
    MFEMInitializePetsc(&argc, &argv, cfg.qd.petsc_options.c_str(), NULL);
    {
       std::unique_ptr<Mesh> smesh = cycle::LoadScaledMesh(cfg.shared.mesh.path, cfg.mesh_scale);
-      ParMesh pmesh(mpi.GetComm(), *smesh);
+      cycle::LtsLayout lts = cycle::DynPhase::PlanLts(*smesh, cfg, mpi.GetComm());
+      ParMesh pmesh(mpi.GetComm(), *smesh, lts.part.empty() ? nullptr : lts.part.data());
+      cycle::DynPhase::MapLts(lts, *smesh, pmesh);
+      if (mpi.IsRoot() && lts.on) { std::cout << "  LTS: " << lts.report << "\n"; }
       smesh.reset();
       if (mpi.IsRoot())
       {
@@ -156,7 +194,7 @@ int main(int argc, char *argv[])
 
       // the QD balance at t_s: a smooth slip on the fault (both kernel slots;
       // 2-D carries one), psi0
-      const real_t ts = 1.0e8;
+      const real_t ts = ts_opt;
       const int N = qd.Table().Size();
       Vector sk(2 * N), psi(N);
       for (int i = 0; i < N; i++)
@@ -180,7 +218,7 @@ int main(int argc, char *argv[])
                      Vmax, qd.PmlWallSpeedFactor());
       }
 
-      cycle::DynPhase dyn(pmesh, cfg, qd.Table(), par, pre, 1.0, nullptr,
+      cycle::DynPhase dyn(pmesh, cfg, qd.Table(), par, pre, 1.0, lts.on ? &lts : nullptr,
                           qd.Domain().FrameField(), qd.SubstrateShape(), qd.PmlBandPtr(),
                           qd.PmlWallSpeedFactor());
       Vector d, V, psin;
@@ -245,7 +283,9 @@ int main(int argc, char *argv[])
          Check(mpi, c_band > 1e-3 * aK, "rest control: without b_band > 1e-3 a_K", c_band / aK);
       }
 
-      // dt
+      // dt (the plain rule: not with --finite-width, rule C6, or --lts, dt_rule
+      // "element" and the clusters' own steps)
+      if (fws.empty() && ltss.empty())
       {
          const real_t ceig = NitscheStableConstant(pmesh.Dimension(), cfg.shared.mesh.order);
          const real_t plain = ComputeMaxDt(W.Sample(), pmesh, cfg.shared.mesh.order,
@@ -262,7 +302,43 @@ int main(int argc, char *argv[])
       }
 
       // steps
-      for (int k = 0; k < n_dyn; k++) { dyn.Step(); }
+      // 2.5D with local time stepping at a late switch: the substrate load
+      // (t_s + tau) M_beta U_pl1 is as large as M_beta u_s, so a load counted
+      // twice anywhere shows after one step as |U'| = dt (beta / rho) |u_s|
+      // (NitscheLtsRun::FinishForce_, the Dirichlet elements; Vista runs
+      // 1142230 and 1143856).  After the first step, on the band DOFs (the
+      // waves of the fault's slip have not reached the band):
+      real_t v1_band = 0.0, us_band = 0.0;
+      for (int k = 0; k < n_dyn; k++)
+      {
+         dyn.Step();
+         if (k > 0) { continue; }
+         const Vector &Ud = dyn.Ud();
+         for (int i = 0; i < Ud.Size(); i++)
+         {
+            if (!inb[i]) { continue; }
+            v1_band = std::max(v1_band, std::abs(Ud(i)));
+            us_band = std::max(us_band, std::abs(us(i)));
+         }
+         v1_band = GMax(mpi, v1_band);
+         us_band = GMax(mpi, us_band);
+      }
+      if (n_dyn > 0)
+      {
+         if (mpi.IsRoot())
+         {
+            std::printf("  after one step: max |U'| on the band DOFs %.4e m/s, max |u_s| there "
+                        "%.4e m, ratio %.4e 1/s\n", v1_band, us_band, v1_band / us_band);
+         }
+         // rate2 without the static split steps the whole state, so its rest
+         // is rounding of K u_s (about 1e-5 1/s at 400 m, plane strain too):
+         // printed, not checked
+         if (ltss.empty() || ltss == "same" || ltss == "split")
+         {
+            Check(mpi, v1_band <= 1e-9 * us_band + 1e-8, "rest after one step: max |U'| on the "
+                  "band DOFs <= 1e-9 /s x max |u_s| + 1e-8 m/s", v1_band / us_band);
+         }
+      }
       const Vector &U = dyn.U();
       real_t du_b = 0.0, du = 0.0;
       bool fin = true;

@@ -97,6 +97,10 @@ test-pml-switch: seas_test_pml_switch
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_pml_switch --quench 1.0
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_pml_switch --kv-eta 0.1 --quench 1.0
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_pml_switch --kind sponge --kv-eta 0.1 --quench 1.0
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_pml_switch --finite-width locked_reference --t-switch 3e11 --dyn-steps 20
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_pml_switch --finite-width locked_reference --t-switch 3e11 --dyn-steps 20 --lts same
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_pml_switch --finite-width locked_reference --t-switch 3e11 --dyn-steps 20 --lts split
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_pml_switch --t-switch 3e11 --dyn-steps 20 --lts split
 
 # quench plan rev1 (Chunhui Zhao 2026-11-06), T-Q2/T-Q3 at the operator level:
 # a box at rest under a body load switched on at t = 0, plain walls and the
