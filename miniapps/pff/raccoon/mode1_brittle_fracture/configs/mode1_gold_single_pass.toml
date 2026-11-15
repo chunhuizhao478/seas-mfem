@@ -1,0 +1,88 @@
+# RACCOON tutorials/mode1_brittle_fracture/tests (hugary1995/raccoon 9fd3a6f):
+# the Exodiff test of the gold file, cli_args Executioner/num_steps=2
+# Executioner/nl_rel_tol=1e-10 Executioner/nl_abs_tol=1e-16 (abs_zero 1e-9,
+# rel_err 1e-4).  Otherwise identical to mode1.toml.
+# mode1_gold_single_pass.toml: the same with one staggered pass per step,
+# which reproduces the gold file to about 1e-10 (see ../README.md).
+
+[case]
+name = "mode1_gold_single_pass"
+source = "raccoon@9fd3a6f tutorials/mode1_brittle_fracture/{elasticity,fracture}.i"
+
+[mesh]
+# GeneratedMeshGenerator dim 2, nx 30, ny 15, ymax 0.5 (xmax default 1)
+type = "cartesian"
+nx = 30
+ny = 15
+xmin = 0.0
+xmax = 1.0
+ymin = 0.0
+ymax = 0.5
+# Adaptivity: initial_steps 2, max_h_level 2, BoxMarker inside REFINE
+refine_steps = 2
+
+[[mesh.refine]]
+lo = [0.4, 0.0, 0.0]
+hi = [1.0, 0.05, 0.0]
+
+# BoundingBoxNodeSetGenerator noncrack, bottom_left (0.5,0,0), top_right (1,0,0)
+[[mesh.nodeset]]
+name = "noncrack"
+boundary = "bottom"
+lo = [0.5, 0.0, 0.0]
+hi = [1.0, 0.0, 0.0]
+
+[material]
+E = 2.1e5
+nu = 0.3
+
+[phase_field]
+# CrackGeometricFunction alpha = d^2 (AT2, c0 = 2);
+# PowerDegradationFunction (1-d)^p (1-eta) + eta, p = 2, eta = 1e-6
+model = "AT2"
+Gc = 2.7
+l = 0.02
+p = 2
+eta = 1e-6
+decomposition = "none"
+driving_average = "element"   # psie_active is a CONSTANT MONOMIAL aux variable
+
+# BCs: ydisp (FunctionDirichletBC disp_y = t on top), xfix (disp_x = 0 on top),
+# yfix (disp_y = 0 on noncrack)
+[[dirichlet]]
+boundaries = ["top"]
+component = 1
+rate = 1.0
+
+[[dirichlet]]
+boundaries = ["top"]
+component = 0
+value = 0.0
+
+[[dirichlet]]
+boundaries = ["noncrack"]
+component = 1
+value = 0.0
+
+[reaction]
+# Postprocessor Fy: NodalSum of fy (save_in of solid_y) on top
+name = "Fy"
+boundaries = ["top"]
+component = 1
+
+[time]
+dt = 2e-5
+end_time = 3.5e-3
+num_steps = 2
+
+[solver]
+fixed_point_max_its = 1   # one staggered pass per step: matches the gold to 1e-10
+fixed_point_rel_tol = 1e-8
+fixed_point_abs_tol = 1e-10
+accept_on_max_fixed_point_iteration = true
+nl_rel_tol = 1e-10
+nl_abs_tol = 1e-16
+
+[output]
+dir = "out/mode1_gold_single_pass"
+nodal_steps = [1, 2]

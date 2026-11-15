@@ -50,9 +50,10 @@ GH200). The CPU result is the reference of each GPU gate.
 1. **R: RACCOON quasi-static benchmarks** (`raccoon/`), RACCOON 9fd3a6f:
     - R1 `tutorials/mode1_brittle_fracture`: AT2, no split, 30×15 QUAD4 with
       two initial refinements in [0.4,1]×[0,0.05]. Gates: 888 elements and
-      994 nodes as in the gold; the 2 gold steps (Fy = 5.69042, 11.38077)
-      and fields within relative 1e-4; the full Fy–u curve against a MOOSE
-      run.
+      994 nodes as in the gold (passes, same coordinates); the 2 gold steps
+      (Fy = 5.69042, 11.38077) and fields within relative 1e-4 (passes:
+      `tests/verification/raccoon_mode1_gold.sh`); the full Fy–u curve
+      against a MOOSE run (open).
     - R2 `tutorials/mode2_brittle_fracture`: spectral split (Newton,
       analytic tangent checked by finite differences), slit mesh of two
       stitched halves. Gates: 2826 elements and 3026 nodes; Fx = 0.923682,
@@ -85,6 +86,12 @@ GH200). The CPU result is the reference of each GPU gate.
 - RACCOON transfers `psie_active` to the fracture app as a CONSTANT
   MONOMIAL, so the damage source sees the element average of ψ_active, not
   its quadrature-point values. Phase R reproduces this.
+- The RACCOON mode I gold file matches one staggered pass per step to 1e-10,
+  not the input's fixed-point iterations (up to 20 passes to 1e-8). Keep both
+  configs until a full MOOSE run shows which the code does
+  (raccoon/README.md).
+- MOOSE runs the RACCOON inputs with `automatic_scaling = true`, which scales
+  the residual norms of the fixed-point test; pff does not.
 
 - The driving-energy conventions differ. spe_hftc: ψ = αGc/(c0 l) + g ψ⁺ with
   no history. cmame hydromech: ψ = αGc/(c0 l) + ½ g H with

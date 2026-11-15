@@ -34,3 +34,11 @@ foreach(test ${PFF_UNIT_TESTS})
              WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   endif()
 endforeach()
+
+# Drivers
+add_mfem_miniapp(pff_qs_driver
+  MAIN drivers/qs_driver.cpp
+  LIBRARIES mfem)
+target_include_directories(pff_qs_driver PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/extern/toml11)

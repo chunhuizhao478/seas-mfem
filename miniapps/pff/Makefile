@@ -30,11 +30,17 @@ UNIT_BINS = $(addprefix tests/unit/,$(UNIT_TESTS))
 
 HEADERS = $(wildcard common/*.hpp config/*.hpp constitutive/*.hpp phasefield/*.hpp \
                      loading/*.hpp io/*.hpp multiphysics/poroelastic/*.hpp \
-                     tests/*.hpp)
+                     domain/*.hpp integrator/*.hpp solver/*.hpp tests/*.hpp)
+
+# Drivers: drivers/*.cpp, one executable each in the miniapp directory
+DRIVERS = qs_driver
 
 .PHONY: all test clean
 
-all: $(UNIT_BINS)
+all: $(UNIT_BINS) $(DRIVERS)
+
+qs_driver: drivers/qs_driver.cpp $(HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	$(MFEM_CXX) $(CXXFLAGS_PFF) $< -o $@ $(LIBS_PFF)
 
 tests/unit/%: tests/unit/%.cpp $(HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	$(MFEM_CXX) $(CXXFLAGS_PFF) $< -o $@ $(LIBS_PFF)
@@ -45,7 +51,7 @@ test: $(UNIT_BINS)
 	done; exit $$fail
 
 clean:
-	rm -f $(UNIT_BINS) tests/unit/*.log
+	rm -f $(UNIT_BINS) $(DRIVERS) tests/unit/*.log
 
 # Make sure the MFEM library is built
 $(MFEM_LIB_FILE):

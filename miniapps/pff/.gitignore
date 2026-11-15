@@ -3,3 +3,4 @@ tests/unit/test_*
 tests/unit/*.log
 out/
 *.o
+qs_driver

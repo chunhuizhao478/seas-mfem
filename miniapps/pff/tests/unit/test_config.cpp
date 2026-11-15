@@ -8,6 +8,8 @@
 
 #include "mfem.hpp"
 #include "../../config/pff_config_parser.hpp"
+#include "../../config/qs_config_parser.hpp"
+#include "../../domain/qs_mesh.hpp"
 #include "../../io/gmsh_physical_names.hpp"
 #include "../test_framework.hpp"
 
@@ -108,11 +110,35 @@ static void TestPhysicalNames()
    TEST_ASSERT(threw, "a volume name is not a boundary");
 }
 
+static void TestRaccoonMode1()
+{
+   std::cout << "\n[raccoon mode1 case]\n";
+   const QsCaseConfig c = QsCaseConfigParser::ParseFile(
+                             "raccoon/mode1_brittle_fracture/configs/mode1.toml");
+   TEST_NEAR(c.K(), 2.1e5 / 3.0 / (1.0 - 0.6), 1e-9, "K = E/3/(1-2 nu) (elasticity.i)");
+   TEST_NEAR(c.G(), 2.1e5 / 2.0 / 1.3, 1e-9, "G = E/2/(1+nu)");
+   TEST_ASSERT(c.pf.crack.model == CrackModel::AT2 && c.pf.crack.c0() == 2.0, "AT2, c0 = 2");
+   TEST_ASSERT(c.decomposition == Decomposition::None && c.driving_element_average,
+               "no split, element-average driving energy");
+   TEST_ASSERT(c.dirichlet.size() == 3 && c.dirichlet[0].rate == 1.0, "three Dirichlet BCs, u_y = t");
+   BoundaryNames names;
+   Mesh m = BuildQsMesh(c, names);
+   // tutorials/mode1_brittle_fracture/gold/elasticity_out.e: 888 elements, 994 nodes
+   TEST_ASSERT(m.GetNE() == 888 && m.GetNV() == 994, "refined mesh matches the gold (888, 994)");
+   TEST_ASSERT(names.at("noncrack") == 5, "noncrack node set is attribute 5");
+   bool threw = false;
+   try { QsCaseConfigParser::ParseString("[case]\nname='x'\n[mesh]\nnx=1\nny=1\n[material]\nE=1\nnu=0\n"
+                                          "[phase_field]\nGc=1\nl=1\n[time]\ndt=1\n[solver]\nfixed_point_max_it=3\n"); }
+   catch (const std::invalid_argument &) { threw = true; }
+   TEST_ASSERT(threw, "misspelt [solver] key throws");
+}
+
 int main()
 {
    TestSpe();
    TestCmame();
    TestStrictKeys();
    TestPhysicalNames();
+   TestRaccoonMode1();
    return TestSummary("test_config");
 }
