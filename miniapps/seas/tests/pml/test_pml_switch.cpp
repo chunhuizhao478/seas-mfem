@@ -71,6 +71,7 @@ int main(int argc, char *argv[])
 {
    real_t ts_opt = 1.0e8;
    const char *fw_sub = "";
+   real_t fw_zeta = 0.0;
    const char *lts_mode = "";
    MPIContext mpi(&argc, &argv);
    const char *deck = "simple_cases/configs/D0_straight.toml";
@@ -91,6 +92,8 @@ int main(int argc, char *argv[])
    args.AddOption(&ts_opt, "-ts", "--t-switch", "Switch time t_s [s].");
    args.AddOption(&fw_sub, "-fw", "--finite-width", "[cycle.finite_width] substrate (W = 15 km, "
                   "wa2020): loading_plane or locked_reference; empty: off.");
+   args.AddOption(&fw_zeta, "-fwz", "--fw-damping", "[cycle.finite_width] damping_ratio (0: "
+                  "off; needs --finite-width).");
    args.AddOption(&lts_mode, "-lts", "--lts", "[cycle.lts] rate2 as: same (same_step), split "
                   "(static_split) or rate2; empty: global stepping.");
    args.AddOption(&quench_d, "-q", "--quench",
@@ -150,7 +153,9 @@ int main(int argc, char *argv[])
       cfg.finite_width.calibration = "wa2020";
       cfg.finite_width.c = 0.5 * M_PI * (1.0 - nu);
       cfg.finite_width.substrate = fws;
+      cfg.finite_width.zeta = fw_zeta;
    }
+   MFEM_VERIFY(fw_zeta == 0.0 || !fws.empty(), "--fw-damping needs --finite-width");
    if (!ltss.empty())
    {
       MFEM_VERIFY(ltss == "same" || ltss == "split" || ltss == "rate2", "--lts " << ltss);
@@ -225,6 +230,26 @@ int main(int argc, char *argv[])
       cycle::bridge::ToNitsche(dyn.Frames(), skq, Vqd, psiq, d, V, psin);
       dyn.Enter(us, d, V, psin, sn, ts);
       NitscheWaveOperator &W = dyn.Op();
+      if (!fws.empty())
+      {
+         // [cycle.finite_width] damping_ratio: the element rate 2 zeta omega_c
+         // (a uniform material), in the operator's blocks with global
+         // stepping and in the LTS run's with [cycle.lts]; off: neither
+         const auto &m = cfg.shared.material_fallback;
+         const real_t want = 2.0 * fw_zeta
+                             * std::sqrt(cfg.finite_width.BetaOverMu() * m.mu / m.rho);
+         const real_t lo = dyn.FiniteWidthDampingMin(), hi = dyn.FiniteWidthDampingMax();
+         if (mpi.IsRoot())
+         {
+            std::printf("  2.5D damper: damping_ratio %.3g, element rate %.6e to %.6e 1/s "
+                        "(2 zeta omega_c = %.6e)\n", fw_zeta, lo, hi, want);
+         }
+         Check(mpi, std::abs(lo - want) <= 1e-14 * want && std::abs(hi - want) <= 1e-14 * want,
+               "2.5D damper: the element rate is 2 zeta omega_c (0 when off)",
+               fw_zeta > 0.0 ? std::abs(hi / want - 1.0) : hi);
+         Check(mpi, W.HasMassDamping() == (fw_zeta > 0.0 && ltss.empty()),
+               "2.5D damper: in the operator's blocks with global stepping only", 0.0);
+      }
 
       // loading: a point on the wall y = +-ymax
       {

@@ -42,6 +42,19 @@
 //                                      on the same events as the plane-
 //                                      strain runs): over many cycles it
 //                                      pulls accumulated slip back.
+//   damping_ratio  zeta of the damper on the term (Chunhui Zhao,
+//                2026-11-15: "let's try option A first"; the ring-train
+//                note /mnt/project-files/fully-dynamic-fault-opening/
+//                2p5d-ringing/2p5d-ringing-options-rev1.pdf)      [0 = off]
+//                  rho u'' = div sigma - beta (u - u_pl) - 2 zeta sqrt(beta rho) u'
+//                dynamic regime only, on every element: the term makes
+//                the medium ring at the cutoff omega_c = sqrt(beta / rho)
+//                behind every front; the damper is the mass-proportional
+//                damping rho d u' with d = 2 zeta omega_c (element values),
+//                so the ring decays as exp(-zeta omega_c t).  It vanishes
+//                at rest: the static state, the QD regime and the hand-back
+//                are unchanged.  It also damps the travelling wave, so far
+//                stations lose amplitude (the note's option A).
 // beta is isotropic, beta(x) = (4 c^2 / W^2) mu(x) on both in-plane
 // components (Chunhui Zhao, 2026-10-30: "we will start with beta = beta
 // (normal direction), however this could be important"; the note's Step 7:

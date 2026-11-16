@@ -315,7 +315,9 @@
 //                   design rev 3, tests/2d_inplane/test_2d_absorbing.cpp)
 //   [cycle.finite_width] the 2.5D finite-width model of a map-view deck
 //                   [absent = off] (Chunhui Zhao, 2026-10-30): W_m,
-//                   calibration ["wa2020"] or c, substrate; see
+//                   calibration ["wa2020"] or c, substrate,
+//                   damping_ratio [0 = off] (the damper
+//                   - 2 zeta sqrt(beta rho) u' of the dynamic regime); see
 //                   cycle/finite_width.hpp
 //
 // The dynamic regime reads the keys the Nitsche driver reads, from the same
@@ -639,7 +641,12 @@ struct FiniteWidthConfig
    std::string calibration;     ///< c by name ("wa2020", "lehner"); "" when the deck gives c
    real_t c = 0.0;              ///< the long-fault stiffness factor, set by Load
    std::string substrate;       ///< "loading_plane" | "locked_reference"
+   /// damping_ratio (Chunhui Zhao 2026-11-15, option A of the ring-train
+   /// note): zeta of the damper - 2 zeta sqrt(beta rho) u' on the 2.5D term,
+   /// dynamic regime only, every element; 0 = off (the default)
+   real_t zeta = 0.0;
    bool On() const { return W > 0.0; }
+   bool Damped() const { return On() && zeta > 0.0; }
    /// beta / mu = 4 c^2 / W^2 [1/m^2]
    real_t BetaOverMu() const { return 4.0 * c * c / (W * W); }
    /// l = sqrt(mu / beta) = W / (2 c) [m]
@@ -1758,7 +1765,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
    {
       const std::string sec = "cycle.finite_width";
       const toml::value &fw = cy.at("finite_width");
-      OnlyKeys(fw, sec, {"W_m", "calibration", "c", "substrate"});
+      OnlyKeys(fw, sec, {"W_m", "calibration", "c", "substrate", "damping_ratio"});
       FiniteWidthConfig &F = c.finite_width;
       F.W = Real(fw, sec, "W_m", 0.0, true);
       MFEM_VERIFY(std::isfinite(F.W) && F.W > 0.0, "[" << sec << "].W_m = " << F.W
@@ -1791,6 +1798,10 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       MFEM_VERIFY(F.substrate == "loading_plane" || F.substrate == "locked_reference",
                   "[" << sec << "].substrate = \"" << F.substrate << "\"; use "
                   "\"loading_plane\" or \"locked_reference\"");
+      F.zeta = Real(fw, sec, "damping_ratio", 0.0);
+      MFEM_VERIFY(std::isfinite(F.zeta) && F.zeta >= 0.0 && F.zeta <= 1.0, "[" << sec
+                  << "].damping_ratio = " << F.zeta << " must be in [0, 1] (0 = off; 1 = "
+                  "the cutoff oscillation critically damped)");
       const std::array<real_t, 3> &up = c.dyn.up;
       MFEM_VERIFY(std::abs(up[0]) < 1e-12 && std::abs(up[1]) < 1e-12 &&
                   std::abs(std::abs(up[2]) - 1.0) < 1e-12,

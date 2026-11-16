@@ -9,7 +9,7 @@
 # (reflecting walls); with it they keep the band (pieces F-a and F-c
 # together).
 #
-#   python3 lts_2d5_check.py decks DECK TMP [band]
+#   python3 lts_2d5_check.py decks DECK TMP [band] [damp]
 #       From the straight-fault band deck (simple_cases D0): an event started
 #       at t = 0 by a V_init patch of 0.02 m/s, [cycle.finite_width] with W =
 #       15 km (cutoff 0.087 Hz; the event still ruptures) on the loading plane,
@@ -17,7 +17,7 @@
 #       "element"): TMP/glob.toml (global stepping), TMP/same.toml (rate2 with
 #       the test key same_step = true), TMP/lts.toml (rate2) and TMP/off.toml
 #       (global stepping without the 2.5D term, the control).
-#   python3 lts_2d5_check.py check TMP PREFIX
+#   python3 lts_2d5_check.py check TMP PREFIX [damp]
 #       After the four ran the same physical time into TMP/glob, TMP/same,
 #       TMP/lts and TMP/off (logs TMP/<run>.log):
 #        1. the control: the 2.5D term changes the final slip by more than
@@ -29,6 +29,14 @@
 #           fault snapshot the slip within 0.1 % of the largest slip, the
 #           stresses within 0.05 MPa and the slip rate within 5 % of its
 #           largest value there.
+# With "damp" after TMP (make test-lts-2d5-damp; Chunhui Zhao, 2026-11-15:
+# "let's try option A first"): the three 2.5D decks carry damping_ratio = 0.2
+# (the damper - 2 zeta sqrt(beta rho) u' of the dynamic regime: the operator's
+# damping blocks with global stepping, NitscheLtsRun::SetBaseDamping with
+# rate2), and TMP/off.toml is the 2.5D deck without the damper; check 1 is
+# then that the damper changes the slip rate history (>= 1 % of its peak);
+# the change of the final slip is printed (measured 2026-11-15: about -10 %,
+# the damper also acts on the rupture).
 # Exit 0 when every check passes.
 
 import os
@@ -49,7 +57,7 @@ def check(ok, what):
         failed += 1
 
 
-def decks(deck, tmp, band):
+def decks(deck, tmp, band, damp=False):
     s = open(deck).read()
     s = replace_once(s,
                      "[cycle.fields.V_init]\ncenter  = [0.0, 0.0]\naxis1   = [1.0, 0.0]\n"
@@ -68,7 +76,11 @@ def decks(deck, tmp, band):
         s = s[:a] + s[b:]
     fw = '[cycle.finite_width]\nW_m = 15.0e3\nsubstrate = "loading_plane"\n\n'
     lts = '[cycle.lts]\nmode = "rate2"\n'
-    out = {"off": s,
+    plain_fw = fw
+    if damp:
+        fw = ('[cycle.finite_width]\nW_m = 15.0e3\nsubstrate = "loading_plane"\n'
+              'damping_ratio = 0.2\n\n')
+    out = {"off": replace_once(s, qd, plain_fw + qd, "[cycle.qd] note") if damp else s,
            "glob": replace_once(s, qd, fw + qd, "[cycle.qd] note"),
            "same": replace_once(s, qd, fw + lts + "same_step = true\n\n" + qd, "[cycle.qd] note"),
            "lts": replace_once(s, qd, fw + lts + "\n" + qd, "[cycle.qd] note")}
@@ -103,7 +115,7 @@ def match_ties(pts, d, ref):
     return swaps
 
 
-def run_check(tmp, prefix):
+def run_check(tmp, prefix, damp=False):
     tg, g = fault(tmp, "glob", prefix)
     ts, s = fault(tmp, "same", prefix)
     tl, l = fault(tmp, "lts", prefix)
@@ -115,9 +127,19 @@ def run_check(tmp, prefix):
         match_ties(pts, d, g)
     smax = float(np.abs(g["slip_strike"][-1]).max())
     doff = float(np.abs(o["slip_strike"][-1] - g["slip_strike"][-1]).max())
-    check(abs(to[-1] - tg[-1]) <= 1e-3 * (tg[-1] - tg[0]) and doff >= 1e-2 * smax,
-          "the control: the 2.5D term changes the final slip by %.3g m (>= 1 %% of %.3g)"
-          % (doff, smax))
+    if damp:
+        m = min(len(tg), len(to))
+        vpk = float(np.abs(o["slip_rate_strike"][:m]).max())
+        dvo = float(np.abs(o["slip_rate_strike"][:m] - g["slip_rate_strike"][:m]).max())
+        so = float(np.abs(o["slip_strike"][-1]).max())
+        check(abs(to[-1] - tg[-1]) <= 1e-3 * (tg[-1] - tg[0]) and dvo >= 1e-2 * vpk,
+              "the control: the damper changes the slip rate history by %.3g m/s (>= 1 %% of its "
+              "peak %.3g); largest final slip %.3g m with it, %.3g m without"
+              % (dvo, vpk, smax, so))
+    else:
+        check(abs(to[-1] - tg[-1]) <= 1e-3 * (tg[-1] - tg[0]) and doff >= 1e-2 * smax,
+              "the control: the 2.5D term changes the final slip by %.3g m (>= 1 %% of %.3g)"
+              % (doff, smax))
 
     n = min(len(tg), len(ts))
     dsig = max(float(np.abs(s[k][:n] - g[k][:n]).max()) for k in ("normal_stress", "shear_stress_strike"))
@@ -138,10 +160,12 @@ def run_check(tmp, prefix):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) in (4, 5) and sys.argv[1] == "decks":
-        decks(sys.argv[2], sys.argv[3], len(sys.argv) == 5 and sys.argv[4] == "band")
-    elif len(sys.argv) == 4 and sys.argv[1] == "check":
-        run_check(sys.argv[2], sys.argv[3])
+    opts = sys.argv[4:]
+    if len(sys.argv) >= 4 and sys.argv[1] == "decks" and set(opts) <= {"band", "damp"}:
+        decks(sys.argv[2], sys.argv[3], "band" in opts, "damp" in opts)
+    elif len(sys.argv) >= 4 and sys.argv[1] == "check" and set(opts) <= {"damp"}:
+        run_check(sys.argv[2], sys.argv[3], "damp" in opts)
         sys.exit(1 if failed else 0)
     else:
-        sys.exit(__doc__ or "usage: lts_2d5_check.py decks DECK TMP [band] | check TMP PREFIX")
+        sys.exit(__doc__ or "usage: lts_2d5_check.py decks DECK TMP [band] [damp] | "
+                 "check TMP PREFIX [damp]")

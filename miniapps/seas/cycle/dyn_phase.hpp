@@ -382,6 +382,36 @@ public:
          dt_ = cfg.lts.same_step ? lts->dt0 : std::ldexp(lts->dt0, lts->fault_cluster);
       }
       else { dt_ = dt_scale * dt_cfl_; }
+      Vector fw_rate;
+      if (cfg.finite_width.Damped())
+      {
+         // [cycle.finite_width] damping_ratio: the damper - 2 zeta sqrt(beta
+         // rho) u' = - rho d_e u', d_e = 2 zeta sqrt(beta_e / rho_e), beta_e =
+         // (beta / mu) mu_e, on every element for the whole phase
+         // (cycle/finite_width.hpp).  Global stepping: the operator's damping
+         // blocks, before SetTimeStep; local time stepping: the run's own
+         // (below, after it is built).
+         const NitscheMaterialSample &sm = W_->Sample();
+         const ParFiniteElementSpace *sfes = sm.RhoGF().ParFESpace();
+         const real_t k = 2.0 * cfg.finite_width.zeta * std::sqrt(cfg.finite_width.BetaOverMu());
+         fw_rate.SetSize(pmesh.GetNE());
+         real_t lo = std::numeric_limits<real_t>::infinity(), hi = 0.0;
+         Array<int> dofs;
+         for (int e = 0; e < pmesh.GetNE(); e++)
+         {
+            sfes->GetElementDofs(e, dofs);
+            fw_rate(e) = k * std::sqrt(sm.MuGF()(dofs[0]) / sm.RhoGF()(dofs[0]));
+            lo = std::min(lo, fw_rate(e));
+            hi = std::max(hi, fw_rate(e));
+         }
+         MPI_Allreduce(MPI_IN_PLACE, &lo, 1, MPITypeMap<real_t>::mpi_type, MPI_MIN,
+                       pmesh.GetComm());
+         MPI_Allreduce(MPI_IN_PLACE, &hi, 1, MPITypeMap<real_t>::mpi_type, MPI_MAX,
+                       pmesh.GetComm());
+         fw_damp_min_ = lo;
+         fw_damp_max_ = hi;
+         if (!lts_on) { W_->SetMassDamping(fw_rate); }
+      }
       W_->SetTimeStep(dt_);
 
       if (dc.kv_eta > 0.0)
@@ -410,6 +440,10 @@ public:
                                                 lts->fault_cluster, lts->dt0,
                                                 cfg.penalty_factor, cfg.lts.same_step);
          lts_->SetStaticSplit(cfg.lts.static_split);
+         if (fw_rate.Size() == pmesh.GetNE() && cfg.finite_width.Damped())
+         {
+            lts_->SetBaseDamping(fw_rate);
+         }
          MFEM_VERIFY(lts_->PmlCluster() == (pml_ ? lts->pml_cluster : -1), "DynPhase: the "
                      "band's cluster is " << lts_->PmlCluster() << " on the mesh, "
                      << lts->pml_cluster << " in the plan");
@@ -796,6 +830,10 @@ public:
    real_t T0() const { return *t0_; }
    /// [cycle.finite_width]: the factor the CFL step was cut by (1 when off).
    real_t FiniteWidthDtFactor() const { return fw_dt_factor_; }
+   /// [cycle.finite_width] damping_ratio: the least and largest element
+   /// rate d_e = 2 zeta sqrt(beta_e / rho_e) [1/s] (0 when off).
+   real_t FiniteWidthDampingMin() const { return fw_damp_min_; }
+   real_t FiniteWidthDampingMax() const { return fw_damp_max_; }
    real_t Time() const { return *t0_ + tau_; }
    real_t Dt() const { return dt_; }
    real_t DtCFL() const { return dt_cfl_; }
@@ -1081,6 +1119,7 @@ private:
    const CycleConfig &cfg_;
    std::shared_ptr<real_t> t0_;   ///< held by the wall-load wrapper too
    real_t fw_dt_factor_ = 1.0;    ///< [cycle.finite_width]: the CFL step's cut (C6)
+   real_t fw_damp_min_ = 0.0, fw_damp_max_ = 0.0;   ///< damping_ratio: element rates [1/s]
    std::unique_ptr<MaterialField> material_;
    BoundaryConfig bc_;
    std::unique_ptr<ParMesh> dmesh_;   ///< [cycle.absorbing]: W's mesh (outlives W)

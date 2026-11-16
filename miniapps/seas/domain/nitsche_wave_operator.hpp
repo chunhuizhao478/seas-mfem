@@ -520,6 +520,32 @@ public:
    }
    bool HasSponge() const { return sponge_ != nullptr; }
 
+   /// The 2.5D term's damper ([cycle.finite_width] damping_ratio, option A of
+   /// the ring-train note; Chunhui Zhao 2026-11-15): C_fw = rate_e rho_e M_e on
+   /// every element, rate_e = 2 zeta sqrt(beta_e / rho_e) [1/s], the term
+   /// - 2 zeta sqrt(beta rho) U' next to - beta (U - U_pl).  It is there for
+   /// the whole dynamic phase, vanishes at rest (the static state and the
+   /// hand-back are unchanged) and only removes energy.  The blocks join
+   /// the damping blocks (the quench adds its own on top and puts these
+   /// back); the step is the damped branch of ImplicitSolve.  Before
+   /// SetTimeStep; collective; not with local time stepping
+   /// (NitscheLtsRun::SetBaseDamping).  rate_e: one entry per local element.
+   void SetMassDamping(const Vector &rate_e)
+   {
+      MFEM_VERIFY(rate_e.Size() == mesh_.GetNE(), "SetMassDamping: " << rate_e.Size()
+                  << " rates for " << mesh_.GetNE() << " elements");
+      MFEM_VERIFY(dt_ == 0.0 && !mass_damped_, "SetMassDamping before SetTimeStep");
+      MFEM_VERIFY(!has_mass_damping_, "SetMassDamping: already set");
+      for (int e = 0; e < rate_e.Size(); e++)
+      {
+         MFEM_VERIFY(rate_e(e) > 0.0 && std::isfinite(rate_e(e)), "SetMassDamping: rate "
+                     << rate_e(e) << " 1/s on element " << e << " must be > 0");
+      }
+      AddMassDampingBlocks_([&rate_e](int e) { return rate_e(e); });
+      has_mass_damping_ = true;
+   }
+   bool HasMassDamping() const { return has_mass_damping_; }
+
    /// Dynamic relaxation, the "quench" (quench plan rev1, Chunhui Zhao
    /// 2026-11-06): C_q = d M_rho on EVERY element, the sponge's damping
    /// rho d U' with one constant rate d [1/s] and no profile, added to the
@@ -540,42 +566,7 @@ public:
       quench_saved_blocks_ = damping_blocks_;
       quench_saved_mass_ = std::move(mass_damped_);
       quench_saved_global_ = has_damping_global_;
-      const ParFiniteElementSpace &fes = elast_->GetFESpace();
-      Vector sh;
-      for (int e = 0; e < mesh_.GetNE(); e++)
-      {
-         const FiniteElement &fe = *fes.GetFE(e);
-         ElementTransformation &T = *mesh_.GetElementTransformation(e);
-         // the mass matrix's own rule (domain/nitsche_mass.hpp): C_q,e = d rho_e M_e
-         const IntegrationRule &ir = IntRules.Get(fe.GetGeomType(), 2 * fe.GetOrder());
-         const int nd = fe.GetDof();
-         sh.SetSize(nd);
-         auto it = damping_blocks_.find(e);
-         if (it == damping_blocks_.end())
-         {
-            it = damping_blocks_.emplace(e, DenseMatrix(dim_ * nd)).first;
-            it->second = 0.0;
-         }
-         DenseMatrix &B = it->second;
-         for (int q = 0; q < ir.GetNPoints(); q++)
-         {
-            const IntegrationPoint &ip = ir.IntPoint(q);
-            T.SetIntPoint(&ip);
-            fe.CalcShape(ip, sh);
-            const real_t s = ip.weight * T.Weight() * rho_e_(e) * d;
-            for (int k = 0; k < nd; k++)
-               for (int l = 0; l < nd; l++)
-               {
-                  const real_t v = s * sh(k) * sh(l);
-                  for (int c = 0; c < dim_; c++) { B(c * nd + k, c * nd + l) += v; }
-               }
-         }
-      }
-      {
-         int local = damping_blocks_.empty() ? 0 : 1, global = 0;
-         MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_LOR, mesh_.GetComm());
-         has_damping_global_ = (global != 0);
-      }
+      AddMassDampingBlocks_([d](int) { return d; });
       // collective (the NitscheMass constructor builds a ParFiniteElementSpace)
       mass_damped_ = std::make_unique<NitscheMass>(mesh_, order_, rho_e_, &damping_blocks_,
                                                    0.5 * dt_);
@@ -2184,6 +2175,50 @@ private:
    std::unique_ptr<NitscheMass> mass_damped_;
    std::map<int, DenseMatrix> damping_blocks_;
    bool has_damping_global_ = false;   ///< any rank has absorbing faces
+   /// damping_blocks_[e] += rate(e) rho_e M_e on every element (the mass
+   /// matrix's own rule), and the global flag.  Collective.
+   template <class Rate>
+   void AddMassDampingBlocks_(Rate rate)
+   {
+      const ParFiniteElementSpace &fes = elast_->GetFESpace();
+      Vector sh;
+      for (int e = 0; e < mesh_.GetNE(); e++)
+      {
+         const FiniteElement &fe = *fes.GetFE(e);
+         ElementTransformation &T = *mesh_.GetElementTransformation(e);
+         // the mass matrix's own rule (domain/nitsche_mass.hpp): C_e = d rho_e M_e
+         const IntegrationRule &ir = IntRules.Get(fe.GetGeomType(), 2 * fe.GetOrder());
+         const int nd = fe.GetDof();
+         const real_t d = rate(e);
+         sh.SetSize(nd);
+         auto it = damping_blocks_.find(e);
+         if (it == damping_blocks_.end())
+         {
+            it = damping_blocks_.emplace(e, DenseMatrix(dim_ * nd)).first;
+            it->second = 0.0;
+         }
+         DenseMatrix &B = it->second;
+         for (int q = 0; q < ir.GetNPoints(); q++)
+         {
+            const IntegrationPoint &ip = ir.IntPoint(q);
+            T.SetIntPoint(&ip);
+            fe.CalcShape(ip, sh);
+            const real_t s = ip.weight * T.Weight() * rho_e_(e) * d;
+            for (int k = 0; k < nd; k++)
+               for (int l = 0; l < nd; l++)
+               {
+                  const real_t v = s * sh(k) * sh(l);
+                  for (int c = 0; c < dim_; c++) { B(c * nd + k, c * nd + l) += v; }
+               }
+         }
+      }
+      {
+         int local = damping_blocks_.empty() ? 0 : 1, global = 0;
+         MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_LOR, mesh_.GetComm());
+         has_damping_global_ = (global != 0);
+      }
+   }
+   bool has_mass_damping_ = false;   ///< SetMassDamping
    // the quench (SetQuench): what it replaced, put back by ClearQuench
    bool quench_on_ = false;
    real_t quench_rate_ = 0.0;

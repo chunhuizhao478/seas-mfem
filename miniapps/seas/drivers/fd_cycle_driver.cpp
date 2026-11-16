@@ -419,6 +419,14 @@ void PrintDynamicSetup(const MPIContext &mpi, const cycle::CycleConfig &cfg,
                 << "step times (1 - " << std::scientific << std::setprecision(3)
                 << 1.0 - dyn.FiniteWidthDtFactor() << std::defaultfloat << std::setprecision(6)
                 << ") for beta / rho; Kelvin-Voigt on K alone\n";
+      if (cfg.finite_width.Damped())
+      {
+         std::cout << "    2.5D damper ([cycle.finite_width] damping_ratio = "
+                   << cfg.finite_width.zeta << "): - 2 zeta sqrt(beta rho) u' on every element "
+                   << "for the whole phase; rate d = 2 zeta omega_c = "
+                   << dyn.FiniteWidthDampingMin() << " to " << dyn.FiniteWidthDampingMax()
+                   << " 1/s (the cutoff ring decays as exp(-d t / 2))\n";
+      }
    }
    if (dyn.HasPml())
    {

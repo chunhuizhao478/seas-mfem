@@ -1168,49 +1168,10 @@ public:
       MFEM_VERIFY(d > 0.0 && std::isfinite(d), "NitscheLtsRun::SetQuench: d = " << d);
       MFEM_VERIFY(!quench_, "NitscheLtsRun::SetQuench: the quench is already on");
       MFEM_VERIFY(m_ == 0, "NitscheLtsRun::SetQuench: not at a sync point (tick " << m_ << ")");
-      const int ne = static_cast<int>(cl_.size());
-      if (mq_.empty())
-      {
-         // rho M_e from the stored inverse (once)
-         mq_.resize(static_cast<std::size_t>(ne) * nd_ * nd_);
-         DenseMatrix Mi(nd_), Me(nd_);
-         for (int e = 0; e < ne; e++)
-         {
-            const real_t *src = minv_.data() + static_cast<std::size_t>(e) * nd_ * nd_;
-            for (int k = 0; k < nd_; k++)
-               for (int l = 0; l < nd_; l++) { Mi(k, l) = src[k * nd_ + l]; }
-            Me = Mi;
-            Me.Invert();
-            const real_t rho = 1.0 / inv_rho_[e];
-            real_t *dst = mq_.data() + static_cast<std::size_t>(e) * nd_ * nd_;
-            for (int k = 0; k < nd_; k++)
-               for (int l = 0; l < nd_; l++) { dst[k * nd_ + l] = rho * Me(k, l); }
-         }
-      }
-      // absorbing elements: ((1 + 1/2 dt d) rho M_e + 1/2 dt C_e)^{-1}
-      binvq_.assign(binv_.size(), 0.0);
-      DenseMatrix B(nb_);
-      for (int e = 0; e < ne; e++)
-      {
-         if (absorb_[e] < 0) { continue; }
-         const real_t hdt = 0.5 * Dt_(cl_[e]);
-         const std::size_t off = static_cast<std::size_t>(absorb_[e]) * nb_ * nb_;
-         const real_t *C = cblk_.data() + off;
-         const real_t *Mq = mq_.data() + static_cast<std::size_t>(e) * nd_ * nd_;
-         for (int i = 0; i < nb_; i++)
-            for (int j = 0; j < nb_; j++) { B(i, j) = hdt * C[i * nb_ + j]; }
-         for (int comp = 0; comp < dim_; comp++)
-            for (int k = 0; k < nd_; k++)
-               for (int l = 0; l < nd_; l++)
-               {
-                  B(comp * nd_ + k, comp * nd_ + l) += (1.0 + hdt * d) * Mq[k * nd_ + l];
-               }
-         B.Invert();
-         for (int i = 0; i < nb_; i++)
-            for (int j = 0; j < nb_; j++) { binvq_[off + i * nb_ + j] = B(i, j); }
-      }
+      BuildDampingMass_();
       qd_ = d;
       quench_ = true;
+      BuildDampedInverse_();
    }
    void ClearQuench()
    {
@@ -1218,8 +1179,36 @@ public:
       MFEM_VERIFY(m_ == 0, "NitscheLtsRun::ClearQuench: not at a sync point (tick " << m_ << ")");
       quench_ = false;
       qd_ = 0.0;
+      if (!base_.empty()) { BuildDampedInverse_(); }   // back to the base rates alone
    }
    bool Quenched() const { return quench_; }
+
+   /// The 2.5D term's damper under local time stepping ([cycle.finite_width]
+   /// damping_ratio; NitscheWaveOperator::SetMassDamping is the global
+   /// form): C_fw = rate_e rho_e M_e on every element for the whole run,
+   /// treated as the quench is, with the element's own rate; the quench
+   /// adds its d on top while it is on.  Once, at a sync point, the quench
+   /// off.  rate_e: one entry per local element, > 0 [1/s].
+   void SetBaseDamping(const Vector &rate_e)
+   {
+      const int ne = static_cast<int>(cl_.size());
+      MFEM_VERIFY(rate_e.Size() == ne, "NitscheLtsRun::SetBaseDamping: " << rate_e.Size()
+                  << " rates for " << ne << " elements");
+      MFEM_VERIFY(base_.empty() && !quench_, "NitscheLtsRun::SetBaseDamping: once, with the "
+                  "quench off");
+      MFEM_VERIFY(m_ == 0, "NitscheLtsRun::SetBaseDamping: not at a sync point (tick " << m_
+                  << ")");
+      if (ne == 0) { return; }
+      for (int e = 0; e < ne; e++)
+      {
+         MFEM_VERIFY(rate_e(e) > 0.0 && std::isfinite(rate_e(e)), "NitscheLtsRun::"
+                     "SetBaseDamping: rate " << rate_e(e) << " 1/s on element " << e);
+      }
+      BuildDampingMass_();
+      base_.assign(rate_e.GetData(), rate_e.GetData() + ne);
+      BuildDampedInverse_();
+   }
+   bool HasBaseDamping() const { return !base_.empty(); }
 
    /// The static split (file header): on, the next Init takes its state (u,
    /// the operator's slip, t; v must be zero) as the static state.  Before
@@ -1374,11 +1363,13 @@ private:
             }
          }
       }
-      if (quench_)
+      if (Damped_())
       {
-         // - C_q v = - d rho M_e v on the cluster's own elements
+         // - C_q v = - d_e rho M_e v on the cluster's own elements (the
+         // quench's d and the element's base rate)
          for (int e : own_[c])
          {
+            const real_t de = Rate_(e);
             const int *ie = blocks_.ElementDofs(e);
             const real_t *Mq = mq_.data() + static_cast<std::size_t>(e) * nd_ * nd_;
             for (int comp = 0; comp < dim_; comp++)
@@ -1386,7 +1377,7 @@ private:
                {
                   real_t s = 0.0;
                   for (int j = 0; j < nd_; j++) { s += Mq[i * nd_ + j] * v(ie[comp * nd_ + j]); }
-                  a(ie[comp * nd_ + i]) -= qd_ * s;
+                  a(ie[comp * nd_ + i]) -= de * s;
                }
          }
       }
@@ -1429,7 +1420,7 @@ private:
          for (int k = 0; k < nb_; k++) { x[k] = a(ie[k]); }
          if (top >= 0 && absorb_[e] >= 0 && cl_[e] <= top)
          {
-            const real_t *B = (quench_ ? binvq_.data() : binv_.data())
+            const real_t *B = (Damped_() ? binvq_.data() : binv_.data())
                               + static_cast<std::size_t>(absorb_[e]) * nb_ * nb_;
             for (int i = 0; i < nb_; i++)
             {
@@ -1442,8 +1433,8 @@ private:
          }
          const real_t *Mi = minv_.data() + static_cast<std::size_t>(e) * nd_ * nd_;
          // the quench where B_top applies: ((1 + 1/2 dt_(c_e) d) rho M_e)^{-1}
-         const real_t w = (quench_ && top >= 0 && cl_[e] <= top)
-                          ? inv_rho_[e] / (1.0 + 0.5 * Dt_(cl_[e]) * qd_) : inv_rho_[e];
+         const real_t w = (Damped_() && top >= 0 && cl_[e] <= top)
+                          ? inv_rho_[e] / (1.0 + 0.5 * Dt_(cl_[e]) * Rate_(e)) : inv_rho_[e];
          for (int comp = 0; comp < dim_; comp++)
          {
             const real_t *xc = x + comp * nd_;
@@ -1454,6 +1445,58 @@ private:
                a(ie[comp * nd_ + i]) = s * w;
             }
          }
+      }
+   }
+
+   /// The mass-proportional damping in force: the quench's d and the base
+   /// rate of the element (SetBaseDamping), [1/s].
+   bool Damped_() const { return quench_ || !base_.empty(); }
+   real_t Rate_(int e) const { return base_.empty() ? qd_ : qd_ + base_[e]; }
+   /// rho M_e from the stored inverse (once).
+   void BuildDampingMass_()
+   {
+      if (!mq_.empty()) { return; }
+      const int ne = static_cast<int>(cl_.size());
+      mq_.resize(static_cast<std::size_t>(ne) * nd_ * nd_);
+      DenseMatrix Mi(nd_), Me(nd_);
+      for (int e = 0; e < ne; e++)
+      {
+         const real_t *src = minv_.data() + static_cast<std::size_t>(e) * nd_ * nd_;
+         for (int k = 0; k < nd_; k++)
+            for (int l = 0; l < nd_; l++) { Mi(k, l) = src[k * nd_ + l]; }
+         Me = Mi;
+         Me.Invert();
+         const real_t rho = 1.0 / inv_rho_[e];
+         real_t *dst = mq_.data() + static_cast<std::size_t>(e) * nd_ * nd_;
+         for (int k = 0; k < nd_; k++)
+            for (int l = 0; l < nd_; l++) { dst[k * nd_ + l] = rho * Me(k, l); }
+      }
+   }
+   /// Absorbing elements: ((1 + 1/2 dt d_e) rho M_e + 1/2 dt C_e)^{-1}, d_e = Rate_(e).
+   void BuildDampedInverse_()
+   {
+      const int ne = static_cast<int>(cl_.size());
+      binvq_.assign(binv_.size(), 0.0);
+      DenseMatrix B(nb_);
+      for (int e = 0; e < ne; e++)
+      {
+         if (absorb_[e] < 0) { continue; }
+         const real_t d = Rate_(e);
+         const real_t hdt = 0.5 * Dt_(cl_[e]);
+         const std::size_t off = static_cast<std::size_t>(absorb_[e]) * nb_ * nb_;
+         const real_t *C = cblk_.data() + off;
+         const real_t *Mq = mq_.data() + static_cast<std::size_t>(e) * nd_ * nd_;
+         for (int i = 0; i < nb_; i++)
+            for (int j = 0; j < nb_; j++) { B(i, j) = hdt * C[i * nb_ + j]; }
+         for (int comp = 0; comp < dim_; comp++)
+            for (int k = 0; k < nd_; k++)
+               for (int l = 0; l < nd_; l++)
+               {
+                  B(comp * nd_ + k, comp * nd_ + l) += (1.0 + hdt * d) * Mq[k * nd_ + l];
+               }
+         B.Invert();
+         for (int i = 0; i < nb_; i++)
+            for (int j = 0; j < nb_; j++) { binvq_[off + i * nb_ + j] = B(i, j); }
       }
    }
 
@@ -1491,6 +1534,7 @@ private:
    std::vector<real_t> mq_, binvq_;   ///< SetQuench: rho M_e; the quenched B^{-1}
    bool quench_ = false;
    real_t qd_ = 0.0;                  ///< the quench rate d [1/s]
+   std::vector<real_t> base_;         ///< SetBaseDamping: the element rates [1/s]
    std::vector<Vector> a_;
    std::vector<Vector> s_;   ///< static split: r_c at the static state, per cluster
    Vector R_;                ///< static split: sum_c s_c, the static residual
