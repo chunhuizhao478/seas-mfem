@@ -23,6 +23,11 @@ script, debugging behaviour). In addition, for pff:
   Follow a seas pattern by writing it in pff.
 - Hydromech code lives in `multiphysics/poroelastic/`.
 
+## Clusters
+
+- Build in `$HOME` or `$WORK`. Results (outputs, logs, checkpoints, sbatch
+  `-o`/`-e` files) go to `$SCRATCH`, never `$WORK` or `$HOME` (see jobs/README.md).
+
 ## Numerics that must not regress
 
 - Damage irreversibility comes from bounds (d_old ≤ d ≤ 1), not from
