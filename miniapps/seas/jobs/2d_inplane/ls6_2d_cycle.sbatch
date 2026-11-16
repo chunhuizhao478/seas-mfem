@@ -29,7 +29,8 @@
 # ranks) cannot continue here.
 # The binaries must be built (ls6_build.sbatch) from a commit whose code is
 # HEAD's: git diff <built> HEAD may touch only config/fd_cycle, jobs/fd_cycle,
-# jobs/2d_inplane, simple_cases/configs and simple_cases/scripts.
+# jobs/2d_inplane, jobs/postprocess, postprocess, tests/postprocess,
+# simple_cases/configs and simple_cases/scripts.
 # Memory: about 250 GB per node (Vista's run of the UCERF 2.5D deck stayed under
 # its 118.8 GiB commit limit on 144 ranks); every minute the node's
 # committed and available memory go to <run>/memlog_<job id>.txt
@@ -65,7 +66,7 @@ BUILT=$(cat miniapps/seas/BUILD_COMMIT_LS6 2>/dev/null)
 git cat-file -e "$BUILT^{commit}" 2>/dev/null \
    || { echo "ERROR: binaries built at '$BUILT', not a commit here; run ls6_build.sbatch"; exit 2; }
 CODE=$(git diff --name-only "$BUILT" HEAD \
-       | grep -v -E '^miniapps/seas/(config/fd_cycle|jobs/fd_cycle|jobs/2d_inplane|simple_cases/configs|simple_cases/scripts)/')
+       | grep -v -E '^miniapps/seas/(config/fd_cycle|jobs/fd_cycle|jobs/2d_inplane|jobs/postprocess|postprocess|tests/postprocess|simple_cases/configs|simple_cases/scripts)/')
 [ -z "$CODE" ] || { echo "ERROR: code changed since the build at $BUILT:"; echo "$CODE"; exit 2; }
 echo "commit $HEAD, binaries built at $BUILT"
 

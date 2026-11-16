@@ -1,0 +1,14 @@
+{
+  "name": "Southern California, frame of the UCERF 2-D meshes (ucerf2d/)",
+  "note": "x, y of the UCERF 2-D meshes: azimuthal equidistant about 37.25 N, 119.25 W on a sphere of radius 6371 km (the mesh builder's projection).",
+  "projection": {"kind": "azimuthal_equidistant", "lat0": 37.25, "lon0": -119.25, "radius_km": 6371.0},
+  "window_km": [-260.0, 480.0, -640.0, -20.0],
+  "lonlat_window": [-124.5, -113.0, 31.0, 38.5],
+  "graticule": {"lat_step": 1, "lon_step": 2},
+  "cities": [
+    ["Los Angeles", 34.05, -118.25], ["San Diego", 32.72, -117.16], ["Bakersfield", 35.37, -119.02],
+    ["Santa Barbara", 34.42, -119.70], ["San Bernardino", 34.11, -117.29], ["Palm Springs", 33.83, -116.55],
+    ["Parkfield", 35.90, -120.43], ["San Luis Obispo", 35.28, -120.66], ["Barstow", 34.90, -117.02],
+    ["Lancaster", 34.70, -118.14], ["Mexicali", 32.62, -115.45], ["Tijuana", 32.51, -117.04]
+  ]
+}
