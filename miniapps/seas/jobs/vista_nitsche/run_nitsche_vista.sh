@@ -2,9 +2,10 @@
 # Shared body of the Vista benchmark jobs (Chunhui Zhao, 2026-10-16).  Sourced by
 # tpv{205,104}_200m_p{1,2,3}.sbatch, tpv102_200m_p3.sbatch, tpv{205,104}_100m_p1.sbatch,
 # tpv{205,104}_mirror_*.sbatch, tpv{6,7}_100m_p{1,2,3}.sbatch, tpv31_200m_p{1,2,3}.sbatch and
-# tpv34_200m_p{1,2,3}.sbatch, which set PROB, DECK, MESH, ORDER, TFINAL and RES (default 200m).
+# tpv34_200m_p{1,2,3}.sbatch and tpv34_200m_p3_check.sbatch, which set PROB, DECK, MESH, ORDER, TFINAL and RES (default 200m).
 # TPV34 also sets TABLE, the 3-D material table (not in the repository: 444 MB): the job passes it
 # as --material-table and runs only when its sha256 is in jobs/vista_nitsche/tables.sha256.
+# Optional: LOG_EVERY (default 1000) and STALL_SAMPLE_AFTER (seconds; stall sampler, off by default).
 # Runs only from a clean pushed checkout (repo CLAUDE.md guard) whose driver was built at
 # the same commit (build_verify_vista.sbatch writes miniapps/seas/BUILD_COMMIT_VISTA) and
 # whose mesh checksum is in MESH_SHA256_VISTA or MESH_SHA256_MIRROR_VISTA (meshes made on Vista by
@@ -61,11 +62,40 @@ cp "$DECK" $OUT/
 # Committed_AS reaches CommitLimit (half the RAM), well before MemAvailable runs out.
 ( while :; do echo "$(date +%s) $(awk '/^MemTotal|^MemAvailable|^CommitLimit|^Committed_AS/{print $2}' /proc/meminfo | tr '\n' ' ')"; sleep 2; done ) > $OUT/meminfo_kB.log &
 MON=$!
+# Optional stall sampler (off unless the job sets STALL_SAMPLE_AFTER, seconds): if driver.log has no
+# "  step " line that long after the start, record what the ranks on the first node are doing, three
+# times 60 s apart, in $OUT/stall_sample_<n>.txt: CPU and state of every rank, and the call stack of
+# three ranks (gstack or gdb if the node has one and allows it; the attempt and its error are logged
+# either way).  Read-only: it never signals the driver.
+SMP=""
 T0=$(date +%s)
+if [ -n "$STALL_SAMPLE_AFTER" ]; then
+   ( sleep "$STALL_SAMPLE_AFTER"
+     for n in 1 2 3; do
+        grep -qa "^  step " $OUT/driver.log 2>/dev/null && exit 0
+        F=$OUT/stall_sample_$n.txt
+        { echo "sample $n at $(date +%s) host $(hostname), $(( $(date +%s) - T0 )) s after start; no step line yet"
+          echo "--- last 5 lines of driver.log"; tail -5 $OUT/driver.log
+          echo "--- ranks on this node: pid state %cpu cputime rss_kB"
+          ps -C seas_nitsche_dyn_driver -o pid=,stat=,pcpu=,time=,rss= | sort -n
+          echo "--- ptrace_scope $(cat /proc/sys/kernel/yama/ptrace_scope 2>&1)  gstack $(command -v gstack || echo none)  gdb $(command -v gdb || echo none)"
+          PIDS=$(ps -C seas_nitsche_dyn_driver -o pid= | sort -n)
+          for pid in $(echo "$PIDS" | sed -n '1p;2p;$p'); do
+             echo "--- stack of pid $pid"
+             if command -v gstack >/dev/null; then gstack $pid 2>&1 | head -80
+             elif command -v gdb >/dev/null; then gdb -batch -p $pid -ex "bt" 2>&1 | tail -60
+             else echo "no gstack or gdb on this node"; fi
+             echo "--- wait channel / syscall of pid $pid: $(cat /proc/$pid/wchan 2>&1) / $(cat /proc/$pid/syscall 2>&1)"
+          done; } > $F 2>&1
+        sleep 60
+     done ) &
+   SMP=$!
+fi
 ibrun ./seas_nitsche_dyn_driver --config "$DECK" --mesh "$MESH" --order $ORDER --tfinal $TFINAL \
-      --output-dir $OUT --log-every 1000 $TABLE_ARGS > $OUT/driver.log 2>&1
+      --output-dir $OUT --log-every ${LOG_EVERY:-1000} $TABLE_ARGS > $OUT/driver.log 2>&1
 rc=$?
-kill $MON 2>/dev/null; wait $MON 2>/dev/null
+kill $MON $SMP 2>/dev/null; wait $MON $SMP 2>/dev/null
+[ -z "$STALL_SAMPLE_AFTER" ] || { ls $OUT/stall_sample_*.txt 2>/dev/null && cat $OUT/stall_sample_1.txt || echo "no stall sample taken (step lines appeared)"; grep -a "^  step " $OUT/driver.log | tail -3; }
 echo "driver exit $rc after $(( $(date +%s) - T0 )) s"; grep "=== done" $OUT/driver.log || tail -20 $OUT/driver.log
 grep -a "time in ode.Step per rank\|fault work:\|fault ParaView output: [0-9]* frames" $OUT/driver.log
 awk '{u=($2-$3)/1048576; if(u>m)m=u; t=$2/1048576; if($5/1048576>c)c=$5/1048576; l=$4/1048576} END{printf "first node memory: peak in use %.1f GB of %.1f GB, peak committed %.1f of %.1f GiB (2 s samples)\n", m, t, c, l}' $OUT/meminfo_kB.log
