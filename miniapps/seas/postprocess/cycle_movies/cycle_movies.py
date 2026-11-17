@@ -220,7 +220,7 @@ class FaultMovie:
         for ax, cm, nm in zip(axs, cms, norms):
             if bm:
                 bm.draw_under(ax)
-                bm.draw_over(ax, zorder=2, fontsize=6)
+                bm.draw_over(ax, zorder=2, fontsize=6, city_zorder=8)  # city names above the fault traces
             ax.add_collection(LineCollection(g["segs"], linewidths=5.0, colors="0.25", capstyle="round", zorder=6))
             lc = LineCollection(g["segs"], linewidths=3.6, cmap=cm, norm=nm, capstyle="round", zorder=7)
             lc.set_array(np.zeros(len(g["segs"])))

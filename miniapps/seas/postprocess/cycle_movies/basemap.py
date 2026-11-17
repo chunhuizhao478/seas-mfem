@@ -93,8 +93,10 @@ class Basemap:
         ax.add_collection(LineCollection(g, colors="#b9b4a8", linewidths=0.5, linestyles=(0, (1, 2)),
                                          zorder=zorder + 0.1))
 
-    def draw_over(self, ax, zorder=5, fontsize=7):
-        """Map lines and city names: above the data."""
+    def draw_over(self, ax, zorder=5, fontsize=7, city_zorder=None):
+        """Map lines and city names: above the data.  city_zorder (default zorder + 1) lifts
+        the cities above something drawn on top of the map lines (wide fault traces)."""
+        cz = zorder + 1 if city_zorder is None else city_zorder
         import matplotlib.patheffects as pe
         from matplotlib.collections import LineCollection
         for key in ("lakes", "states", "borders", "coast"):
@@ -102,8 +104,8 @@ class Basemap:
             ax.add_collection(LineCollection(self.lines[key], colors=colour, linewidths=width, zorder=zorder))
         for name, lat, lon in self.cities:
             x, y = self.project(lon, lat)
-            ax.plot([x], [y], "o", ms=3, mfc="k", mec="white", mew=0.6, zorder=zorder + 1)
-            ax.text(x + 5, y + 3, name, fontsize=fontsize, color="#222222", zorder=zorder + 1,
+            ax.plot([x], [y], "o", ms=3, mfc="k", mec="white", mew=0.6, zorder=cz)
+            ax.text(x + 5, y + 3, name, fontsize=fontsize, color="#222222", zorder=cz,
                     path_effects=[pe.withStroke(linewidth=2, foreground="white")])
         ax.text(0.988, 0.012, "map: Natural Earth", transform=ax.transAxes, fontsize=6, color="#8a857a",
                 ha="right", va="bottom", zorder=zorder + 2)

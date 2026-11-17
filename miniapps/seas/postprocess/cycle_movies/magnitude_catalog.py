@@ -145,10 +145,12 @@ def main():
     ax.set_ylabel("Mw")
     ax.set_ylim(0, np.ceil(np.nanmax(mw) * 2) / 2 + 0.25)
     ax.set_xlim(0, None)
-    ax.legend(title="fault with the largest slip of the event", fontsize=8, title_fontsize=8, loc="lower right",
-              bbox_to_anchor=(1.0, 1.01), ncol=min(5, len(names)), frameon=False)
-    ax.set_title(a.title or os.path.basename(os.path.normpath(a.run))[-40:], fontsize=9, loc="left")
-    fig.tight_layout()
+    ax.legend(title="fault with the largest slip of the event", fontsize=8, title_fontsize=8, loc="lower left",
+              bbox_to_anchor=(0.0, 1.01), ncol=min(5, len(names)), frameon=False)
+    # the whole run name, small, on its own line above the legend
+    fig.suptitle(a.title or os.path.basename(os.path.normpath(a.run)), fontsize=6, x=0.01, y=0.995, ha="left",
+                 va="top")
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
     png = os.path.join(a.out, "magnitude_catalog.png")
     fig.savefig(png)
     print(csv)
