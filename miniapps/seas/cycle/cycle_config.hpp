@@ -273,7 +273,10 @@
 //                   handed over at the switch: NitscheLtsRun::SetStaticSplit),
 //                   same_step [false] (test only: the same clusters and
 //                   split, every cluster stepping at dt0, which is global
-//                   stepping to round-off).
+//                   stepping to round-off), check_ghosts [false] (test
+//                   only, with [rheology.viscoelastic]: at every sync
+//                   point the ghost memories against their owners, the
+//                   run stops at any difference).
 //                   With [cycle.pml] (kind "cfs", dt_rule "element"): the
 //                   band's elements sit in one cluster and its memory
 //                   steps at that cluster's step.
@@ -320,6 +323,15 @@
 //                   - 2 zeta sqrt(beta rho) u' of the dynamic regime); see
 //                   cycle/finite_width.hpp
 //
+// [rheology] (deck root, rheology/rheology_config.hpp): the dynamic regime's
+// off-fault rheology.  The cycle runs [rheology.viscoelastic] only (GMB
+// attenuation, viscoelastic attenuation plan rev6; absent = elastic, every
+// bit as before).  Refused in the cycle: [rheology.drucker_prager]
+// enabled, output_dt_s > 0, width_memory = true without
+// [cycle.finite_width], [cycle.probe]
+// (the probes run the phase past the switch, the hand-back report reads
+// the memory at the end of the phase).
+//
 // The dynamic regime reads the keys the Nitsche driver reads, from the same
 // shared sections (drivers/nitsche_dyn_driver.cpp:616-648, 708-736,
 // 849-884), with its defaults:
@@ -348,6 +360,7 @@
 #include "fault_fields.hpp"
 #include "prestress.hpp"
 #include "../spatial/code/spatial_friction.hpp"
+#include "../rheology/rheology_config.hpp"
 
 #ifdef SEAS_USE_TOML
 #include <toml.hpp>
@@ -518,6 +531,7 @@ struct LtsConfig
    real_t fault_weight = 0.0;
    bool static_split = false;  ///< NitscheLtsRun::SetStaticSplit (the w form)
    bool same_step = false;     ///< test only: every cluster steps at dt0
+   bool check_ghosts = false;  ///< test only: attenuation ghost memories vs owners
    bool On() const { return mode == "rate2"; }
 };
 
@@ -732,6 +746,7 @@ struct CycleConfig
    AbsorbingConfig absorbing;
    FiniteWidthConfig finite_width;   ///< [cycle.finite_width] (default: off)
    PmlConfig pml;                    ///< [cycle.pml] (default: off)
+   RheologyConfig rheology;          ///< [rheology] at the deck root (default: off)
    int checkpoint_every = 0;
    std::vector<DeckVector> deck_vectors;   ///< every vector key Load read
 
@@ -1582,7 +1597,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       const std::string sec = "cycle.lts";
       const toml::value &l = cy.at("lts");
       OnlyKeys(l, sec, {"mode", "cluster_cap", "fault_buffer", "fault_weight", "static_split",
-                         "same_step"});
+                         "same_step", "check_ghosts"});
       LtsConfig &lc = c.lts;
       lc.mode = Str(l, sec, "mode", lc.mode);
       lc.cluster_cap = Int(l, sec, "cluster_cap", lc.cluster_cap);
@@ -1590,6 +1605,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       lc.fault_weight = Real(l, sec, "fault_weight", lc.fault_weight);
       lc.static_split = Bool(l, sec, "static_split", lc.static_split);
       lc.same_step = Bool(l, sec, "same_step", lc.same_step);
+      lc.check_ghosts = Bool(l, sec, "check_ghosts", lc.check_ghosts);
       MFEM_VERIFY(lc.mode == "off" || lc.mode == "rate2",
                   "[" << sec << "].mode must be \"off\" or \"rate2\"");
       MFEM_VERIFY(lc.cluster_cap >= 1 && lc.fault_buffer >= 0 && lc.fault_weight >= 0.0,
@@ -1944,6 +1960,26 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       MFEM_VERIFY(!c.opening.floor_taper || c.sigma_n_floor > 0.0, "[cycle.opening] "
                   "floor_taper needs [cycle].sigma_n_floor_pa > 0 (the taper caps the "
                   "floor arm, plan eq. 6.2); give a floor or set floor_taper = false");
+   }
+
+   // ---- [rheology] (deck root): viscoelastic attenuation plan rev6, 5.10 ----
+   {
+      const std::string e = ParseRheologyConfig(root, c.rheology);
+      MFEM_VERIFY(e.empty(), "fd_cycle: " << e);
+      const RheologyConfig &R = c.rheology;
+      MFEM_VERIFY(!R.drucker_prager, "fd_cycle: [rheology.drucker_prager] enabled: the "
+                  "cycle runs [rheology.viscoelastic] only (plasticity in the cycle is not "
+                  "implemented)");
+      MFEM_VERIFY(R.output_dt == 0.0, "fd_cycle: [rheology] output_dt_s > 0: the cycle "
+                  "writes no rheology diagnostics file; set it to 0");
+      MFEM_VERIFY(!R.viscoelastic || !R.width_memory || c.finite_width.On(),
+                  "fd_cycle: [rheology.viscoelastic] width_memory = true needs "
+                  "[cycle.finite_width] (the memory of the 2.5D term, plan section 5.6)");
+      MFEM_VERIFY(!R.viscoelastic || !c.probe.Enabled(), "fd_cycle: [rheology.viscoelastic] "
+                  "with [cycle.probe]: the probes run the phase past the switch, so the "
+                  "hand-back report would read a later memory; leave one of the two out");
+      MFEM_VERIFY(!R.viscoelastic || c.switching, "fd_cycle: [rheology.viscoelastic] needs "
+                  "[cycle].switching = true (attenuation acts in the dynamic regime only)");
    }
 
    if (c.lts.On())

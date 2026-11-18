@@ -118,6 +118,18 @@
 // time.  The band's part of the term (PmlDynamicTerms::SetFiniteWidth) is in
 // the band force of c_P above.  BuildNitscheLtsAssignment's beta_over_rho
 // applies rule C6 to each element's step.  Without the term nothing changes.
+//
+// Viscoelastic attenuation (the operator's SetRheology / SetWidthMemory;
+// attenuation plan rev6, section 5.8, phase V6; a stack linear in the strain
+// only): each element's memory steps at its own cluster's ticks with dt_c,
+// after the drift and before the fault, and the ghost copy of each
+// face-neighbour element's memory steps from the displacement halo
+// (RheologyCoupler::AdvanceLts); the halo is therefore completed before the
+// fault closure at such a tick (the fault's Q dsig reads the neighbour's
+// memory), which gives up the overlap of the exchange with the fault and the
+// interior blocks.  The force of cluster c gets the owner split (5.6) of its
+// elements' P dsig and their width-memory force (FinishForce_).  The memory
+// is zero at entry, so the static split's shares are unchanged.
 
 #ifndef MFEM_SEAS_NITSCHE_LTS_RUN_HPP
 #define MFEM_SEAS_NITSCHE_LTS_RUN_HPP
@@ -133,6 +145,7 @@
 #include <array>
 #include <climits>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -598,6 +611,13 @@ public:
    double WaitSeconds() const { return wait_sec_; }
    /// Face-neighbour elements this rank receives at level <= k (all ranks' max).
    int NumHaloElements() const { return nh_; }
+   /// The received u of face-neighbour element j (after WaitHalo of a level
+   /// that moves it): its nb DOFs in ElementDofs order, stride HaloStride().
+   const real_t *HaloU(int j) const
+   {
+      return recv_.data() + static_cast<std::size_t>(nbr_slot_[j]) * nb_ * nm_;
+   }
+   int HaloStride() const { return nm_; }
 
    /// Post the exchange of the halo clusters 0..top read: u (and v for K_eta).
    void PostHalo(int top, const Vector &u, const Vector *v)
@@ -1133,6 +1153,12 @@ public:
          }
       }
 
+      // viscoelastic attenuation (file header)
+      rc_ = op.RheologyMutable();
+      wm_ = op.WidthMemoryMutable();
+      if (rc_) { rc_->SetLts(cl_, cl_nbr); }   // refuses a nonlinear stack; collective
+      if (wm_) { wm_->SetLts(cl_); }
+
       const int n = op.Height();
       a_.assign(nc_, Vector(n));
       for (Vector &a : a_) { a = 0.0; }
@@ -1182,6 +1208,10 @@ public:
       if (!base_.empty()) { BuildDampedInverse_(); }   // back to the base rates alone
    }
    bool Quenched() const { return quench_; }
+   /// Attenuation test (collective): the largest |ghost dsig - owner dsig|
+   /// over every face-neighbour element (0 when the ghosts agree; -1
+   /// without attenuation).  The owners' values replace the ghosts.
+   real_t AttenuationGhostMismatch() { return rc_ ? rc_->GhostMismatch() : -1.0; }
 
    /// The 2.5D term's damper under local time stepping ([cycle.finite_width]
    /// damping_ratio; NitscheWaveOperator::SetMassDamping is the global
@@ -1234,6 +1264,9 @@ public:
       blocks_.PostHalo(L_, u, kv_ ? &v : nullptr);
       for (int c = 0; c <= L_; c++) { blocks_.MultInterior(c, u, kv_ ? &v : nullptr, a_[c]); }
       blocks_.WaitHalo();
+      // the ghosts' entry state from the halo (the owners' Reset ran in
+      // DynPhase::Enter); collective
+      if (rc_) { rc_->ResetGhosts(HaloFn_(), blocks_.HaloStride()); }
       for (int c = 0; c <= L_; c++) { FinishForce_(c, -1, v, t); }
       if (split_)
       {
@@ -1267,6 +1300,10 @@ public:
 
 private:
    real_t Dt_(int c) const { return same_ ? dt0_ : std::ldexp(dt0_, c); }
+   std::function<const real_t *(int)> HaloFn_() const
+   {
+      return [this](int j) { return blocks_.HaloU(j); };
+   }
 
    /// One tick; returns the top cluster that ended a step.
    int Tick_(Vector &u, Vector &v, real_t &t)
@@ -1284,9 +1321,20 @@ private:
       // the band's memory: one step of c_P, with u at its new time, before
       // the forces that read it (collective: every rank has the same top)
       if (cp_ >= 0 && cp_ <= top) { op_.Pml()->Advance(u, t); }
+      // attenuation: the memories of clusters 0..top with u at t, before
+      // the fault and the forces (the ghosts need the halo first)
+      bool waited = false;
+      if (rc_)
+      {
+         blocks_.WaitHalo();
+         waited = true;
+         rc_->AdvanceLts(top, u, HaloFn_(), blocks_.HaloStride(), t,
+                         [this](int c) { return Dt_(c); });
+      }
+      if (wm_) { wm_->AdvanceLts(top, u, t, [this](int c) { return Dt_(c); }); }
       if (op_.HasFault() && cf_ <= top) { op_.LtsAdvanceFault(u, t, kv_ ? &v : nullptr); }
       for (int c = 0; c <= top; c++) { blocks_.MultInterior(c, u, kv_ ? &v : nullptr, a_[c]); }
-      blocks_.WaitHalo();
+      if (!waited) { blocks_.WaitHalo(); }
       if (has_dirichlet_) { op_.Elasticity().AssembleDirichletOnlyRHS(FD_, t); }
       for (int c = 0; c <= top; c++) { FinishForce_(c, top, v, t); }
       for (int c = 0; c <= top; c++) { Kick_(c, v); }
@@ -1309,6 +1357,10 @@ private:
          for (int k = 0; k < nb_; k++) { a(ie[k]) = -a(ie[k]); }
       }
       if (op_.HasFault() && c == cf_) { op_.LtsAddFaultLoads(a); }
+      // attenuation: P dsig of c's elements (owner split) and their
+      // width-memory force (zero at Init: the memories start at 0)
+      if (rc_) { rc_->AddLoadCluster(c, a); }
+      if (wm_) { wm_->AddLoadCluster(c, a); }
       if (c == cp_)
       {
          // - (b_band + B + E) of the band's stored state, on its own rows
@@ -1517,6 +1569,8 @@ private:
 
    NitscheWaveOperator &op_;
    std::vector<int> cl_;
+   RheologyCoupler *rc_ = nullptr;   ///< attenuation (null: none)
+   WidthMemory *wm_ = nullptr;       ///< 2.5D width memory (null: none)
    int nc_ = 1, L_ = 0, cf_ = 0, nb_ = 0, nd_ = 0, dim_ = 3;
    int cp_ = -1;                  ///< the PML band's cluster (-1: none)
    std::vector<int> pml_elems_;   ///< local elements the band terms touch

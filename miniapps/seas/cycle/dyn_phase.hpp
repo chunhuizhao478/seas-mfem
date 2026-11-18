@@ -75,6 +75,21 @@
 // copy damps K alone; dt_cfl is cut by 1 / sqrt(1 + beta dt^2 / (4 rho)).
 // With [cycle.lts] rate2 PlanLts applies that cut to each element's step.
 //
+// [rheology.viscoelastic] (viscoelastic attenuation plan rev6, section 5.9):
+// the GMB strain memory (RheologyCoupler with the ViscoelasticModel stack,
+// W.SetRheology) and, with width_memory and [cycle.finite_width], the 2.5D
+// width memory (WidthMemory, W.SetWidthMemory), built once after the
+// material sample; the PML band's elements are excluded (decision D4).
+// The step outside the band is cut by s_Y = 1 / sqrt(max_e StiffnessBound)
+// = min_e sqrt(1 - sum_l Y^P_l(e)) before the finite-width cut (rule C6);
+// with a band the global step is the smaller of that and the band's step.
+// With [cycle.lts] rate2 PlanLts cuts each element's step outside the band
+// by s_Y (from the fit at the deck's material) and NitscheLtsRun steps the
+// memories per cluster (attenuation plan rev6, 5.8, phase V6).  Enter
+// resets both memories to the entry state (2.42d: xi = eta = 0, the strain
+// at u_s); AttenuationHandback gives the anelastic part the hand-back drops
+// (2.36).
+//
 // Station fields in the dynamic regime use the kernel components of the
 // end-of-step traction X* + gamma V (the friction strength along -V, as the
 // Nitsche driver's stations; gamma includes sigma_F^eta with Kelvin-Voigt)
@@ -315,6 +330,7 @@ public:
                      "(QDPhase::SubstrateShape) with " << W_->Height() << " entries");
          W_->SetFiniteWidth(cfg.finite_width.BetaOverMu(), *substrate, t0_);
       }
+      if (cfg.rheology.viscoelastic) { BuildAttenuation_(cfg, substrate, pml); }
       BuildFrames_();
       if (tags_.dirichlet > 0) { CollectWallDofs_(); }
       Vector S0;
@@ -323,6 +339,7 @@ public:
 
       ceig_ = NitscheStableConstant(pmesh.Dimension(), p);
       dt_cfl_ = ComputeMaxDt(W_->Sample(), pmesh, p, dc.cfl * ceig_);
+      const real_t dt_mesh = dt_cfl_;
       if (pml_)
       {
          // decision D6: the band's SIPG penalty is kappa_gamma P, so the
@@ -369,6 +386,27 @@ public:
          const real_t br = cfg.finite_width.BetaOverMu() * mf.mu / mf.rho;
          fw_dt_factor_ = 1.0 / std::sqrt(1.0 + 0.25 * br * dt_cfl_ * dt_cfl_);
          dt_cfl_ *= fw_dt_factor_;
+      }
+      if (rc_)
+      {
+         // attenuation plan rev6, 5.9: the unrelaxed moduli C_U = C_R /
+         // (1 - sum Y^P) raise the stiffness's largest eigenvalue outside
+         // the band by 1 / s_Y^2: the mesh step times s_Y, then the 2.5D
+         // cut (rule C6) at that step, as BuildNitscheLtsAssignment applies
+         // an element's factor before C6.  The band's elements carry no
+         // memory (decision D4), so with a band the step is the smaller of
+         // this one and the band's step above.
+         const real_t sY = VeDtFactor_();
+         real_t dt_ve = dt_mesh * sY;
+         if (cfg.finite_width.On())
+         {
+            const auto &mf = s.material_fallback;
+            const real_t br = cfg.finite_width.BetaOverMu() * mf.mu / mf.rho;
+            dt_ve *= 1.0 / std::sqrt(1.0 + 0.25 * br * dt_ve * dt_ve);
+         }
+         visco_sY_ = sY;
+         if (!pml_ || dt_ve < dt_cfl_) { visco_dt_factor_ = dt_ve / dt_cfl_; dt_cfl_ = dt_ve; }
+         else { visco_dt_factor_ = 1.0; }
       }
       const bool lts_on = (lts != nullptr && lts->on);
       MFEM_VERIFY(lts_on == cfg.lts.On(), "DynPhase: [cycle.lts] is " << cfg.lts.mode
@@ -513,6 +551,10 @@ public:
       // PML (plan rev2, Section 3.1): memory to zero, b_band from u_s and the
       // wall data at t_s, so the static QD state is an equilibrium of W
       if (pml_) { W_->PmlEnter(u_s); }
+      // attenuation (plan rev6, (2.42d)): the memories start from the
+      // relaxed state at u_s; the operator's clock is 0 and t0 = t_s
+      if (rc_) { rc_->Reset(u_s); }
+      if (wm_) { wm_->Reset(u_s, 0.0); }
       if (W_->HasPrakashClifton()) { W_->SetPrakashCliftonState(sigma_n); }
       W_->ResetFloorCount();
       if (tags_.dirichlet > 0)
@@ -555,6 +597,15 @@ public:
             W_->SetTime(tau_);
             fault_steps_++;
             if (fault_hook_) { fault_hook_(*t0_ + tau_); }
+         }
+         if (cfg_.lts.check_ghosts && rc_)
+         {
+            // test only: the ghost memories against the owners (collective)
+            const real_t m = lts_->AttenuationGhostMismatch();
+            ghost_checks_++;
+            ghost_max_ = std::max(ghost_max_, m);
+            MFEM_VERIFY(m == 0.0, "[cycle.lts] check_ghosts: a ghost memory differs from "
+                        "its owner by " << m << " Pa at t = " << tau_ << " s");
          }
       }
       else
@@ -627,6 +678,7 @@ public:
       NitscheLtsAssignment asg;
       std::ostringstream rep;
       std::vector<char> in_band;   // rank 0: elements with their centroid in a band
+      real_t rep_ve_sY = 0.0;      // rank 0: the attenuation factor (0: none)
       if (rank == 0)
       {
          const auto &mf = cfg.shared.material_fallback;
@@ -676,6 +728,29 @@ public:
                in_band[e] = band.InBand(x) ? 1 : 0;
             }
          }
+         if (cfg.rheology.viscoelastic)
+         {
+            // attenuation plan rev6, 5.9: each element's step outside the
+            // band times sqrt(1 - sum Y^P), from the GMB fit at the deck's
+            // material (the material this plan already uses for c_p); the
+            // band's elements (pinned) carry no memory (decision D4)
+            const RheologyConfig &R = cfg.rheology;
+            const ViscoelasticModel vm(R.gmb_band, R.gmb_q, R.gmb_moduli);
+            const GMBFit f = vm.Fit(mf.lambda, mf.mu, mf.rho);
+            MFEM_VERIFY(f.error.empty(), "PlanLts: [rheology.viscoelastic]: " << f.error);
+            // s_Y = 1 / sqrt(ViscoelasticModel::StiffnessBound), the
+            // arithmetic of the global step's VeDtFactor_
+            real_t sl = 0.0;
+            for (std::size_t l = 0; l < f.lam_l.size(); l++) { sl += f.lam_l[l] + 2.0 * f.mu_l[l]; }
+            const real_t PR = mf.lambda + 2.0 * mf.mu;
+            const real_t sY = 1.0 / std::sqrt((PR + sl) / PR);
+            if (factor.empty()) { factor.assign(ne, 1.0); }
+            for (int e = 0; e < ne; e++)
+            {
+               if (pinned.empty() || !pinned[e]) { factor[e] *= sY; }
+            }
+            rep_ve_sY = sY;
+         }
          asg = BuildNitscheLtsAssignment(smesh, p, cfg.dyn.cfl * ceig, cp, cfg.fault_attr,
                                          std::numeric_limits<real_t>::infinity(),
                                          cfg.lts.cluster_cap, cfg.lts.fault_buffer,
@@ -697,6 +772,10 @@ public:
              << asg.buffer_tets << " buffer tets in " << cfg.lts.fault_buffer
              << " layer(s)) in cluster " << asg.fault_cluster << " after " << asg.passes
              << " clustering(s)";
+         if (rep_ve_sY > 0.0)
+         {
+            rep << "; attenuation: steps outside the band times s_Y = " << rep_ve_sY;
+         }
          if (cfg.pml.On())
          {
             rep << "; PML band (" << asg.pml_cells << " elements with a vertex in a band, "
@@ -849,6 +928,60 @@ public:
    bool HasPml() const { return pml_ != nullptr; }
    bool HasSponge() const { return sponge_; }
    long Steps() const { return steps_; }
+   /// [rheology.viscoelastic] (attenuation plan rev6, 5.9).
+   bool HasAttenuation() const { return rc_ != nullptr; }
+   bool HasWidthMemory() const { return wm_ != nullptr; }
+   /// s_Y: the CFL step's cut for the unrelaxed moduli (1 when off).
+   real_t AttenuationDtFactor() const { return visco_dt_factor_; }
+   /// s_Y = min_e sqrt(1 - sum Y^P(e)) outside the band (the factor of an
+   /// element's own step).
+   real_t AttenuationSY() const { return visco_sY_; }
+   /// [cycle.lts] check_ghosts (test only): sync points checked and the
+   /// largest |ghost - owner| dsig seen (the run stops at a nonzero one).
+   long long GhostChecks() const { return ghost_checks_; }
+   real_t GhostMismatchMax() const { return ghost_max_; }
+   /// Elements without memory (the PML band), all ranks.
+   long long AttenuationExcluded() const { return visco_excluded_; }
+   /// What the hand-back drops (2.36), all ranks: the largest component of
+   /// the anelastic fault traction Q dsig [Pa] and of the width memory eta
+   /// [m] (0 without it).  Collective; with the memories of the last step.
+   void AttenuationHandback(real_t &maxQ, real_t &maxEta) const
+   {
+      MFEM_VERIFY(rc_, "DynPhase::AttenuationHandback without [rheology.viscoelastic]");
+      Vector T;
+      W_->RheologyTraction(T);
+      maxQ = T.Size() > 0 ? T.Normlinf() : 0.0;
+      maxEta = wm_ ? wm_->MaxEta() : 0.0;
+      real_t m[2] = {maxQ, maxEta};
+      MPI_Allreduce(MPI_IN_PLACE, m, 2, MPITypeMap<real_t>::mpi_type, MPI_MAX,
+                    pmesh_.GetComm());
+      maxQ = m[0];
+      maxEta = m[1];
+   }
+   /// True when every memory is in the entry state's zero (xi = 0, eta = 0)
+   /// on every rank: what a restart from a QD checkpoint must find.
+   /// Collective.
+   bool AttenuationAtRest() const
+   {
+      int bad = 0;
+      if (rc_)
+      {
+         const RheologyField &F = rc_->Field();
+         const int L = cfg_.rheology.gmb_band.L;
+         for (int e = 0; e < F.NumElements() && !bad; e++)
+         {
+            for (int i = 0; i < F.NodesPerElement() && !bad; i++)
+            {
+               const real_t *q = F.State(e, i);
+               for (int a = 0; a < 6 * L; a++) { bad |= (q[a] != 0.0); }
+               for (int c = 0; c < 6; c++) { bad |= (F.Dsig(e, i)[c] != 0.0); }
+            }
+         }
+      }
+      if (wm_) { bad |= (wm_->MaxEta() != 0.0); }
+      MPI_Allreduce(MPI_IN_PLACE, &bad, 1, MPI_INT, MPI_MAX, pmesh_.GetComm());
+      return bad == 0;
+   }
 
    /// [cycle.quench] (quench plan rev1, Q3): the damping C_q = d M_rho on
    /// every element (NitscheWaveOperator::SetQuench), the driver's call once
@@ -1115,6 +1248,65 @@ private:
                   "do not describe one orientation");
    }
 
+   /// The memories of [rheology.viscoelastic] on W's space (plan rev6, 5.9).
+   void BuildAttenuation_(const CycleConfig &cfg, const Vector *substrate,
+                          const std::shared_ptr<const PmlBand> &band)
+   {
+      const RheologyConfig &R = cfg.rheology;
+      ParMesh &wm = W_->GetMesh();
+      ParFiniteElementSpace &fes = W_->Elasticity().GetFESpace();
+      // sigma_0' is not read by the viscoelastic model (the prestress enters
+      // the fault traction only, as without attenuation)
+      auto zero = [](const real_t *, real_t s[9]) { for (int i = 0; i < 9; i++) { s[i] = 0.0; } };
+      rc_ = std::make_unique<RheologyCoupler>(fes, W_->Sample(), W_->Boundary().dirichlet_attrs,
+                                              BuildRheologyStack(R), zero);
+      // decision D4 (in_pml_band = false): no memory in the band.  The band
+      // elements are the PML operator's own (PmlBandElement: a vertex
+      // strictly inside a band), so no element carries both the PML terms
+      // and a memory
+      std::vector<char> mask(wm.GetNE(), 0);
+      long long nx = 0;
+      if (band)
+      {
+         for (int e = 0; e < wm.GetNE(); e++)
+         {
+            if (PmlBandElement(wm, e, *band)) { mask[e] = 1; nx++; }
+         }
+      }
+      MPI_Allreduce(MPI_IN_PLACE, &nx, 1, MPI_LONG_LONG, MPI_SUM, wm.GetComm());
+      visco_excluded_ = nx;
+      rc_->SetExcluded(mask);
+      W_->SetRheology(rc_.get());
+      if (R.width_memory)
+      {
+         MFEM_VERIFY(cfg.finite_width.On() && substrate != nullptr, "DynPhase: "
+                     "[rheology.viscoelastic] width_memory = true needs [cycle.finite_width]");
+         ve_model_ = std::make_unique<ViscoelasticModel>(R.gmb_band, R.gmb_q, R.gmb_moduli);
+         wm_ = std::make_unique<WidthMemory>(fes, W_->Sample(), *ve_model_,
+                                             cfg.finite_width.BetaOverMu(), *substrate, t0_);
+         wm_->SetExcluded(mask);
+         W_->SetWidthMemory(wm_.get());
+      }
+   }
+
+   /// 1 / sqrt(max over the memory elements of StiffnessBound), all ranks.
+   real_t VeDtFactor_() const
+   {
+      const RheologyField &F = rc_->Field();
+      real_t b = 1.0;
+      for (int e = 0; e < F.NumElements(); e++)
+      {
+         if (rc_->Excluded(e)) { continue; }
+         for (int i = 0; i < F.NodesPerElement(); i++)
+         {
+            b = std::max(b, rc_->Stack().StiffnessBound(F.Context(e, i), F.State(e, i)));
+         }
+      }
+      MPI_Allreduce(MPI_IN_PLACE, &b, 1, MPITypeMap<real_t>::mpi_type, MPI_MAX,
+                    pmesh_.GetComm());
+      return 1.0 / std::sqrt(b);
+   }
+
    ParMesh &pmesh_;
    const CycleConfig &cfg_;
    std::shared_ptr<real_t> t0_;   ///< held by the wall-load wrapper too
@@ -1129,6 +1321,15 @@ private:
    std::unique_ptr<DieterichRuinaFriction> fr_;
    std::unique_ptr<RateStateClosure> closure_;
    std::unique_ptr<NitscheWaveOperator> W_;
+   // [rheology.viscoelastic]: declared after W_ is fine for the pointers W_
+   // holds (W_ never calls them after the destructor starts)
+   std::unique_ptr<RheologyCoupler> rc_;       ///< strain memory (null: off)
+   std::unique_ptr<ViscoelasticModel> ve_model_;
+   std::unique_ptr<WidthMemory> wm_;           ///< 2.5D width memory (null: off)
+   real_t visco_dt_factor_ = 1.0, visco_sY_ = 1.0;
+   long long ghost_checks_ = 0;
+   real_t ghost_max_ = 0.0;
+   long long visco_excluded_ = 0;
    std::shared_ptr<const PmlBand> pml_;   ///< [cycle.pml] (null: off)
    real_t pml_kappa_max_ = 1.0;
    real_t pml_dt_factor_ = 1.0;

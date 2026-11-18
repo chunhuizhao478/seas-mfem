@@ -93,7 +93,9 @@
 // Exit codes: 0 done (or --max-dyn-steps), 2 no PETSc, 3 non-finite, 4 a
 // dynamic phase reached T_max, 7 the guard: the QD balance after a switch
 // back is above V_on, 8 stopped at --wall-limit (checkpoint written; a
-// --restart from it continues the run and its files).
+// --restart from it continues the run and its files), 9 the anelastic fault
+// traction a hand-back would drop is above [rheology.viscoelastic]
+// handback_tol_pa (attenuation plan rev6, 5.9).
 
 #include "mfem.hpp"
 #include "../cycle/build_info.hpp"
@@ -444,6 +446,23 @@ void PrintDynamicSetup(const MPIContext &mpi, const cycle::CycleConfig &cfg,
                    << "the CFL step divided by sqrt(kappa_max = " << dyn.PmlKappaMax() << ")\n";
       }
    }
+   if (dyn.HasAttenuation())
+   {
+      // viscoelastic attenuation plan rev6, 5.9
+      const RheologyConfig &R = cfg.rheology;
+      std::cout << "    attenuation ([rheology.viscoelastic]): GMB, L = " << R.gmb_band.L
+                << ", f_c " << R.gmb_band.f_c << " Hz, f_ratio " << R.gmb_band.R << ", ";
+      if (R.gmb_q.from_vs)
+      {
+         std::cout << "Q_S = " << R.gmb_q.q_s_over_vs << " V_S, Q_P = " << R.gmb_q.q_p_over_q_s
+                   << " Q_S";
+      }
+      else { std::cout << "Q_S = " << R.gmb_q.Q_s << ", Q_P = " << R.gmb_q.Q_p; }
+      std::cout << ", relaxed moduli; strain memory" << (dyn.HasWidthMemory() ? " + 2.5D width memory" : "")
+                << "; s_Y = " << dyn.AttenuationSY() << ", the CFL step times "
+                << dyn.AttenuationDtFactor() << "; " << dyn.AttenuationExcluded()
+                << " band elements without memory\n";
+   }
    if (dyn.HasSponge())
    {
       std::cout << "    sponge band (comparator): rho sum_a d_a U' on the band elements, "
@@ -784,6 +803,7 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
    std::vector<char> snap_open;   // [cycle.opening]: the open flags there
    Vector snap_gap;               // mode contact: the gap there (g = d . n)
    real_t snap_Vmax = 0.0;
+   real_t snap_attQ = 0.0, snap_attEta = 0.0;   // [rheology.viscoelastic]: (2.36)
    cycle::StationFields snap_fd;   // [cycle.output].handback_table
 
    // End of the phase for the files: the last station row, the switch log,
@@ -979,6 +999,7 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
                              cfg.opening.Contact() ? &snap_gap : nullptr);
          if (cfg.opening.On()) { snap_open = dyn.OpenFlags(); }
          if (cfg.output.handback_table && to_qd) { dyn.FillStationFields(snap_fd); }
+         if (dyn.HasAttenuation()) { dyn.AttenuationHandback(snap_attQ, snap_attEta); }
          snap_Vmax = Vmax;
          end.t = t;
          end.back_to_qd = to_qd;
@@ -1080,6 +1101,40 @@ PhaseEnd RunDynamicPhase(MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::
    if (cfg.output.handback_table)
    {
       WriteHandbackTable(mpi, cfg, qd, snap_fd, dyn.FaultPositions(), phase, end.t, commit);
+   }
+   if (dyn.HasAttenuation())
+   {
+      // viscoelastic attenuation plan rev6, (2.36): what the hand-back drops
+      const real_t tol = cfg.rheology.handback_tol;
+      if (root)
+      {
+         std::cout << std::scientific << std::setprecision(6)
+                   << "  [rheology.viscoelastic] hand-back drops max |Q dsig| " << snap_attQ / 1e6
+                   << " MPa on the fault";
+         if (dyn.HasWidthMemory()) { std::cout << ", max |eta| " << snap_attEta << " m"; }
+         if (dyn.GhostChecks() > 0)
+         {
+            std::cout << "; [cycle.lts] check_ghosts: " << dyn.GhostChecks()
+                      << " sync points, max |ghost - owner| " << dyn.GhostMismatchMax() << " Pa";
+         }
+         std::cout << std::defaultfloat << std::setprecision(6)
+                   << (tol > 0.0 ? " (handback_tol_pa " : "") ;
+         if (tol > 0.0) { std::cout << tol << ")"; }
+         std::cout << "\n" << std::flush;
+      }
+      if (tol > 0.0 && snap_attQ > tol)
+      {
+         if (root)
+         {
+            std::cerr << "STOP: the anelastic fault traction the hand-back would drop, max |Q "
+                      << "dsig| = " << snap_attQ << " Pa, is above [rheology.viscoelastic] "
+                      << "handback_tol_pa = " << tol << " Pa (attenuation plan rev6, 5.9).\n";
+         }
+         out.SwitchLog(end.t, snap_Vmax, "QD", "stop", "attenuation_handback");
+         end.rc = 9;
+         end.back_to_qd = false;
+         return end;
+      }
    }
    if (!std::isfinite(Vqd))
    {
@@ -1671,6 +1726,14 @@ int main(int argc, char *argv[])
             }
          }
          PrintDynamicSetup(mpi, cfg, *dyn, MPI_Wtime() - w);
+         // attenuation plan rev6, 5.9: checkpoints are written at QD steps,
+         // where the memories are zero, so none is in the file; a restart
+         // must find them at rest
+         if (dyn->HasAttenuation())
+         {
+            MFEM_VERIFY(dyn->AttenuationAtRest(), "restart: the attenuation memories are "
+                        "not at rest after the dynamic regime was built");
+         }
       }
       auto dynamic_phase = [&](real_t ts, real_t Vs)
       {
