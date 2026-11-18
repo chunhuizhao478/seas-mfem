@@ -2,10 +2,12 @@
 # Shared body of the Vista benchmark jobs (Chunhui Zhao, 2026-10-16).  Sourced by
 # tpv{205,104}_200m_p{1,2,3}.sbatch, tpv102_200m_p3.sbatch, tpv{205,104}_100m_p1.sbatch,
 # tpv{205,104}_mirror_*.sbatch, tpv{6,7}_100m_p{1,2,3}.sbatch, tpv31_200m_p{1,2,3}.sbatch and
-# tpv34_200m_p{1,2,3}.sbatch and tpv34_200m_p3_check.sbatch, which set PROB, DECK, MESH, ORDER, TFINAL and RES (default 200m).
+# tpv34_200m_p{1,2,3,4}.sbatch and tpv34_200m_p3_check.sbatch, which set PROB, DECK, MESH, ORDER, TFINAL and RES (default 200m).
 # TPV34 also sets TABLE, the 3-D material table (not in the repository: 444 MB): the job passes it
 # as --material-table and runs only when its sha256 is in jobs/vista_nitsche/tables.sha256.
-# Optional: LOG_EVERY (default 1000) and STALL_SAMPLE_AFTER (seconds; stall sampler, off by default).
+# Optional: LOG_EVERY (default 1000), STALL_SAMPLE_AFTER (seconds; stall sampler, off by default) and
+# STALL_ABORT=1 (with the sampler: cancel the job when it found no step line three times).
+# DRIVER_ARGS: further driver options, appended as given (TPV34 p = 4: --dense-fill direct).
 # Runs only from a clean pushed checkout (repo CLAUDE.md guard) whose driver was built at
 # the same commit (build_verify_vista.sbatch writes miniapps/seas/BUILD_COMMIT_VISTA) and
 # whose mesh checksum is in MESH_SHA256_VISTA or MESH_SHA256_MIRROR_VISTA (meshes made on Vista by
@@ -39,7 +41,7 @@ echo "host $(hostname)  nodes $SLURM_JOB_NUM_NODES  ranks $SLURM_NTASKS"
 SHA=$(sha256sum "$MESH" | cut -d' ' -f1)
 grep -q "^$SHA  $MESH\$" MESH_SHA256_VISTA MESH_SHA256_MIRROR_VISTA MESH_SHA256_TPV34_VISTA jobs/vista_nitsche/meshes.sha256 2>/dev/null \
    || { echo "ERROR: $MESH sha256 $SHA not in MESH_SHA256_VISTA, MESH_SHA256_MIRROR_VISTA, MESH_SHA256_TPV34_VISTA or jobs/vista_nitsche/meshes.sha256"; exit 2; }
-echo "deck $DECK  mesh $MESH sha256 $SHA  order $ORDER  tfinal $TFINAL"
+echo "deck $DECK  mesh $MESH sha256 $SHA  order $ORDER  tfinal $TFINAL${DRIVER_ARGS:+  driver args: $DRIVER_ARGS}"
 TABLE_ARGS=""
 if [ -n "$TABLE" ]; then
    [ -f "$TABLE" ] || { echo "ERROR: material table $TABLE missing"; exit 2; }
@@ -56,7 +58,7 @@ echo "modules: $(module -t list 2>&1 | tr '\n' ' ')"
 OUT=$SCRATCH/nitsche_benchmarks/${PROB}_${RES:-200m}_p${ORDER}_$SLURM_JOB_ID
 mkdir -p $OUT
 cp "$DECK" $OUT/
-{ echo "commit $HEAD"; echo "mesh $MESH $SHA"; echo "deck $DECK"; echo "job $SLURM_JOB_ID nodes $SLURM_JOB_NUM_NODES ranks $SLURM_NTASKS"; [ -z "$TABLE" ] || echo "material table $TABLE $TSHA"; } > $OUT/RUN_INFO.txt
+{ echo "commit $HEAD"; echo "mesh $MESH $SHA"; echo "deck $DECK"; echo "job $SLURM_JOB_ID nodes $SLURM_JOB_NUM_NODES ranks $SLURM_NTASKS"; [ -z "$TABLE" ] || echo "material table $TABLE $TSHA"; [ -z "$DRIVER_ARGS" ] || echo "driver args $DRIVER_ARGS"; } > $OUT/RUN_INFO.txt
 # Memory on the first node, 2 s samples, for the speed record: time MemTotal MemAvailable CommitLimit
 # Committed_AS (kB).  Vista compute nodes use strict overcommit, so allocations fail once
 # Committed_AS reaches CommitLimit (half the RAM), well before MemAvailable runs out.
@@ -88,11 +90,17 @@ if [ -n "$STALL_SAMPLE_AFTER" ]; then
              echo "--- wait channel / syscall of pid $pid: $(cat /proc/$pid/wchan 2>&1) / $(cat /proc/$pid/syscall 2>&1)"
           done; } > $F 2>&1
         sleep 60
-     done ) &
+     done
+     # Optional: STALL_ABORT=1 ends the job after the third sample when there is still no step line,
+     # so a stalled run does not hold its nodes to the time limit.
+     if [ "$STALL_ABORT" = 1 ] && ! grep -qa "^  step " $OUT/driver.log 2>/dev/null; then
+        echo "no step line $(( $(date +%s) - T0 )) s after start: STALL_ABORT=1, cancelling job $SLURM_JOB_ID" | tee -a $OUT/stall_sample_3.txt
+        scancel $SLURM_JOB_ID
+     fi ) &
    SMP=$!
 fi
 ibrun ./seas_nitsche_dyn_driver --config "$DECK" --mesh "$MESH" --order $ORDER --tfinal $TFINAL \
-      --output-dir $OUT --log-every ${LOG_EVERY:-1000} $TABLE_ARGS > $OUT/driver.log 2>&1
+      --output-dir $OUT --log-every ${LOG_EVERY:-1000} $TABLE_ARGS $DRIVER_ARGS > $OUT/driver.log 2>&1
 rc=$?
 kill $MON $SMP 2>/dev/null; wait $MON $SMP 2>/dev/null
 [ -z "$STALL_SAMPLE_AFTER" ] || { ls $OUT/stall_sample_*.txt 2>/dev/null && cat $OUT/stall_sample_1.txt || echo "no stall sample taken (step lines appeared)"; grep -a "^  step " $OUT/driver.log | tail -3; }

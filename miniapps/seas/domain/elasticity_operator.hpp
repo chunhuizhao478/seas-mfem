@@ -301,6 +301,63 @@ public:
       return *K;
    }
 #endif
+   /// Hands every matrix AssembleStiffness adds to the local matrix to
+   /// `sink`, in the same order (BilinearForm::Assemble, then
+   /// ParBilinearForm::AssembleSharedFaces): element matrices, interior
+   /// faces by face number, Dirichlet boundary faces, shared faces; without
+   /// assembling anything.  `sink` has Element(e, M), InteriorFace(e1, e2,
+   /// M), BdrFace(e, M) and SharedFace(e1, face_nbr_element, M)
+   /// (DenseBlockStiffness::DirectSink).  SIPG on a parallel mesh only:
+   /// false otherwise, with nothing visited.  (Chunhui Zhao, 2026-11-18.)
+   template <class Sink>
+   bool VisitStiffnessMatrices(Sink &sink) const
+   {
+      if (method_ != DGMethod::IP) { return false; }
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+         auto *pfes = dynamic_cast<ParFiniteElementSpace *>(fes_.get());
+         if (!pfes) { return false; }
+         mesh_.ExchangeFaceNbrData();
+         pfes->ExchangeFaceNbrData();
+         ElasticityIntegrator dom(*lambda_ptr_, *mu_ptr_);
+         DGElasticityIPCombinedIntegrator face(*lambda_ptr_, *mu_ptr_, 3, epsilon_, penalty_factor_);
+         DenseMatrix M;
+         for (int e = 0; e < fes_->GetNE(); e++)
+         {
+            dom.AssembleElementMatrix(*fes_->GetFE(e), *fes_->GetElementTransformation(e), M);
+            sink.Element(e, M);
+         }
+         for (int f = 0; f < mesh_.GetNumFaces(); f++)
+         {
+            FaceElementTransformations *tr = mesh_.GetInteriorFaceTransformations(f);
+            if (!tr) { continue; }
+            face.AssembleFaceMatrix(*fes_->GetFE(tr->Elem1No), *fes_->GetFE(tr->Elem2No), *tr, M);
+            sink.InteriorFace(tr->Elem1No, tr->Elem2No, M);
+         }
+         if (dirichlet_bdr_marker_.Size() > 0)
+         {
+            for (int b = 0; b < fes_->GetNBE(); b++)
+            {
+               if (dirichlet_bdr_marker_[mesh_.GetBdrAttribute(b) - 1] == 0) { continue; }
+               FaceElementTransformations *tr = mesh_.GetBdrFaceTransformations(b);
+               if (!tr) { continue; }
+               const FiniteElement &fe = *fes_->GetFE(tr->Elem1No);
+               face.AssembleFaceMatrix(fe, fe, *tr, M);
+               sink.BdrFace(tr->Elem1No, M);
+            }
+         }
+         for (int sf = 0; sf < mesh_.GetNSharedFaces(); sf++)
+         {
+            FaceElementTransformations *tr = mesh_.GetSharedFaceTransformations(sf);
+            const int nbr = tr->Elem2No - mesh_.GetNE();
+            face.AssembleFaceMatrix(*fes_->GetFE(tr->Elem1No), *pfes->GetFaceNbrFE(nbr), *tr, M);
+            sink.SharedFace(tr->Elem1No, nbr, M);
+         }
+         return true;
+      }
+      else { return false; }
+   }
+
    /// Free the assembled K (and the serial form, if kept).  The next
    /// ApplyStiffness / Solve / ParStiffness assembles it again.
    void ReleaseStiffness()

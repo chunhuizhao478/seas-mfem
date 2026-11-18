@@ -774,6 +774,13 @@ public:
    /// the CSR products; when the blocks cannot be built (DenseBlockStiffness
    /// ::Init) the operator falls back to them.  Call before the first step.
    void SetDenseBlocks(bool on) { dense_enabled_ = on; dense_state_ = 0; }
+   /// Fill the dense blocks straight from the element and face matrices
+   /// instead of reading the assembled K and K_eta (off by default): the same
+   /// block entries, without the memory of the two assembled matrices at the
+   /// first time step.  Only with dense blocks on; when the direct fill is
+   /// refused the run stops (no silent fall back to the assembled matrices).
+   void SetDenseFillDirect(bool on) { dense_direct_ = on; dense_state_ = 0; }
+   bool DenseFillDirect() const { return dense_direct_; }
    /// True once the dense blocks are in use (after the first acceleration).
    bool DenseBlocksActive() const { return dense_state_ == 1; }
    /// Bytes of the dense blocks summed over the ranks (0 when not in use).
@@ -1070,10 +1077,29 @@ private:
          int ok = dense_enabled_ ? 1 : 0;
          if (ok)
          {
-            ok = dense_.Init(elast_->GetFESpace(), elast_->ParStiffness(),
-                             kv_ ? &kv_->ParStiffness() : nullptr) ? 1 : 0;
+            if (dense_direct_)
+            {
+               // blocks straight from the element and face matrices: K and
+               // K_eta are never assembled (SetDenseFillDirect)
+               using Sink = DenseBlockStiffness::DirectSink;
+               std::function<bool(Sink &)> vk = [this](Sink &s) {
+                  return elast_->VisitStiffnessMatrices(s);
+               };
+               std::function<bool(Sink &)> ve;
+               if (kv_) { ve = [this](Sink &s) { return kv_->VisitStiffnessMatrices(s); }; }
+               ok = dense_.InitDirect(elast_->GetFESpace(), vk, ve) ? 1 : 0;
+            }
+            else
+            {
+               ok = dense_.Init(elast_->GetFESpace(), elast_->ParStiffness(),
+                                kv_ ? &kv_->ParStiffness() : nullptr) ? 1 : 0;
+            }
          }
          MPI_Allreduce(MPI_IN_PLACE, &ok, 1, MPI_INT, MPI_MIN, mesh_.GetComm());
+         MFEM_VERIFY(ok || !(dense_enabled_ && dense_direct_), "dense fill 'direct': the blocks "
+                     "could not be filled from the element and face matrices on some rank "
+                     "(needs SIPG, one block size per element, symmetric matrices); use the "
+                     "default fill");
          dense_state_ = ok ? 1 : -1;
          if (ok)
          {
@@ -1569,6 +1595,7 @@ private:
    mutable FusedStiffnessPair fused_;
    mutable long long fused_extra_ = 0, fused_nnz_k_ = 0;
    bool dense_enabled_ = true;
+   bool dense_direct_ = false;   ///< SetDenseFillDirect
    mutable int dense_state_ = 0;   ///< 0 not tried, 1 dense blocks, -1 fused or CSR
    mutable DenseBlockStiffness dense_;
    mutable long long dense_bytes_ = 0;

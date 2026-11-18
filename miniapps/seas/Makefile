@@ -3291,6 +3291,23 @@ test-body-stations: seas_test_body_stations
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_body_stations
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 3 ./seas_test_body_stations
 
+# Direct fill of the dense stiffness blocks (DenseBlockStiffness::InitDirect,
+# Chunhui Zhao 2026-11-18): bitwise the blocks read from the assembled K, K_eta.
+TEST_DENSE_FILL_DIRECT_SRC = tests/unit/test_dense_fill_direct.cpp
+TEST_DENSE_FILL_DIRECT_OBJ = $(TEST_DENSE_FILL_DIRECT_SRC:.cpp=.o)
+$(TEST_DENSE_FILL_DIRECT_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+seas_test_dense_fill_direct: $(TEST_DENSE_FILL_DIRECT_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_DENSE_FILL_DIRECT_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-dense-fill-direct: seas_test_dense_fill_direct
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_dense_fill_direct
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_dense_fill_direct
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 3 ./seas_test_dense_fill_direct
+
 test-nitsche-tpv-setup: seas_test_nitsche_tpv_setup
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_tpv_setup
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_tpv_setup

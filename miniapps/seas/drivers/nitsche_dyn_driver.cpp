@@ -756,7 +756,8 @@ int main(int argc, char *argv[])
                       " [--station-every n] [--dump-every n] [--log-every n]"
                       " [--station-copies average|first] [--station-comm sub|world]"
                       " [--station-flush-every n] [--fast-fault 0|1]"
-                      " [--fused-spmv 0|1] [--dense-blocks 0|1] [--fault-weight w]"
+                      " [--fused-spmv 0|1] [--dense-blocks 0|1] [--dense-fill assembled|direct]"
+                      " [--fault-weight w]"
                       " [--fast-fault-output 0|1] [--paraview-fault-deflate-level n|none]"
                       " [--lts-report 0|1]"
                       " [--lts-report-cap n] [--lts-report-ranks a,b,...]"
@@ -804,6 +805,15 @@ int main(int argc, char *argv[])
    // item 8a (2026-10-18): K u (+ K_eta v) from dense element and face
    // blocks; takes precedence over --fused-spmv, which applies when it is 0
    const int dense_blocks = ArgInt(argc, argv, "--dense-blocks", 1);
+   // TPV34 p = 4 (Chunhui Zhao, 2026-11-18): --dense-fill direct fills the
+   // dense blocks straight from the element and face matrices, so K and K_eta
+   // are never assembled (the memory peak of the first time step); the block
+   // entries and the run are bitwise those of the default, "assembled".
+   const std::string dense_fill = ArgStr(argc, argv, "--dense-fill", "assembled");
+   MFEM_VERIFY(dense_fill == "assembled" || dense_fill == "direct", "--dense-fill '" << dense_fill
+               << "': expected assembled or direct");
+   MFEM_VERIFY(dense_fill == "assembled" || dense_blocks != 0, "--dense-fill direct needs dense "
+               "blocks (--dense-blocks 1, the default)");
    const int fast_fault_output = ArgInt(argc, argv, "--fast-fault-output", 1);
    // speed-next O1 (header, "Fault frame filter"): "" = the deck
    const std::string fault_deflate = ArgStr(argc, argv, "--paraview-fault-deflate-level", "");
@@ -858,6 +868,8 @@ int main(int argc, char *argv[])
    // the ranks that hold the serial mesh
    const bool smesh_here = !parts_load && (!mesh_rank0 || g_rank == 0);
    MFEM_VERIFY(!lts_same || lts_on, "--lts-same-step needs --lts rate2");
+   MFEM_VERIFY(!lts_on || dense_fill == "assembled", "--dense-fill direct: not with --lts rate2 "
+               "(the LTS cluster blocks are read from the assembled matrices)");
    MFEM_VERIFY(station_copies == "average" || station_copies == "first",
                "--station-copies " << station_copies << ": expected average or first");
    MFEM_VERIFY(station_comm == "sub" || station_comm == "world",
@@ -2360,6 +2372,7 @@ int main(int argc, char *argv[])
    op.SetFastFaultKernels(fast_fault != 0);
    op.SetFusedStiffness(fused_spmv != 0);
    op.SetDenseBlocks(dense_blocks != 0);
+   op.SetDenseFillDirect(dense_fill == "direct");
    CentralDifferenceSolver ode;
    std::unique_ptr<NitscheLtsRun> lts_run;
    if (lts_on)
@@ -2587,6 +2600,7 @@ int main(int argc, char *argv[])
          if (op.DenseBlocksActive())
          {
             std::cout << " (" << op.DenseBlockBytes() / 1e6 << " MB over all ranks)";
+            if (op.DenseFillDirect()) { std::cout << ", filled direct (no assembled K)"; }
          }
          std::cout << "\n";
       }

@@ -19,10 +19,12 @@
 #   3. the material table $WORK/tpv34_material/tpv34_cvmh_table.h5: sha256 against
 #      jobs/vista_nitsche/tables.sha256; the job stops if it differs
 #   4. unit tests: test-nitsche-tpv-setup (30/30), test-nitsche-table-material (13 and 10),
-#      test-body-stations (11 on 1, 2, 3 ranks)
+#      test-body-stations (11 on 1, 2, 3 ranks), test-dense-fill-direct (44 on 1, 2, 3 ranks)
 #   5. driver smoke: TPV34 1000 m p = 1 to 20 s on 8 ranks.  Mac reference (d0b287e7, its own 1000 m
 #      mesh, 234,727 tets): "14662 steps, t = 20.0009 s; max|V| 1.22367 m/s; max|V|dt/Dc 0.00927357".
 #      The Vista mesh can differ (gmsh output depends on the platform): compare numbers, not bytes.
+#   5b. dense-fill pair: TPV34 1000 m p = 2 to 0.5 s on 8 ranks, once with the default fill and once
+#      with --dense-fill direct; every station, off-fault and rupture-time file must be bitwise equal
 #   6. 200 m load check: p = 2 on 144 ranks, tfinal 0.003 s: tets, dt, steps to 20 s for p = 2.  On
 #      one node this checks only the driver's setup (the TPV31 one ran out of memory after it, job
 #      1083417); it counts as failed only when there is no dt line.
@@ -67,7 +69,7 @@ grep -q "^$TSHA  $(basename "$TABLE")\$" jobs/vista_nitsche/tables.sha256 \
 echo "material table $TABLE sha256 $TSHA"
 FAIL=0
 echo "=== unit tests ==="
-for t in test-nitsche-tpv-setup test-nitsche-table-material test-body-stations; do
+for t in test-nitsche-tpv-setup test-nitsche-table-material test-body-stations test-dense-fill-direct; do
    s=$(date +%s); make MFEM_DIR=../.. HDF5_DIR="$TACC_PHDF5_DIR" SEAS_FS_LIB= $t > ${t}_$SLURM_JOB_ID.log 2>&1; rc=$?
    nf=$(grep -a -v echo ${t}_$SLURM_JOB_ID.log | grep -a -c FAILED)
    echo "$t exit $rc in $(( $(date +%s) - s )) s: PASSED $(grep -a -v echo ${t}_$SLURM_JOB_ID.log | grep -a -c PASSED), FAILED $nf"
@@ -83,6 +85,24 @@ echo "driver exit $? in $(( $(date +%s) - s )) s"; grep -a "=== done" $OUT/drive
 grep -a "material:\|table box\|off-fault stations" $OUT/driver.log
 echo "off-fault station files: $(ls $OUT/*_offfault_*.dat 2>/dev/null | wc -l) (56 expected)"
 echo "Mac reference (d0b287e7): 14662 steps, t = 20.0009 s; max|V| 1.22367 m/s; max|V|dt/Dc 0.00927357"
+echo "=== dense-fill pair: TPV34 1000 m p=2 0.5 s, 8 ranks, assembled vs direct ==="
+for f in assembled direct; do
+   OUT=$SCRATCH/nitsche_benchmarks/verify_tpv34_fill_${f}_$SLURM_JOB_ID; mkdir -p $OUT
+   s=$(date +%s)
+   ibrun -n 8 -o 0 ./seas_nitsche_dyn_driver --config tpv34/configs/tpv34_nitsche.toml \
+      --mesh tpv34/mesh/tpv34_nitsche_1000m.msh --order 2 --tfinal 0.5 --material-table "$TABLE" \
+      --output-dir $OUT --log-every 1000 --dense-fill $f > $OUT/driver.log 2>&1
+   echo "$f: driver exit $? in $(( $(date +%s) - s )) s"; grep -a "=== done" $OUT/driver.log || FAIL=$((FAIL + 1))
+   grep -a -o "step 1 [0-9.e+-]* s (with the operator assembly).*" $OUT/driver.log
+done
+A=$SCRATCH/nitsche_benchmarks/verify_tpv34_fill_assembled_$SLURM_JOB_ID
+B=$SCRATCH/nitsche_benchmarks/verify_tpv34_fill_direct_$SLURM_JOB_ID
+nfile=0; ndiff=0
+for f in $A/*.dat $A/*_rupture_time_r*.csv; do
+   nfile=$((nfile + 1)); cmp -s "$f" "$B/$(basename "$f")" || { ndiff=$((ndiff + 1)); echo "DIFFERS: $(basename "$f")"; }
+done
+echo "dense-fill pair: $nfile files compared, $ndiff differ (0 expected)"
+[ $nfile -gt 0 ] && [ $ndiff -eq 0 ] || FAIL=$((FAIL + 1))
 echo "=== load check: TPV34 200 m p=2, 144 ranks, tfinal 0.003 s ==="
 OUT=$SCRATCH/nitsche_benchmarks/loadcheck_tpv34_p2_$SLURM_JOB_ID; mkdir -p $OUT
 ( while :; do echo "$(date +%s) $(awk '/^MemTotal|^MemAvailable/{print $2}' /proc/meminfo | tr '\n' ' ')"; sleep 2; done ) > $OUT/meminfo_kB.log &
