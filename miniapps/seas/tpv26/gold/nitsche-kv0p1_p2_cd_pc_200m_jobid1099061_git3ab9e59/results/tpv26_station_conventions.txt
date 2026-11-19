@@ -1,0 +1,11 @@
+# Nitsche dynamic-rupture station conventions (spec I3)
+# frame: nhat = pin reference normal (0, -1, 0), up = (0, 0, 1)
+#        shat = up x nhat / |up x nhat| = (1, 0, -0), dhat = shat x nhat = (0, -0, -1)
+# pin: orientation propagated, pinned by the reference normal; plus side = side nhat points into
+# columns: t slip1 slip2 V1 V2 tau1 tau2 sigma_n slip_path
+#   slip1 = delta.dhat (SCEC v-slip)      slip2 = delta.shat (SCEC h-slip)
+#   V1    = V.dhat     (SCEC v-slip-rate) V2    = V.shat     (SCEC h-slip-rate)
+#   tau1  = -T.dhat    (SCEC v-shear-stress, Pa)  tau2 = -T.shat (SCEC h-shear-stress, Pa)
+#   sigma_n = -T.nhat (compression positive, Pa); T = total traction on the face with normal nhat
+#   delta = u(+) - u(-), V = d delta/dt (SCEC slip definition)
+#   slip_path: accumulated slip path (m)

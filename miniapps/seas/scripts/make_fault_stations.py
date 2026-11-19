@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Write the on-fault station files read by the Nitsche dynamic-rupture driver.
 
-One CSV per problem, <problem>/stations/<problem>_fault_stations.csv:
+One CSV per problem, <problem>/stations/<problem>_fault_stations.csv (and
+for TPV26/27 also <problem>/stations/<problem>_off_fault_stations.csv, the
+surface stations of [output.off_fault_stations], same format):
 
     # comment lines start with '#'
     name,x,y,z
@@ -30,7 +32,10 @@ The positions are the on-fault station lists of the benchmark descriptions:
   tpv31   TPV31_32_Description_v03.pdf, on-fault stations (thirty points:
           strike 0, 6, 12 km at ten depths; the same positions as the
           SeisSol and EQdyna files in tpv31/benchmark_data/)
-TPV104, TPV205, TPV6, TPV7 and TPV31 stations are named like the SCEC
+  tpv26   TPV26_27_Description_v13.pdf, Part 8 (twelve points; the same
+          positions as the DRDG3D files in tpv26/ and tpv27/benchmark_data/;
+          TPV27 uses this file too)
+TPV104, TPV205, TPV6, TPV7, TPV31 and TPV26 stations are named like the SCEC
 reference files (x2_<strike km>_x3_<depth km>).
 
 Usage (from miniapps/seas):
@@ -49,9 +54,15 @@ Off-fault stations ([output.body_stations]) go to
           body<normal>st<strike>dp<depth>, units of 100 m.  The description's
           z (fault normal, positive on the far side) is the mesh Y.
 
+Off-fault surface stations ([output.off_fault_stations]) go to
+<problem>/stations/<problem>_off_fault_stations.csv, same columns:
+  tpv26   TPV26_27_Description_v13.pdf, Part 9 (six surface points),
+          named body<normal>st<strike>dp000 (units of 100 m); TPV27 uses it too.
+
 Scope: Chunhui Zhao, 2026-10-16 (TPV205/TPV104 plan rev 1.3, decision Q4); TPV6, TPV7
 and TPV31 added 2026-10-19 (TPV6/TPV7/TPV31 plan rev 1); TPV34 and the off-fault
-files added 2026-11-12 (TPV34 plan rev 2).
+files added 2026-11-12 (TPV34 plan rev 2); TPV26 and its
+off-fault file 2026-10-20 (rheology plan rev 1, phase R0).
 """
 import argparse
 import os
@@ -73,6 +84,17 @@ _TPV34_BODY = [(n, s, d)
                                   (3, (-20, -10, 0, 10, 20)), (9, (-20, -10, 0, 10, 20)),
                                   (15, (-15, 0, 15)))
                for s in strikes for d in (0, 2.4)]
+_TPV26_POINTS = [(-15, 10), (-5, 0), (-5, 5), (-5, 10), (-5, 15), (0, 10), (5, 10),
+                 (10, 10), (15, 0), (15, 5), (15, 10), (15, 15)]
+# TPV26/27 Part 9: (fault-normal km, strike km) on the surface; + = far side = +Y
+_TPV26_OFF_POINTS = [(3, -5), (-3, -5), (3, 5), (-3, 5), (3, 15), (-3, 15)]
+
+
+def body_name_surface(n, s):
+    """TPV26/27 off-fault names: body<normal x10, 3 digits>st<strike x10, 3 digits>dp000."""
+    def f(v):
+        return ("-" if v < 0 else "") + f"{round(abs(v) * 10):03d}"
+    return f"body{f(n)}st{f(s)}dp000"
 
 
 def _km(v):
@@ -113,6 +135,7 @@ PROBLEMS = {
     "tpv7": ("SCEC TPV7 on-fault stations", [(scec_name(s, d), s, d) for s, d in _TPV6_POINTS]),
     "tpv31": ("SCEC TPV31 on-fault stations", [(scec_name(s, d), s, d) for s, d in _TPV31_POINTS]),
     "tpv34": ("SCEC TPV34 on-fault stations", [(faultst_name(s, d), s, d) for s, d in _TPV34_POINTS]),
+    "tpv26": ("SCEC TPV26/TPV27 on-fault stations", [(scec_name(s, d), s, d) for s, d in _TPV26_POINTS]),
 }
 
 # Off-fault stations: (name, strike km, fault normal km, depth km).
@@ -151,6 +174,28 @@ def target(root, problem, kind="fault"):
     return os.path.join(root, problem, "stations", f"{problem}_{kind}_stations.csv")
 
 
+# off-fault surface stations ([output.off_fault_stations], TPV26/27 writer):
+# problem -> (title, [(name, strike km, normal km)])
+OFF_FAULT = {
+    "tpv26": ("SCEC TPV26/TPV27 off-fault surface stations",
+              [(body_name_surface(n, s), s, n) for n, s in _TPV26_OFF_POINTS]),
+}
+
+
+def render_off(problem):
+    title, rows = OFF_FAULT[problem]
+    out = [f"# {title}, written by scripts/make_fault_stations.py; do not edit by hand.",
+           "# Global frame of the mesh: X along strike, Y fault normal (+ = far side), Z up (m).",
+           "name,x,y,z"]
+    for name, s, n in rows:
+        out.append(f"{name},{_num(1000.0 * s)},{_num(1000.0 * n)},{_num(0.0)}")
+    return "\n".join(out) + "\n"
+
+
+def target_off(root, problem):
+    return os.path.join(root, problem, "stations", f"{problem}_off_fault_stations.csv")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("problems", nargs="*", default=sorted(PROBLEMS))
@@ -165,6 +210,9 @@ def main():
         if p in BODY:
             files.append((os.path.normpath(target(a.out_root, p, "body")), render_body(p),
                           len(BODY[p][1])))
+        if p in OFF_FAULT:
+            files.append((os.path.normpath(target_off(a.out_root, p)), render_off(p),
+                          len(OFF_FAULT[p][1])))
         for path, text, count in files:
             if a.check:
                 same = os.path.exists(path) and open(path).read() == text

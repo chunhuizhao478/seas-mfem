@@ -11,7 +11,8 @@
 # Runs only from a clean pushed checkout (repo CLAUDE.md guard) whose driver was built at
 # the same commit (build_verify_vista.sbatch writes miniapps/seas/BUILD_COMMIT_VISTA) and
 # whose mesh checksum is in MESH_SHA256_VISTA or MESH_SHA256_MIRROR_VISTA (meshes made on Vista by
-# build_verify_vista.sbatch and make_mirror_meshes_vista.sbatch) or jobs/vista_nitsche/meshes.sha256
+# build_verify_vista.sbatch and make_mirror_meshes_vista.sbatch), MESH_SHA256_TPV2627_VISTA (the
+# TPV26/27 meshes of jobs/vista_rheology/build_tpv2627_vista.sbatch) or jobs/vista_nitsche/meshes.sha256
 # (meshes copied in).  Every log records the commit and the mesh sha256.
 export LC_ALL=C LANG=C
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1      # one thread per MPI rank
@@ -39,8 +40,9 @@ echo "host $(hostname)  nodes $SLURM_JOB_NUM_NODES  ranks $SLURM_NTASKS"
    || { echo "ERROR: driver built at '$(cat BUILD_COMMIT_VISTA 2>/dev/null)', checkout is $HEAD; rerun build_verify_vista.sbatch"; exit 2; }
 [ -f "$MESH" ] || { echo "ERROR: $MESH missing; build_verify_vista.sbatch generates the 200 m meshes and the TPV6 100 m one, make_mirror_meshes_vista.sbatch the mirror ones, the TPV205 and TPV104 100 m ones are copied in"; exit 2; }
 SHA=$(sha256sum "$MESH" | cut -d' ' -f1)
-grep -q "^$SHA  $MESH\$" MESH_SHA256_VISTA MESH_SHA256_MIRROR_VISTA MESH_SHA256_TPV34_VISTA jobs/vista_nitsche/meshes.sha256 2>/dev/null \
-   || { echo "ERROR: $MESH sha256 $SHA not in MESH_SHA256_VISTA, MESH_SHA256_MIRROR_VISTA, MESH_SHA256_TPV34_VISTA or jobs/vista_nitsche/meshes.sha256"; exit 2; }
+grep -q "^$SHA  $MESH\$" MESH_SHA256_VISTA MESH_SHA256_MIRROR_VISTA MESH_SHA256_TPV34_VISTA MESH_SHA256_TPV2627_VISTA \
+     jobs/vista_nitsche/meshes.sha256 2>/dev/null \
+   || { echo "ERROR: $MESH sha256 $SHA not in MESH_SHA256_VISTA, MESH_SHA256_MIRROR_VISTA, MESH_SHA256_TPV34_VISTA, MESH_SHA256_TPV2627_VISTA or jobs/vista_nitsche/meshes.sha256"; exit 2; }
 echo "deck $DECK  mesh $MESH sha256 $SHA  order $ORDER  tfinal $TFINAL${DRIVER_ARGS:+  driver args: $DRIVER_ARGS}"
 TABLE_ARGS=""
 if [ -n "$TABLE" ]; then
