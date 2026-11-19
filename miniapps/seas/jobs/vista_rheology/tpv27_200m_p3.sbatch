@@ -3,8 +3,8 @@
 #SBATCH -o tpv27_mirror_200m_p3_%j.out
 #SBATCH -e tpv27_mirror_200m_p3_%j.err
 #SBATCH -p gg
-#SBATCH -N 36
-#SBATCH -n 4608
+#SBATCH -N 32
+#SBATCH -n 4096
 #SBATCH -t 04:00:00
 #SBATCH -A EAR24034
 #SBATCH --exclude=i617-131
@@ -13,14 +13,16 @@
 # several stations from p = 1 to p = 2.  Same deck (tpv27/configs/tpv27_nitsche_kv0p1.toml: the plastic
 # state at the 10 nodes of degree 2 in each tet), mesh and output as tpv27_200m_p2.sbatch, 0 -> 13.0 s.
 # Submit from miniapps/seas/jobs/vista_rheology/ AFTER build_tpv2627_vista.sbatch passed at this commit.
-# Layout: 36 nodes x 128 ranks (83.3 k tets per node).  Memory: the step-1 operator assembly peaks at about
-# 0.968 MiB per tet at p = 3 (cloud VmData; TPV31 p = 3 on Vista at 127 k tets per node peaked at 115.2 GiB
-# committed), so about 79 GiB plus the rank-0 mesh setup's ~18 GiB, about 97 GiB per node, under the 118.8 GiB
-# limit (24 nodes would need about 137 GiB).  The plastic state (7 values at 10 nodes per tet) adds 1.7 GB in all.
+# Layout: 32 nodes x 128 ranks (93.7 k tets per node); 32 is the most the gg partition's QOS allows per job
+# (qgg MaxTRES node=32; 36 was refused with QOSMaxNodePerJobLimit on 2026-11-18).  Memory: TPV31 p = 3 on Vista
+# (1096106, 126.9 k tets per node) committed 94.5 GiB of its own at the step-1 operator assembly, 18.3 of it the
+# rank-0 mesh setup, so about 0.60 MiB per tet: about 56 + 18 = 74 GiB per node here.  The cloud-measured
+# 0.968 MiB per tet gives the upper bound 89 + 18 = 107 GiB, still under the 118.8 GiB limit.  The plastic
+# state (7 values at 10 nodes per tet) adds 1.7 GB in all.
 # Estimate: dt scales by C(3)/9 / (C(2)/4) = 0.591, so about 203,000 steps; p = 3 costs 2.77 x p = 2 per
 # step at the same layout (TPV31 1096106 vs 1096105) and TPV27 p = 2 ran 17.1 ms/step on 24 nodes, so about
-# 32 ms/step on 36 nodes and 1.8 h, 36 nodes x 2 h x 0.33 = 24 SU expected.  Requested: 36 nodes x 4 h x
-# 0.33 SU = 47.5 SU at most, on EAR24034 (the p = 3 account).
+# 36 ms/step on 32 nodes and 2.0 h, 32 nodes x 2.1 h x 0.33 = 22 SU expected.  Requested: 32 nodes x 4 h x
+# 0.33 SU = 42.2 SU at most, on EAR24034 (the p = 3 account).
 PROB=tpv27
 RES=mirror200m
 DECK=tpv27/configs/tpv27_nitsche_kv0p1.toml
