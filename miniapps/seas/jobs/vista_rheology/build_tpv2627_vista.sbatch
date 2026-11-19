@@ -67,7 +67,7 @@ rc=$?; echo "build_vista.sh exit $rc after $(( $(date +%s) - T0 )) s"; tail -5 b
 [ $rc -eq 0 ] || exit $rc
 module purge; module load TACC
 module swap nvidia gcc/14.2.0 2>/dev/null || module load gcc/14.2.0
-module load cuda/12.6 openmpi/5.0.5 hypre/2.31.0 metis/5.1.0.3 phdf5/1.14.6 gmsh/4.15.0
+module load openmpi/5.0.11 hypre/2.31.0 metis/5.1.0.3 phdf5/1.14.6 gmsh/4.15.0
 cd miniapps/seas
 MK="make MFEM_DIR=../.. HDF5_DIR=$TACC_PHDF5_DIR SEAS_FS_LIB="
 $MK -j64 seas_test_nitsche_lts seas_test_rheology_pointwise seas_test_rheology_initial_stress \

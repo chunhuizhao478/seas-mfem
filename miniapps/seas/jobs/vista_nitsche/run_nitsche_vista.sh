@@ -40,7 +40,7 @@ grep -q "^$SHA  $MESH\$" MESH_SHA256_VISTA MESH_SHA256_MIRROR_VISTA MESH_SHA256_
 echo "deck $DECK  mesh $MESH sha256 $SHA  order $ORDER  tfinal $TFINAL"
 module purge; module load TACC
 module swap nvidia gcc/14.2.0 2>/dev/null || module load gcc/14.2.0
-module load cuda/12.6 openmpi/5.0.5 hypre/2.31.0 metis/5.1.0.3 phdf5/1.14.6
+module load openmpi/5.0.11 hypre/2.31.0 metis/5.1.0.3 phdf5/1.14.6
 echo "modules: $(module -t list 2>&1 | tr '\n' ' ')"
 OUT=$SCRATCH/nitsche_benchmarks/${PROB}_${RES:-200m}_p${ORDER}_$SLURM_JOB_ID
 mkdir -p $OUT
