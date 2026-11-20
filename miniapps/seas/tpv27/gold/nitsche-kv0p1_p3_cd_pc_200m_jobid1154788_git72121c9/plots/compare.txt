@@ -1,0 +1,68 @@
+# stations tpv26/stations/tpv26_fault_stations.csv; t_end 11.99969959259 s; noise: 0.1 s centred moving average, from arrival + 0.5 s
+station          source          arrival   peak V     slip     state  sn rms  th rms  tv rms   misfit vs DRDG3D
+x2_-15_x3_10     p1               3.6010    2.085   2.3784    2.3785   0.003   0.002   0.009   dt -0.545 s  slip  -1.23%  peak  -19.2%
+x2_-15_x3_10     p2               4.1194    2.551   2.3851    2.3852   0.003   0.000   0.007   dt -0.026 s  slip  -0.95%  peak   -1.2%
+x2_-15_x3_10     p3               4.1624    2.641   2.3942    2.3943   0.001   0.000   0.003   dt +0.017 s  slip  -0.57%  peak   +2.3%
+x2_-15_x3_10     DRDG3D           4.1458    2.582   2.4080       nan   0.003   0.000   0.002
+x2_-5_x3_0       p1                  nan    0.000   0.0000    0.0000     nan     nan     nan   neither side passes 1 mm/s
+x2_-5_x3_0       p2                  nan    0.000   0.0000    0.0000     nan     nan     nan   neither side passes 1 mm/s
+x2_-5_x3_0       p3                  nan    0.000   0.0000    0.0000     nan     nan     nan   neither side passes 1 mm/s
+x2_-5_x3_0       DRDG3D              nan    0.000   0.0000       nan     nan     nan     nan
+x2_-5_x3_5       p1               2.4490    0.775   2.4202    2.4202   0.001   0.007   0.003   dt -0.058 s  slip  -1.75%  peak   +6.5%
+x2_-5_x3_5       p2               2.5310    0.748   2.4547    2.4548   0.000   0.003   0.002   dt +0.024 s  slip  -0.35%  peak   +2.9%
+x2_-5_x3_5       p3               2.5499    0.738   2.4562    2.4562   0.000   0.003   0.001   dt +0.043 s  slip  -0.29%  peak   +1.5%
+x2_-5_x3_5       DRDG3D           2.5066    0.727   2.4634       nan   0.001   0.004   0.001
+x2_-5_x3_10      p1               0.2073    0.588   3.1317    3.1317   0.001   0.000   0.010   dt -0.020 s  slip  -1.08%  peak   +8.6%
+x2_-5_x3_10      p2               0.2077    0.548   3.1536    3.1536   0.001   0.000   0.008   dt -0.020 s  slip  -0.38%  peak   +1.1%
+x2_-5_x3_10      p3               0.2079    0.540   3.1555    3.1555   0.000   0.000   0.005   dt -0.020 s  slip  -0.32%  peak   -0.3%
+x2_-5_x3_10      DRDG3D           0.2276    0.542   3.1657       nan   0.001   0.000   0.002
+x2_-5_x3_15      p1               2.3093    3.135   2.2367    2.2367   0.001   0.001   0.025   dt -0.108 s  slip  -0.46%  peak  -14.1%
+x2_-5_x3_15      p2               2.3539    3.925   2.2423    2.2423   0.001   0.000   0.018   dt -0.064 s  slip  -0.21%  peak   +7.6%
+x2_-5_x3_15      p3               2.4008    3.946   2.2343    2.2343   0.001   0.000   0.013   dt -0.017 s  slip  -0.57%  peak   +8.2%
+x2_-5_x3_15      DRDG3D           2.4174    3.647   2.2470       nan   0.004   0.000   0.004
+x2_0_x3_10       p1               2.1157    1.595   3.2382    3.2382   0.002   0.000   0.006   dt -0.216 s  slip  +1.48%  peak   -4.8%
+x2_0_x3_10       p2               2.3199    1.728   3.1937    3.1937   0.001   0.000   0.005   dt -0.011 s  slip  +0.08%  peak   +3.2%
+x2_0_x3_10       p3               2.3546    1.725   3.1872    3.1872   0.000   0.000   0.003   dt +0.023 s  slip  -0.12%  peak   +3.0%
+x2_0_x3_10       DRDG3D           2.3313    1.674   3.1910       nan   0.002   0.000   0.002
+x2_5_x3_10       p1               3.6702    2.029   3.1360    3.1361   0.004   0.000   0.008   dt -0.475 s  slip  +1.16%  peak  -21.1%
+x2_5_x3_10       p2               4.1180    2.511   3.1019    3.1019   0.002   0.000   0.005   dt -0.027 s  slip  +0.06%  peak   -2.4%
+x2_5_x3_10       p3               4.1642    2.636   3.0962    3.0962   0.001   0.000   0.003   dt +0.019 s  slip  -0.12%  peak   +2.5%
+x2_5_x3_10       DRDG3D           4.1448    2.571   3.1000       nan   0.003   0.000   0.002
+x2_10_x3_10      p1               5.2556    2.140   2.9126    2.9127   0.004   0.000   0.013   dt -0.615 s  slip  +1.19%  peak  -24.1%
+x2_10_x3_10      p2               5.7553    2.777   2.8774    2.8774   0.005   0.001   0.008   dt -0.115 s  slip  -0.03%  peak   -1.6%
+x2_10_x3_10      p3               5.8355    2.887   2.8717    2.8717   0.002   0.000   0.003   dt -0.035 s  slip  -0.23%  peak   +2.3%
+x2_10_x3_10      DRDG3D           5.8702    2.821   2.8784       nan   0.003   0.000   0.002
+x2_15_x3_0       p1                  nan    0.000   0.0000    0.0000     nan     nan     nan   neither side passes 1 mm/s
+x2_15_x3_0       p2                  nan    0.000   0.0000    0.0000     nan     nan     nan   neither side passes 1 mm/s
+x2_15_x3_0       p3                  nan    0.000   0.0000    0.0000     nan     nan     nan   neither side passes 1 mm/s
+x2_15_x3_0       DRDG3D              nan    0.000   0.0000       nan     nan     nan     nan
+x2_15_x3_5       p1               7.3018    1.352   1.9207    1.9209   0.002   0.001   0.006   dt -0.591 s  slip  +0.59%  peak   -3.8%
+x2_15_x3_5       p2               7.8522    1.448   1.9066    1.9069   0.002   0.000   0.003   dt -0.041 s  slip  -0.15%  peak   +2.9%
+x2_15_x3_5       p3               7.8970    1.434   1.9026    1.9028   0.001   0.000   0.002   dt +0.004 s  slip  -0.36%  peak   +1.9%
+x2_15_x3_5       DRDG3D           7.8928    1.406   1.9094       nan   0.002   0.000   0.001
+x2_15_x3_10      p1               6.9212    2.360   2.4355    2.4355   0.008   0.001   0.009   dt -0.656 s  slip  -0.88%  peak  -19.8%
+x2_15_x3_10      p2               7.5344    2.857   2.4444    2.4444   0.004   0.001   0.009   dt -0.043 s  slip  -0.52%  peak   -2.9%
+x2_15_x3_10      p3               7.5951    2.990   2.4456    2.4456   0.002   0.000   0.005   dt +0.018 s  slip  -0.47%  peak   +1.7%
+x2_15_x3_10      DRDG3D           7.5771    2.941   2.4570       nan   0.005   0.001   0.004
+x2_15_x3_15      p1               7.0289    3.032   1.7835    1.7837   0.006   0.008   0.029   dt -0.710 s  slip  +3.24%  peak  -21.3%
+x2_15_x3_15      p2               7.6676    4.051   1.7430    1.7430   0.007   0.004   0.018   dt -0.071 s  slip  +0.90%  peak   +5.1%
+x2_15_x3_15      p3               7.7539    4.452   1.7289    1.7289   0.003   0.006   0.018   dt +0.015 s  slip  +0.08%  peak  +15.5%
+x2_15_x3_15      DRDG3D           7.7391    3.854   1.7275       nan   0.010   0.003   0.008
+
+# median noise RMS over stations (MPa)
+p1             sn 0.003  th 0.001  tv 0.009
+p2             sn 0.002  th 0.000  tv 0.007
+p3             sn 0.001  th 0.000  tv 0.003
+DRDG3D         sn 0.003  th 0.000  tv 0.002
+
+# median |misfit| vs DRDG3D along the run order (pass item 4)
+p1             arrival 0.5097 s  slip 1.17%  peak 16.64%
+p2             arrival 0.0337 s  slip 0.28%  peak 2.89%
+p3             arrival 0.0187 s  slip 0.31%  peak 2.31%
+
+# pass test for run p3 against DRDG3D
+  1 arrival within 0.1 s at every station: PASS
+  2 slip within 2% where ref slip > 0.1 m: PASS
+  3 peak within 10% at 11 of 12 stations
+  4 medians shrink along the run order: FAIL
+# wrote /Users/chunhuizhao/projects/seas-mfem-nitsche-results/tpv27_200m/p123_6e35a58/compare_summary.json
