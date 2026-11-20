@@ -1,0 +1,7 @@
+# SCEC TPV205 (TPV5) off-fault stations, written by scripts/make_fault_stations.py; do not edit by hand.
+# Global frame of the mesh: X along strike, Y fault normal, Z up (m); fault on Y = 0.
+name,x,y,z
+body030st-120dp000,-12000,3000,0
+body030st120dp000,12000,3000,0
+body030st-120dp075,-12000,3000,-7500
+body030st120dp075,12000,3000,-7500

@@ -121,7 +121,7 @@ PROBLEMS = {
 UPLOAD_LIMIT = 10e6   # "about 10 MB" per file (TPV205 description)
 
 
-def rows(path):
+def rows(path, allow_empty=False):
     out = []
     with open(path) as f:
         for ln in f:
@@ -130,6 +130,8 @@ def rows(path):
                 continue
             out.append([float(c) for c in s.split()])
     if not out:
+        if allow_empty:
+            return out
         sys.exit(f"export_scec: {path}: no data rows")
     n = len(out[0])
     if any(len(r) != n for r in out):
@@ -210,12 +212,16 @@ def write(path, lines):
         f.write("\n".join(lines) + "\n")
 
 
+# fault tag of our station name -> the SCEC station-name stem (TPV14_15_Description_v08.pdf,
+# TPV22_23_Description_v08.pdf); an unknown tag aborts
+_TAG_STEM = {"main": "fault", "branch": "branch", "fault1": "fault1", "fault2": "fault2"}
 _NAME = re.compile(r"^(?:([A-Za-z]+[0-9]*)_)?x2_(-?[0-9.]+)_x3_(-?[0-9.]+)$")
 
 
 def scec_station(name):
-    """x2_<s>_x3_<d> -> faultst<s x10>dp<d x10> (the TPV26/34 form); a fault tag stays as
-    a prefix (main_, fault2_ ...).  flt_ (TPV102) names: the same.  Else the name."""
+    """x2_<s>_x3_<d> -> faultst<s x10>dp<d x10> (the TPV26/34 form); a fault tag picks the
+    descriptions' prefix (TPV15 main_ -> faultst, branch_ -> branchst; TPV22 fault1_ ->
+    fault1st, fault2_ -> fault2st).  flt_ (TPV102) names: the same.  Else the name."""
     m = _NAME.match(name)
     s = d = tag = None
     if m:
@@ -231,7 +237,10 @@ def scec_station(name):
     def f(v, signed=True):
         return ("-" if (signed and v < 0) else "") + f"{round(abs(v) * 10):03d}"
     loc = f"on fault, {s:g} km along strike, {d:g} km down-dip" + (f" ({tag})" if tag else "")
-    return (f"{tag}_" if tag else "") + f"faultst{f(s)}dp{f(d, False)}", loc
+    if tag and tag not in _TAG_STEM:
+        sys.exit(f"export_scec: station {name}: unknown fault tag {tag!r} (known: {', '.join(_TAG_STEM)})")
+    stem = _TAG_STEM[tag] if tag else "fault"
+    return f"{stem}st{f(s)}dp{f(d, False)}", loc
 
 
 def on_fault(a, fields, per_side, nsign):
@@ -320,7 +329,8 @@ def cplot(a, problem):
     nodes = {}
     ndof = 0
     for p in paths:
-        for r in rows(p):
+        # a rank that owns no fault DOF writes the header line only
+        for r in rows(p, allow_empty=True):
             if len(r) != 4:
                 sys.exit(f"export_scec: {p}: expected 'x y z t_rupture'")
             ndof += 1
@@ -330,6 +340,8 @@ def cplot(a, problem):
                 nodes[key][3] = min(nodes[key][3], t)
             else:
                 nodes[key] = list(r[:3]) + [t]
+    if not nodes:
+        sys.exit(f"export_scec: no data rows in any of the {len(paths)} rupture-time files")
     fr = frames(problem)
     per = {f: [] for f in fr}
     worst = 0.0

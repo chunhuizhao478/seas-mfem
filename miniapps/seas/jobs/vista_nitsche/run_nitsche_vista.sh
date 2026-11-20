@@ -1,7 +1,7 @@
 #!/bin/bash
 # Shared body of the Vista benchmark jobs (Chunhui Zhao, 2026-10-16).  Sourced by
 # tpv{205,104}_200m_p{1,2,3}.sbatch, tpv102_200m_p3.sbatch, tpv{205,104}_100m_p1.sbatch,
-# tpv{205,104}_mirror_*.sbatch, tpv{6,7}_100m_p{1,2,3}.sbatch, tpv31_200m_p{1,2,3}.sbatch and
+# tpv{205,104}_mirror_*.sbatch, tpv{6,7}_100m_p{1,2,3}.sbatch, tpv31_200m_p{1,2,3,4}.sbatch, tpv104_200m_p4.sbatch and
 # tpv34_200m_p{1,2,3,4}.sbatch and tpv34_200m_p3_check.sbatch, which set PROB, DECK, MESH, ORDER, TFINAL and RES (default 200m).
 # TPV34 also sets TABLE, the 3-D material table (not in the repository: 444 MB): the job passes it
 # as --material-table and runs only when its sha256 is in jobs/vista_nitsche/tables.sha256.

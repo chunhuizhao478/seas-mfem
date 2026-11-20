@@ -166,6 +166,18 @@ paraview_free_surface  = "off"
 file             = "tpv31/stations/tpv31_fault_stations.csv"
 snap_tolerance_m = 700.0
 
+# Off-fault stations (SCEC submission runs, Chunhui Zhao, 2026-11-20):
+# TPV31_32_Description_v03.pdf Part 6, eighteen points (six
+# boreholes at 0, 0.5 and 2.4 km depth).
+# Components in the description's frame: h along strike (+X), v vertical,
+# positive down (-Z), n horizontal fault normal toward the far side (+Y).
+# Rows every step (--station-every); scripts/export_scec.py thins them.
+[output.body_stations]
+file   = "tpv31/stations/tpv31_body_stations.csv"
+h_axis = [1.0, 0.0,  0.0]
+v_axis = [0.0, 0.0, -1.0]
+n_axis = [0.0, 1.0,  0.0]
+
 [friction.slip_weakening]
 mu_s_default     = 0.58
 mu_d_default     = 0.45

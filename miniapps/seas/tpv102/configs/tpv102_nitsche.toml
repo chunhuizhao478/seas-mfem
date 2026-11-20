@@ -107,6 +107,17 @@ paraview_free_surface  = "off"   # the Nitsche driver writes no free-surface sli
 file             = "tpv102/stations/tpv102_fault_stations.csv"
 snap_tolerance_m = 700.0
 
+# Off-fault stations (SCEC submission runs, Chunhui Zhao, 2026-11-20):
+# the six free-surface points of SCEC_validation_ageing_law.pdf.
+# Components in the description's frame: h along strike (+X), v vertical,
+# positive down (-Z), n horizontal fault normal toward the far side (+Y).
+# Rows every step (--station-every); scripts/export_scec.py thins them.
+[output.body_stations]
+file   = "tpv102/stations/tpv102_body_stations.csv"
+h_axis = [1.0, 0.0,  0.0]
+v_axis = [0.0, 0.0, -1.0]
+n_axis = [0.0, 1.0,  0.0]
+
 # Rate-and-state, aging law (native TPV102Params).
 #   VW core a = 0.008, VS border a = 0.016 (boxcar_taper rule),
 #   b = 0.012, Dc(L) = 0.02 m, f_0 = 0.6, V_0 = 1e-6, V_init = 1e-12.

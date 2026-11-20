@@ -150,6 +150,18 @@ snap_tolerance_m = 700.0
 # At 200 m, p = 2 and 3, dt_F is 143 and 84 us, so every step is still written.
 dt               = "1e-4s"
 
+# Off-fault stations (SCEC submission runs, Chunhui Zhao, 2026-11-20):
+# TPV12_13_Description_v6.pdf Part 8, twelve points; the normal
+# distance is horizontal (scripts/make_fault_stations.py).
+# Components in the description's frame: h along strike (+X), v vertical,
+# positive down (-Z), n horizontal fault normal toward the far side (+Y).
+# Rows every step (--station-every); scripts/export_scec.py thins them.
+[output.body_stations]
+file   = "tpv12/stations/tpv12_body_stations.csv"
+h_axis = [1.0, 0.0,  0.0]
+v_axis = [0.0, 0.0, -1.0]
+n_axis = [0.0, 1.0,  0.0]
+
 # Linear slip weakening: mu = mu_s - (mu_s - mu_d) min(slip/d_c, 1).
 [friction.slip_weakening]
 mu_s_default     = 0.70

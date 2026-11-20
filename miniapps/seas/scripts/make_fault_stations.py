@@ -66,15 +66,33 @@ Off-fault stations ([output.body_stations]) go to
           each at the surface and at 2.4 km depth), named
           body<normal>st<strike>dp<depth>, units of 100 m.  The description's
           z (fault normal, positive on the far side) is the mesh Y.
+  tpv205  uploadTPV5_v2.pdf (four: 3 km on the far side, strike -12 and
+          12 km, depth 0 and 7.5 km)
+  tpv102, tpv104  SCEC_validation_ageing_law.pdf / _slip_law.pdf (six
+          free-surface points; names from uploadTPV101.pdf / uploadTPV103.pdf,
+          whose "body-060s-120dp000" typos are written with "st")
+  tpv12   TPV12_13_Description_v6.pdf, Part 8 (twelve; horizontal distance
+          from the fault trace, or from the fault at 0.3 km depth for the
+          four 0.3 km stations)
+  tpv22   TPV22_23_Description_v08.pdf, Part 7 (six surface points;
+          distance from fault 1)
+  tpv31   TPV31_32_Description_v03.pdf, Part 6 (eighteen: six boreholes at
+          0, 0.5 and 2.4 km depth, all on the near side)
+  All of them: names body<normal>st<strike>dp<depth> (units of 100 m), the
+  description's far side = +Y.
 
 Off-fault surface stations ([output.off_fault_stations]) go to
 <problem>/stations/<problem>_off_fault_stations.csv, same columns:
   tpv26   TPV26_27_Description_v13.pdf, Part 9 (six surface points),
           named body<normal>st<strike>dp000 (units of 100 m); TPV27 uses it too.
+  tpv15   TPV14_15_Description_v08.pdf, Part 6 (eleven surface points;
+          distance from the main fault, strike from the junction; this
+          writer because TPV15 runs with LTS)
 
 Scope: Chunhui Zhao, 2026-10-16 (TPV205/TPV104 plan rev 1.3, decision Q4); TPV6, TPV7
 and TPV31 added 2026-10-19 (TPV6/TPV7/TPV31 plan rev 1); TPV34 and the off-fault
-files added 2026-11-12 (TPV34 plan rev 2); TPV26 and its
+files added 2026-11-12 (TPV34 plan rev 2); the other off-fault files
+2026-11-20 (SCEC submission runs); TPV26 and its
 off-fault file 2026-10-20 (rheology plan rev 1, phase R0).
 """
 import argparse
@@ -98,6 +116,25 @@ _TPV34_BODY = [(n, s, d)
                                   (3, (-20, -10, 0, 10, 20)), (9, (-20, -10, 0, 10, 20)),
                                   (15, (-15, 0, 15)))
                for s in strikes for d in (0, 2.4)]
+# Off-fault stations of the other descriptions: (fault normal km, strike km, depth km);
+# + normal = the far side = +Y (SCEC submission runs, Chunhui Zhao, 2026-11-20).
+# TPV5: uploadTPV5_v2.pdf (four, all on the far side)
+_TPV205_BODY = [(3, -12, 0), (3, 12, 0), (3, -12, 7.5), (3, 12, 7.5)]
+# TPV102 / TPV104: SCEC_validation_ageing_law.pdf / _slip_law.pdf free-surface (x, z)
+# points, names from uploadTPV101.pdf / uploadTPV103.pdf
+_TPV102_BODY = [(-6, -12, 0), (-9, 0, 0), (-6, 12, 0), (6, -12, 0), (9, 0, 0), (6, 12, 0)]
+# TPV12: TPV12_13_Description_v6.pdf, Part 8 (twelve)
+_TPV12_BODY = ([(n, 0, 0) for n in (-3, -2, -1, 1, 2, 3)]
+               + [(n, 0, 0.3) for n in (-1, -0.5, 0.5, 1)] + [(-3, 12, 0), (3, 12, 0)])
+# TPV15: TPV14_15_Description_v08.pdf, Part 6 (eleven, surface; normal from the main fault;
+# written to the [output.off_fault_stations] file, see OFF_FAULT)
+_TPV15_BODY = [(3, -2, 0), (-3, -2, 0), (3, 2, 0), (-0.6, 2, 0), (-4.2, 2, 0), (3, 5, 0),
+               (-1.4, 5, 0), (-5.9, 5, 0), (3, 8, 0), (-2.3, 8, 0), (-7.6, 8, 0)]
+# TPV22: TPV22_23_Description_v08.pdf, Part 7 (six, surface; normal from fault 1)
+_TPV22_BODY = [(3, -5, 0), (-3, -5, 0), (3, 5, 0), (-3, 5, 0), (3, 15, 0), (-3, 15, 0)]
+# TPV31: TPV31_32_Description_v03.pdf, Part 6 (eighteen: six boreholes at 0, 0.5, 2.4 km)
+_TPV31_BODY = [(n, s, d) for n, s in ((-3, 0), (-3, 12), (-9, 0), (-9, 15), (-15, 0), (-15, 15))
+               for d in (0, 0.5, 2.4)]
 _TPV26_POINTS = [(-15, 10), (-5, 0), (-5, 5), (-5, 10), (-5, 15), (0, 10), (5, 10),
                  (10, 10), (15, 0), (15, 5), (15, 10), (15, 15)]
 # TPV26/27 Part 9: (fault-normal km, strike km) on the surface; + = far side = +Y
@@ -201,10 +238,33 @@ PROBLEMS = {
     "tpv22": ("SCEC TPV22 on-fault stations", framed("tpv22", _TPV22_POINTS, True)),
 }
 
-# Off-fault stations: (name, strike km, fault normal km, depth km).
+# Off-fault stations: (name, strike km, fault normal km, depth km).  The
+# normal coordinate is the mesh Y in km (+ = the description's far side).
 BODY = {
     "tpv34": ("SCEC TPV34 off-fault stations",
               [(body_name(n, s, d), s, n, d) for n, s, d in _TPV34_BODY]),
+    "tpv205": ("SCEC TPV205 (TPV5) off-fault stations",
+               [(body_name(n, s, d), s, n, d) for n, s, d in _TPV205_BODY]),
+    "tpv102": ("SCEC TPV102 off-fault (free-surface) stations",
+               [(body_name(n, s, d), s, n, d) for n, s, d in _TPV102_BODY]),
+    "tpv104": ("SCEC TPV104 off-fault (free-surface) stations",
+               [(body_name(n, s, d), s, n, d) for n, s, d in _TPV102_BODY]),
+    "tpv31": ("SCEC TPV31 off-fault stations",
+              [(body_name(n, s, d), s, n, d) for n, s, d in _TPV31_BODY]),
+    # TPV12: the distance is horizontal, from the fault trace for the surface
+    # stations and from the fault at the station's depth for the 0.3 km ones
+    # (Part 8 diagram text); the fault dips toward +Y, so at depth d it is at
+    # Y = d cot 60 and the station sits at Y = n + d cot 60.
+    "tpv12": ("SCEC TPV12 off-fault stations",
+              [(body_name(n, s, d), s, round(n + d / math.tan(_DIP60), 9), d)
+               for n, s, d in _TPV12_BODY]),
+    "tpv22": ("SCEC TPV22 off-fault stations",
+              [(body_name(n, s, d), s, n, d) for n, s, d in _TPV22_BODY]),
+}
+_BODY_NOTES = {
+    "tpv12": "# Fault trace on the X axis, 60 deg dip toward +Y (hanging wall = far side = +Y); "
+             "a station n km off the fault at depth d km sits at Y = n + d cot 60.",
+    "tpv22": "# Fault 1 on Y = 0, fault 2 on Y = -1600 m; distances from fault 1, x = global X.",
 }
 
 
@@ -230,11 +290,15 @@ def render(problem):
 
 def render_body(problem):
     title, rows = BODY[problem]
-    out = [f"# {title}, written by scripts/make_fault_stations.py; do not edit by hand.",
-           "# Global frame of the mesh: X along strike, Y fault normal, Z up (m); fault on Y = 0.",
-           "name,x,y,z"]
+    out = [f"# {title}, written by scripts/make_fault_stations.py; do not edit by hand."]
+    if problem in _BODY_NOTES:
+        out += ["# Global frame of the mesh: X along strike, Y fault normal (+ = far side), Z up (m).",
+                _BODY_NOTES[problem]]
+    else:
+        out.append("# Global frame of the mesh: X along strike, Y fault normal, Z up (m); fault on Y = 0.")
+    out.append("name,x,y,z")
     for name, s, n, d in rows:
-        out.append(f"{name},{_num(1000.0 * s)},{_num(1000.0 * n)},{_num(0.0 - 1000.0 * d)}")
+        out.append(f"{name},{_num(1000.0 * s)},{_num(round(1000.0 * n, 6))},{_num(0.0 - 1000.0 * d)}")
     return "\n".join(out) + "\n"
 
 
@@ -247,6 +311,11 @@ def target(root, problem, kind="fault"):
 OFF_FAULT = {
     "tpv26": ("SCEC TPV26/TPV27 off-fault surface stations",
               [(body_name_surface(n, s), s, n) for n, s in _TPV26_OFF_POINTS]),
+    # TPV15 runs with LTS, whose volume is synchronised only at sync points; this
+    # writer (unlike [output.body_stations]) writes there only.  Distances from
+    # the main fault (Y = 0), x from the junction.
+    "tpv15": ("SCEC TPV15 off-fault surface stations (normal distance from the main fault)",
+              [(body_name(n, s, d), s, n) for n, s, d in _TPV15_BODY]),
 }
 
 

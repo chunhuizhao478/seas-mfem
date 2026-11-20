@@ -104,6 +104,17 @@ paraview_free_surface  = "off"   # the Nitsche driver writes no free-surface sli
 file             = "tpv104/stations/tpv104_fault_stations.csv"
 snap_tolerance_m = 700.0
 
+# Off-fault stations (SCEC submission runs, Chunhui Zhao, 2026-11-20):
+# the six free-surface points of SCEC_validation_slip_law.pdf.
+# Components in the description's frame: h along strike (+X), v vertical,
+# positive down (-Z), n horizontal fault normal toward the far side (+Y).
+# Rows every step (--station-every); scripts/export_scec.py thins them.
+[output.body_stations]
+file   = "tpv104/stations/tpv104_body_stations.csv"
+h_axis = [1.0, 0.0,  0.0]
+v_axis = [0.0, 0.0, -1.0]
+n_axis = [0.0, 1.0,  0.0]
+
 # Rate and state, slip law with strong rate weakening (TPV104):
 #   b = 0.014, L (Dc) = 0.4 m, f_0 = 0.6, V_0 = 1e-6 m/s, V_ini = 1e-16 m/s,
 #   f_w = 0.2; a and V_w per node from the boxcar_taper rule below.

@@ -157,6 +157,14 @@ snap_tolerance_m = 700.0
 # Without it, the p = 3 fault cluster (8 us steps) wrote 1.5 M rows per station.
 dt               = "1e-4s"
 
+# Off-fault surface stations (SCEC submission runs, Chunhui Zhao,
+# 2026-11-20): TPV14_15_Description_v08.pdf Part 6, eleven points, distance
+# from the main fault.  This writer, not [output.body_stations], because it
+# writes at LTS sync points only (the volume is synchronised there).  Frame:
+# h along strike (up x ref_normal = +X), v down, n toward the far side (+Y).
+[output.off_fault_stations]
+file = "tpv15/stations/tpv15_off_fault_stations.csv"
+
 # Linear slip weakening: mu = mu_s - (mu_s - mu_d) min(slip/d_c, 1).
 [friction.slip_weakening]
 mu_s_default     = 0.677
