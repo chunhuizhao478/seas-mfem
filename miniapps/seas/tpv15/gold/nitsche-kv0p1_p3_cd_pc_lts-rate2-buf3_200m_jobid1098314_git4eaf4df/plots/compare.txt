@@ -1,0 +1,81 @@
+# WARNING: SeisSolGap ends at 11.9998 s < t_end = 12.0 s; every source is measured to t = 11.9998 s
+# stations /Users/chunhuizhao/projects/seas-mfem-nitsche-results/complex_tools_6e35a58/miniapps/seas/tpv15/stations/tpv15_fault_stations.csv; t_end 11.9998 s; noise: 0.1 s centred moving average, from arrival + 0.5 s
+station          source          arrival   peak V     slip     state  sn rms  th rms  tv rms   misfit vs SeisSolGap
+main_x2_-2_x3_0  p3               4.0142    9.948   5.6750    5.6790   0.027   0.032   0.053   dt -0.006 s  slip  -1.28%  peak   -6.5%
+main_x2_-2_x3_0  SeisSolGap       4.0199   10.638   5.7486       nan   0.027   0.039   0.019
+main_x2_2_x3_0   p3               4.7678    4.905   0.7781    0.7792   0.042   0.035   0.005   dt -0.005 s  slip +18.41%  peak   +0.5%
+main_x2_2_x3_0   SeisSolGap       4.7724    4.882   0.6572       nan   0.028   0.031   0.001
+main_x2_5_x3_0   p3                  nan    0.000   0.0000    0.0000     nan     nan     nan   neither side passes 1 mm/s
+main_x2_5_x3_0   SeisSolGap          nan    0.000   0.0000       nan     nan     nan     nan
+main_x2_9_x3_0   p3                  nan    0.000   0.0000    0.0000     nan     nan     nan   neither side passes 1 mm/s
+main_x2_9_x3_0   SeisSolGap          nan    0.000   0.0000       nan     nan     nan     nan
+main_x2_-2_x3_7.5 p3               2.3873    2.527   4.9753    4.9754   0.012   0.010   0.016   dt +0.009 s  slip  -1.17%  peak   -0.2%
+main_x2_-2_x3_7.5 SeisSolGap       2.3782    2.533   5.0340       nan   0.012   0.011   0.021
+main_x2_2_x3_7.5 p3                  nan    0.000   0.0000    0.0000     nan     nan     nan   neither side passes 1 mm/s
+main_x2_2_x3_7.5 SeisSolGap          nan    0.000   0.0000       nan     nan     nan     nan
+main_x2_5_x3_7.5 p3                  nan    0.000   0.0000    0.0000     nan     nan     nan   neither side passes 1 mm/s
+main_x2_5_x3_7.5 SeisSolGap          nan    0.000   0.0000       nan     nan     nan     nan
+main_x2_9_x3_7.5 p3                  nan    0.000   0.0000    0.0000     nan     nan     nan   neither side passes 1 mm/s
+main_x2_9_x3_7.5 SeisSolGap          nan    0.000   0.0000       nan     nan     nan     nan
+branch_x2_2_x3_0 p3               4.3480    5.538   5.1999    5.2036   0.088   0.060   0.096   dt +0.006 s  slip  -3.58%  peak  -13.5%
+branch_x2_2_x3_0 SeisSolGap       4.3416    6.401   5.3930       nan   0.092   0.053   0.035
+branch_x2_5_x3_0 p3               4.8521    6.091   6.3027    6.3063   0.056   0.035   0.077   dt +0.017 s  slip  -1.82%  peak   +1.1%
+branch_x2_5_x3_0 SeisSolGap       4.8354    6.024   6.4198       nan   0.062   0.037   0.033
+branch_x2_9_x3_0 p3               5.4853   10.278   5.3075    5.3120   0.051   0.028   0.088
+branch_x2_2_x3_7.5 p3               3.5105    2.767   4.5967    4.5968   0.023   0.016   0.021   dt +0.010 s  slip  -2.68%  peak   -8.0%
+branch_x2_2_x3_7.5 SeisSolGap       3.5007    3.007   4.7233       nan   0.028   0.020   0.026
+branch_x2_5_x3_7.5 p3               4.1248    6.304   5.7796    5.7798   0.023   0.014   0.056   dt +0.013 s  slip  -1.25%  peak   -5.7%
+branch_x2_5_x3_7.5 SeisSolGap       4.1121    6.683   5.8528       nan   0.012   0.009   0.057
+branch_x2_9_x3_7.5 p3               4.8939    9.823   4.8162    4.8163   0.043   0.033   0.027   dt +0.020 s  slip  -2.45%  peak   -6.5%
+branch_x2_9_x3_7.5 SeisSolGap       4.8742   10.503   4.9373       nan   0.015   0.025   0.023
+
+# median noise RMS over stations (MPa)
+p3             sn 0.042  th 0.032  tv 0.053
+SeisSolGap     sn 0.028  th 0.028  tv 0.025
+
+# signed checks vs SeisSolGap: final slip (m) where |ref| > 0.1 m, t = 0 stresses (MPa, SCEC signs) where |ref| > 1 MPa
+main_x2_-2_x3_0        p3             h_slip      -5.67456     -5.74848  same sign
+main_x2_-2_x3_0        p3             th0        -70.00000    -70.00000  same sign
+main_x2_-2_x3_0        p3             sn0       -120.00000   -120.00000  same sign
+main_x2_2_x3_0         p3             h_slip      -0.77684     -0.65705  same sign
+main_x2_2_x3_0         p3             th0        -70.00000    -70.00000  same sign
+main_x2_2_x3_0         p3             sn0       -120.00000   -120.00000  same sign
+main_x2_5_x3_0         p3             th0        -70.00000    -70.00000  same sign
+main_x2_5_x3_0         p3             sn0       -120.00000   -120.00000  same sign
+main_x2_9_x3_0         p3             th0        -70.00000    -70.00000  same sign
+main_x2_9_x3_0         p3             sn0       -120.00000   -120.00000  same sign
+main_x2_-2_x3_7.5      p3             h_slip      -4.97530     -5.03403  same sign
+main_x2_-2_x3_7.5      p3             th0        -70.00000    -70.00000  same sign
+main_x2_-2_x3_7.5      p3             sn0       -120.00000   -120.00000  same sign
+main_x2_2_x3_7.5       p3             th0        -70.00000    -70.00000  same sign
+main_x2_2_x3_7.5       p3             sn0       -120.00000   -120.00000  same sign
+main_x2_5_x3_7.5       p3             th0        -70.00000    -70.00000  same sign
+main_x2_5_x3_7.5       p3             sn0       -120.00000   -120.00000  same sign
+main_x2_9_x3_7.5       p3             th0        -70.00000    -70.00000  same sign
+main_x2_9_x3_7.5       p3             sn0       -120.00000   -120.00000  same sign
+branch_x2_2_x3_0       p3             h_slip      -5.19810     -5.39301  same sign
+branch_x2_2_x3_0       p3             th0        -78.00000    -77.99900  same sign
+branch_x2_2_x3_0       p3             sn0       -120.00000   -120.00129  same sign
+branch_x2_5_x3_0       p3             h_slip      -6.30246     -6.41974  same sign
+branch_x2_5_x3_0       p3             th0        -78.00000    -77.99900  same sign
+branch_x2_5_x3_0       p3             sn0       -120.00000   -120.00129  same sign
+branch_x2_2_x3_7.5     p3             h_slip      -4.59670     -4.72331  same sign
+branch_x2_2_x3_7.5     p3             th0        -78.00000    -77.99900  same sign
+branch_x2_2_x3_7.5     p3             sn0       -120.00000   -120.00129  same sign
+branch_x2_5_x3_7.5     p3             h_slip      -5.77959     -5.85276  same sign
+branch_x2_5_x3_7.5     p3             th0        -78.00000    -77.99900  same sign
+branch_x2_5_x3_7.5     p3             sn0       -120.00000   -120.00129  same sign
+branch_x2_9_x3_7.5     p3             h_slip      -4.81624     -4.93730  same sign
+branch_x2_9_x3_7.5     p3             th0        -78.00000    -77.99900  same sign
+branch_x2_9_x3_7.5     p3             sn0       -120.00000   -120.00129  same sign
+
+# median |misfit| vs SeisSolGap along the run order (pass item 4)
+p3             arrival 0.0095 s  slip 2.14%  peak 6.07%
+
+# pass test for run p3 against SeisSolGap (stations missing: branch_x2_9_x3_0)
+  0 signs of final slip and t = 0 stresses agree: PASS
+  1 arrival within 0.1 s at every station: FAIL
+  2 slip within 2% where ref slip > 0.1 m: FAIL
+  3 peak within 10% at 12 of 13 stations
+  4 medians shrink along the run order: n/a (one run)
+# wrote /Users/chunhuizhao/projects/seas-mfem-nitsche-results/tpv15_200m/p3_vs_refs_6e35a58/compare_p3_vs_seissolgap.json

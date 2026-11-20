@@ -111,6 +111,12 @@
 // (never calling SetRheology) is the elastic operator.  Local time stepping
 // refuses a coupler.
 //
+// Complex fault geometries (plan rev 2, Chunhui Zhao 2026-10-20) use the
+// same slip measure (SlipMeasure::Path) and tension mode
+// (TensionMode::ZeroStrength); forced rupture is the closure's
+// (friction/forced_rupture.hpp).  TensionFloorCount() counts the
+// DOF-steps whose law normal stress was raised to 0 (diagnostic only).
+//
 // NitscheMaterialSample lives in nitsche_material_sample.hpp (moved there in
 // P3 to break an include cycle with nitsche_mass.hpp); it is re-exported here.
 //
@@ -448,6 +454,9 @@ public:
    void SetTensionMode(TensionMode m) { tension_ = m; }
    SlipMeasure GetSlipMeasure() const { return slip_measure_; }
    TensionMode GetTensionMode() const { return tension_; }
+   /// DOF-steps (owned, this rank) whose law normal stress was raised to 0
+   /// with TensionMode::ZeroStrength (diagnostic; no effect on the run).
+   long long TensionFloorCount() const { return floored_; }
    /// Projected prestress (3 no) and nucleation spatial traction (3 no);
    /// the nucleation enters as NucleationFactor(t) * NucleationTraction().
    const Vector &PrestressTraction() const { return S0_own_; }
@@ -600,7 +609,11 @@ public:
          *sigma_pc = E * (*sigma_pc) + omE * sigma_eff;
          sig_law = *sigma_pc;
       }
-      if (zero_strength) { sig_law = std::max(sig_law, real_t(0.0)); }
+      if (zero_strength && sig_law < 0.0)
+      {
+         sig_law = std::max(sig_law, real_t(0.0));
+         ++floored_;
+      }
       real_t Vl[2];
       const real_t gamma = ClosureGamma(j);
       closure_->SolveSlipRate(X, gamma, sig_law, st, Vl);
@@ -1652,6 +1665,7 @@ private:
    bool pc_ = false, pc_seeded_ = false;   // Prakash-Clifton (header)
    real_t pc_vstar_ = 0.0, pc_len_ = 0.0;
    Vector sigpc_;                          // sigma* per owned DOF
+   mutable long long floored_ = 0;         // TensionFloorCount()
    long steps_ = 0;
    NitscheStepRecord record_;
    bool lts_defer_red_ = false;   // LtsDeferRecordReduce

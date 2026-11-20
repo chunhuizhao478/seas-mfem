@@ -211,6 +211,16 @@
 // station outside the mesh stops the run.  No table, no files, and the run
 // is the same bit for bit.
 //
+// Station output interval (Chunhui Zhao, 2026-10-25): [output.stations] dt
+// (s, a number or a string such as "1e-4s"; optional) writes the stations (and the copy envelopes) every
+// max(1, round(dt / dt_F)) fault steps and at the last step, dt_F being the
+// fault step (the global step, or with LTS the fault cluster's), as
+// [output] paraview_fault_dt does for the fault frames.  It cannot be
+// combined with --station-every.  Absent, the stations come every
+// --station-every steps (default 1), every bit as before.  [output.stations]
+// takes only file, snap_tolerance_m, per_side and dt: any other key aborts the run, so
+// a misspelt dt cannot fall back to every step.
+//
 // --lts-report 1 (plan item 7, local time stepping, phase P0): rank 0 prints
 // the rate-2 cluster report of solver/nitsche_lts_setup.hpp for the serial
 // mesh and the run stops before the partition.  --lts-report-cap n picks the
@@ -237,6 +247,20 @@
 // (checked at the end).  LTS needs cfl <= 0.6 (the accepted multirate
 // limit, Chunhui Zhao 2026-10-19) and kv_scale = "node".  --lts-same-step 1
 // (test only): the same clusters, every one at dt0.
+//
+// Complex fault geometries (plan rev 2, Chunhui Zhao 2026-10-20): standalone
+// options, each its own top-level table read only here and its own header
+// dynamic/nitsche_opt_*.hpp; an absent table leaves every bit as before.
+//   O1 [prestress_depth_table]  prestress tensor piecewise linear in depth,
+//                               with explicit jumps (TPV12, TPV22)
+//   O2-O4 (merged into scec-benchmarks, 2026-11-20): the tension floor, the
+//   slip-path weakening and the forced rupture are the [friction.slip_weakening]
+//   keys tension = "zero_strength" and slip_measure = "path" and the table
+//   [friction.forced_rupture] (above); the old tables [fault_tension],
+//   [slip_weakening_distance] and [forced_rupture] abort with the new names.
+//   A forced DOF on a locked tip edge aborts.
+//   O5 [fault_tip_lock]         fault DOFs on the fault border locked, except
+//                               on excluded (free-surface) edges (TPV22)
 
 #include "mfem.hpp"
 #include "../domain/nitsche_wave_operator.hpp"
@@ -257,6 +281,8 @@
 #include "../dynamic/nitsche_deck_fields.hpp"
 #include "../io/off_fault_stations.hpp"
 #include "../dynamic/station_copy_average.hpp"
+#include "../dynamic/nitsche_opt_depth_prestress.hpp"   // complex geometries O1
+#include "../dynamic/nitsche_opt_tip_lock.hpp"           // complex geometries O5
 #include "../dynamic/lts_partition.hpp"   // METIS with element weights (plan item 6)
 #include "../dynamic/mesh_parts.hpp"      // --mesh-setup rank0 (header, "Mesh setup")
 #include "../solver/nitsche_lts_setup.hpp"   // --lts-report (plan item 7, P0)
@@ -929,6 +955,47 @@ int main(int argc, char *argv[])
       MFEM_VERIFY(pc_vstar > 0.0 && pc_len > 0.0, "[friction.prakash_clifton] v_star = "
                   << pc_vstar << ", length = " << pc_len << "; both must be > 0");
    }
+   // complex geometries O1 (header): [prestress_depth_table]
+   std::shared_ptr<const nitsche_opt::DepthPrestressTable> depth_ps;
+   if (root.contains(nitsche_opt::DepthPrestressTable::kTable))
+   {
+      const real_t up[3] = {cfg.fault_geometry.up[0], cfg.fault_geometry.up[1],
+                            cfg.fault_geometry.up[2]};
+      depth_ps = std::make_shared<const nitsche_opt::DepthPrestressTable>(
+         nitsche_opt::ParseDepthPrestress(root.at(nitsche_opt::DepthPrestressTable::kTable), up));
+      MFEM_VERIFY(cfg.stress.sigma_xx_pa == 0.0 && cfg.stress.sigma_yy_pa == 0.0
+                  && cfg.stress.sigma_zz_pa == 0.0 && cfg.stress.sigma_xy_pa == 0.0
+                  && cfg.stress.sigma_yz_pa == 0.0 && cfg.stress.sigma_xz_pa == 0.0,
+                  "[prestress_depth_table] replaces the [stress] background: set every "
+                  "[stress] sigma_*_pa to 0 (kind = \"constant_tensor\")");
+      MFEM_VERIFY(depth_ps->measure != nitsche_opt::DepthPrestressTable::Measure::Effective
+                  || !root.contains("rheology"),
+                  "[prestress_depth_table] stress_measure = \"effective\" (sigma - P_f I) is "
+                  "exact only for a linear elastic bulk; it is refused with a [rheology] table");
+   }
+   // complex geometries O2-O4 (header): the old tables are refused; the same
+   // options are [friction.slip_weakening] tension / slip_measure and
+   // [friction.forced_rupture]
+   MFEM_VERIFY(!root.contains("fault_tension"), "[fault_tension] is gone: write "
+               "tension = \"zero_strength\" in [friction.slip_weakening]");
+   MFEM_VERIFY(!root.contains("slip_weakening_distance"), "[slip_weakening_distance] is "
+               "gone: write slip_measure = \"path\" in [friction.slip_weakening]");
+   MFEM_VERIFY(!root.contains("forced_rupture"), "[forced_rupture] is gone: write "
+               "[friction.forced_rupture] hypocenter_x_m, hypocenter_y_m, hypocenter_z_m, "
+               "r_crit_m, vs_m_s, t0_s (rupture speed 0.7 vs)");
+   // complex geometries O5 (header): [fault_tip_lock]
+   nitsche_opt::TipLockConfig tip_cfg;
+   if (root.contains(nitsche_opt::TipLockConfig::kTable))
+   {
+      tip_cfg = nitsche_opt::ParseTipLock(root.at(nitsche_opt::TipLockConfig::kTable));
+   }
+   {
+      // complex geometries O1-O5: a misspelt option table would leave its option off
+      const std::string miss = nitsche_opt::OptNearMissTable(root,
+         {nitsche_opt::DepthPrestressTable::kTable, nitsche_opt::TipLockConfig::kTable});
+      MFEM_VERIFY(miss.empty(), "deck table " << miss << ": a misspelt option table would "
+                  "leave the option off; fix the name");
+   }
    MFEM_VERIFY(p >= 1 && p <= 4, "order p must be in 1..4 (P3 constants); got " << p);
    MFEM_VERIFY(cfl > 0.0 && cfl <= 1.0, "[numerics] cfl (fraction of C(p)) must be in (0,1]");
    MFEM_VERIFY(!lts_on || cfl <= 0.6, "[numerics] cfl = " << cfl << ": local time stepping "
@@ -1149,6 +1216,64 @@ int main(int argc, char *argv[])
    }
    if (mesh_rank0) { MPI_Bcast(&ne_global, 1, MPI_LONG_LONG, 0, MPI_COMM_WORLD); }
    setup_timer.Mark("mesh read");
+   MFEM_VERIFY(!parts_load || (!depth_ps && !tip_cfg.enabled), "[prestress_depth_table] and "
+               "[fault_tip_lock] read the serial mesh; not with --mesh-parts");
+   if (depth_ps && smesh_here)
+   {
+      // complex geometries O1: every jump depth must be a mesh line on the fault
+      MFEM_VERIFY(cfg.boundary.fault_attr > 0, "[boundary] fault_attr is required");
+      const real_t tol = 1e-6 * (1.0 + depth_ps->depth.back());
+      std::string first;
+      const long long nx = nitsche_opt::CountFaultFacesAcrossDepths(
+         *smesh, cfg.boundary.fault_attr, depth_ps->jump, depth_ps->up, tol, &first);
+      MFEM_VERIFY(nx == 0, "[prestress_depth_table]: " << nx << " fault faces cross a "
+                  "jump depth (" << first << "); the per-face projection would overshoot. "
+                  "Embed each jump_depths_m line in the fault surface of the mesh.");
+      if (g_rank == 0)
+      {
+         std::cout << "  prestress: [prestress_depth_table] (" << (depth_ps->measure ==
+                   nitsche_opt::DepthPrestressTable::Measure::Effective ? "effective" : "total")
+                   << " stress), " << depth_ps->depth.size() << " nodes over depth ["
+                   << depth_ps->depth.front() << ", " << depth_ps->depth.back() << "] m, "
+                   << depth_ps->jump.size() << " jump(s); no fault face crosses a jump\n";
+      }
+   }
+   std::shared_ptr<const nitsche_opt::TipEdges> tip_edges;
+   if (tip_cfg.enabled)
+   {
+      // built from the serial mesh where it is held; with --mesh-setup rank0
+      // rank 0 builds it and broadcasts the segments (TipEdges::Bcast)
+      // complex geometries O5: the tip edges of the serial mesh (header)
+      MFEM_VERIFY(cfg.boundary.fault_attr > 0, "[boundary] fault_attr is required");
+      std::set<int> excl;
+      if (tip_cfg.has_exclude) { excl.insert(tip_cfg.exclude_attrs.begin(), tip_cfg.exclude_attrs.end()); }
+      else { excl.insert(cfg.boundary.natural_attrs.begin(), cfg.boundary.natural_attrs.end()); }
+      MFEM_VERIFY(!excl.count(cfg.boundary.fault_attr), "[fault_tip_lock] exclude_attrs "
+                  "contains the fault attribute " << cfg.boundary.fault_attr);
+      auto te = smesh_here ? std::make_shared<nitsche_opt::TipEdges>(*smesh, cfg.boundary.fault_attr, excl)
+                           : std::make_shared<nitsche_opt::TipEdges>();
+      if (mesh_rank0) { te->Bcast(MPI_COMM_WORLD, 0); }
+      tip_edges = te;
+      MFEM_VERIFY(tip_edges->NumEdges() > 0, "[fault_tip_lock]: the fault (attr "
+                  << cfg.boundary.fault_attr << ", " << tip_edges->NumFaultFaces()
+                  << " faces) has no tip edge outside the excluded attributes");
+      for (int a : excl)
+      {
+         // a listed attribute that touches no fault edge frees nothing (a typo
+         // would lock the trace it was meant to free); the default list may
+         // name surfaces a buried fault never reaches
+         MFEM_VERIFY(!tip_cfg.has_exclude || tip_edges->SharedEdges(a) > 0,
+                     "[fault_tip_lock] exclude_attrs: attribute " << a << " shares no edge "
+                     "with the fault (attr " << cfg.boundary.fault_attr << ")");
+      }
+      if (g_rank == 0)
+      {
+         std::cout << "  fault tips: " << tip_edges->NumEdges() << " tip edges on "
+                   << tip_edges->NumFaultFaces() << " fault faces; edges on attributes";
+         for (int a : excl) { std::cout << " " << a << " (" << tip_edges->SharedEdges(a) << " fault edges)"; }
+         std::cout << " stay free\n";
+      }
+   }
    if (lts_report)
    {
       MFEM_VERIFY(cfg.boundary.fault_attr > 0, "[boundary] fault_attr is required");
@@ -1660,6 +1785,8 @@ int main(int argc, char *argv[])
    }
    if (is_on)
    {
+      MFEM_VERIFY(!depth_ps, "[prestress_depth_table] and [initial_stress] both set the "
+                  "prestress; give one");
       bool zero = true;
       for (int i = 0; i < 9; i++) { zero = zero && s0[i] == 0.0; }
       const std::string e = CheckInitialStressRun(
@@ -1671,13 +1798,15 @@ int main(int argc, char *argv[])
    }
    else
    {
-      fs.prestress = [s0, regions](const real_t x[3], real_t s[9]) {
+      fs.prestress = [s0, regions, depth_ps](const real_t x[3], real_t s[9]) {
          const real_t *src = s0;
          for (const StressRegion &R : regions)
          {
             if (x[0] >= R.lo[0] && x[0] <= R.hi[0] && x[1] >= R.lo[1] && x[1] <= R.hi[1]
                 && x[2] >= R.lo[2] && x[2] <= R.hi[2]) { src = R.s; }
          }
+         // complex geometries O1: the depth table is the background
+         if (src == s0 && depth_ps) { depth_ps->Eval(x, s); return; }
          for (int i = 0; i < 9; i++) { s[i] = src[i]; }
       };
    }
@@ -1823,6 +1952,13 @@ int main(int argc, char *argv[])
    }
 
    setup_timer.Mark("fault setup");
+   if (tip_edges)
+   {
+      // complex geometries O5: lock the DOFs on the tip edges (header)
+      MFEM_VERIFY(law.kind == LawKind::SlipWeakening, "[fault_tip_lock] locks by mu_s and "
+                  "cohesion: it needs [meta] law = \"slip_weakening\"");
+      fs.parameters = nitsche_opt::WrapTipLock(fs.parameters, tip_edges);
+   }
 
    // ------------------------------------------------------------ operator
    DomainConfig dcfg;
@@ -1848,6 +1984,23 @@ int main(int argc, char *argv[])
                   "reference normal, which needs a planar fault; a fault face normal is "
                   << std::asin(std::min(dev, real_t(1.0))) * 180.0 / M_PI
                   << " degrees off [fault_geometry] ref_normal (mesh " << mesh_path << ")");
+   }
+   if (tip_edges)
+   {
+      long long nl[2] = {0, op.NumOwnedFaultDOFs()};
+      for (int j = 0; j < op.NumOwnedFaultDOFs(); j++)
+      {
+         if (tip_edges->OnTip(&op.FaultPositions()(3 * j))) { nl[0]++; }
+      }
+      MPI_Allreduce(MPI_IN_PLACE, nl, 2, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+      MFEM_VERIFY(nl[0] > 0, "[fault_tip_lock]: " << tip_edges->NumEdges() << " tip edges "
+                  "but no fault DOF lies on one");
+      if (g_rank == 0)
+      {
+         std::cout << "  fault tips: " << nl[0] << " of " << nl[1] << " fault DOFs locked (mu_s "
+                   << nitsche_opt::TipLockConfig::kLockedMuS << ", cohesion "
+                   << nitsche_opt::TipLockConfig::kLockedCohesion << " Pa)\n";
+      }
    }
    const real_t dt_cfl = ComputeMaxDt(op.Sample(), pmesh, p, cfl * kCeig[p]);
    const real_t dt_gts = std::min(dt_cfl, cfg.time.dt_max);
@@ -1970,6 +2123,21 @@ int main(int argc, char *argv[])
          // sigma*^0 = the initial sigma_n per DOF
          op.SetPrakashClifton(pc_vstar, pc_len);
          op.SetPrakashCliftonState(sig0);
+      }
+      if (forced_on && tip_edges)
+      {
+         // the forcing lowers mu toward mu_d; it must not reach a locked tip DOF
+         long long nf = 0;
+         for (int j = 0; j < no; j++)
+         {
+            const real_t *x = &op.FaultPositions()(3 * j);
+            if (ForcedRupture::Time(forced, x) < ForcedRupture::kNeverForced
+                && tip_edges->OnTip(x)) { nf++; }
+         }
+         MPI_Allreduce(MPI_IN_PLACE, &nf, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+         MFEM_VERIFY(nf == 0, "[friction.forced_rupture]: " << nf << " fault DOFs locked by "
+                     "[fault_tip_lock] lie within r_crit_m of the hypocentre; the forcing "
+                     "would weaken them");
       }
       // initial fault state per owned DOF (generic; e.g. to check psi^0
       // against a benchmark's closed form outside the driver)
@@ -2131,13 +2299,33 @@ int main(int argc, char *argv[])
    std::unique_ptr<FaultSideStationWriter> side_stations;
    std::vector<int> station_dofs;   // the owned DOFs the stations read (sorted)
    std::string state_label = "log10_theta";
+   long st_every = station_every;   // header, "Station output interval"
+   bool st_last = false;
    if (t_st)
    {
       MFEM_VERIFY(t_st->is_table() && t_st->contains("file") && t_st->contains("snap_tolerance_m"),
                   "[output.stations] needs file (the station CSV) and snap_tolerance_m (m); "
                   "there are no defaults");
-      RefuseUnknownKeys(*t_st, "[output.stations]", {"file", "snap_tolerance_m", "per_side"});
+      RefuseUnknownKeys(*t_st, "[output.stations]", {"file", "snap_tolerance_m", "per_side", "dt"});
       const bool per_side = TomlBool(t_st, "per_side", false);
+      if (t_st->contains("dt"))
+      {
+         // seconds, a number or a string such as "1e-4s" (as paraview_fault_dt)
+         const toml::value &v = t_st->at("dt");
+         const real_t st_dt = v.is_string() ? spatial::SpatialTimeParseSeconds(v.as_string())
+                              : TomlReal(t_st, "dt", 0.0);
+         MFEM_VERIFY(st_dt > 0.0, "[output.stations] dt = " << st_dt << "; it must be > 0 (s)");
+         MFEM_VERIFY(ArgStr(argc, argv, "--station-every", "").empty(),
+                     "[output.stations] dt and --station-every both set the station output; give one");
+         st_every = std::max(1L, std::lround(st_dt / dt));
+         st_last = true;
+         if (g_rank == 0)
+         {
+            std::cout << std::setprecision(10) << "  stations every " << st_every << " fault steps ("
+                      << st_every * dt << " s; [output.stations] dt = " << st_dt
+                      << " s) and at the last step\n";
+         }
+      }
       const std::string st_path = TomlStr(t_st, "file", "");
       const real_t snap_tol = TomlReal(t_st, "snap_tolerance_m", 0.0);
       MFEM_VERIFY(snap_tol > 0.0, "[output.stations] snap_tolerance_m = " << snap_tol
@@ -2709,7 +2897,7 @@ int main(int argc, char *argv[])
          W_fric += 0.5 * (er.t - er_prev.t) * (er.P_fric + er_prev.P_fric);
          er_prev = er;
       }
-      if (stations && s % station_every == 0)
+      if (stations && (s % st_every == 0 || (st_last && s == nsteps)))
       {
          fill_dofdata();
          if (station_avg) { station_avg->Apply(t, dofdata); }
@@ -2925,6 +3113,15 @@ int main(int argc, char *argv[])
       }
    }
    const real_t wall = std::chrono::duration<real_t>(std::chrono::steady_clock::now() - wall0).count();
+   if (tension_s == "zero_strength")
+   {
+      long long nfl = op.TensionFloorCount();
+      MPI_Allreduce(MPI_IN_PLACE, &nfl, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+      if (g_rank == 0)
+      {
+         std::cout << "  tension floor: " << nfl << " DOF-steps with sigma_n < 0 (law saw 0)\n";
+      }
+   }
    if (g_rank == 0)
    {
       std::cout << std::setprecision(6) << "=== done: " << nsteps << " steps, t = " << t

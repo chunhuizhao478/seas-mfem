@@ -1,0 +1,204 @@
+# =====================================================================
+#  SCEC TPV12 — linear slip weakening on a planar 60-degree dipping normal
+#  fault, linear elastic, run through the Nitsche dynamic-rupture driver
+#  (seas_nitsche_dyn_driver; complex-geometries plan rev 2, phase P2).
+#
+#  Built from tpv205/configs/tpv205_nitsche.toml (KV kv_eta = 0.1 and
+#  Prakash-Clifton, as the Track 2 golds) with the TPV12 values of
+#  TPV12_13_Description_v6.pdf:
+#
+#   - Fault: X in [-15, 15] km, 15 km down-dip at 60 degrees toward +Y, trace
+#     on the X axis at Z = 0 (tpv12/mesh/tpv12_*.geo).  ref_normal =
+#     (0, -sin 60, -cos 60) points into the footwall, so the plus side (the
+#     side the normal points away from) is the hanging wall: v-slip
+#     (slip . dip) is positive for normal faulting (plan 10.4).
+#   - Prestress: [prestress_depth_table] (option O1), the effective tensor
+#     sigma - P_f I of the spec's Method 1 (plan 10.1), tension positive,
+#     z_d = -Z:
+#        above 13.8 km down-dip (z_d < 11951.150572225253 m):
+#          sigma_zz = -16660 z_d, sigma_yy = -5824.336 z_d,
+#          sigma_xx = -11242.168 z_d, shear components 0;
+#        below: sigma_xx = sigma_yy = sigma_zz = -16660 z_d (isotropic).
+#     The jump depth is 13800 sin 60 in double precision, the value gmsh
+#     gives the embedded jump line, so no fault face lies across it.  The
+#     tensor is linear in z_d on each side, so the table needs only the
+#     surface, the jump and one deep node.  At 7.5 km down-dip this gives
+#     sigma_n' = 55.43 MPa and tau = 30.48 MPa (DRDG3D t = 0).
+#     [stress] stays at zero: O1 refuses a non-zero background tensor.
+#   - Friction: mu_s 0.70 (0.54 in the 3 x 3 km nucleation square centred
+#     12 km down-dip), mu_d 0.10, d_0 0.5 m, cohesion 0.2 MPa.  The square
+#     is a [[friction.slip_weakening.spatial]] box padded by 1 m; its border
+#     is a mesh line, and the DG copies on that line (of the faces inside
+#     and outside) all take mu_s = 0.54 (the box is inclusive and the
+#     parameters are set per DOF position).
+#   - Material: rho 2700, Vs 3300, Vp 5716.
+#   - Boundary attributes of the TPV12 meshes: free 101, fault 103,
+#     absorbing 105.  No barrier rules: the mesh ends the fault at the
+#     30 x 15 km rectangle.
+#   - Stations: tpv12/stations/tpv12_fault_stations.csv (ten points,
+#     x2 = along strike km, x3 = DOWN-DIP km).
+#
+#   - Tension: [fault_tension] (option O2) "zero_strength_floor": where the
+#     normal stress turns tensile (the free-surface trace, from round-off at
+#     t = 0) the strength is the cohesion, as the spec defines it; without it
+#     the driver aborts at the first step.
+#   - Weakening distance: [slip_weakening_distance] (option O3) "slip_path",
+#     the spec's total slip path distance.
+#
+#  Meshes are generated, not committed (from miniapps/seas, pythonenv):
+#    gmsh -3 tpv12/mesh/tpv12_1000m.geo -format msh22 -o tpv12/mesh/tpv12_1000m.msh
+#    gmsh -3 tpv12/mesh/tpv12_200m.geo  -format msh22 -o tpv12/mesh/tpv12_200m.msh
+#    gmsh -3 tpv12/mesh/tpv12_100m.geo  -format msh22 -o tpv12/mesh/tpv12_100m.msh
+#  The 1000 m mesh does not resolve the cohesive zone (210-390 m, plan
+#  10.5): smoke runs only.  Production uses --mesh with 200 m (p = 2, 3)
+#  or 100 m (p = 1).
+#
+#  Scope: Chunhui Zhao, 2026-10-20.
+# =====================================================================
+
+[meta]
+schema_version = 1
+law            = "slip_weakening"
+description    = "SCEC TPV12 (linear slip weakening, 60-degree normal fault, elastic) via the Nitsche dynamic-rupture driver — depth-dependent effective prestress."
+
+[problem]
+tag = "tpv12"   # output file prefix; the stations come from [output.stations]
+
+# Material: homogeneous, rho = 2700, cs = 3300, cp = 5716:
+#   mu = rho cs^2, lambda = rho (cp^2 - 2 cs^2).
+[material_constant_fallback]
+lambda = 29410171200.0
+mu     = 29403000000.0
+rho    = 2700.0
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0     # sigma_min of the Nitsche sigma_n_eff range check
+
+[mesh]
+# 1000 m smoke mesh; production overrides with --mesh (200 m, 100 m).
+path  = "tpv12/mesh/tpv12_1000m.msh"
+order = 1
+
+[velocity]
+use_sidecar = false
+
+# Zero: the prestress comes from [prestress_depth_table].
+[stress]
+kind        = "constant_tensor"
+sigma_xx_pa = 0.0
+sigma_yy_pa = 0.0
+sigma_zz_pa = 0.0
+sigma_xy_pa = 0.0
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+# Option O1: the effective prestress tensor (global frame, tension positive)
+# piecewise linear in depth = -(x . up); the plain lists are the values from
+# above, the _below lists the values just below the jump.
+[prestress_depth_table]
+stress_measure = "effective"
+depth_m        = [0.0, 11951.150572225253, 60000.0]
+jump_depths_m  = [11951.150572225253]
+sigma_xx_pa    = [0.0, -134356842.52625242, -999600000.0]
+sigma_yy_pa    = [0.0,  -69607516.51923214, -999600000.0]
+sigma_zz_pa    = [0.0, -199106168.5332727,  -999600000.0]
+sigma_xy_pa    = [0.0, 0.0, 0.0]
+sigma_yz_pa    = [0.0, 0.0, 0.0]
+sigma_xz_pa    = [0.0, 0.0, 0.0]
+sigma_xx_pa_below = [-199106168.5332727]
+sigma_yy_pa_below = [-199106168.5332727]
+sigma_zz_pa_below = [-199106168.5332727]
+sigma_xy_pa_below = [0.0]
+sigma_yz_pa_below = [0.0]
+sigma_xz_pa_below = [0.0]
+
+# Option O2: zero strength in tension (the law sees max(sigma_n, 0)).
+[fault_tension]
+mode = "zero_strength_floor"
+
+# Option O3: mu from the slip path int |V| dt, not |slip|.
+[slip_weakening_distance]
+measure = "slip_path"
+
+[numerics]
+cfl            = 0.5        # fraction of C(p) (P3)
+penalty_factor = 1.0        # IP penalty scale (Nitsche driver only)
+# Kelvin-Voigt damping (Day et al. 2005 A8): beta_e = kv_eta (1/3) (h_e/p) / c_s,e, h_e = 6V/A
+kv_eta    = 0.1
+kv_scale  = "node"
+kv_length = "inscribed"
+
+[time]
+tfinal     = "8s"
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.05s"
+
+[output]
+output_dir     = "output_tpv12_nitsche"
+restart_prefix = "cp"
+# Fault ParaView output: ONE <output_dir>/fault.vtkhdf per run.
+paraview_enabled       = true
+paraview_fault         = "hdf5"
+paraview_fault_dt      = "0.02s"
+paraview_fault_zfp_tol = 0.0
+paraview_fault_deflate_level = 1
+paraview_free_surface  = "off"   # the Nitsche driver writes no free-surface slice
+
+# On-fault stations: the committed station file (scripts/make_fault_stations.py),
+# each station snapped to the nearest fault node in 3-D; the run aborts if that
+# node is farther than snap_tolerance_m (<prefix>_station_snap.txt lists them).
+[output.stations]
+file             = "tpv12/stations/tpv12_fault_stations.csv"
+snap_tolerance_m = 700.0
+
+# Linear slip weakening: mu = mu_s - (mu_s - mu_d) min(slip/d_c, 1).
+[friction.slip_weakening]
+mu_s_default     = 0.70
+mu_d_default     = 0.10
+d_c_default      = 0.5
+cohesion_default = 0.2e6
+
+# Nucleation square: X in [-1.5, 1.5] km, 10.5 to 13.5 km down-dip
+# (depth 9093.27 to 11691.34 m), padded by 1 m; Y left open (the fault is
+# the only surface in the box).
+[[friction.slip_weakening.spatial]]
+kind    = "box"
+x_min_m = -1501.0
+x_max_m =  1501.0
+z_min_m = -11692.35
+z_max_m =  -9092.26
+mu_s    = 0.54
+
+[boundary]
+fault_attr      = 103
+natural_attrs   = [101]
+absorbing_attrs = [105]
+
+[fault_geometry]
+ref_normal        = [0.0, -0.8660254037844386, -0.5]
+up                = [0.0,  0.0, 1.0]
+kind              = "dipping_normal"
+orientation       = "propagated"
+pin_by            = "reference"
+tangent           = "pointwise"
+junction_policy   = "refuse"
+pin_min_margin    = 0.1
+
+# Centre of the nucleation square (12 km down-dip).
+[hypocenter]
+x_m                 = 0.0
+y_m                 = 6000.0
+z_m                 = -10392.304845413264
+nucleation_radius_m = 1500.0
+
+[diagnostics]
+energy_balance = false
+
+# Prakash-Clifton regularization of the normal stress the law sees
+# (SeisSol TPV6/7 values, as the validated TPV102 deck).
+[friction.prakash_clifton]
+v_star = 1.0      # m/s
+length = 0.01     # m
