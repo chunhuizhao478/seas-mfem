@@ -13,15 +13,17 @@
 #       https://github.com/chunhuizhao478/seas-mfem.git seas-mfem-complex-geometries
 #   cd seas-mfem-complex-geometries/miniapps/seas/jobs/vista_complex && sbatch build_verify_complex_vista.sbatch
 # Steps:
-#   0. the repo CLAUDE.md guard (GitHub first), plus no untracked sources; the base commit 64e2b92 of step 4
-#      is in the clone and has the same MFEM sources and toml11 commit as HEAD
+#   0. the repo CLAUDE.md guard (GitHub first), plus no untracked sources; the base commit of step 4
+#      is in the clone and has the same MFEM sources and toml11 commit as HEAD.  On branch scec-benchmarks
+#      the base is 9f562eab, the commit before the complex-geometries merge (18ddd5b2): 64e2b92 has no
+#      linalg/cudss.* and failed this check there (Vista 1155937; Chunhui Zhao, 2026-11-20)
 #   1. build_vista.sh (MFEM + seas_nitsche_dyn_driver + six gate tests; writes BUILD_COMMIT_VISTA), then
 #      seas_test_nitsche_options
 #   2. meshes from the committed .geo with TACC gmsh, msh 2.2, sha256 in MESH_SHA256_COMPLEX_VISTA:
 #      the 1000 m and 200 m meshes of TPV12, TPV22 and TPV15, and tpv205/mesh/tpv2053d_1000m.msh for step 4
 #      (the 100 m TPV12 mesh has its own job and checksum file, make_tpv12_100m_mesh_vista.sbatch)
 #   3. tests: the six gate suites of build_verify_vista.sbatch, and test-nitsche-options (52 checks, 1 and 2 ranks)
-#   4. G-off on Vista: the driver of the base commit 64e2b92 (its miniapps/seas sources by git archive into
+#   4. G-off on Vista: the driver of the base commit (its miniapps/seas sources by git archive into
 #      $SCRATCH, this build's MFEM by symlink) and this driver run TPV205 1000 m, p = 1, 1.2 s, 8 ranks,
 #      under global stepping and --lts rate2, with no option table; both runs must finish, and every output
 #      file must be identical byte for byte (the cloud gate, 18 of 18 cells, repeated on this hardware),
@@ -57,7 +59,7 @@ UNTRACKED=$(git ls-files --others --exclude-standard -- '*.cpp' '*.hpp' '*.inl' 
 [ -z "$UNTRACKED" ] || { echo "ERROR: untracked sources in $ROOT:"; echo "$UNTRACKED"; exit 2; }
 HEAD=$(git rev-parse HEAD)
 rm -f miniapps/seas/VERIFIED_COMMIT_COMPLEX_VISTA
-BASE_COMMIT=64e2b921
+BASE_COMMIT=9f562eab
 git cat-file -e $BASE_COMMIT^{commit} || { echo "ERROR: base commit $BASE_COMMIT not in this clone"; exit 2; }
 # step 4 links this build's MFEM into the base tree: the MFEM library sources and the toml11 commit must match
 [ -z "$(git diff --name-only $BASE_COMMIT HEAD -- config fem general linalg mesh makefile ':(glob)*.hpp')" ] \
@@ -103,7 +105,7 @@ echo "=== G-off on Vista: base $BASE_COMMIT against this commit, TPV205 1000 m p
 # The base tree: its miniapps/seas sources (git archive, without the benchmark data folders, which hold no
 # source), and this checkout's MFEM level by symlink (the same sources, checked in step 0, and this
 # build's libmfem.a, config.mk and _config.hpp) and toml11 (the same commit).  Tried in the cloud: the
-# driver built this way is byte for byte the 64e2b92 driver built the usual way.
+# driver built this way is byte for byte the 64e2b92 driver built the usual way (complex-geometries branch).
 X=$SCRATCH/complex_geometries/base_$SLURM_JOB_ID
 mkdir -p $X/miniapps
 for e in $ROOT/*; do [ "$(basename $e)" = miniapps ] || ln -s $e $X/; done
