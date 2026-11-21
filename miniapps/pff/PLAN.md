@@ -59,6 +59,10 @@ GH200). The CPU result is the reference of each GPU gate.
       analytic tangent checked by finite differences), slit mesh of two
       stitched halves. Gates: 2826 elements and 3026 nodes; Fx = 0.923682,
       1.847363 at the 2 gold steps; the full curve against MOOSE.
+      Status (2026-11-21): passes. Mesh 2826/3026 with the 28 slit pairs;
+      gold steps to 5e-12; full curve against M-R2 to 6e-12 with the same
+      pass count on all 1000 steps (548 capped at 20 in both). Needs the
+      MOOSE Newton norm (scaled, NodalBC rows) and preset = false.
     - R3 three-point bending: deferred (RACCOON's case is finite-strain J2
       elastoplastic), revisited after R1 and R2.
 2. **C1/G1 explicit elastodynamics, no damage**: force kernel, lumped mass,

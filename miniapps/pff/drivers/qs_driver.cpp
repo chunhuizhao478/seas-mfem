@@ -78,17 +78,38 @@ real_t GlobalNorm(MPI_Comm comm, const Vector &v)
 /// Dirichlet values.  Converged when |R| <= max(nl_rel_tol |R0|, nl_abs_tol), or
 /// when the update is at round-off (|dX| <= 1e-13 |X|).  Returns the iteration
 /// count; aborts on failure.
-int SolveDisplacement(ParNonlinearForm &N, Vector &X, const QsCaseConfig &c, int dim,
+/// Newton solve of the displacement as MOOSE/PETSc SNES runs it (solve_type
+/// NEWTON, no line-search change): the residual has the kernel rows scaled by
+/// the automatic scaling factors W and the Dirichlet rows u - g (NodalBC,
+/// unscaled); a BC with preset = false starts from the old value, so the
+/// first step also moves the boundary. Converged when
+/// |F| <= max(nl_rel_tol |F_0|, nl_abs_tol). Row scaling does not change the
+/// Newton step. Returns the number of Newton iterations.
+int SolveDisplacement(ParNonlinearForm &Nfree, Vector &X, const Array<int> &ess,
+                      const Vector &G, const Vector &W, const QsCaseConfig &c, int dim,
                       MPI_Comm comm)
 {
-   Vector R(X.Size()), dX(X.Size());
-   N.Mult(X, R);
-   const real_t r0 = GlobalNorm(comm, R);
+   Vector R(X.Size()), dX(X.Size()), rhs(X.Size()), Xb(X.Size());
+   auto residual = [&]()
+   {
+      Nfree.Mult(X, R);
+      for (int t : ess) { R(t) = X(t) - G(t); }
+      Vector Rw(R);
+      for (int i = 0; i < Rw.Size(); i++) { Rw(i) *= W(i); }
+      return GlobalNorm(comm, Rw);
+   };
+   const real_t r0 = residual();
    real_t r = r0;
    for (int it = 0; it < 50; it++)
    {
       if (r <= std::max(c.nl_rel_tol * r0, c.nl_abs_tol)) { return it; }
-      HypreParMatrix &J = dynamic_cast<HypreParMatrix &>(N.GetGradient(X));
+      HypreParMatrix J(dynamic_cast<HypreParMatrix &>(Nfree.GetGradient(X)));
+      std::unique_ptr<HypreParMatrix> Je(J.EliminateRowsCols(ess));
+      // Rows: J_ff dX_f + J_fb dX_b = R_f, dX_b = R_b = X_b - g_b.
+      Xb = 0.0;
+      for (int t : ess) { Xb(t) = R(t); }
+      rhs = R;
+      J.EliminateBC(*Je, ess, Xb, rhs);
       HypreBoomerAMG amg(J);
       amg.SetSystemsOptions(dim, true);
       amg.SetPrintLevel(0);
@@ -100,15 +121,14 @@ int SolveDisplacement(ParNonlinearForm &N, Vector &X, const QsCaseConfig &c, int
       cg.SetMaxIter(5000);
       cg.SetPrintLevel(0);
       dX = 0.0;
-      cg.Mult(R, dX);
+      cg.Mult(rhs, dX);
       if (!cg.GetConverged())
       {
          MFEM_ABORT("displacement PCG did not converge: final norm " << cg.GetFinalNorm()
                     << " after " << cg.GetNumIterations() << " iterations");
       }
       X -= dX;
-      N.Mult(X, R);
-      r = GlobalNorm(comm, R);
+      r = residual();
       // Round-off floor: a residual tolerance below machine precision (the
       // RACCOON gold tests use nl_abs_tol = 1e-16) cannot be met; stop once
       // the Newton update is at round-off relative to the solution.
@@ -328,9 +348,14 @@ int main(int argc, char *argv[])
          R(ess.tdofs[k]) = X(ess.tdofs[k]) - Xbc(ess.tdofs[k]);
       }
       const real_t initial_norm = scaled_norm(R);
-      X = Xbc;
+      // preset BCs (MOOSE default) are applied to the initial guess; the
+      // others (preset = false) are reached by the first Newton step.
+      for (int k = 0; k < ess.tdofs.Size(); k++)
+      {
+         if (c.dirichlet[ess.spec[k]].preset) { X(ess.tdofs[k]) = Xbc(ess.tdofs[k]); }
+      }
 
-      int k = 0, qp_its = 0;
+      int k = 0, qp_its = 0, newton_its = 0;
       real_t F_last = 0.0;
       bool converged = false;
       real_t end_norm = 0.0;
@@ -338,7 +363,7 @@ int main(int argc, char *argv[])
       {
          // The grid function d holds the damage of the previous pass (or of
          // the last step): the displacement solve uses it.
-         SolveDisplacement(N, X, c, dim, comm);
+         newton_its += SolveDisplacement(Nfree, X, ess.tdofs, Xbc, W, c, dim, comm);
          u.SetFromTrueDofs(X);
 
          // Reaction (NodalSum of save_in): MOOSE evaluates the postprocessor
@@ -384,7 +409,8 @@ int main(int argc, char *argv[])
          {
             mfem::out << "  step " << n << " pass " << k << ": end norm " << std::setprecision(6)
                       << end_norm << ", initial " << initial_norm << ", relative "
-                      << end_norm / initial_norm << ", damage QP its " << st.iterations
+                      << end_norm / initial_norm << ", Newton its (step so far) " << newton_its
+                      << ", damage QP its " << st.iterations
                       << ", |r_I| " << st.r << " / " << st.r0 << "\n";
          }
          if (end_norm < c.fixed_point_abs_tol ||

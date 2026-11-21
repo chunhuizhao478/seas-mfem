@@ -5,6 +5,8 @@
 //  - sigma = d psi / d eps (central differences at fixed g) on random strains
 //  - limiting states: pure tension, pure compression, repeated eigenvalues
 //  - plane-strain padding: lambda = K - 2G/3 as with LIBMESH_DIM = 3 in MOOSE
+//  - tangent: SplitTangentApply = central differences of sigma, on random 3D
+//    and plane-strain strains (eps_zz = 0, a zero eigenvalue) at g = 0.3
 
 #include "mfem.hpp"
 #include "../../constitutive/strain_split.hpp"
@@ -131,9 +133,72 @@ static void TestPlaneStrainPadding()
    TEST_REL(r.sigma[8], lambda * tr, 1e-12, "sigma_zz = lambda tr(eps) (plane strain, lambda = K - 2G/3)");
 }
 
+static void TestTangent()
+{
+   std::mt19937 rng(99);
+   for (Decomposition dec : {Decomposition::None, Decomposition::Spectral, Decomposition::VolDev})
+   {
+      for (bool plane : {false, true})
+      {
+         real_t worst = 0.0;
+         for (int trial = 0; trial < 1000; trial++)
+         {
+            real_t e[9], de[9];
+            RandomSymmetric(rng, 1e-3, e);
+            RandomSymmetric(rng, 1.0, de);
+            if (plane)
+            {
+               for (int k : {2, 5, 6, 7, 8}) { e[k] = 0.0; de[k] = 0.0; }
+            }
+            const real_t g = 0.3, h = 1e-9;
+            real_t ep[9], em[9];
+            for (int i = 0; i < 9; i++) { ep[i] = e[i] + h * de[i]; em[i] = e[i] - h * de[i]; }
+            SplitResult rp, rm;
+            ComputeSplit(dec, ep, K, G, g, rp);
+            ComputeSplit(dec, em, K, G, g, rm);
+            real_t ds[9];
+            SplitTangentApply(dec, e, K, G, g, de, ds);
+            real_t err = 0.0, nrm = 0.0;
+            for (int i = 0; i < 9; i++)
+            {
+               const real_t fd = (rp.sigma[i] - rm.sigma[i]) / (2.0 * h);
+               err = std::max(err, std::abs(fd - ds[i]));
+               nrm = std::max(nrm, std::abs(fd));
+            }
+            worst = std::max(worst, err / (nrm + 1.0));
+         }
+         std::cout << "  " << Name(dec) << (plane ? " plane strain" : " 3D")
+                   << ": max |dsig - FD| / |FD| = " << worst << "\n";
+         TEST_ASSERT(worst < 1e-5, "tangent = central differences of sigma");
+      }
+   }
+   // Repeated eigenvalues: eps = diag(a, a, b), the limit theta = H(a).
+   for (real_t b : {-3e-4, 5e-4})   // tr eps != 0 (Macaulay kink at tr = 0)
+   {
+      real_t e[9] = {1e-4, 0, 0, 0, 1e-4, 0, 0, 0, b}, de[9];
+      RandomSymmetric(rng, 1.0, de);
+      real_t ds[9], ep[9], em[9];
+      SplitTangentApply(Decomposition::Spectral, e, K, G, 0.3, de, ds);
+      const real_t h = 1e-10;
+      for (int i = 0; i < 9; i++) { ep[i] = e[i] + h * de[i]; em[i] = e[i] - h * de[i]; }
+      SplitResult rp, rm;
+      ComputeSplit(Decomposition::Spectral, ep, K, G, 0.3, rp);
+      ComputeSplit(Decomposition::Spectral, em, K, G, 0.3, rm);
+      real_t err = 0.0, nrm = 0.0;
+      for (int i = 0; i < 9; i++)
+      {
+         const real_t fd = (rp.sigma[i] - rm.sigma[i]) / (2.0 * h);
+         err = std::max(err, std::abs(fd - ds[i])); nrm = std::max(nrm, std::abs(fd));
+      }
+      std::cout << "  spectral, repeated eigenvalue: " << err / nrm << "\n";
+      TEST_ASSERT(err / nrm < 1e-5, "spectral tangent at a repeated eigenvalue");
+   }
+}
+
 int main()
 {
    TestConsistency();
+   TestTangent();
    TestLimits();
    TestPlaneStrainPadding();
    return TestSummary("test_strain_split");

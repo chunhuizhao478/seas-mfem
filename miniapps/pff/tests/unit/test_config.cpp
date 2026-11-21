@@ -7,6 +7,7 @@
 // Run from miniapps/pff (the Makefile's `make test` does).
 
 #include "mfem.hpp"
+#include <map>
 #include "../../config/pff_config_parser.hpp"
 #include "../../config/qs_config_parser.hpp"
 #include "../../domain/qs_mesh.hpp"
@@ -134,6 +135,33 @@ static void TestRaccoonMode1()
    TEST_ASSERT(threw, "misspelt [solver] key throws");
 }
 
+static void TestRaccoonMode2()
+{
+   std::cout << "\n[raccoon mode2 case]\n";
+   const QsCaseConfig c = QsCaseConfigParser::ParseFile(
+                             "raccoon/mode2_brittle_fracture/configs/mode2.toml");
+   TEST_ASSERT(c.mesh_type == "slit" && c.slit_x == 0.5, "slit mesh stitched for x >= 0.5");
+   TEST_ASSERT(c.decomposition == Decomposition::Spectral, "spectral split (elasticity.i)");
+   TEST_ASSERT(!c.dirichlet[0].preset && c.dirichlet[1].preset,
+               "xdisp preset = false, the DirichletBCs keep MOOSE's default preset = true");
+   BoundaryNames names;
+   Mesh m = BuildQsMesh(c, names);
+   // M-R2 and tutorials/mode2_brittle_fracture/gold/elasticity_out.e: 2826
+   // elements, 3026 nodes, 28 coincident node pairs on y = 0, x < 0.5.
+   int pairs = 0;
+   std::map<std::pair<long long, long long>, int> seen;
+   for (int v = 0; v < m.GetNV(); v++)
+   {
+      const real_t *x = m.GetVertex(v);
+      const auto key = std::make_pair(std::llround(x[0] * 1e9), std::llround(x[1] * 1e9));
+      if (seen[key]++ == 1) { pairs++; }
+   }
+   TEST_ASSERT(m.GetNE() == 2826 && m.GetNV() == 3026, "refined slit mesh matches MOOSE (2826, 3026)");
+   TEST_ASSERT(pairs == 28, "28 duplicated node pairs along the slit");
+   TEST_ASSERT(names.at("top_half_top") == 3 && names.at("bottom_half_bottom") == 5,
+               "boundary_name_prefix names");
+}
+
 int main()
 {
    TestSpe();
@@ -141,5 +169,6 @@ int main()
    TestStrictKeys();
    TestPhysicalNames();
    TestRaccoonMode1();
+   TestRaccoonMode2();
    return TestSummary("test_config");
 }

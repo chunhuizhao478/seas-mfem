@@ -13,8 +13,9 @@
 //
 // Residual  R_a,i = sum_qp w |J| sigma_ij(eps(u), d) dN_a/dx_j
 // Tangent   d R / d u: analytic for NONE (g C) and VOLDEV
-//           (g C + (1 - g) K H(-tr eps) I x I).  SPECTRAL aborts until the
-//           spectral tangent is implemented and checked (phase R2).
+//           (g C + (1 - g) K H(-tr eps) I x I); SPECTRAL through
+//           SplitTangentApply (derivative of the eigenprojection), checked
+//           against finite differences in tests/unit/test_strain_split.cpp.
 
 #ifndef MFEM_PFF_SPLIT_ELASTICITY_INTEGRATOR_HPP
 #define MFEM_PFF_SPLIT_ELASTICITY_INTEGRATOR_HPP
@@ -94,7 +95,8 @@ public:
    {
       if (dec_ == Decomposition::Spectral)
       {
-         MFEM_ABORT("SplitElasticityIntegrator: the spectral tangent is not implemented yet");
+         AssembleSpectralGrad(el, Tr, elfun, elmat);
+         return;
       }
       const int dof = el.GetDof(), dim = el.GetDim();
       dshape_.SetSize(dof, dim);
@@ -163,6 +165,46 @@ public:
    }
 
 private:
+   void AssembleSpectralGrad(const FiniteElement &el, ElementTransformation &Tr,
+                             const Vector &elfun, DenseMatrix &elmat)
+   {
+      const int dof = el.GetDof(), dim = el.GetDim();
+      dshape_.SetSize(dof, dim);
+      elmat.SetSize(dof * dim);
+      elmat = 0.0;
+      const IntegrationRule &ir = Rule(el, Tr);
+      for (int q = 0; q < ir.GetNPoints(); q++)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         Tr.SetIntPoint(&ip);
+         el.CalcPhysDShape(Tr, dshape_);
+         real_t eps[9];
+         Strain(dim, dof, dshape_, elfun, eps);
+         const real_t g = Degradation(Tr, ip);
+         const real_t w = ip.weight * Tr.Weight();
+         for (int b = 0; b < dof; b++)
+            for (int k = 0; k < dim; k++)
+            {
+               // deps = sym(e_k (x) grad N_b)
+               real_t de[9] = {0.0};
+               for (int l = 0; l < dim; l++)
+               {
+                  de[k + 3*l] += 0.5 * dshape_(b, l);
+                  de[l + 3*k] += 0.5 * dshape_(b, l);
+               }
+               real_t ds[9];
+               SplitTangentApply(dec_, eps, K_, G_, g, de, ds);
+               for (int a = 0; a < dof; a++)
+                  for (int i = 0; i < dim; i++)
+                  {
+                     real_t v = 0.0;
+                     for (int j = 0; j < dim; j++) { v += ds[i + 3*j] * dshape_(a, j); }
+                     elmat(a + i * dof, b + k * dof) += w * v;
+                  }
+            }
+      }
+   }
+
    const IntegrationRule &Rule(const FiniteElement &el, ElementTransformation &Tr) const
    {
       if (IntRule) { return *IntRule; }

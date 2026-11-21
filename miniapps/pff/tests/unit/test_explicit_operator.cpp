@@ -13,6 +13,9 @@
 //   - the pressure vector of a constant Peak on one face is -P n |face|.
 //   - the central difference with zeta = 0 and no dashpots conserves the
 //     discrete energy H = 1/2 v^{n-1/2} M v^{n-1/2} + 1/2 u^n K u^{n-1}.
+//   - SplitElasticityIntegrator::AssembleElementGrad (spectral, d != 0) =
+//     central differences of AssembleElementVector (the qs Newton tangent,
+//     RACCOON mode II), on a quad and a triangle.
 
 #include "mfem.hpp"
 #include "../test_framework.hpp"
@@ -150,6 +153,45 @@ static void Check(Mesh &serial, const char *label)
    TEST_ASSERT(worst <= 1e-10 * H1, "central difference conserves H over 2000 steps");
 }
 
+static void CheckSpectralGrad(Element::Type type, const char *label)
+{
+   Mesh m = Mesh::MakeCartesian2D(2, 2, type, true, 1.0, 1.0);
+   H1_FECollection h1(1, 2);
+   FiniteElementSpace V(&m, &h1, 2, Ordering::byNODES), S(&m, &h1);
+   GridFunction dg(&S);
+   FunctionCoefficient dfun([](const Vector &X) { return 0.3 + 0.4 * X(0) * X(1); });
+   dg.ProjectCoefficient(dfun);
+   ExplicitElasticityParams p = Params(1);
+   SplitElasticityIntegrator integ(p.K, p.G, Decomposition::Spectral, p.deg, dg);
+   real_t worst = 0.0;
+   for (int e = 0; e < m.GetNE(); e++)
+   {
+      const FiniteElement &fe = *V.GetFE(e);
+      ElementTransformation &T = *V.GetElementTransformation(e);
+      const int n = fe.GetDof() * 2;
+      Vector u(n), up(n), um(n), fp, fm;
+      u.Randomize(10 + e);
+      u -= 0.5;
+      u *= 1e-3;
+      DenseMatrix J;
+      integ.AssembleElementGrad(fe, T, u, J);
+      const real_t h = 1e-9;
+      for (int k = 0; k < n; k++)
+      {
+         up = u; um = u; up(k) += h; um(k) -= h;
+         integ.AssembleElementVector(fe, T, up, fp);
+         integ.AssembleElementVector(fe, T, um, fm);
+         for (int i = 0; i < n; i++)
+         {
+            const real_t fd = (fp(i) - fm(i)) / (2.0 * h);
+            worst = std::max(worst, std::abs(fd - J(i, k)) / (J.MaxMaxNorm() + 1e-30));
+         }
+      }
+   }
+   std::cout << "\n[" << label << "] spectral element tangent vs FD: " << worst << "\n";
+   TEST_ASSERT(worst < 1e-6, "spectral AssembleElementGrad = FD of AssembleElementVector");
+}
+
 int main(int argc, char *argv[])
 {
    Mpi::Init(argc, argv);
@@ -158,5 +200,7 @@ int main(int argc, char *argv[])
    Check(tri, "triangles");
    Mesh tet = Mesh::MakeCartesian3D(3, 3, 3, Element::TETRAHEDRON, 1.0, 1.0, 1.0);
    Check(tet, "tetrahedra");
+   CheckSpectralGrad(Element::QUADRILATERAL, "quads");
+   CheckSpectralGrad(Element::TRIANGLE, "triangles");
    return TestSummary("test_explicit_operator");
 }

@@ -4,6 +4,7 @@
 | --- | --- | --- |
 | R1 gold (RACCOON mode I) | `raccoon_mode1_gold.sh` | nodal fields to 1e-10 |
 | R1 full curve vs MOOSE M-R1 | `raccoon_mode1_moose.sh` | 4.4e-12 (gate 1e-9), same pass count every step |
+| R2 mesh and full curve vs MOOSE M-R2 | `raccoon_mode2_moose.sh` | 2826 elements; 6e-12 (gate 1e-9), same pass count on all 1000 steps |
 | C1 energy (free faces, ζ = 0) | `pff_driver -fd -c spe_hftc/configs/verification/c1_section_free_zeta0.toml -tf 3.82e-4` | 0.048 % of the input work over 10 021 steps (gate 0.1 %) |
 | C1 pressurised cavity (spe_hftc PLAN A.8) | `mpirun -np 2 tests/verification/cavity_hoop` | explicit vs static FE 0.35 % (gate 1 %); static FE vs Lamé 3.5 % (gate 5 %, first order in h: 1.74 % at h/2) |
 | C1 dashpot reflection | `tests/verification/dashpot_reflection -w p` / `-w s` | 0.24 % amplitude (gate 2 %) |

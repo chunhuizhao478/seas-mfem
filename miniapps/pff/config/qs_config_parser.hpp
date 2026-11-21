@@ -147,12 +147,13 @@ private:
       {
          for (const auto &b : toml::get<toml::array>(data.at("dirichlet")))
          {
-            Check(b, "dirichlet", {"boundaries", "component", "value", "rate"});
+            Check(b, "dirichlet", {"boundaries", "component", "value", "rate", "preset"});
             DirichletSpec s;
             s.boundaries = Names(b, "boundaries");
             s.component = Int(b, "component", 0);
             s.value = Real(b, "value", 0.0);
             s.rate = Real(b, "rate", 0.0);
+            s.preset = b.contains("preset") ? toml::get<bool>(b.at("preset")) : true;
             c.dirichlet.push_back(s);
          }
       }

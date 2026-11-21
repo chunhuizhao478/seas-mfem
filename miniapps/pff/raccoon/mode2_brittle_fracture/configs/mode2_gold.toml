@@ -1,0 +1,88 @@
+# RACCOON tutorials/mode2_brittle_fracture (hugary1995/raccoon 9fd3a6f, the
+# farms@cdms `raccoon` submodule). elasticity.i + fracture.i, all values
+# copied from them (byte copies in the M-R2 run folder, sha256 checked).
+
+[case]
+name = "mode2_gold"
+source = "raccoon@9fd3a6f tutorials/mode2_brittle_fracture/{elasticity,fracture}.i"
+
+[mesh]
+# top_half / bottom_half: GeneratedMeshGenerator dim 2, nx 30, ny 15,
+# ymin 0 / -0.5, ymax 0.5 / 0 (xmax default 1); StitchedMeshGenerator on the
+# BoundingBoxNodeSets (0.5, 0, 0)-(1, 0, 0) of each half.
+type = "slit"
+nx = 30
+ny = 15
+xmin = 0.0
+xmax = 1.0
+ymin = -0.5
+ymax = 0.5
+slit_x = 0.5
+# Adaptivity: initial_steps 2, max_h_level 2, OrientedBoxMarker inside REFINE
+refine_steps = 2
+
+[[mesh.refine]]
+center = [0.65, -0.25, 0.0]
+length = 0.8
+width = 0.2
+height = 1.0
+length_direction = [1.0, -1.5, 0.0]
+width_direction = [1.5, 1.0, 0.0]
+
+[material]
+E = 2.1e5
+nu = 0.3
+
+[phase_field]
+# CrackGeometricFunction alpha = d^2 (AT2, c0 = 2);
+# PowerDegradationFunction (1-d)^p (1-eta) + eta, p = 2, eta = 1e-6
+model = "AT2"
+Gc = 2.7
+l = 0.02
+p = 2
+eta = 1e-6
+decomposition = "spectral"
+driving_average = "element"   # psie_active is a CONSTANT MONOMIAL aux variable
+
+# BCs: xdisp (FunctionDirichletBC disp_x = t on top_half_top, preset = false),
+# yfix (disp_y = 0 on top_half_top and bottom_half_bottom),
+# xfix (disp_x = 0 on bottom_half_bottom)
+[[dirichlet]]
+boundaries = ["top_half_top"]
+component = 0
+rate = 1.0
+preset = false
+
+[[dirichlet]]
+boundaries = ["top_half_top", "bottom_half_bottom"]
+component = 1
+value = 0.0
+
+[[dirichlet]]
+boundaries = ["bottom_half_bottom"]
+component = 0
+value = 0.0
+
+[reaction]
+# Postprocessor Fx: NodalSum of fx (save_in of solid_x) on top_half_top
+name = "Fx"
+boundaries = ["top_half_top"]
+component = 0
+
+[time]
+dt = 2e-5
+end_time = 2e-2
+num_steps = 2
+
+[solver]
+fixed_point_max_its = 20
+fixed_point_rel_tol = 1e-8
+fixed_point_abs_tol = 1e-10
+accept_on_max_fixed_point_iteration = true
+automatic_scaling = true   # elasticity.i Executioner
+nl_rel_tol = 1e-8
+nl_abs_tol = 1e-10
+
+[output]
+dir = "out/mode2_gold"
+nodal_steps = [1, 2]

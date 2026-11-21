@@ -43,7 +43,7 @@ def main():
     print(f"peak pff   {pp[1]:.10g} at t = {pp[0]:g}")
     print(f"peak MOOSE {pm[1]:.10g} at t = {pm[0]:g}")
     print(f"max rel diff {worst[0]:.3e} at {worst[1]}")
-    ok = worst[0] <= a.rel and pp[0] == pm[0]
+    ok = worst[0] <= a.rel and abs(pp[0] - pm[0]) <= 1e-12 * max(1.0, abs(pm[0]))
     print("PASS" if ok else f"FAIL (tol {a.rel:g})")
     return 0 if ok else 1
 

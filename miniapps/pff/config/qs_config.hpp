@@ -42,13 +42,15 @@ struct NodeSetBox
 };
 
 /// u_component = value + rate * t on the named boundaries (DirichletBC,
-/// FunctionDirichletBC with function = 'rate*t').
+/// FunctionDirichletBC with function = 'rate*t'). preset as the MOOSE
+/// parameter (default true): applied to the Newton initial guess.
 struct DirichletSpec
 {
    std::vector<std::string> boundaries;
    int component = 0;
    real_t value = 0.0;
    real_t rate = 0.0;
+   bool preset = true;
 };
 
 struct QsCaseConfig
