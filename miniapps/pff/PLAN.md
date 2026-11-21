@@ -53,7 +53,8 @@ GH200). The CPU result is the reference of each GPU gate.
       994 nodes as in the gold (passes, same coordinates); the 2 gold steps
       (Fy = 5.69042, 11.38077) and fields within relative 1e-4 (passes:
       `tests/verification/raccoon_mode1_gold.sh`); the full Fy–u curve
-      against a MOOSE run (open).
+      against MOOSE M-R1 within 1e-4 (passes: 2.0e-5, peak equal to 1e-11,
+      `tests/verification/raccoon_mode1_moose.sh`).
     - R2 `tutorials/mode2_brittle_fracture`: spectral split (Newton,
       analytic tangent checked by finite differences), slit mesh of two
       stitched halves. Gates: 2826 elements and 3026 nodes; Fx = 0.923682,
@@ -86,12 +87,13 @@ GH200). The CPU result is the reference of each GPU gate.
 - RACCOON transfers `psie_active` to the fracture app as a CONSTANT
   MONOMIAL, so the damage source sees the element average of ψ_active, not
   its quadrature-point values. Phase R reproduces this.
-- The RACCOON mode I gold file matches one staggered pass per step to 1e-10,
-  not the input's fixed-point iterations (up to 20 passes to 1e-8). Keep both
-  configs until a full MOOSE run shows which the code does
-  (raccoon/README.md).
+- The RACCOON mode I gold file matches one staggered pass per step to 1e-10.
+  MOOSE does iterate (M-R1), but its fixed-point test on the scaled residual
+  passes after one pass at steps 1–2.
 - MOOSE runs the RACCOON inputs with `automatic_scaling = true`, which scales
-  the residual norms of the fixed-point test; pff does not.
+  the residual norms of the fixed-point test; pff does not yet, so it takes
+  more passes (55 capped steps against MOOSE's 25 in mode I). The curves
+  still agree to 2e-5. Porting the scaling is pending the MOOSE source.
 
 - The driving-energy conventions differ. spe_hftc: ψ = αGc/(c0 l) + g ψ⁺ with
   no history. cmame hydromech: ψ = αGc/(c0 l) + ½ g H with
