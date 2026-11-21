@@ -13,7 +13,7 @@ Claude Doc "pff restructure proposal"; PLAN.md is the working plan.
 | `common/` | started | `pff_types.hpp`: enums for decomposition, crack model, driving energy, permeability, porosity |
 | `config/` | phase 1 done | `pff_config.hpp` (CaseConfig, dynamic cases), `qs_config.hpp` (QsCaseConfig, phase R), their parsers, `toml_reader.hpp` (strict TOML helpers, toml11 v3) |
 | `constitutive/` | phase 1 done | `strain_split.hpp`: none / spectral / voldev σ and ψ± (MOOSE branches). The material interface is pff's own, in MFEM's style: integrators and coefficients over quadrature data, with the `MFEM_HOST_DEVICE` kernels inside |
-| `phasefield/` | phase 1 done | `phase_field_functions.hpp`: g(d), α(d), c0, source, crack energy |
+| `phasefield/` | phase 1 done | `phase_field_functions.hpp`: g(d), α(d), c0, source, crack energy; `initial_damage.hpp`: node-interior seeding of initial_damage boxes |
 | `loading/` | phase 1 done | `pulse_load.hpp` (ElkPulseLoadExperiment), rates from (t_r, t_d) |
 | `domain/` | C1 done | `qs_mesh.hpp`, `qs_damage_operator.hpp` (phase R); `explicit_elasticity_operator.hpp`: lumped mass, lumped Lysmer dashpot blocks, pulse load vector, power iteration for ω_max |
 | `integrator/` | started | split-elasticity residual and tangent, damage diffusion / reaction / source, dashpot and pressure traction later |
@@ -24,7 +24,7 @@ Claude Doc "pff restructure proposal"; PLAN.md is the working plan.
 | `drivers/` | started | `qs_driver.cpp` (quasi-static staggered, phase R); `pff_driver.cpp` (explicit dynamics, C1: `-fd` holds d = 0) |
 | `raccoon/` | phase R | RACCOON quasi-static benchmarks: `mode1_brittle_fracture/`, `mode2_brittle_fracture/` |
 | `spe_hftc/`, `cmame_revision/` | configs | `configs/*.toml` per MOOSE case; `mesh/`, `gold/`, `benchmark_data/`, `benchmark_document/` as they are added |
-| `tests/unit/` | 6 files, 129 checks | `make test` |
+| `tests/unit/` | 7 files, 140 checks | `make test` |
 | `tests/parallel/`, `tests/verification/` | started | `raccoon_mode1_gold.sh`, `raccoon_mode1_moose.sh`, `dashpot_reflection.cpp`, `cavity_hoop.cpp` (README lists the C1 gates) |
 | `jobs/<cluster>/` | later | sbatch scripts with the commit guard of the repo CLAUDE.md |
 | `archive/qs_prototype/` | frozen | earlier quasi-static AT2 prototype (does not match the benchmarks) |

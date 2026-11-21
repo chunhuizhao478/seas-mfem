@@ -1,0 +1,72 @@
+# C2: as c2_section_eta1.toml with free faces and zeta_pulse = 0, the setting of the farms local_runs/README.md runs (farms 3cea9bdc, code_2d/elasticity.i).
+# Reproduces the Vista 2D run section_homog_eta0p45_absorb:
+#   farms@cdms pulsepower/spe_hftc/code_2d/elasticity_absorbing.i + fracture.i
+#   with the job-script overrides  eta=0.45 zeta_pulse=1e-8 Np=20
+#   (code_2d/cases_vista/submit_vista_eta0p45.sbatch).
+
+[case]
+name = "c2_section_eta1_free_zeta0"
+model = "solid"
+source = "pulsepower/spe_hftc/code_2d/elasticity_absorbing.i"
+
+[mesh]
+# make_spe_section_2d.py --h 0.3e-3 (67 k triangles); export with msh_version="2.2"
+file = "../../mesh/spe_section_h0p3.msh"
+dim = 2
+corner = [-25.555e-3, -25.96e-3, 0.0]   # (-Lx/2, -Ly/2, 0): pinned in x and y
+
+[boundaries]
+pressure = ["borehole"]
+absorbing = []                           # free faces, as the 2026-10-21 MOOSE runs (code_2d/elasticity.i)
+
+[material]                               # cast acrylic, paper Table 1
+E = 2.80e9
+nu = 0.35
+density = 1190
+
+[phase_field]
+model = "AT1"
+ft = 69e6                                # Gc = 8 l ft^2 / (3E) = 2720.57 J/m^2
+l = 6e-4
+eta = 1e-6
+p = 2
+decomposition = "spectral"
+driving = "active"                       # psi = alpha Gc/c0/l + g psie_active
+
+[pulse]                                  # ElkPulseLoadExperiment
+shape_alpha = 4.1032e5                   # t_r = 0.3 us, t_d = 6 us
+shape_beta = 1.1529e7
+rise_time = 3e-7
+pulse_duration = 6e-5
+EM = 0.144
+gap = 7.17e-3
+efficiency = 1.0
+kappa = 0.35
+m_exp = 0.25
+base_factor = 8000
+center = [0.0, 0.0, 0.0]               # section at the gap: uniform peak
+num_pulses = 20
+
+[damping]
+zeta_pulse = 0
+zeta_quench = 1e-5
+t_free = 2.5e-5
+quench = "stiffness"                     # MOOSE parity; see PLAN.md: explicit needs "mass" or "implicit"
+
+[time]
+cfl = 0.4
+dt_max = 1e-7
+dt_quiet = 1e-7
+
+[coupling]
+scheme = "single_pass"
+
+[output]
+directory = "out/c2_section_eta1_free_zeta0"
+interval = 100
+fields = ["d", "vel_mag"]
+
+[metrics]
+d_threshold = 0.5
+r_core = 15e-3
+r_hole = 4.15e-3

@@ -127,11 +127,27 @@ public:
       }
    }
 
+   /// Element values of psi_e^+ (undegraded, constant per P1 element): the
+   /// CONSTANT MONOMIAL psie_active that MOOSE transfers to the fracture app.
+   /// psi_e has one entry per local element.
+   void ElementActiveEnergy(const Vector &U, Vector &psi_e) const
+   {
+      vfes_.GetProlongationMatrix()->Mult(U, uL_);
+      Ru_->Mult(uL_, ue_);
+      dL_ = 0.0;
+      Rd_->Mult(dL_, de_);
+      ElementForces(ue_, de_, fe_, psi_e_, &psi_e);
+   }
+
    int NumQuadraturePoints() const { return nq_; }
 
 private:
-   void ElementForces(const Vector &ue, const Vector &de, Vector &fe, Vector &psi_e) const
+   void ElementForces(const Vector &ue, const Vector &de, Vector &fe, Vector &psi_e,
+                      Vector *psi_active = nullptr) const
    {
+      const bool want_active = psi_active != nullptr;
+      if (want_active) { psi_active->SetSize(ne_); psi_active->UseDevice(true); }
+      real_t *PA = want_active ? psi_active->Write() : nullptr;
       const int ND = nd_, DIM = dim_, NE = ne_;
       const real_t K = K_, G = G_;
       const Decomposition dec = dec_;
@@ -178,6 +194,7 @@ private:
                Fo(a, i, e) = v * s;
             }
          P[e] = v * r.psi;
+         if (want_active) { PA[e] = r.psi_active; }
       });
    }
 

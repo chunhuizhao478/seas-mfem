@@ -76,6 +76,21 @@ GH200). The CPU result is the reference of each GPU gate.
    spe_hftc 2D one pulse to 10 µs (η = 1: d > 0.5 out to 1.76 mm and
    77 J/m; η = 0.3: d_max = 0.18); cmame 2D solid first pulse. G2: d matches
    the CPU solver to 1e-8.
+   Status (2026-11-21): code done (`pff_driver` without `-fd`): one damage
+   solve per explicit step on ψ⁺(u^{n+1}) (element values), bounds
+   max(d_old, seed) ≤ d ≤ 1 (farms VariableConstantIrreversibleBounds is
+   initial_damage_aux at step 1 and d_old after, so MOOSE damage is
+   irreversible), fracture.i tolerances with its automatic scaling; a step
+   whose start point already meets the absolute tolerance is skipped, as
+   PETSc stops at iteration 0. Energy budget with the crack energy closes to
+   0.13 J of 1190 J/m (η = 1, 10 µs); halving dt changes the crack energy by
+   0.1 %. The gate numbers above come from the 2026-10-21 MOOSE runs
+   (farms local_runs/README.md, 3cea9bdc: free faces, ζ = 0, mesh made then,
+   8 ranks). pff at ζ = 0: η = 1 d > 0.5 to 3.24 mm, 97.5 J/m; η = 0.3
+   d_max = 0.25, 6.8 J/m, i.e. more damage than that run. pff at the current
+   ζ_pulse = 1e-8: η = 1 1.88 mm, 76.6 J/m; η = 0.3 d_max = 0.166, 5.3 J/m.
+   The comparison that counts is M-C2a/b (current inputs, ζ = 1e-8, the pff
+   mesh), queued on the Mac.
 4. **C3/G3 pulse trains and the quench**: 20-pulse spe_hftc 2D η sweep and
    100 pulses of the cmame 2D solid benchmark; extents per pulse within one
    element, the energy budget closes.

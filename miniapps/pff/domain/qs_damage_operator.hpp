@@ -50,6 +50,23 @@ private:
    Kind kind_;
 };
 
+/// Source(d(x), D(x)) of ADPFFSource for a damage field d and driving field D.
+class SourceCoefficient : public Coefficient
+{
+public:
+   SourceCoefficient(const PhaseFieldModel &pf, const GridFunction &d, const GridFunction &D)
+      : pf_(pf), d_(d), D_(D) {}
+
+   real_t Eval(ElementTransformation &T, const IntegrationPoint &ip) override
+   {
+      return pf_.Source(d_.GetValue(T, ip), D_.GetValue(T, ip));
+   }
+
+private:
+   const PhaseFieldModel &pf_;
+   const GridFunction &d_, &D_;
+};
+
 class QsDamageOperator
 {
 public:
@@ -92,7 +109,26 @@ public:
       f.ParallelAssemble(b_);
    }
 
+   /// r = A(D) x - b(D) = kappa K x + int Source(x, D) v without assembling
+   /// A (p = 2: Source is linear in d, and the same quadrature as Assemble).
+   void Residual(const Vector &x, const GridFunction &D, Vector &r) const
+   {
+      ParGridFunction xg(&fes_);
+      xg.SetFromTrueDofs(x);
+      SourceCoefficient src(pf_, xg, D);
+      ParLinearForm f(&fes_);
+      auto *li = new DomainLFIntegrator(src);
+      if (ir_) { li->SetIntRule(ir_); }
+      f.AddDomainIntegrator(li);
+      f.Assemble();
+      r.SetSize(fes_.GetTrueVSize());
+      f.ParallelAssemble(r);
+      K_->AddMult(x, r);
+   }
+
    const HypreParMatrix &A() const { return *A_; }
+   /// kappa K (the diffusion part, assembled once).
+   const HypreParMatrix &DiffusionMatrix() const { return *K_; }
    const Vector &b() const { return b_; }
 
 private:

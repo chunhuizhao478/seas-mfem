@@ -3,10 +3,11 @@
 // pff_driver.cpp — explicit dynamic phase-field fracture (phases C1-C5).
 //
 //   mpirun -np N ./pff_driver -c spe_hftc/configs/section_homog_eta0p45_absorb.toml
-//                             -fd [-tf END_TIME] [-o DIR] [-pi ITERS] [-pv INTERVAL]
+//                             [-fd] [-tf END_TIME] [-o DIR] [-pi ITERS] [-pv INTERVAL]
 //
-// Phase C1 (this version): elastodynamics with the damage frozen at d = 0
-// (-fd/--frozen-damage is required; damage evolution is phase C2). One step:
+// Phase C2 (this version): explicit elastodynamics plus one bound-constrained
+// damage solve per step (below); -fd/--frozen-damage holds d = 0 (phase C1,
+// output <name>_c1.csv, otherwise <name>_c2.csv). One step:
 // central difference with lumped mass (solver/central_difference.hpp), split
 // internal force (kernels/split_force_kernels.hpp), Lysmer dashpots and the
 // ElkPulseLoadExperiment borehole pressure (domain/explicit_elasticity_operator.hpp).
@@ -27,6 +28,11 @@
 // u), energy_error = kinetic + elastic - external_work + damping_work +
 // kv_work. MOOSE's FarmsExternalWork is a left-endpoint rule in time with the
 // consistent-mass kinetic energy, so the energies compare to O(dt) only.
+// C2 columns: crack_energy (Gc/(c0 l) int alpha(d) + 1/2 d . kappa K d, part
+// of energy_error), d_max, fracture_extent and extent_090 (largest xy
+// distance from [pulse] center of a node with d >= [metrics] d_threshold and
+// d >= 0.9, minus r_hole), damage_qp_its (0: skipped step). The shadow_*
+// columns assume a fixed d and are diagnostics of C1 only.
 
 #include "mfem.hpp"
 #include "../config/pff_config_parser.hpp"
@@ -34,6 +40,9 @@
 #include "../domain/explicit_elasticity_operator.hpp"
 #include "../solver/central_difference.hpp"
 #include "../solver/cfl.hpp"
+#include "../domain/qs_damage_operator.hpp"
+#include "../solver/bound_constrained_qp.hpp"
+#include "../phasefield/initial_damage.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -94,6 +103,22 @@ void NearestVertexTrueDofs(ParFiniteElementSpace &vfes, const std::array<real_t,
    }
 }
 
+/// Inactive-set residual norm at x of the bound-constrained damage problem,
+/// with the active set of BoundConstrainedQP (and of PETSc vinewtonrsls).
+real_t InactiveResidualNorm(MPI_Comm comm, const Vector &x, const Vector &r, const Vector &lo,
+                            const Vector &hi)
+{
+   real_t s = 0.0;
+   for (int i = 0; i < x.Size(); i++)
+   {
+      const bool active = (x(i) <= lo(i) && r(i) > 0.0) || (x(i) >= hi(i) && r(i) < 0.0);
+      if (!active) { s += r(i) * r(i); }
+   }
+   real_t g = 0.0;
+   MPI_Allreduce(&s, &g, 1, MPITypeMap<real_t>::mpi_type, MPI_SUM, comm);
+   return std::sqrt(g);
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -113,7 +138,7 @@ int main(int argc, char *argv[])
    args.AddOption(&output_override, "-o", "--output-dir", "Override [output] directory.");
    args.AddOption(&end_time_override, "-tf", "--end-time", "Override [time] end_time.");
    args.AddOption(&frozen_damage, "-fd", "--frozen-damage", "-nfd", "--no-frozen-damage",
-                  "Hold d = 0 (phase C1). Required until damage evolution (C2) exists.");
+                  "Hold d = 0 (phase C1: elastodynamics only).");
    args.AddOption(&power_its, "-pi", "--power-iterations",
                   "Power iterations for omega_max^2 of M^-1 K.");
    args.AddOption(&pv_interval, "-pv", "--paraview-interval",
@@ -129,16 +154,13 @@ int main(int argc, char *argv[])
    if (std::string(output_override).size()) { c.output_dir = output_override; }
    if (end_time_override > 0.0) { c.end_time = end_time_override; }
 
-   if (!frozen_damage)
-   {
-      MFEM_ABORT("pff_driver: damage evolution is phase C2 and not implemented yet; "
-                 "run with -fd (d frozen at 0)");
-   }
    MFEM_VERIFY(c.model == CaseModel::Solid, "pff_driver: hydromech is phase C4");
    MFEM_VERIFY(c.confinement_pressure == 0.0 && c.confinement_bdr.empty(),
                "pff_driver: confinement is not implemented yet (C2)");
-   MFEM_VERIFY(c.initial_damage.empty(),
-               "pff_driver: seeded initial damage needs the damage solve (C2)");
+   MFEM_VERIFY(frozen_damage || c.pf.driving == DrivingEnergy::Active,
+               "pff_driver: the history driving energy is phase C4 (hydromech)");
+   MFEM_VERIFY(frozen_damage || c.coupling == CouplingScheme::SinglePass,
+               "pff_driver: [coupling] fixed_point is not implemented for the explicit step");
    if (c.zeta_quench > 0.0 && c.quench != QuenchMode::Stiffness)
    {
       MFEM_ABORT("pff_driver: quench modes 'mass' and 'implicit' are phase C3");
@@ -194,7 +216,8 @@ int main(int argc, char *argv[])
    const HYPRE_BigInt global_nodes = Sfes.GlobalTrueVSize();
    if (Mpi::Root())
    {
-      mfem::out << "pff_driver (C1, d frozen at 0): " << c.name << "\n  source: " << c.source
+      mfem::out << "pff_driver (" << (frozen_damage ? "C1, d frozen at 0" : "C2, damage")
+                << "): " << c.name << "\n  source: " << c.source
                 << "\n  mesh " << mesh_path << ": " << global_ne << " elements, "
                 << global_nodes << " nodes"
                 << "\n  c_p = " << ep.Cp() << " m/s, c_s = " << ep.Cs() << " m/s"
@@ -213,6 +236,89 @@ int main(int argc, char *argv[])
    S.F_prev.SetSize(n); S.F_prev = 0.0;
    Vector D(Sfes.GetTrueVSize());
    D = 0.0;
+
+   // Damage (phase C2): farms@cdms pulsepower/spe_hftc/code_{2d,3d}/fracture.i.
+   // One damage solve per explicit step (single pass), with psie_active of
+   // u^{n+1} as the CONSTANT MONOMIAL driving field. Bounds: farms
+   // VariableConstantIrreversibleBounds (bound_value = initial_damage_aux at
+   // the first step, d_old after) and ConstantBounds 1, i.e. lo = max(d_old,
+   // seed) with d^0 = 0. Tolerances of fracture.i: nl_rel_tol 1e-8,
+   // nl_abs_tol 1e-10 with automatic_scaling (compute_scaling_once, Jacobian
+   // diagonal): the absolute tolerance is on s |r| with s = 1/max_i A_ii of
+   // the first solve. A step whose start point d_old already meets the
+   // absolute tolerance is skipped, as PETSc stops at iteration 0 there.
+   const IntegrationRule &dir = IntRules.Get(pmesh.GetTypicalElementGeometry(),
+                                             ep.quadrature_order);
+   L2_FECollection l2(0, dim);
+   ParFiniteElementSpace Lfes(&pmesh, &l2);
+   ParGridFunction Dgf(&Lfes);
+   Dgf = 0.0;
+   std::unique_ptr<QsDamageOperator> damage;
+   BoundConstrainedQP qp;
+   qp.rel_tol = 1e-8;
+   real_t damage_abs_tol = -1.0;   // set at the first damage step
+   const real_t fracture_nl_abs_tol = 1e-10;
+   Vector seed, lo(D.Size()), hi(D.Size()), rd(D.Size()), dx(D.Size()), psi_el;
+   hi = 1.0;
+   Vector m_lump(D.Size());   // int phi_i
+   std::unique_ptr<HypreParMatrix> Mcons;
+   Vector node_r(D.Size());   // distance of each node from the pulse center in the xy plane
+   long damage_solves = 0, damage_qp_its = 0;
+   if (!frozen_damage)
+   {
+      damage.reset(new QsDamageOperator(Sfes, c.pf, &dir));
+      SeedInitialDamage(Sfes, c.initial_damage, seed);
+      ParLinearForm one(&Sfes);
+      ConstantCoefficient onec(1.0);
+      auto *li = new DomainLFIntegrator(onec);
+      li->SetIntRule(&dir);
+      one.AddDomainIntegrator(li);
+      one.Assemble();
+      one.ParallelAssemble(m_lump);
+      ParBilinearForm mf(&Sfes);
+      auto *mi = new MassIntegrator();
+      mi->SetIntRule(&dir);
+      mf.AddDomainIntegrator(mi);
+      mf.Assemble();
+      mf.Finalize();
+      Mcons.reset(mf.ParallelAssemble());
+      ParGridFunction rg(&Sfes);
+      const real_t ctr[2] = {c.pulse.center[0], c.pulse.center[1]};
+      FunctionCoefficient rf([&ctr](const Vector &x) { return std::hypot(x(0) - ctr[0], x(1) - ctr[1]); });
+      rg.ProjectCoefficient(rf);
+      rg.GetTrueDofs(node_r);
+      if (Mpi::Root())
+      {
+         mfem::out << "  damage: " << (c.pf.crack.model == CrackModel::AT1 ? "AT1" : "AT2")
+                   << ", Gc = " << c.pf.Gc << " J/m^2, l = " << c.pf.l << " m, kappa = "
+                   << c.pf.DiffusionCoefficient() << ", onset psi+ = "
+                   << c.pf.OnsetDrivingEnergy() << " J/m^3\n";
+      }
+   }
+   // Crack energy Gc/(c0 l) int alpha(d) + 1/2 d . kappa K d of the damage d.
+   auto crack_energy = [&](const Vector &d)
+   {
+      if (frozen_damage) { return 0.0; }
+      Vector Kd(d.Size());
+      damage->DiffusionMatrix().Mult(d, Kd);
+      real_t a = 0.0;
+      if (c.pf.crack.model == CrackModel::AT1) { a = InnerProduct(comm, m_lump, d); }
+      else
+      {
+         Vector Md(d.Size());
+         Mcons->Mult(d, Md);
+         a = InnerProduct(comm, d, Md);
+      }
+      return c.pf.Gc / (c.pf.crack.c0() * c.pf.l) * a + 0.5 * InnerProduct(comm, d, Kd);
+   };
+   // Largest xy distance from the pulse center of a node with d >= thr, minus r_hole (0 if none).
+   auto extent = [&](const Vector &d, real_t thr)
+   {
+      real_t loc = 0.0, glob = 0.0;
+      for (int i = 0; i < d.Size(); i++) { if (d(i) >= thr) { loc = std::max(loc, node_r(i) - c.r_hole); } }
+      MPI_Allreduce(&loc, &glob, 1, MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
+      return glob;
+   };
    CentralDifference cd(op);
    CentralDifferenceStepInfo info;
 
@@ -220,21 +326,23 @@ int main(int argc, char *argv[])
    if (Mpi::Root())
    {
       std::filesystem::create_directories(c.output_dir);
-      const std::string path = c.output_dir + "/" + c.name + "_c1.csv";
+      const std::string path = c.output_dir + "/" + c.name + (frozen_damage ? "_c1.csv" : "_c2.csv");
       csv.open(path);
       MFEM_VERIFY(csv.good(), "cannot write " << path);
       csv << "step,t,dt,p_wall,v_max,kinetic,elastic,external_work,damping_work,kv_work,"
-          "energy_error,shadow_energy,shadow_input,shadow_dissipated,shadow_error\n"
+          "energy_error,shadow_energy,shadow_input,shadow_dissipated,shadow_error,"
+          "crack_energy,d_max,fracture_extent,extent_090,damage_qp_its\n"
           << std::setprecision(12);
    }
    std::unique_ptr<ParaViewDataCollection> pv;
-   ParGridFunction vel(&Vfes), disp(&Vfes);
+   ParGridFunction vel(&Vfes), disp(&Vfes), dout(&Sfes);
    if (pv_interval > 0)
    {
       pv.reset(new ParaViewDataCollection(c.name + "_c1", &pmesh));
       pv->SetPrefixPath(c.output_dir);
       pv->RegisterField("velocity", &vel);
       pv->RegisterField("displacement", &disp);
+      pv->RegisterField("d", &dout);
    }
 
    // Work accounting (trapezoidal in u).
@@ -280,7 +388,51 @@ int main(int argc, char *argv[])
       }
       if (step_n == 1) { H_ref = H; }
       const Vector u_n(S.u);
+      const Vector d_n(D);
       cd.Step(S, D, s, zeta, dt, info);
+
+      // Damage d^{n+1} from psie_active(u^{n+1}).
+      int qp_its_step = 0;
+      if (!frozen_damage)
+      {
+         op.Force().ElementActiveEnergy(S.u, psi_el);
+         psi_el.HostRead();
+         for (int e = 0; e < pmesh.GetNE(); e++) { Dgf(e) = c.pf.DrivingFrom(psi_el(e)); }
+         for (int i = 0; i < D.Size(); i++) { lo(i) = std::max(D(i), seed(i)); }
+         dx = lo;   // the projected start point d_old (SNESVI projects onto the bounds)
+         bool assembled = false;
+         if (damage_abs_tol < 0.0)
+         {
+            damage->Assemble(Dgf);
+            assembled = true;
+            Vector diag;
+            damage->A().GetDiag(diag);
+            real_t loc = diag.Normlinf(), glob = 0.0;
+            MPI_Allreduce(&loc, &glob, 1, MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
+            damage_abs_tol = fracture_nl_abs_tol * glob;
+            if (Mpi::Root())
+            {
+               mfem::out << "  damage automatic scaling factor 1/max A_ii = " << 1.0 / glob
+                         << ", absolute tolerance on |r| = " << damage_abs_tol << "\n";
+            }
+         }
+         damage->Residual(dx, Dgf, rd);
+         if (InactiveResidualNorm(comm, dx, rd, lo, hi) > damage_abs_tol)
+         {
+            if (!assembled) { damage->Assemble(Dgf); }
+            qp.abs_tol = damage_abs_tol;
+            BoundConstrainedQP::Stats st;
+            if (!qp.Solve(damage->A(), damage->b(), lo, hi, dx, st))
+            {
+               MFEM_ABORT("step " << step_n << " (t = " << S.t << "): damage QP did not converge, |r_I| = "
+                          << st.r << " (|r_I,0| = " << st.r0 << ")");
+            }
+            qp_its_step = std::max(st.iterations, 1);
+            damage_solves++;
+            damage_qp_its += st.iterations;
+         }
+         D = dx;
+      }
       if (step_n >= 1)
       {
          real_t li = 0.0, lo = 0.0;
@@ -321,19 +473,35 @@ int main(int argc, char *argv[])
 
       const real_t ke = op.KineticEnergy(info.v_n);
       const real_t vmax = op.MaxNodalSpeed(info.v_n);
-      const real_t err = ke + info.psi - W_ext + W_damp + W_kv;
+      // info and the works refer to t^n, where the damage is d^n.
+      const real_t Ec = crack_energy(d_n);
+      const real_t err = ke + info.psi + Ec - W_ext + W_damp + W_kv;
+      real_t dmax = 0.0, ext = 0.0, ext90 = 0.0;
+      if (!frozen_damage)
+      {
+         real_t loc = d_n.Size() ? d_n.Max() : 0.0;
+         MPI_Allreduce(&loc, &dmax, 1, MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
+         ext = extent(d_n, c.d_threshold);
+         ext90 = extent(d_n, 0.9);
+      }
       if (Mpi::Root())
       {
          csv << step_n << ',' << t_n << ',' << dt << ',' << op.PeakOnPressureBoundary() * s << ','
              << vmax << ',' << ke << ',' << info.psi << ',' << W_ext << ',' << W_damp << ','
              << W_kv << ',' << err << ',' << H << ',' << Ws_in << ',' << Ws_out << ','
-             << shadow_err_report << '\n';
+             << shadow_err_report << ',' << Ec << ',' << dmax << ',' << ext << ',' << ext90
+             << ',' << qp_its_step << '\n';
          if (step_n % 200 == 0)
          {
             mfem::out << "step " << step_n << " t = " << t_n << " dt = " << dt << " v_max = "
                       << vmax << " KE = " << ke << " EE = " << info.psi << " W_ext = " << W_ext
                       << " W_damp = " << W_damp << " err = " << err << " shadow err = "
-                      << shadow_err_report << "\n";
+                      << shadow_err_report;
+            if (!frozen_damage)
+            {
+               mfem::out << " d_max = " << dmax << " extent = " << ext << " crack = " << Ec;
+            }
+            mfem::out << "\n";
          }
       }
       if (pv && step_n % pv_interval == 0)
@@ -342,6 +510,7 @@ int main(int argc, char *argv[])
          Vector un(S.u);
          un.Add(-dt, S.v_half);
          disp.SetFromTrueDofs(un);
+         dout.SetFromTrueDofs(d_n);
          pv->SetCycle(static_cast<int>(step_n));
          pv->SetTime(t_n);
          pv->Save();
@@ -352,6 +521,11 @@ int main(int argc, char *argv[])
    {
       mfem::out << "done: " << S.step << " steps to t = " << S.t << " in " << tic_toc.RealTime()
                 << " s (" << tic_toc.RealTime() / std::max<long>(S.step, 1) << " s/step)\n";
+      if (!frozen_damage)
+      {
+         mfem::out << "  damage QP solves " << damage_solves << " (" << damage_qp_its
+                   << " iterations), skipped steps " << S.step - damage_solves << "\n";
+      }
    }
    return 0;
 }
