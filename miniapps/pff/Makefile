@@ -25,21 +25,30 @@ LIBS_PFF = $(MFEM_LIBS)
 # Unit tests (serial, no mesh): tests/unit/test_*.cpp, one executable each
 # -----------------------------------------------------------------------------
 UNIT_TESTS = test_phase_field_functions test_strain_split test_poro_damage \
-             test_pulse_load test_config
+             test_pulse_load test_config test_explicit_operator
 UNIT_BINS = $(addprefix tests/unit/,$(UNIT_TESTS))
 
 HEADERS = $(wildcard common/*.hpp config/*.hpp constitutive/*.hpp phasefield/*.hpp \
                      loading/*.hpp io/*.hpp multiphysics/poroelastic/*.hpp \
-                     domain/*.hpp integrator/*.hpp solver/*.hpp tests/*.hpp)
+                     domain/*.hpp integrator/*.hpp kernels/*.hpp solver/*.hpp tests/*.hpp)
 
 # Drivers: drivers/*.cpp, one executable each in the miniapp directory
-DRIVERS = qs_driver
+DRIVERS = qs_driver pff_driver
 
 .PHONY: all test clean
 
 all: $(UNIT_BINS) $(DRIVERS)
 
 qs_driver: drivers/qs_driver.cpp $(HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	$(MFEM_CXX) $(CXXFLAGS_PFF) $< -o $@ $(LIBS_PFF)
+
+pff_driver: drivers/pff_driver.cpp $(HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	$(MFEM_CXX) $(CXXFLAGS_PFF) $< -o $@ $(LIBS_PFF)
+
+# Verification programs (tests/verification/*.cpp)
+VERIFY_PROGS = tests/verification/dashpot_reflection
+
+tests/verification/%: tests/verification/%.cpp $(HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	$(MFEM_CXX) $(CXXFLAGS_PFF) $< -o $@ $(LIBS_PFF)
 
 tests/unit/%: tests/unit/%.cpp $(HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
@@ -51,7 +60,7 @@ test: $(UNIT_BINS)
 	done; exit $$fail
 
 clean:
-	rm -f $(UNIT_BINS) $(DRIVERS) tests/unit/*.log
+	rm -f $(UNIT_BINS) $(DRIVERS) $(VERIFY_PROGS) tests/unit/*.log
 
 # Make sure the MFEM library is built
 $(MFEM_LIB_FILE):

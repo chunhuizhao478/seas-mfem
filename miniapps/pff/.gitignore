@@ -4,3 +4,5 @@ tests/unit/*.log
 out/
 *.o
 qs_driver
+pff_driver
+tests/verification/dashpot_reflection
