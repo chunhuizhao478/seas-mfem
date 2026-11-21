@@ -1,0 +1,44 @@
+{
+  "file": "spe_section_h0p3.msh",
+  "args": {
+    "lx": 0.05111,
+    "ly": 0.05192,
+    "rb": 0.00415,
+    "h": 0.0003,
+    "msh_version": "2.2",
+    "threads": 1
+  },
+  "physical_ids": {
+    "borehole": 1,
+    "ymin": 2,
+    "xmin": 3,
+    "xmax": 4,
+    "ymax": 5,
+    "acrylic": 6
+  },
+  "n_nodes": 33861,
+  "n_tris": 66945,
+  "lines_per_curve": {
+    "xmax": 174,
+    "ymax": 171,
+    "borehole": 87,
+    "xmin": 174,
+    "ymin": 171
+  },
+  "lengths_m": {
+    "xmax": 0.05192,
+    "ymax": 0.05111,
+    "borehole": 0.026075219024795288,
+    "xmin": 0.05192,
+    "ymin": 0.05111
+  },
+  "length_borehole_expected_m": 0.026075219024795284,
+  "area_m2": 0.00259952512052355,
+  "area_expected_m2": 0.00259952512052355,
+  "gamma_min": 0.7068168877616503,
+  "gamma_mean": 0.9983452555714537,
+  "gamma_below_0p1": 0,
+  "mesh_seconds": 1.5,
+  "total_seconds": 1.7,
+  "gmsh_version": "4.15.2"
+}
