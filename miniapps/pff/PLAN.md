@@ -94,8 +94,12 @@ GH200). The CPU result is the reference of each GPU gate.
    8 ranks). pff at ζ = 0: η = 1 d > 0.5 to 3.24 mm, 97.5 J/m; η = 0.3
    d_max = 0.25, 6.8 J/m, i.e. more damage than that run. pff at the current
    ζ_pulse = 1e-8: η = 1 1.88 mm, 76.6 J/m; η = 0.3 d_max = 0.166, 5.3 J/m.
-   The comparison that counts is M-C2a/b (current inputs, ζ = 1e-8, the pff
-   mesh), queued on the Mac.
+   Against M-C2a/b (current inputs, ζ = 1e-8, the pff mesh, Mac 2026-11-21):
+   η = 1 crack energy 76.57 vs 76.58 J/m, d ≥ 0.9 to 0.609 mm in both, the
+   d ≥ 0.5 front on the same node through 9.5 us (then one node further in
+   pff: 1.88 vs 1.65 mm), d_max 0.949 vs 0.951; η = 0.3 crack 5.336 vs
+   5.340 J/m, d_max 0.1656 vs 0.1657 (spe_hftc/gold/moose_c2_section_*).
+   These replace the gate numbers above.
 4. **C3/G3 pulse trains and the quench**: 20-pulse spe_hftc 2D η sweep and
    100 pulses of the cmame 2D solid benchmark; extents per pulse within one
    element, the energy budget closes.
