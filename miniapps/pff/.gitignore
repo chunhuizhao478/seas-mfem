@@ -6,3 +6,4 @@ out/
 qs_driver
 pff_driver
 tests/verification/dashpot_reflection
+tests/verification/cavity_hoop

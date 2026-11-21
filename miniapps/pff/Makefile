@@ -46,7 +46,7 @@ pff_driver: drivers/pff_driver.cpp $(HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	$(MFEM_CXX) $(CXXFLAGS_PFF) $< -o $@ $(LIBS_PFF)
 
 # Verification programs (tests/verification/*.cpp)
-VERIFY_PROGS = tests/verification/dashpot_reflection
+VERIFY_PROGS = tests/verification/dashpot_reflection tests/verification/cavity_hoop
 
 tests/verification/%: tests/verification/%.cpp $(HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	$(MFEM_CXX) $(CXXFLAGS_PFF) $< -o $@ $(LIBS_PFF)

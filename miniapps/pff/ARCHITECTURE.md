@@ -15,16 +15,17 @@ Claude Doc "pff restructure proposal"; PLAN.md is the working plan.
 | `constitutive/` | phase 1 done | `strain_split.hpp`: none / spectral / voldev σ and ψ± (MOOSE branches). The material interface is pff's own, in MFEM's style: integrators and coefficients over quadrature data, with the `MFEM_HOST_DEVICE` kernels inside |
 | `phasefield/` | phase 1 done | `phase_field_functions.hpp`: g(d), α(d), c0, source, crack energy |
 | `loading/` | phase 1 done | `pulse_load.hpp` (ElkPulseLoadExperiment), rates from (t_r, t_d) |
-| `domain/` | started | elasticity operator (quasi-static, then explicit), damage operator (SPD with bounds), boundary configuration |
+| `domain/` | C1 done | `qs_mesh.hpp`, `qs_damage_operator.hpp` (phase R); `explicit_elasticity_operator.hpp`: lumped mass, lumped Lysmer dashpot blocks, pulse load vector, power iteration for ω_max |
 | `integrator/` | started | split-elasticity residual and tangent, damage diffusion / reaction / source, dashpot and pressure traction later |
-| `solver/` | started | bound-constrained damage solver (PETSc VI, native active set), staggered step, central difference and CFL later |
+| `solver/` | C1 done | `bound_constrained_qp.hpp` (native active set), `central_difference.hpp` (half-step, dashpot at vⁿ, Kelvin–Voigt as the backward difference of the stored internal force), `cfl.hpp` |
+| `kernels/` | C1 done | `split_force_kernels.hpp`: split internal force as one `mfem::forall` over E-vectors (P1 simplices) |
 | `multiphysics/poroelastic/` | started | `poro_damage.hpp`: α(d), φ(d), M, c_p, H, permeability models. Pressure operator and Biot coupling later (C4) |
 | `io/` | started | `gmsh_physical_names.hpp`; next: reaction force CSV, ParaView, energies, checkpoint |
-| `drivers/` | started | `qs_driver.cpp` (quasi-static staggered, phase R) |
+| `drivers/` | started | `qs_driver.cpp` (quasi-static staggered, phase R); `pff_driver.cpp` (explicit dynamics, C1: `-fd` holds d = 0) |
 | `raccoon/` | phase R | RACCOON quasi-static benchmarks: `mode1_brittle_fracture/`, `mode2_brittle_fracture/` |
 | `spe_hftc/`, `cmame_revision/` | configs | `configs/*.toml` per MOOSE case; `mesh/`, `gold/`, `benchmark_data/`, `benchmark_document/` as they are added |
-| `tests/unit/` | 5 files, 106 checks | `make test` |
-| `tests/parallel/`, `tests/verification/` | started | `verification/raccoon_mode1_gold.sh` |
+| `tests/unit/` | 6 files, 129 checks | `make test` |
+| `tests/parallel/`, `tests/verification/` | started | `raccoon_mode1_gold.sh`, `raccoon_mode1_moose.sh`, `dashpot_reflection.cpp`, `cavity_hoop.cpp` (README lists the C1 gates) |
 | `jobs/<cluster>/` | later | sbatch scripts with the commit guard of the repo CLAUDE.md |
 | `archive/qs_prototype/` | frozen | earlier quasi-static AT2 prototype (does not match the benchmarks) |
 | `extern/toml11/` | submodule | toml11 v3.8 (commit d4eb5f3) |

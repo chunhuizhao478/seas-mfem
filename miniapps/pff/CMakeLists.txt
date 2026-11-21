@@ -19,7 +19,8 @@ set(PFF_UNIT_TESTS
     test_strain_split
     test_poro_damage
     test_pulse_load
-    test_config)
+    test_config
+    test_explicit_operator)
 
 foreach(test ${PFF_UNIT_TESTS})
   add_mfem_miniapp(pff_${test}
