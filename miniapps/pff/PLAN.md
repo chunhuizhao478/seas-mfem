@@ -73,8 +73,9 @@ GH200). The CPU result is the reference of each GPU gate.
    Status (2026-11-21): code done (`pff_driver -fd`). Energy 0.048 % over
    10 021 steps (free faces, ζ = 0, 7 pulses); cavity: explicit vs static FE
    0.35 %, static FE vs Lamé 3.5 % at h = 0.3 mm and 1.74 % at 0.15 mm (P1
-   stresses, first order); dashpot reflection 0.24 % (P and S). Open: v_max(t)
-   against M-C1. The kernel force equals SplitElasticityIntegrator to 1e-10
+   stresses, first order); dashpot reflection 0.24 % (P and S). Against
+   M-C1: KE and SE within 1 % after 1 us, v_max 13 % higher in the first
+   microsecond and 0.4 % at 25 us (spe_hftc/gold/moose_c1_section_d0_*). The kernel force equals SplitElasticityIntegrator to 1e-10
    for the spectral split with damage (unit test).
 3. **C2/G2 damage**: native active-set solver against PETSc VI to 1e-8;
    spe_hftc 2D one pulse to 10 µs (η = 1: d > 0.5 out to 1.76 mm and
