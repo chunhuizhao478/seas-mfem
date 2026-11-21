@@ -14,7 +14,7 @@ tests/verification/raccoon_mode1_moose.sh                             # full cur
 | Case | RACCOON input | Status |
 | --- | --- | --- |
 | `mode1_brittle_fracture/` | `tutorials/mode1_brittle_fracture` | R1 done: gold check and full curve against MOOSE pass |
-| `mode2_brittle_fracture/` | `tutorials/mode2_brittle_fracture` | R2: next (slit mesh, spectral tangent) |
+| `mode2_brittle_fracture/` | `tutorials/mode2_brittle_fracture` | R2: MOOSE curve archived (M-R2); pff next (slit mesh, spectral tangent) |
 | three-point bending | `tutorials/three_point_bending` | deferred (finite-strain J2 elastoplastic) |
 
 Each case folder: `configs/` (one TOML per run, header cites the input),
@@ -31,19 +31,19 @@ unchanged), and later `gold/<run>_jobid<N>_git<hash>/` for full MOOSE runs.
   (`mode1_gold.toml`) and with one pass per step (`mode1_gold_single_pass.toml`).
   The fixed-point test uses MOOSE's automatic scaling
   (`[solver] automatic_scaling = true`, as in elasticity.i): one factor per
-  displacement component, 1/max|J_ii| of the unconstrained volumetric
-  Jacobian at the first solve (here 1/((λ+3μ)·4/3) = 2.0635e-6), applied to
-  the kernel rows, not to the Dirichlet rows. With it the test passes after
-  one pass at steps 1 and 2, as in MOOSE, which is why the gold file looks
+  displacement component, 1/max|J_ii| of the volumetric Jacobian at the
+  first solve, taken from the constrained (hanging-node) system as libMesh
+  assembles it: 1.547619e-6 here, equal to the factor MOOSE prints in the
+  verbose run M-R1b (the unconstrained element diagonal gives 2.0635e-6,
+  4/3 of it). It is applied to the kernel rows, not to the Dirichlet rows.
+  With it the test passes after one pass at steps 1 and 2, as in MOOSE,
+  which is why the gold file looks
   like a single pass. Without the scaling pff took 3 passes there.
 - Full run (`mode1.toml`, 175 steps to t = 3.5e-3, np = 1): about 45 s. Peak
   Fy = 691.00227 at u = 2.86e-3; the load drops to about 14 by u = 3.14e-3.
 - Against MOOSE (M-R1, `gold/moose_mode1_mac_np4_farms46ad2eb-dirty/`):
-  the peak agrees to 1e-11 and the largest relative difference over the curve
-  is 1.6e-5. The pass counts per step agree on 143 of 175 steps (MOOSE caps
-  25 steps at 20 passes, pff the same 25). On the other 32, all at the
-  boundary between two counts, pff takes one pass more. The pff/MOOSE pass
-  counts are consistent only with MOOSE's fixed-point norms being 0.749–0.753
-  times pff's on every step, so a constant factor of about 3/4 is left in the
-  scaling or the norm. Open: MOOSE's printed scaling factors (verbose run
-  requested) decide it.
+  the curve agrees to 4.4e-12 relative (gate 1e-9), the peak 691.00227 at
+  u = 2.86e-3 in both, and the fixed-point pass count is the same on every
+  step (1, 1, 2, ..., the cap of 20 on steps 132-156, then 8, 5, 5, 5, ...).
+  The earlier 1.6e-5 and the 32 steps with one pass more came from the
+  unconstrained scaling diagonal (a factor 3/4 in the norm), now fixed.

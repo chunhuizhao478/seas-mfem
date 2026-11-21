@@ -124,33 +124,32 @@ int SolveDisplacement(ParNonlinearForm &N, Vector &X, const QsCaseConfig &c, int
 std::vector<real_t> AutomaticScalingFactors(Mesh &serial, const QsCaseConfig &c,
                                             const IntegrationRule &ir)
 {
+   // The diagonal of the constrained (true-dof) Jacobian: MOOSE assembles the
+   // scaling Jacobian through libMesh's constraint handling, so a node next
+   // to a hanging node collects the constrained rows. M-R1b (verbose run,
+   // 2026-11-21) prints 1.54762e-06 for mode I, = 1/max diag of the
+   // constrained matrix here; the unconstrained diagonal gives 2.0635e-06.
    const int dim = serial.Dimension();
    H1_FECollection h1(1, dim);
    FiniteElementSpace sV(&serial, &h1, dim, Ordering::byNODES);
    FiniteElementSpace sD(&serial, &h1);
    GridFunction d0(&sD);
    d0 = 0.0;
-   SplitElasticityIntegrator integ(c.K(), c.G(), c.decomposition, c.pf.deg, d0);
-   integ.SetIntRule(&ir);
-   Vector diag(sV.GetVSize());
-   diag = 0.0;
-   Array<int> vdofs;
-   Vector el;
-   DenseMatrix elmat;
-   for (int e = 0; e < serial.GetNE(); e++)
-   {
-      sV.GetElementVDofs(e, vdofs);
-      el.SetSize(vdofs.Size());
-      el = 0.0;
-      integ.AssembleElementGrad(*sV.GetFE(e), *sV.GetElementTransformation(e), el, elmat);
-      for (int i = 0; i < vdofs.Size(); i++) { diag(vdofs[i]) += elmat(i, i); }
-   }
-   const int nd = sV.GetNDofs();
+   NonlinearForm nf(&sV);
+   auto *integ = new SplitElasticityIntegrator(c.K(), c.G(), c.decomposition, c.pf.deg, d0);
+   integ->SetIntRule(&ir);
+   nf.AddDomainIntegrator(integ);
+   Vector z(sV.GetTrueVSize());
+   z = 0.0;
+   Vector diag;
+   dynamic_cast<SparseMatrix &>(nf.GetGradient(z)).GetDiag(diag);
+   MFEM_VERIFY(diag.Size() == sV.GetTrueVSize(), "unexpected Jacobian size");
+   const int nt = diag.Size() / dim;   // true vdofs byNODES: (comp, i) -> comp nt + i
    std::vector<real_t> factor(dim, 0.0);
    for (int comp = 0; comp < dim; comp++)
    {
       real_t m = 0.0;
-      for (int i = 0; i < nd; i++) { m = std::max(m, std::abs(diag(sV.DofToVDof(i, comp)))); }
+      for (int i = 0; i < nt; i++) { m = std::max(m, std::abs(diag(comp * nt + i))); }
       factor[comp] = (m == 0.0) ? 1.0 : 1.0 / m;
    }
    return factor;

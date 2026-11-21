@@ -53,7 +53,7 @@ GH200). The CPU result is the reference of each GPU gate.
       994 nodes as in the gold (passes, same coordinates); the 2 gold steps
       (Fy = 5.69042, 11.38077) and fields within relative 1e-4 (passes:
       `tests/verification/raccoon_mode1_gold.sh`); the full Fy–u curve
-      against MOOSE M-R1 within 1e-4 (passes: 1.6e-5, peak equal to 1e-11,
+      against MOOSE M-R1 (passes: 4.4e-12 with equal pass counts, gate 1e-9,
       `tests/verification/raccoon_mode1_moose.sh`).
     - R2 `tutorials/mode2_brittle_fracture`: spectral split (Newton,
       analytic tangent checked by finite differences), slit mesh of two
@@ -109,10 +109,10 @@ GH200). The CPU result is the reference of each GPU gate.
   MONOMIAL, so the damage source sees the element average of ψ_active, not
   its quadrature-point values. Phase R reproduces this.
 - MOOSE runs the RACCOON inputs with `automatic_scaling = true`; pff
-  reproduces it in the fixed-point test (`[solver] automatic_scaling`). With
-  it the mode I gold file (one pass at steps 1 and 2) matches to 1e-10, and
-  the pass counts of M-R1 match on 143 of 175 steps; the rest point to a
-  constant factor of about 3/4 in MOOSE's norm, still open (raccoon/README.md).
+  reproduces it in the fixed-point test (`[solver] automatic_scaling`),
+  with the factor from the constrained (hanging-node) Jacobian diagonal as
+  libMesh assembles it. The mode I gold file matches to 1e-10 and M-R1 to
+  4.4e-12 with the same pass count on every step.
 
 - The driving-energy conventions differ. spe_hftc: ψ = αGc/(c0 l) + g ψ⁺ with
   no history. cmame hydromech: ψ = αGc/(c0 l) + ½ g H with
