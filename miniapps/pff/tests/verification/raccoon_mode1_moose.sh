@@ -6,7 +6,7 @@
 #   tests/verification/raccoon_mode1_moose.sh       (from miniapps/pff, after make qs_driver)
 #
 # Gate: relative difference <= 1e-4 on every step with |Fy| > 1, and the
-# peak at the same step. Observed: 2.0e-5, peak 691.00227 at t = 2.86e-3 in
+# peak at the same step. Observed: 1.6e-5 (with automatic scaling), peak 691.00227 at t = 2.86e-3 in
 # both (equal to 1e-11; the steps where both codes hit the 20-pass cap agree
 # to round-off, the rest differ only through the number of passes).
 set -euo pipefail

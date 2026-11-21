@@ -121,6 +121,7 @@ static void TestRaccoonMode1()
    TEST_ASSERT(c.decomposition == Decomposition::None && c.driving_element_average,
                "no split, element-average driving energy");
    TEST_ASSERT(c.dirichlet.size() == 3 && c.dirichlet[0].rate == 1.0, "three Dirichlet BCs, u_y = t");
+   TEST_ASSERT(c.automatic_scaling, "automatic_scaling = true (elasticity.i Executioner)");
    BoundaryNames names;
    Mesh m = BuildQsMesh(c, names);
    // tutorials/mode1_brittle_fracture/gold/elasticity_out.e: 888 elements, 994 nodes

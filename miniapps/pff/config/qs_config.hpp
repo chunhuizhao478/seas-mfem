@@ -94,6 +94,7 @@ struct QsCaseConfig
    int fixed_point_max_its = 20;
    real_t fixed_point_rel_tol = 1e-8, fixed_point_abs_tol = 1e-10;
    bool accept_on_max_fixed_point_iteration = true;
+   bool automatic_scaling = false;   ///< MOOSE Executioner automatic_scaling (default false)
    real_t nl_rel_tol = 1e-8, nl_abs_tol = 1e-10;   ///< MOOSE Executioner values
    real_t linear_rel_tol = 1e-12;
    int quadrature_order = 3;  ///< 2x2 Gauss on quads, as MOOSE's SECOND for P1

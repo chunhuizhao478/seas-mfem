@@ -4,10 +4,11 @@
 #
 #   tests/verification/raccoon_mode1_gold.sh        (from miniapps/pff, after make qs_driver)
 #
-# 1. mode1_gold.toml (fixed-point iterations as in the input): exodiff
-#    tolerances of the RACCOON test (rel 1e-4, abs_zero 1e-9).
-# 2. mode1_gold_single_pass.toml (one staggered pass per step, which is what
-#    the gold file holds): rel 1e-8.
+# 1. mode1_gold.toml (fixed-point iterations as in the input, with MOOSE's
+#    automatic scaling in the fixed-point test, which then stops after one
+#    pass at steps 1 and 2 as MOOSE does): rel 1e-8 (the RACCOON test uses
+#    exodiff rel 1e-4, abs_zero 1e-9).
+# 2. mode1_gold_single_pass.toml (one staggered pass per step): rel 1e-8.
 # Needs python3 with numpy and netCDF4.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -21,7 +22,7 @@ run() {
          --rel "$rel" --abs-zero 1e-9 || fail=1
    done
 }
-run mode1_gold mode1_gold 1e-4
+run mode1_gold mode1_gold 1e-8
 run mode1_gold_single_pass mode1_gold_single_pass 1e-8
 if [ $fail -ne 0 ]; then echo "raccoon_mode1_gold: FAILED"; exit 1; fi
 echo "raccoon_mode1_gold: passed"

@@ -21,8 +21,18 @@
 //      (FixedPointSolve::examineFixedPointConvergence; the begin norm is 0 without
 //      TIMESTEP_BEGIN MultiApps)
 //
-// Parity notes: MOOSE runs with automatic_scaling = true, which rescales the
-// residual norms the fixed-point test uses; pff does not reproduce the scaling.
+// Automatic scaling ([solver] automatic_scaling, MOOSE Executioner
+// automatic_scaling with the defaults compute_scaling_once = true,
+// resid_vs_jac_scaling_param = 0, off_diagonals_in_auto_scaling = false;
+// NonlinearSystemBase::computeScaling at moose 94b6528): one factor per
+// displacement component, 1 / max_i |J_ii| over the component's dofs, where J
+// is the volumetric Jacobian assembled without constraints (no Dirichlet
+// rows, hanging-node constraints not applied) at the first solve (d = 0).
+// MOOSE multiplies the kernel residual by the factor; the Dirichlet rows
+// (NodalBC set()) hold u - g unscaled.  The fixed-point norms (initial and
+// end) are taken of this scaled residual (FEProblemBase::computeResidualL2Norm).
+// The displacement Newton test stays unscaled: it is tighter than the scaled
+// one, and MOOSE solves the linear system with LU.
 // The reaction is the NodalSum of the save_in residual: the sum over the
 // boundary's true dofs of the unconstrained internal force at the converged u
 // of the last pass, with the d that solve used (the postprocessor runs at
@@ -39,7 +49,10 @@
 #include "../integrator/split_elasticity_integrator.hpp"
 #include "../solver/bound_constrained_qp.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <fstream>
+#include <vector>
 #include <iomanip>
 #include <memory>
 #include <filesystem>
@@ -105,6 +118,44 @@ int SolveDisplacement(ParNonlinearForm &N, Vector &X, const QsCaseConfig &c, int
    return -1;
 }
 
+/// MOOSE automatic scaling factors (see the header), from the serial mesh: its
+/// element-wise assembled diagonal over all local dofs is libMesh's
+/// unconstrained scaling Jacobian.  Identical on every rank.
+std::vector<real_t> AutomaticScalingFactors(Mesh &serial, const QsCaseConfig &c,
+                                            const IntegrationRule &ir)
+{
+   const int dim = serial.Dimension();
+   H1_FECollection h1(1, dim);
+   FiniteElementSpace sV(&serial, &h1, dim, Ordering::byNODES);
+   FiniteElementSpace sD(&serial, &h1);
+   GridFunction d0(&sD);
+   d0 = 0.0;
+   SplitElasticityIntegrator integ(c.K(), c.G(), c.decomposition, c.pf.deg, d0);
+   integ.SetIntRule(&ir);
+   Vector diag(sV.GetVSize());
+   diag = 0.0;
+   Array<int> vdofs;
+   Vector el;
+   DenseMatrix elmat;
+   for (int e = 0; e < serial.GetNE(); e++)
+   {
+      sV.GetElementVDofs(e, vdofs);
+      el.SetSize(vdofs.Size());
+      el = 0.0;
+      integ.AssembleElementGrad(*sV.GetFE(e), *sV.GetElementTransformation(e), el, elmat);
+      for (int i = 0; i < vdofs.Size(); i++) { diag(vdofs[i]) += elmat(i, i); }
+   }
+   const int nd = sV.GetNDofs();
+   std::vector<real_t> factor(dim, 0.0);
+   for (int comp = 0; comp < dim; comp++)
+   {
+      real_t m = 0.0;
+      for (int i = 0; i < nd; i++) { m = std::max(m, std::abs(diag(sV.DofToVDof(i, comp)))); }
+      factor[comp] = (m == 0.0) ? 1.0 : 1.0 / m;
+   }
+   return factor;
+}
+
 void WriteNodal(const std::string &path, ParMesh &mesh, ParGridFunction &u,
                 ParGridFunction &d)
 {
@@ -133,10 +184,13 @@ int main(int argc, char *argv[])
    const char *config_file = "";
    int num_steps_override = -1;
    const char *output_override = "";
+   bool fp_verbose = false;
    OptionsParser args(argc, argv);
    args.AddOption(&config_file, "-c", "--config", "Case TOML file.");
    args.AddOption(&num_steps_override, "-ns", "--num-steps", "Override [time] num_steps.");
    args.AddOption(&output_override, "-o", "--output-dir", "Override [output] dir.");
+   args.AddOption(&fp_verbose, "-v", "--fp-verbose", "-nv", "--no-fp-verbose",
+                  "Print the fixed-point norms of every pass.");
    args.Parse();
    if (!args.Good() || std::string(config_file).empty())
    {
@@ -155,6 +209,10 @@ int main(int argc, char *argv[])
    Mesh serial = BuildQsMesh(c, names);
    const int max_attr = serial.bdr_attributes.Max();
    const int dim = serial.Dimension();
+   const IntegrationRule &ir = IntRules.Get(serial.GetElementBaseGeometry(0),
+                                            c.quadrature_order);
+   std::vector<real_t> scaling(dim, 1.0);
+   if (c.automatic_scaling) { scaling = AutomaticScalingFactors(serial, c, ir); }
    ParMesh pmesh(comm, serial);
    serial.Clear();
    const long long ne = pmesh.GetGlobalNE();
@@ -168,13 +226,18 @@ int main(int argc, char *argv[])
       mfem::out << "pff qs_driver: " << c.name << "\n  source: " << c.source
                 << "\n  elements " << ne << ", displacement dofs " << Vfes.GlobalTrueVSize()
                 << ", damage dofs " << Dfes.GlobalTrueVSize() << ", steps " << nsteps << "\n";
+      if (c.automatic_scaling)
+      {
+         mfem::out << "  automatic scaling factors:" << std::setprecision(10);
+         for (int comp = 0; comp < dim; comp++) { mfem::out << ' ' << scaling[comp]; }
+         mfem::out << "\n";
+      }
    }
 
    ParGridFunction u(&Vfes), d(&Dfes), D(&Lfes);
    u = 0.0;
    d = 0.0;
    D = 0.0;
-   const IntegrationRule &ir = IntRules.Get(pmesh.GetElementBaseGeometry(0), c.quadrature_order);
 
    auto make_integrator = [&]()
    {
@@ -204,6 +267,20 @@ int main(int argc, char *argv[])
       MFEM_VERIFY(sorted.Size() == ess.tdofs.Size(), "a dof has two Dirichlet conditions");
    }
    N.SetEssentialTrueDofs(ess.tdofs);
+   // Weights of the fixed-point residual norm: the component's scaling factor
+   // on the kernel rows, 1 on the Dirichlet rows (true dofs are byNODES).
+   Vector W(Vfes.GetTrueVSize());
+   {
+      const int ntd = Vfes.GetTrueVSize() / dim;
+      for (int comp = 0; comp < dim; comp++)
+         for (int i = 0; i < ntd; i++) { W(comp * ntd + i) = scaling[comp]; }
+      for (int t : ess.tdofs) { W(t) = 1.0; }
+   }
+   auto scaled_norm = [&](Vector &v)
+   {
+      for (int i = 0; i < v.Size(); i++) { v(i) *= W(i); }
+      return GlobalNorm(comm, v);
+   };
    Array<int> reaction_tdofs;
    {
       Array<int> marker = BoundaryMarker(names, c.reaction_boundaries, max_attr);
@@ -251,7 +328,7 @@ int main(int argc, char *argv[])
       {
          R(ess.tdofs[k]) = X(ess.tdofs[k]) - Xbc(ess.tdofs[k]);
       }
-      const real_t initial_norm = GlobalNorm(comm, R);
+      const real_t initial_norm = scaled_norm(R);
       X = Xbc;
 
       int k = 0, qp_its = 0;
@@ -303,7 +380,14 @@ int main(int argc, char *argv[])
          d.SetFromTrueDofs(Dd);
 
          N.Mult(X, R);
-         end_norm = GlobalNorm(comm, R);
+         end_norm = scaled_norm(R);
+         if (fp_verbose && Mpi::Root())
+         {
+            mfem::out << "  step " << n << " pass " << k << ": end norm " << std::setprecision(6)
+                      << end_norm << ", initial " << initial_norm << ", relative "
+                      << end_norm / initial_norm << ", damage QP its " << st.iterations
+                      << ", |r_I| " << st.r << " / " << st.r0 << "\n";
+         }
          if (end_norm < c.fixed_point_abs_tol ||
              end_norm / initial_norm < c.fixed_point_rel_tol)
          {

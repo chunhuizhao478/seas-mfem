@@ -16,7 +16,8 @@
 //   [time]         dt, end_time, num_steps
 //   [solver]       fixed_point_max_its, fixed_point_rel_tol,
 //                  fixed_point_abs_tol, accept_on_max_fixed_point_iteration,
-//                  nl_rel_tol, nl_abs_tol, linear_rel_tol, quadrature_order
+//                  automatic_scaling, nl_rel_tol, nl_abs_tol, linear_rel_tol,
+//                  quadrature_order
 //   [output]       dir, nodal_steps
 //
 // Unknown tables and keys throw.
@@ -175,7 +176,8 @@ private:
       {
          const auto &t = data.at("solver");
          Check(t, "solver", {"fixed_point_max_its", "fixed_point_rel_tol", "fixed_point_abs_tol",
-                             "accept_on_max_fixed_point_iteration", "nl_rel_tol", "nl_abs_tol",
+                             "accept_on_max_fixed_point_iteration", "automatic_scaling",
+                             "nl_rel_tol", "nl_abs_tol",
                              "linear_rel_tol", "quadrature_order"
                             });
          c.fixed_point_max_its = Int(t, "fixed_point_max_its", c.fixed_point_max_its);
@@ -183,6 +185,7 @@ private:
          c.fixed_point_abs_tol = Real(t, "fixed_point_abs_tol", c.fixed_point_abs_tol);
          c.accept_on_max_fixed_point_iteration =
             Bool(t, "accept_on_max_fixed_point_iteration", c.accept_on_max_fixed_point_iteration);
+         c.automatic_scaling = Bool(t, "automatic_scaling", c.automatic_scaling);
          c.nl_rel_tol = Real(t, "nl_rel_tol", c.nl_rel_tol);
          c.nl_abs_tol = Real(t, "nl_abs_tol", c.nl_abs_tol);
          c.linear_rel_tol = Real(t, "linear_rel_tol", c.linear_rel_tol);
