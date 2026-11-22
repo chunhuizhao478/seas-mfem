@@ -24,7 +24,7 @@ Claude Doc "pff restructure proposal"; PLAN.md is the working plan.
 | `drivers/` | started | `qs_driver.cpp` (quasi-static staggered, phase R); `pff_driver.cpp` (explicit dynamics, C1: `-fd` holds d = 0) |
 | `raccoon/` | phase R | RACCOON quasi-static benchmarks: `mode1_brittle_fracture/`, `mode2_brittle_fracture/` |
 | `spe_hftc/`, `cmame_revision/` | configs | `configs/*.toml` per MOOSE case; `mesh/`, `gold/`, `benchmark_data/`, `benchmark_document/` as they are added |
-| `tests/unit/` | 7 files, 164 checks | `make test` |
+| `tests/unit/` | 7 files, 174 checks | `make test` |
 | `tests/parallel/`, `tests/verification/` | started | `raccoon_mode1_gold.sh`, `raccoon_mode1_moose.sh`, `dashpot_reflection.cpp`, `cavity_hoop.cpp` (README lists the C1 gates) |
 | `jobs/<cluster>/` | later | sbatch scripts with the commit guard of the repo CLAUDE.md |
 | `archive/qs_prototype/` | frozen | earlier quasi-static AT2 prototype (does not match the benchmarks) |

@@ -42,7 +42,13 @@ struct ExplicitElasticityParams
    PowerDegradation deg;
    Array<int> pressure_marker;    ///< boundary attributes with the pulse pressure
    Array<int> absorbing_marker;   ///< boundary attributes with Lysmer dashpots
+   Array<int> confinement_marker; ///< boundary attributes with the constant confinement pressure
+   real_t confinement_pressure = 0.0; ///< MOOSE Pressure BC, factor = confinement_pressure, from t = 0
    int quadrature_order = 2;
+   /// Diagnostic: consistent mass (MOOSE ADInertialForce) instead of the row
+   /// sum; each step then solves M a = r by PCG. The dashpots, the mass
+   /// damping and the CFL estimate keep the lumped mass.
+   bool consistent_mass = false;
    real_t Cp() const { return std::sqrt((K + 4.0 / 3.0 * G) / density); }
    real_t Cs() const { return std::sqrt(G / density); }
 };
@@ -60,6 +66,7 @@ public:
       nt_ = sfes.GetTrueVSize();
       MFEM_VERIFY(vfes.GetTrueVSize() == dim_ * nt_, "vector/scalar true dofs do not match");
       AssembleLumpedMass();
+      if (p_.consistent_mass) { AssembleConsistentMass(); }
       AssembleDashpots();
       AssemblePressure();
    }
@@ -68,6 +75,8 @@ public:
    int ScalarTrueSize() const { return nt_; }
    const Vector &LumpedMass() const { return M_; }     ///< per scalar true dof
    const Vector &PressureVector() const { return b_; } ///< -int Peak n phi (true dofs)
+   /// -int P_c n phi on the confinement boundary (true dofs; zero without one).
+   const Vector &ConfinementVector() const { return bc_; }
    const Array<int> &FixedTrueDofs() const { return fixed_; }
    const SplitForceKernel &Force() const { return force_; }
 
@@ -92,6 +101,33 @@ public:
          }
    }
 
+   /// y = ((1 + h alpha) M + h C_b) x (consistent or lumped M), y = x on the
+   /// fixed dofs: the operator SolveAcceleration inverts.
+   void ApplySystem(real_t h, real_t alpha, const Vector &x, Vector &y) const
+   {
+      y.SetSize(x.Size());
+      if (Ms_)
+      {
+         Vector xc, yc;
+         for (int c = 0; c < dim_; c++)
+         {
+            xc.MakeRef(const_cast<Vector &>(x), c * nt_, nt_);
+            yc.MakeRef(y, c * nt_, nt_);
+            Ms_->Mult(xc, yc);
+         }
+      }
+      else
+      {
+         for (int c = 0; c < dim_; c++)
+            for (int i = 0; i < nt_; i++) { y(c * nt_ + i) = M_(i) * x(c * nt_ + i); }
+      }
+      y *= 1.0 + h * alpha;
+      Vector cx;
+      DashpotForce(x, cx);
+      y.Add(h, cx);
+      for (int t : fixed_) { y(t) = x(t); }
+   }
+
    /// f += alpha M v with the lumped mass.
    void AddMassForce(real_t alpha, const Vector &v, Vector &f) const
    {
@@ -103,6 +139,7 @@ public:
    /// node has a dashpot block), a = 0 on the fixed dofs.
    void SolveAcceleration(const Vector &rhs, real_t h, Vector &a, real_t alpha = 0.0) const
    {
+      if (Ms_) { SolveConsistent(rhs, h, alpha, a); return; }
       a.SetSize(rhs.Size());
       const int D = dim_;
       for (int i = 0; i < nt_; i++)
@@ -130,6 +167,18 @@ public:
    /// 1/2 v^T M v (lumped).
    real_t KineticEnergy(const Vector &v) const
    {
+      if (Ms_)
+      {
+         Vector vc(nullptr, nt_), y(nt_);
+         real_t s = 0.0;
+         for (int c = 0; c < dim_; c++)
+         {
+            vc.MakeRef(const_cast<Vector &>(v), c * nt_, nt_);
+            Ms_->Mult(vc, y);
+            s += 0.5 * InnerProduct(vfes_.GetComm(), vc, y);
+         }
+         return s;
+      }
       real_t s = 0.0;
       for (int c = 0; c < dim_; c++)
          for (int i = 0; i < nt_; i++) { s += 0.5 * M_(i) * v(c * nt_ + i) * v(c * nt_ + i); }
@@ -212,6 +261,53 @@ private:
       }
    }
 
+   void AssembleConsistentMass()
+   {
+      ParBilinearForm m(&sfes_);
+      ConstantCoefficient rho(p_.density);
+      m.AddDomainIntegrator(new MassIntegrator(rho));
+      m.Assemble();
+      m.Finalize();
+      Ms_.reset(m.ParallelAssemble());
+   }
+
+   /// (1 + h alpha) M_c a + h C_b a = rhs, a = 0 on the fixed dofs; PCG with
+   /// the lumped (M + h C_b diag) as Jacobi preconditioner.
+   void SolveConsistent(const Vector &rhs, real_t h, real_t alpha, Vector &a) const
+   {
+      const int n = rhs.Size(), D = dim_;
+      struct Op : public Operator
+      {
+         const ExplicitElasticityOperator &o; real_t h, al;
+         Op(const ExplicitElasticityOperator &o_, real_t h_, real_t al_, int n)
+            : Operator(n), o(o_), h(h_), al(al_) {}
+         void Mult(const Vector &x, Vector &y) const override { o.ApplySystem(h, al, x, y); }
+      } A(*this, h, alpha, n);
+      Vector pdiag(n);
+      for (int c = 0; c < D; c++)
+         for (int i = 0; i < nt_; i++)
+         {
+            pdiag(c * nt_ + i) = 1.0 / ((1.0 + h * alpha) * M_(i) + h * Cb_(Block(i, c, c)));
+         }
+      for (int t : fixed_) { pdiag(t) = 1.0; }
+      OperatorJacobiSmoother P(pdiag, Array<int>(), 1.0);
+      Vector b(rhs);
+      for (int t : fixed_) { b(t) = 0.0; }
+      CGSolver cg(vfes_.GetComm());
+      cg.SetOperator(A);
+      cg.SetPreconditioner(P);
+      cg.SetRelTol(1e-12);
+      cg.SetAbsTol(0.0);
+      cg.SetMaxIter(500);
+      cg.SetPrintLevel(0);
+      a.SetSize(n);
+      a = 0.0;
+      cg.Mult(b, a);
+      MFEM_VERIFY(cg.GetConverged(), "consistent-mass PCG did not converge (" << cg.GetNumIterations()
+                  << " iterations, |r| = " << cg.GetFinalNorm() << ")");
+      for (int t : fixed_) { a(t) = 0.0; }
+   }
+
    void AssembleDashpots()
    {
       ParMesh &mesh = *sfes_.GetParMesh();
@@ -265,18 +361,30 @@ private:
 
    void AssemblePressure()
    {
+      real_t peak = 0.0;
+      AssembleBoundaryPressure(p_.pressure_marker,
+                               [&](const real_t *x) { const real_t P = pulse_.Peak(x); peak = std::max(peak, P); return P; },
+                               b_);
+      MPI_Allreduce(&peak, &peak_max_, 1, MPITypeMap<real_t>::mpi_type, MPI_MAX,
+                    vfes_.GetComm());
+      const real_t Pc = p_.confinement_pressure;
+      AssembleBoundaryPressure(p_.confinement_marker, [&](const real_t *) { return Pc; }, bc_);
+   }
+
+   /// out = -int P(x) n phi over the marked boundary (2-point Gauss on faces).
+   template <typename PFun>
+   void AssembleBoundaryPressure(const Array<int> &marker, PFun P_of, Vector &out)
+   {
       ParMesh &mesh = *vfes_.GetParMesh();
       const int D = dim_;
       Vector bL(vfes_.GetVSize());
       bL = 0.0;
       Vector shape, nor(D);
       Array<int> vdofs;
-      real_t peak = 0.0;
       for (int be = 0; be < mesh.GetNBE(); be++)
       {
          const int attr = mesh.GetBdrAttribute(be);
-         if (p_.pressure_marker.Size() == 0 || attr > p_.pressure_marker.Size() ||
-             !p_.pressure_marker[attr - 1]) { continue; }
+         if (marker.Size() == 0 || attr > marker.Size() || !marker[attr - 1]) { continue; }
          FaceElementTransformations *ft = mesh.GetBdrFaceTransformations(be);
          MFEM_VERIFY(ft, "pressure boundary element " << be << " has no face transformation");
          const FiniteElement &fe = *vfes_.GetBE(be);
@@ -294,8 +402,7 @@ private:
             x = 0.0;
             Vector xd(x.GetData(), D);
             ft->Transform(ip, xd);
-            const real_t P = pulse_.Peak(x.GetData());
-            peak = std::max(peak, P);
+            const real_t P = P_of(x.GetData());
             fe.CalcShape(ip, shape);
             for (int c = 0; c < D; c++)
                for (int a = 0; a < nd; a++)
@@ -304,10 +411,8 @@ private:
                }
          }
       }
-      b_.SetSize(vfes_.GetTrueVSize());
-      vfes_.GetProlongationMatrix()->MultTranspose(bL, b_);
-      MPI_Allreduce(&peak, &peak_max_, 1, MPITypeMap<real_t>::mpi_type, MPI_MAX,
-                    vfes_.GetComm());
+      out.SetSize(vfes_.GetTrueVSize());
+      vfes_.GetProlongationMatrix()->MultTranspose(bL, out);
    }
 
    ParFiniteElementSpace &vfes_, &sfes_;
@@ -316,7 +421,8 @@ private:
    Array<int> fixed_;
    SplitForceKernel force_;
    int dim_ = 0, nt_ = 0;
-   Vector M_, Cb_, b_;
+   Vector M_, Cb_, b_, bc_;
+   std::unique_ptr<HypreParMatrix> Ms_;
    std::vector<bool> has_dashpot_;
    real_t peak_max_ = 0.0;
 };

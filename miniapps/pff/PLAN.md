@@ -43,6 +43,15 @@ This file is the working plan.
   3.24 mm). Parity for ζ_pulse = 0 is M-C2c (MOOSE M-C2a with the CLI override
   zeta_pulse=0); the production configs no longer reproduce the published
   MOOSE runs step for step.
+  **Mass matrix (2026-11-22):** at ζ_pulse = 0 the lumped mass grows the
+  crack faster than MOOSE's consistent mass after 6 µs (η = 1, 10 µs: crack
+  energy 97.5 vs 82.5 J/m in M-C2c, 79.7 in M-C2d at dt ≤ 3e-8). pff with
+  `-cm` (consistent mass, PCG per step, +23 % per step in 2D) gives 80.35 J/m,
+  d ≥ 0.5 extent 2.41 mm (M-C2d 2.17, M-C2c 2.45). Not the time step (pff
+  cfl 0.2: 96.1 J/m; MOOSE dt 1e-7 → 3e-8 moves it 3 %). With ζ_pulse = 1e-8
+  the high frequencies are damped and the two masses agree. The result is
+  sensitive to the mass discretization, i.e. the mesh (h = 0.3 mm, l = 0.6 mm)
+  is not converged for undamped crack growth.
 
 ## Phases
 

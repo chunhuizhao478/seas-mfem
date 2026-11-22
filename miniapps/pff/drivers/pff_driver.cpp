@@ -28,7 +28,7 @@
 // u), energy_error = kinetic + elastic - external_work + damping_work +
 // kv_work. MOOSE's FarmsExternalWork is a left-endpoint rule in time with the
 // consistent-mass kinetic energy, so the energies compare to O(dt) only.
-// C2 columns: crack_energy (Gc/(c0 l) int alpha(d) + 1/2 d . kappa K d, part
+// C2 columns: crack_energy (Gc/(c0 l) int alpha(d) + 1/2 d . kappa K d; its change since t^1, part
 // of energy_error), d_max, fracture_extent and extent_090 (largest xy
 // distance from [pulse] center of a node with d >= [metrics] d_threshold and
 // d >= 0.9, minus r_hole), damage_qp_its (0: skipped step). The shadow_*
@@ -37,6 +37,9 @@
 // MOOSE inputs): after t_free of each window the stiffness quench is replaced
 // by mass-proportional damping C = alpha_mass M (lumped), which leaves the
 // stable step unchanged; mass_damping_work (part of energy_error) is its work.
+// [confinement] (cmame): constant pressure on [boundaries] confinement from
+// t = 0 (MOOSE Pressure BC static_pressure_outer, no preload); its work is
+// confinement_work (external_work is the pulse only), part of energy_error.
 
 #include "mfem.hpp"
 #include "../config/pff_config_parser.hpp"
@@ -135,6 +138,7 @@ int main(int argc, char *argv[])
    const char *output_override = "";
    real_t end_time_override = -1.0;
    bool frozen_damage = false;
+   bool consistent_mass = false;
    int power_its = 60;
    int pv_interval = 0;
    OptionsParser args(argc, argv);
@@ -145,6 +149,8 @@ int main(int argc, char *argv[])
                   "Hold d = 0 (phase C1: elastodynamics only).");
    args.AddOption(&power_its, "-pi", "--power-iterations",
                   "Power iterations for omega_max^2 of M^-1 K.");
+   args.AddOption(&consistent_mass, "-cm", "--consistent-mass", "-lm", "--lumped-mass",
+                  "Diagnostic: consistent mass (PCG solve per step) instead of the lumped mass.");
    args.AddOption(&pv_interval, "-pv", "--paraview-interval",
                   "Write ParaView output every N steps (0: none).");
    args.Parse();
@@ -159,8 +165,8 @@ int main(int argc, char *argv[])
    if (end_time_override > 0.0) { c.end_time = end_time_override; }
 
    MFEM_VERIFY(c.model == CaseModel::Solid, "pff_driver: hydromech is phase C4");
-   MFEM_VERIFY(c.confinement_pressure == 0.0 && c.confinement_bdr.empty(),
-               "pff_driver: confinement is not implemented yet (C2)");
+   MFEM_VERIFY((c.confinement_pressure == 0.0) == c.confinement_bdr.empty(),
+               "pff_driver: [confinement] pressure and [boundaries] confinement go together");
    MFEM_VERIFY(frozen_damage || c.pf.driving == DrivingEnergy::Active,
                "pff_driver: the history driving energy is phase C4 (hydromech)");
    MFEM_VERIFY(frozen_damage || c.coupling == CouplingScheme::SinglePass,
@@ -207,8 +213,11 @@ int main(int argc, char *argv[])
    ep.density = c.density;
    ep.decomposition = c.decomposition;
    ep.deg = c.pf.deg;
+   ep.consistent_mass = consistent_mass;
    ep.pressure_marker = Marker(ResolveAttributes(c.pressure_bdr, names, dim - 1), max_attr);
    ep.absorbing_marker = Marker(ResolveAttributes(c.absorbing_bdr, names, dim - 1), max_attr);
+   ep.confinement_marker = Marker(ResolveAttributes(c.confinement_bdr, names, dim - 1), max_attr);
+   ep.confinement_pressure = c.confinement_pressure;
    PulseLoad pulse(c.pulse);
    ExplicitElasticityOperator op(Vfes, Sfes, ep, pulse, fixed);
 
@@ -334,7 +343,7 @@ int main(int argc, char *argv[])
       MFEM_VERIFY(csv.good(), "cannot write " << path);
       csv << "step,t,dt,p_wall,v_max,kinetic,elastic,external_work,damping_work,kv_work,"
           "energy_error,shadow_energy,shadow_input,shadow_dissipated,shadow_error,"
-          "crack_energy,d_max,fracture_extent,extent_090,damage_qp_its,mass_damping_work\n"
+          "crack_energy,d_max,fracture_extent,extent_090,damage_qp_its,mass_damping_work,confinement_work\n"
           << std::setprecision(12);
    }
    std::unique_ptr<ParaViewDataCollection> pv;
@@ -351,7 +360,9 @@ int main(int argc, char *argv[])
    // Work accounting (trapezoidal in u).
    Vector u_prev(S.u), fext_prev(n), fdamp_prev(n), fkv_prev(n), fmass_prev(n);
    fext_prev = 0.0; fdamp_prev = 0.0; fkv_prev = 0.0; fmass_prev = 0.0;
-   real_t W_ext = 0.0, W_damp = 0.0, W_kv = 0.0, W_mass = 0.0;
+   const Vector &f_conf = op.ConfinementVector();   // constant in time
+   real_t W_ext = 0.0, W_damp = 0.0, W_kv = 0.0, W_mass = 0.0, W_conf = 0.0;
+   real_t Ec_first = 0.0;
    // Discrete (shadow) energy of the central difference scheme, conserved up to
    // round-off for linear K and constant dt:
    //   H^{n-1/2} = 1/2 v^{n-1/2} M v^{n-1/2} + 1/2 u^n . F_int(u^{n-1}),
@@ -457,7 +468,7 @@ int main(int argc, char *argv[])
       u_nm1 = u_n;
 
       // Works up to t^n (info refers to t^n).
-      real_t dWe = 0.0, dWd = 0.0, dWk = 0.0, dWm = 0.0;
+      real_t dWe = 0.0, dWd = 0.0, dWk = 0.0, dWm = 0.0, dWc = 0.0;
       {
          // u^n = S.u - dt v^{n+1/2}
          Vector un(S.u);
@@ -465,16 +476,18 @@ int main(int argc, char *argv[])
          for (int i = 0; i < n; i++)
          {
             const real_t d_u = un(i) - u_prev(i);
-            dWe += 0.5 * (fext_prev(i) + info.f_ext(i)) * d_u;
+            // fext_prev and info.f_ext hold pulse + confinement; book them apart
+            dWe += (0.5 * (fext_prev(i) + info.f_ext(i)) - f_conf(i)) * d_u;
+            dWc += f_conf(i) * d_u;
             dWd += 0.5 * (fdamp_prev(i) + info.f_damp(i)) * d_u;
             dWk += 0.5 * (fkv_prev(i) + info.f_kv(i)) * d_u;
             dWm += 0.5 * (fmass_prev(i) + info.f_mass(i)) * d_u;
          }
          u_prev = un;
       }
-      real_t loc[4] = {dWe, dWd, dWk, dWm}, glob[4];
-      MPI_Allreduce(loc, glob, 4, MPITypeMap<real_t>::mpi_type, MPI_SUM, comm);
-      W_ext += glob[0]; W_damp += glob[1]; W_kv += glob[2]; W_mass += glob[3];
+      real_t loc[5] = {dWe, dWd, dWk, dWm, dWc}, glob[5];
+      MPI_Allreduce(loc, glob, 5, MPITypeMap<real_t>::mpi_type, MPI_SUM, comm);
+      W_ext += glob[0]; W_damp += glob[1]; W_kv += glob[2]; W_mass += glob[3]; W_conf += glob[4];
       fext_prev = info.f_ext; fdamp_prev = info.f_damp; fkv_prev = info.f_kv;
       fmass_prev = info.f_mass;
 
@@ -482,7 +495,10 @@ int main(int argc, char *argv[])
       const real_t vmax = op.MaxNodalSpeed(info.v_n);
       // info and the works refer to t^n, where the damage is d^n.
       const real_t Ec = crack_energy(d_n);
-      const real_t err = ke + info.psi + Ec - W_ext + W_damp + W_kv + W_mass;
+      // The seeded initial damage (lo = seed at the first solve) is not part of
+      // the budget: MOOSE subtracts dissipated_energy_first_step; here Ec at t^1.
+      if (step_n == 1) { Ec_first = Ec; }
+      const real_t err = ke + info.psi + (Ec - Ec_first) - W_ext - W_conf + W_damp + W_kv + W_mass;
       real_t dmax = 0.0, ext = 0.0, ext90 = 0.0;
       if (!frozen_damage)
       {
@@ -497,7 +513,7 @@ int main(int argc, char *argv[])
              << vmax << ',' << ke << ',' << info.psi << ',' << W_ext << ',' << W_damp << ','
              << W_kv << ',' << err << ',' << H << ',' << Ws_in << ',' << Ws_out << ','
              << shadow_err_report << ',' << Ec << ',' << dmax << ',' << ext << ',' << ext90
-             << ',' << qp_its_step << ',' << W_mass << '\n';
+             << ',' << qp_its_step << ',' << W_mass << ',' << W_conf << '\n';
          if (step_n % 200 == 0)
          {
             mfem::out << "step " << step_n << " t = " << t_n << " dt = " << dt << " v_max = "

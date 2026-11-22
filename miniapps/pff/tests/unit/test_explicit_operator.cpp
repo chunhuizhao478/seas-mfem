@@ -17,6 +17,10 @@
 //     translation decays by the closed-form factor of the half-step
 //     velocity update, v^{N-1/2} = v0 (1 - a/2) ((1 - a/2)/(1 + a/2))^{N-1},
 //     a = alpha dt, close to exp(-alpha t), and KE + mass_damping_work = KE0.
+//   - the confinement vector of a constant P_c on one face is -P_c n |face|.
+//   - consistent mass (-cm diagnostic, MOOSE ADInertialForce): KE of a rigid
+//     translation = 1/2 rho |Omega| |v|^2 (closed form), and the PCG solve
+//     inverts M_c (+ h C_b on the dashpot face): A^{-1} (A x) = x.
 //   - SplitElasticityIntegrator::AssembleElementGrad (spectral, d != 0) =
 //     central differences of AssembleElementVector (the qs Newton tangent,
 //     RACCOON mode II), on a quad and a triangle.
@@ -189,6 +193,54 @@ static void Check(Mesh &serial, const char *label)
                "mass damping: close to exp(-alpha t)");
       std::cout << "  mass damping: max |KE + W_mass - KE0| / KE0 = " << worst_w << "\n";
       TEST_ASSERT(worst_w <= 1e-3, "mass damping: KE + mass_damping_work = KE0");
+   }
+
+   // Consistent mass.
+   {
+      ExplicitElasticityParams pc = Params(max_attr);
+      pc.absorbing_marker[right - 1] = 1;
+      pc.consistent_mass = true;
+      ExplicitElasticityOperator opc(V, S, pc, pulse, fixed);
+      Vector vr(n);
+      vr = 0.0;
+      for (int i = 0; i < nt; i++) { vr(i) = 2.0; vr(nt + i) = -1.0; }
+      TEST_REL(opc.KineticEnergy(vr), 0.5 * p.density * vol * 5.0, 1e-12,
+               "consistent mass: KE of a rigid translation = 1/2 rho |Omega| |v|^2");
+      // Confinement (cmame static_pressure_outer): constant P_c on the right face.
+      {
+         ExplicitElasticityParams pq = Params(max_attr);
+         pq.confinement_marker.SetSize(max_attr);
+         pq.confinement_marker = 0;
+         pq.confinement_marker[right - 1] = 1;
+         pq.confinement_pressure = 1e6;
+         ExplicitElasticityOperator opq(V, S, pq, pulse, fixed);
+         const Vector &bc = opq.ConfinementVector();
+         real_t cx = 0.0, cy = 0.0;
+         for (int i = 0; i < nt; i++) { cx += bc(i); cy += bc(nt + i); }
+         TEST_REL(cx, -1e6 * face, 1e-12, "confinement vector = -P_c n |face|");
+         TEST_ASSERT(std::abs(cy) <= 1e-12 * std::abs(cx), "confinement vector has no tangential part");
+      }
+      Vector x(n), r(n), xs;
+      x.Randomize(7);
+      x -= 0.5;
+      for (int t : fixed) { x(t) = 0.0; }
+      const real_t h = 1e-7, alpha = 2e5;
+      opc.ApplySystem(h, alpha, x, r);
+      opc.SolveAcceleration(r, h, xs, alpha);
+      xs -= x;
+      TEST_ASSERT(xs.Normlinf() <= 1e-9 * x.Normlinf(),
+                  "consistent mass: PCG solve inverts (1 + h alpha) M_c + h C_b");
+      // lumped path through the same interface
+      {
+         ExplicitElasticityParams pl = pc;
+         pl.consistent_mass = false;
+         ExplicitElasticityOperator opl(V, S, pl, pulse, fixed);
+         opl.ApplySystem(h, alpha, x, r);
+         opl.SolveAcceleration(r, h, xs, alpha);
+         xs -= x;
+         TEST_ASSERT(xs.Normlinf() <= 1e-12 * x.Normlinf(),
+                     "lumped mass: nodal solve inverts (1 + h alpha) M_L + h C_b");
+      }
    }
 }
 

@@ -4,7 +4,7 @@
 // velocities, variable step; Belytschko, Liu & Moran, box 6.1):
 //
 //   a^n     = ((1 + h alpha) M + h C_b)^{-1}
-//             [ s(t^n) b - F_int(u^n) - F_KV^n - (C_b + alpha M) v^{n-1/2} ],
+//             [ s(t^n) b + b_c - F_int(u^n) - F_KV^n - (C_b + alpha M) v^{n-1/2} ],
 //             h = dt_{n-1/2} / 2 (0 at the first step, where v holds v^0),
 //             so the dashpot sees v^n = v^{n-1/2} + h a^n;
 //   dt_avg = (dt_{n-1/2} + dt_{n+1/2}) / 2 (dt_{1/2} / 2 at the first step);
@@ -46,7 +46,8 @@ struct CentralDifferenceStepInfo
    real_t psi = 0.0;      ///< int psi(u^n)
    Vector v_n;            ///< v^n = v^{n-1/2} + h a^n
    Vector F_int;          ///< F_int^n
-   Vector f_ext;          ///< s(t^n) b
+   Vector f_ext;          ///< s(t^n) b + b_c (pulse plus confinement)
+   Vector f_conf;         ///< b_c (constant confinement)
    Vector f_damp;         ///< C_b v^n
    Vector f_kv;           ///< F_KV^n
    Vector f_mass;         ///< alpha M v^n
@@ -76,6 +77,8 @@ public:
       }
       info.f_ext.SetSize(n);
       info.f_ext.Set(s, op_.PressureVector());
+      info.f_conf = op_.ConfinementVector();
+      info.f_ext += info.f_conf;
 
       Vector cv;
       op_.DashpotForce(S.v_half, cv);

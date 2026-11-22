@@ -9,7 +9,7 @@ model = "solid"
 source = "pulsepower/cmame_revision/2d_solid/benchmark/elasticity.i"
 
 [mesh]
-file = "../2d_mesh/2d_mesh.msh"         # physical curves: OuterBoundary 1, RefinedBoundary 2, HoleBoundary 3
+file = "../2d_mesh/2d_mesh_v22.msh"     # msh 2.2 of farms 2d_mesh.msh; physical curves: OuterBoundary 1, RefinedBoundary 2, HoleBoundary 3
 dim = 2
 corner = [0.01, 0.01, 0.0]               # ExtraNodesetGenerator corner_ptr (closest node)
 
