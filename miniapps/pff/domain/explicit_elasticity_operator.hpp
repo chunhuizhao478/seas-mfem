@@ -92,15 +92,22 @@ public:
          }
    }
 
-   /// a = (M + h C)^{-1} rhs per node (dim x dim solve where the node has a
-   /// dashpot block), a = 0 on the fixed dofs.
-   void SolveAcceleration(const Vector &rhs, real_t h, Vector &a) const
+   /// f += alpha M v with the lumped mass.
+   void AddMassForce(real_t alpha, const Vector &v, Vector &f) const
+   {
+      for (int c = 0; c < dim_; c++)
+         for (int i = 0; i < nt_; i++) { f(c * nt_ + i) += alpha * M_(i) * v(c * nt_ + i); }
+   }
+
+   /// a = ((1 + h alpha) M + h C)^{-1} rhs per node (dim x dim solve where the
+   /// node has a dashpot block), a = 0 on the fixed dofs.
+   void SolveAcceleration(const Vector &rhs, real_t h, Vector &a, real_t alpha = 0.0) const
    {
       a.SetSize(rhs.Size());
       const int D = dim_;
       for (int i = 0; i < nt_; i++)
       {
-         const real_t m = M_(i);
+         const real_t m = (1.0 + h * alpha) * M_(i);
          if (!has_dashpot_[i])
          {
             for (int c = 0; c < D; c++) { a(c * nt_ + i) = rhs(c * nt_ + i) / m; }

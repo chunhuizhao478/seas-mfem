@@ -33,6 +33,10 @@
 // distance from [pulse] center of a node with d >= [metrics] d_threshold and
 // d >= 0.9, minus r_hole), damage_qp_its (0: skipped step). The shadow_*
 // columns assume a fixed d and are diagnostics of C1 only.
+// quench = "mass" (C3, a pff choice approved by Andy 2026-11-22, not in the
+// MOOSE inputs): after t_free of each window the stiffness quench is replaced
+// by mass-proportional damping C = alpha_mass M (lumped), which leaves the
+// stable step unchanged; mass_damping_work (part of energy_error) is its work.
 
 #include "mfem.hpp"
 #include "../config/pff_config_parser.hpp"
@@ -161,10 +165,9 @@ int main(int argc, char *argv[])
                "pff_driver: the history driving energy is phase C4 (hydromech)");
    MFEM_VERIFY(frozen_damage || c.coupling == CouplingScheme::SinglePass,
                "pff_driver: [coupling] fixed_point is not implemented for the explicit step");
-   if (c.zeta_quench > 0.0 && c.quench != QuenchMode::Stiffness)
-   {
-      MFEM_ABORT("pff_driver: quench modes 'mass' and 'implicit' are phase C3");
-   }
+   MFEM_VERIFY(c.quench != QuenchMode::Implicit, "pff_driver: quench = 'implicit' is not implemented");
+   MFEM_VERIFY(c.quench != QuenchMode::Mass || c.zeta_quench == 0.0,
+               "pff_driver: quench = 'mass' uses alpha_mass; set zeta_quench = 0");
 
    // Mesh (path relative to the config file).
    const std::filesystem::path cfg_dir = std::filesystem::path(config_file).parent_path();
@@ -331,7 +334,7 @@ int main(int argc, char *argv[])
       MFEM_VERIFY(csv.good(), "cannot write " << path);
       csv << "step,t,dt,p_wall,v_max,kinetic,elastic,external_work,damping_work,kv_work,"
           "energy_error,shadow_energy,shadow_input,shadow_dissipated,shadow_error,"
-          "crack_energy,d_max,fracture_extent,extent_090,damage_qp_its\n"
+          "crack_energy,d_max,fracture_extent,extent_090,damage_qp_its,mass_damping_work\n"
           << std::setprecision(12);
    }
    std::unique_ptr<ParaViewDataCollection> pv;
@@ -346,9 +349,9 @@ int main(int argc, char *argv[])
    }
 
    // Work accounting (trapezoidal in u).
-   Vector u_prev(S.u), fext_prev(n), fdamp_prev(n), fkv_prev(n);
-   fext_prev = 0.0; fdamp_prev = 0.0; fkv_prev = 0.0;
-   real_t W_ext = 0.0, W_damp = 0.0, W_kv = 0.0;
+   Vector u_prev(S.u), fext_prev(n), fdamp_prev(n), fkv_prev(n), fmass_prev(n);
+   fext_prev = 0.0; fdamp_prev = 0.0; fkv_prev = 0.0; fmass_prev = 0.0;
+   real_t W_ext = 0.0, W_damp = 0.0, W_kv = 0.0, W_mass = 0.0;
    // Discrete (shadow) energy of the central difference scheme, conserved up to
    // round-off for linear K and constant dt:
    //   H^{n-1/2} = 1/2 v^{n-1/2} M v^{n-1/2} + 1/2 u^n . F_int(u^{n-1}),
@@ -360,6 +363,8 @@ int main(int argc, char *argv[])
 
    auto window = [&](real_t t) { return std::fmod(t + eps_t, Tw); };
    auto zeta_at = [&](real_t t) { return window(t) < c.t_free ? c.zeta_pulse : c.zeta_quench; };
+   auto alpha_at = [&](real_t t)
+   { return (c.quench == QuenchMode::Mass && window(t) >= c.t_free) ? c.alpha_mass : 0.0; };
    auto cap_at = [&](real_t t) { return window(t) < c.t_free ? c.dt_max : c.dt_quiet; };
    auto next_event = [&](real_t t)
    {
@@ -389,7 +394,7 @@ int main(int argc, char *argv[])
       if (step_n == 1) { H_ref = H; }
       const Vector u_n(S.u);
       const Vector d_n(D);
-      cd.Step(S, D, s, zeta, dt, info);
+      cd.Step(S, D, s, zeta, dt, info, alpha_at(S.t));
 
       // Damage d^{n+1} from psie_active(u^{n+1}).
       int qp_its_step = 0;
@@ -440,7 +445,7 @@ int main(int argc, char *argv[])
          {
             const real_t du2 = 0.5 * (S.u(i) - u_nm1(i));
             li += info.f_ext(i) * du2;
-            lo += (info.f_damp(i) + info.f_kv(i)) * du2;
+            lo += (info.f_damp(i) + info.f_kv(i) + info.f_mass(i)) * du2;
          }
          real_t loc2[2] = {li, lo}, glob2[2];
          MPI_Allreduce(loc2, glob2, 2, MPITypeMap<real_t>::mpi_type, MPI_SUM, comm);
@@ -452,7 +457,7 @@ int main(int argc, char *argv[])
       u_nm1 = u_n;
 
       // Works up to t^n (info refers to t^n).
-      real_t dWe = 0.0, dWd = 0.0, dWk = 0.0;
+      real_t dWe = 0.0, dWd = 0.0, dWk = 0.0, dWm = 0.0;
       {
          // u^n = S.u - dt v^{n+1/2}
          Vector un(S.u);
@@ -463,19 +468,21 @@ int main(int argc, char *argv[])
             dWe += 0.5 * (fext_prev(i) + info.f_ext(i)) * d_u;
             dWd += 0.5 * (fdamp_prev(i) + info.f_damp(i)) * d_u;
             dWk += 0.5 * (fkv_prev(i) + info.f_kv(i)) * d_u;
+            dWm += 0.5 * (fmass_prev(i) + info.f_mass(i)) * d_u;
          }
          u_prev = un;
       }
-      real_t loc[3] = {dWe, dWd, dWk}, glob[3];
-      MPI_Allreduce(loc, glob, 3, MPITypeMap<real_t>::mpi_type, MPI_SUM, comm);
-      W_ext += glob[0]; W_damp += glob[1]; W_kv += glob[2];
+      real_t loc[4] = {dWe, dWd, dWk, dWm}, glob[4];
+      MPI_Allreduce(loc, glob, 4, MPITypeMap<real_t>::mpi_type, MPI_SUM, comm);
+      W_ext += glob[0]; W_damp += glob[1]; W_kv += glob[2]; W_mass += glob[3];
       fext_prev = info.f_ext; fdamp_prev = info.f_damp; fkv_prev = info.f_kv;
+      fmass_prev = info.f_mass;
 
       const real_t ke = op.KineticEnergy(info.v_n);
       const real_t vmax = op.MaxNodalSpeed(info.v_n);
       // info and the works refer to t^n, where the damage is d^n.
       const real_t Ec = crack_energy(d_n);
-      const real_t err = ke + info.psi + Ec - W_ext + W_damp + W_kv;
+      const real_t err = ke + info.psi + Ec - W_ext + W_damp + W_kv + W_mass;
       real_t dmax = 0.0, ext = 0.0, ext90 = 0.0;
       if (!frozen_damage)
       {
@@ -490,7 +497,7 @@ int main(int argc, char *argv[])
              << vmax << ',' << ke << ',' << info.psi << ',' << W_ext << ',' << W_damp << ','
              << W_kv << ',' << err << ',' << H << ',' << Ws_in << ',' << Ws_out << ','
              << shadow_err_report << ',' << Ec << ',' << dmax << ',' << ext << ',' << ext90
-             << ',' << qp_its_step << '\n';
+             << ',' << qp_its_step << ',' << W_mass << '\n';
          if (step_n % 200 == 0)
          {
             mfem::out << "step " << step_n << " t = " << t_n << " dt = " << dt << " v_max = "

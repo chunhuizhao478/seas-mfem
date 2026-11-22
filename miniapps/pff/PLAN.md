@@ -34,6 +34,15 @@ This file is the working plan.
   explicit Δt about 600×. The options are `quench = "mass"` (C = α_M M) or
   `"implicit"` (Newmark on the ring-down only), chosen at gate 4 on 2D
   evidence. `"stiffness"` stays available for parity at a small Δt.
+  **Decided 2026-11-22 (Andy):** `quench = "mass"` with α_M = 2e5 /s after
+  t_free (decay time 1/α_M = 10 µs, the 1/ζ_quench design target), and
+  ζ_pulse = 0. The MOOSE runs use ζ_pulse = 1e-8 s, which removes about 12 %
+  of the input energy during the pulse in the MHz band (pff kv_work 147 J/m of
+  1190 at 10 µs, η = 1; MOOSE's budget does not record it) and lowers the
+  damage (η = 1, 10 µs: crack energy 76.6 → 97.5 J/m, d ≥ 0.5 extent 1.88 →
+  3.24 mm). Parity for ζ_pulse = 0 is M-C2c (MOOSE M-C2a with the CLI override
+  zeta_pulse=0); the production configs no longer reproduce the published
+  MOOSE runs step for step.
 
 ## Phases
 

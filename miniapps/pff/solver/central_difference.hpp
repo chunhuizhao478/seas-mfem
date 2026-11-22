@@ -3,7 +3,8 @@
 // central_difference.hpp — one explicit step with lumped mass (half-step
 // velocities, variable step; Belytschko, Liu & Moran, box 6.1):
 //
-//   a^n     = (M + h C_b)^{-1} [ s(t^n) b - F_int(u^n) - F_KV^n - C_b v^{n-1/2} ],
+//   a^n     = ((1 + h alpha) M + h C_b)^{-1}
+//             [ s(t^n) b - F_int(u^n) - F_KV^n - (C_b + alpha M) v^{n-1/2} ],
 //             h = dt_{n-1/2} / 2 (0 at the first step, where v holds v^0),
 //             so the dashpot sees v^n = v^{n-1/2} + h a^n;
 //   dt_avg = (dt_{n-1/2} + dt_{n+1/2}) / 2 (dt_{1/2} / 2 at the first step);
@@ -11,6 +12,8 @@
 //
 // Kelvin-Voigt term (ADDynamicStressDivergenceTensors, alpha = 0):
 //   F_KV^n = zeta (F_int^n - F_int^{n-1}) / dt_{n-1/2},
+// Mass-proportional damping (quench = "mass", C = alpha M with the lumped M)
+// is treated like the dashpot, at v^n: F_M^n = alpha M v^n.
 // the backward difference of the stored degraded internal force, which is
 // MOOSE's zeta (sigma - sigma_old)/dt . grad(test) lagged by one step. At
 // fixed damage it equals zeta K v^{n-1/2}.
@@ -46,6 +49,7 @@ struct CentralDifferenceStepInfo
    Vector f_ext;          ///< s(t^n) b
    Vector f_damp;         ///< C_b v^n
    Vector f_kv;           ///< F_KV^n
+   Vector f_mass;         ///< alpha M v^n
 };
 
 class CentralDifference
@@ -54,9 +58,10 @@ public:
    CentralDifference(const ExplicitElasticityOperator &op) : op_(op) {}
 
    /// Advance state from t^n to t^n + dt with damage D (true dofs, held
-   /// fixed over the step), pulse factor s = Shape(t^n), damping zeta(t^n).
+   /// fixed over the step), pulse factor s = Shape(t^n), damping zeta(t^n),
+   /// mass-proportional damping alpha(t^n).
    void Step(CentralDifferenceState &S, const Vector &D, real_t s, real_t zeta,
-             real_t dt, CentralDifferenceStepInfo &info) const
+             real_t dt, CentralDifferenceStepInfo &info, real_t alpha = 0.0) const
    {
       const int n = S.u.Size();
       op_.InternalForce(S.u, D, info.F_int, &info.psi);
@@ -74,6 +79,7 @@ public:
 
       Vector cv;
       op_.DashpotForce(S.v_half, cv);
+      if (alpha > 0.0) { op_.AddMassForce(alpha, S.v_half, cv); }
       Vector rhs(n);
       for (int i = 0; i < n; i++)
       {
@@ -83,12 +89,15 @@ public:
       // v^n = v^{n-1/2} + (t^n - t^{n-1/2}) a^n; at the first step v_half holds v^0.
       const real_t h = 0.5 * S.dt_prev;
       Vector a(n);
-      op_.SolveAcceleration(rhs, h, a);
+      op_.SolveAcceleration(rhs, h, a, alpha);
 
       info.v_n.SetSize(n);
       add(S.v_half, h, a, info.v_n);
       for (int t : op_.FixedTrueDofs()) { info.v_n(t) = 0.0; }
       op_.DashpotForce(info.v_n, info.f_damp);
+      info.f_mass.SetSize(n);
+      info.f_mass = 0.0;
+      if (alpha > 0.0) { op_.AddMassForce(alpha, info.v_n, info.f_mass); }
 
       S.v_half.Add(dt_avg, a);
       for (int t : op_.FixedTrueDofs()) { S.v_half(t) = 0.0; }

@@ -13,6 +13,10 @@
 //   - the pressure vector of a constant Peak on one face is -P n |face|.
 //   - the central difference with zeta = 0 and no dashpots conserves the
 //     discrete energy H = 1/2 v^{n-1/2} M v^{n-1/2} + 1/2 u^n K u^{n-1}.
+//   - mass-proportional damping (quench = "mass", C = alpha M): a rigid
+//     translation decays by the closed-form factor of the half-step
+//     velocity update, v^{N-1/2} = v0 (1 - a/2) ((1 - a/2)/(1 + a/2))^{N-1},
+//     a = alpha dt, close to exp(-alpha t), and KE + mass_damping_work = KE0.
 //   - SplitElasticityIntegrator::AssembleElementGrad (spectral, d != 0) =
 //     central differences of AssembleElementVector (the qs Newton tangent,
 //     RACCOON mode II), on a quad and a triangle.
@@ -151,6 +155,41 @@ static void Check(Mesh &serial, const char *label)
    }
    std::cout << "  max |H - H1| / H1 over 2000 steps: " << worst / H1 << "\n";
    TEST_ASSERT(worst <= 1e-10 * H1, "central difference conserves H over 2000 steps");
+
+   // Mass-proportional damping on a rigid translation (F_int = 0, no dashpots).
+   {
+      const real_t alpha = 2e5, dtm = 2e-7;   // alpha dt = 0.04
+      CentralDifferenceState sm;
+      sm.u.SetSize(n); sm.u = 0.0;
+      sm.v_half.SetSize(n); sm.v_half = 0.0;
+      for (int i = 0; i < nt; i++) { sm.v_half(i) = 1.0; sm.v_half(nt + i) = -0.5; }
+      sm.F_prev.SetSize(n); sm.F_prev = 0.0;
+      const real_t ke0 = op0.KineticEnergy(sm.v_half);
+      const int N = 250;
+      real_t Wm = 0.0, worst_w = 0.0;
+      Vector fm_prev(n), u_prev(sm.u);
+      fm_prev = 0.0;
+      for (int k = 0; k < N; k++)
+      {
+         cd.Step(sm, D0, 0.0, 0.0, dtm, info, alpha);
+         // trapezoid in u from u^{k-1} to u^k (info at t^k), as in pff_driver
+         Vector uk(sm.u);
+         uk.Add(-dtm, sm.v_half);
+         for (int i = 0; i < n; i++) { Wm += 0.5 * (fm_prev(i) + info.f_mass(i)) * (uk(i) - u_prev(i)); }
+         u_prev = uk;
+         fm_prev = info.f_mass;
+         worst_w = std::max(worst_w, std::abs(op0.KineticEnergy(info.v_n) + Wm - ke0) / ke0);
+      }
+      const real_t a = alpha * dtm;
+      const real_t expect = (1.0 - 0.5 * a) * std::pow((1.0 - 0.5 * a) / (1.0 + 0.5 * a), N - 1);
+      TEST_REL(sm.v_half(0), expect, 1e-12, "mass damping: discrete decay factor (rigid x)");
+      TEST_REL(sm.v_half(nt + 1), -0.5 * expect, 1e-12, "mass damping: same factor in y");
+      // v^{N-1/2} at t = (N - 1/2) dt vs exp(-alpha t): O((alpha dt)^2) per unit alpha t
+      TEST_REL(sm.v_half(0), std::exp(-alpha * (N - 0.5) * dtm), 2e-3,
+               "mass damping: close to exp(-alpha t)");
+      std::cout << "  mass damping: max |KE + W_mass - KE0| / KE0 = " << worst_w << "\n";
+      TEST_ASSERT(worst_w <= 1e-3, "mass damping: KE + mass_damping_work = KE0");
+   }
 }
 
 static void CheckSpectralGrad(Element::Type type, const char *label)
