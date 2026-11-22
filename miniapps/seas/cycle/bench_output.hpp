@@ -293,10 +293,11 @@ public:
          real_t *r = &mine[nqt * static_cast<size_t>(i)];
          r[0] = FdCycleOutput::Eval(f.slip_strike, L);
          r[1] = FdCycleOutput::Eval(f.slip_dip, L);
+         const real_t eta_L = FdCycleOutput::EtaAt(f, L);
          r[2] = -(FdCycleOutput::Eval(f.tau_a_strike, L) + FdCycleOutput::Eval(f.tau_b_strike, L)
-                  + f.eta * FdCycleOutput::Eval(f.V_strike, L)) / 1e6;
+                  + eta_L * FdCycleOutput::Eval(f.V_strike, L)) / 1e6;
          r[3] = -(FdCycleOutput::Eval(f.tau_a_dip, L) + FdCycleOutput::Eval(f.tau_b_dip, L)
-                  + f.eta * FdCycleOutput::Eval(f.V_dip, L)) / 1e6;
+                  + eta_L * FdCycleOutput::Eval(f.V_dip, L)) / 1e6;
          if (nqt == 5) { r[4] = FdCycleOutput::Eval(f.sigma_n, L) / 1e6; }
       }
       // Each point has one owner, so the sum is that owner's values.
@@ -435,8 +436,8 @@ private:
       {
          slip(2 * k) = f.slip_strike(k);
          slip(2 * k + 1) = f.slip_dip(k);
-         tau(2 * k) = -(f.tau_a_strike(k) + f.tau_b_strike(k) + f.eta * f.V_strike(k)) / 1e6;
-         tau(2 * k + 1) = -(f.tau_a_dip(k) + f.tau_b_dip(k) + f.eta * f.V_dip(k)) / 1e6;
+         tau(2 * k) = -(f.tau_a_strike(k) + f.tau_b_strike(k) + f.EtaAt(k) * f.V_strike(k)) / 1e6;
+         tau(2 * k + 1) = -(f.tau_a_dip(k) + f.tau_b_dip(k) + f.EtaAt(k) * f.V_dip(k)) / 1e6;
       }
    }
 

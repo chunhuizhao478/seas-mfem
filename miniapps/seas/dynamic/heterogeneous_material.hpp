@@ -73,6 +73,24 @@ struct MaterialField
 
    Mode mode = Mode::Constant;
 
+   /// How NitscheMaterialSample reduces a spatially varying material to one
+   /// value per element (heterogeneity plan rev4, D11):
+   ///   - Centroid       (default): the value at the element centroid, as before;
+   ///   - StiffestPoint  : the quadrature point of IntRules(geom, 2p) with the
+   ///                      largest (lambda + 2 mu) / rho, so per-element bounds
+   ///                      (CFL, penalty) hold at every point;
+   ///   - CellAverage    : SeisSol's homogenization over those points (rho
+   ///                      arithmetic, mu harmonic, lambda from the mean of
+   ///                      lambda / (2 mu (3 lambda + 2 mu)); SeisSol
+   ///                      ParameterDB.cpp computeAveragedMaterial).
+   enum class Sampling : int { Centroid = 0, StiffestPoint = 1, CellAverage = 2 };
+   Sampling sampling = Sampling::Centroid;
+   /// Mode::Coefficient only: true makes the Nitsche operator assemble K and M
+   /// with the coefficients at every quadrature point (sampling then only sets
+   /// the per-element scalars).  False (default): K and M use the per-element
+   /// sample, as before.
+   bool pointwise = false;
+
    // Scalar fallback (mode == Constant).
    real_t lambda_const = 0.0;
    real_t mu_const     = 0.0;

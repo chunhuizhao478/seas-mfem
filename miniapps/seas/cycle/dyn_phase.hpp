@@ -197,8 +197,13 @@ public:
       MFEM_VERIFY(p >= 1 && p <= 4, "DynPhase: order " << p << " is outside 1..4");
       MFEM_VERIFY(rsb.state_evolution == spatial::StateEvolutionKind::AgingLaw,
                   "DynPhase: the QD regime runs the aging law; the deck asks for another");
-      material_ = std::make_unique<MaterialField>(MaterialField::MakeConstant(
-         s.material_fallback.lambda, s.material_fallback.mu, s.material_fallback.rho));
+      // [velocity] kind = "grid" (plan rev4): the grid, sampled as the
+      // QD regime samples it (cycle/grid_material.hpp)
+      material_ = std::make_unique<MaterialField>(
+         cfg.hetero.velocity ? cfg.hetero.Material()
+                             : MaterialField::MakeConstant(s.material_fallback.lambda,
+                                                           s.material_fallback.mu,
+                                                           s.material_fallback.rho));
 
       // Boundaries: the QD legacy constructor's lists, loads read at t0 + tau.
       bc_.dirichlet_attrs = {5};
@@ -382,8 +387,7 @@ public:
       if (cfg.finite_width.On())
       {
          // Rule C6: omega_max^2 + beta / rho, with dt_cfl taken as 2 / omega_max
-         const auto &mf = s.material_fallback;
-         const real_t br = cfg.finite_width.BetaOverMu() * mf.mu / mf.rho;
+         const real_t br = cfg.finite_width.BetaOverMu() * MuOverRhoMax_(cfg);
          fw_dt_factor_ = 1.0 / std::sqrt(1.0 + 0.25 * br * dt_cfl_ * dt_cfl_);
          dt_cfl_ *= fw_dt_factor_;
       }
@@ -400,8 +404,7 @@ public:
          real_t dt_ve = dt_mesh * sY;
          if (cfg.finite_width.On())
          {
-            const auto &mf = s.material_fallback;
-            const real_t br = cfg.finite_width.BetaOverMu() * mf.mu / mf.rho;
+            const real_t br = cfg.finite_width.BetaOverMu() * MuOverRhoMax_(cfg);
             dt_ve *= 1.0 / std::sqrt(1.0 + 0.25 * br * dt_ve * dt_ve);
          }
          visco_sY_ = sY;
@@ -682,8 +685,36 @@ public:
       if (rank == 0)
       {
          const auto &mf = cfg.shared.material_fallback;
-         const real_t cp = std::sqrt((mf.lambda + 2.0 * mf.mu) / mf.rho);
+         real_t cp = std::sqrt((mf.lambda + 2.0 * mf.mu) / mf.rho);
          const real_t ceig = NitscheStableConstant(smesh.Dimension(), p);
+         // [velocity] kind = "grid": the reference c_p is the slowest
+         // element's and each element's step scales with c_p,min / c_p,e <= 1
+         // (the element's sample, as DynPhase's); the 2.5D cut (rule C6) takes
+         // the largest mu_e / rho_e.  A uniform grid gives cp = the deck's and
+         // factors exactly 1.
+         std::vector<double> het_factor;
+         std::vector<real_t> het_l, het_m, het_r;   // each element's sample (attenuation below)
+         real_t mr_max = mf.mu / mf.rho;
+         if (cfg.hetero.velocity)
+         {
+            const MaterialField hm = cfg.hetero.Material();
+            het_factor.resize(ne);
+            het_l.resize(ne); het_m.resize(ne); het_r.resize(ne);
+            real_t mr = 0.0, cmin = std::numeric_limits<real_t>::infinity();
+            for (int e = 0; e < ne; e++)
+            {
+               real_t l, m, r;
+               SampleElementMaterial(hm, *smesh.GetElementTransformation(e), e,
+                                     smesh.GetElementBaseGeometry(e), p, l, m, r);
+               het_l[e] = l; het_m[e] = m; het_r[e] = r;
+               het_factor[e] = std::sqrt((l + 2.0 * m) / r);   // c_p,e for now
+               cmin = std::min(cmin, het_factor[e]);
+               mr = std::max(mr, m / r);
+            }
+            for (int e = 0; e < ne; e++) { het_factor[e] = cmin / het_factor[e]; }
+            cp = cmin;
+            mr_max = mr;
+         }
          // [cycle.pml]: the band of the serial mesh (as PlanPmlPartition).
          // Step factor 1 / sqrt(kappa_e) with kappa_e the largest kappa at
          // the element's vertices (kappa grows with the depth into a band, so
@@ -736,14 +767,30 @@ public:
             // band's elements (pinned) carry no memory (decision D4)
             const RheologyConfig &R = cfg.rheology;
             const ViscoelasticModel vm(R.gmb_band, R.gmb_q, R.gmb_moduli);
-            const GMBFit f = vm.Fit(mf.lambda, mf.mu, mf.rho);
-            MFEM_VERIFY(f.error.empty(), "PlanLts: [rheology.viscoelastic]: " << f.error);
             // s_Y = 1 / sqrt(ViscoelasticModel::StiffnessBound), the
             // arithmetic of the global step's VeDtFactor_
-            real_t sl = 0.0;
-            for (std::size_t l = 0; l < f.lam_l.size(); l++) { sl += f.lam_l[l] + 2.0 * f.mu_l[l]; }
-            const real_t PR = mf.lambda + 2.0 * mf.mu;
-            const real_t sY = 1.0 / std::sqrt((PR + sl) / PR);
+            auto bound = [&vm](real_t l, real_t m, real_t r)
+            {
+               const GMBFit f = vm.Fit(l, m, r);
+               MFEM_VERIFY(f.error.empty(), "PlanLts: [rheology.viscoelastic]: " << f.error);
+               real_t sl = 0.0;
+               for (std::size_t q = 0; q < f.lam_l.size(); q++) { sl += f.lam_l[q] + 2.0 * f.mu_l[q]; }
+               const real_t PR = l + 2.0 * m;
+               return (PR + sl) / PR;
+            };
+            real_t bmax = 0.0;
+            if (het_l.empty()) { bmax = bound(mf.lambda, mf.mu, mf.rho); }
+            else
+            {
+               // [velocity] kind = "grid": the largest bound over the
+               // elements outside the band, as VeDtFactor_ (one s_Y for all)
+               for (int e = 0; e < ne; e++)
+               {
+                  if (!pinned.empty() && pinned[e]) { continue; }
+                  bmax = std::max(bmax, bound(het_l[e], het_m[e], het_r[e]));
+               }
+            }
+            const real_t sY = 1.0 / std::sqrt(bmax);
             if (factor.empty()) { factor.assign(ne, 1.0); }
             for (int e = 0; e < ne; e++)
             {
@@ -751,13 +798,18 @@ public:
             }
             rep_ve_sY = sY;
          }
+         if (!het_factor.empty())
+         {
+            if (factor.empty()) { factor.assign(ne, 1.0); }
+            for (int e = 0; e < ne; e++) { factor[e] *= het_factor[e]; }
+         }
          asg = BuildNitscheLtsAssignment(smesh, p, cfg.dyn.cfl * ceig, cp, cfg.fault_attr,
                                          std::numeric_limits<real_t>::infinity(),
                                          cfg.lts.cluster_cap, cfg.lts.fault_buffer,
                                          factor.empty() ? nullptr : &factor,
                                          pinned.empty() ? nullptr : &pinned,
                                          cfg.finite_width.On()
-                                            ? cfg.finite_width.BetaOverMu() * mf.mu / mf.rho
+                                            ? cfg.finite_width.BetaOverMu() * mr_max
                                             : 0.0);
          hdr[0] = asg.num_clusters;
          hdr[1] = asg.fault_cluster;
@@ -1140,6 +1192,7 @@ public:
          f.theta(j) = fr_->PsiToTheta(W_->State()(j), W_->FaultDc()(j));
       }
       f.eta = 0.0;
+      f.eta_dof.SetSize(0);   // the dynamic regime has no radiation damping
       if (relax_r_) { f.sigma_red = *relax_r_; }   // [cycle.relaxation]: frozen r
       else { f.sigma_red.SetSize(0); }
       if (W_->ShearFreeOpening() || W_->ContactOpening())
@@ -1312,6 +1365,19 @@ private:
    std::shared_ptr<real_t> t0_;   ///< held by the wall-load wrapper too
    real_t fw_dt_factor_ = 1.0;    ///< [cycle.finite_width]: the CFL step's cut (C6)
    real_t fw_damp_min_ = 0.0, fw_damp_max_ = 0.0;   ///< damping_ratio: element rates [1/s]
+   /// The largest mu / rho of the material: the deck's (bit for bit as
+   /// before) or, with [velocity] kind = "grid", over the sample's
+   /// elements on all ranks.  Collective in the second case.
+   real_t MuOverRhoMax_(const CycleConfig &cfg) const
+   {
+      const auto &mf = cfg.shared.material_fallback;
+      if (!cfg.hetero.velocity) { return mf.mu / mf.rho; }
+      const NitscheMaterialSample &sm = W_->Sample();
+      real_t m = 0.0;
+      for (int i = 0; i < sm.MuGF().Size(); i++) { m = std::max(m, sm.MuGF()(i) / sm.RhoGF()(i)); }
+      MPI_Allreduce(MPI_IN_PLACE, &m, 1, MPITypeMap<real_t>::mpi_type, MPI_MAX, pmesh_.GetComm());
+      return m;
+   }
    std::unique_ptr<MaterialField> material_;
    BoundaryConfig bc_;
    std::unique_ptr<ParMesh> dmesh_;   ///< [cycle.absorbing]: W's mesh (outlives W)

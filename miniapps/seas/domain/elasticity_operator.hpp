@@ -188,6 +188,10 @@ public:
       model_ = owned_model_.get();
       lambda_ptr_ = &lambda;
       mu_ptr_ = &mu;
+      vol_lambda_ptr_ = config.volume_lambda;
+      vol_mu_ptr_ = config.volume_mu;
+      MFEM_VERIFY(!vol_lambda_ptr_ == !vol_mu_ptr_, "ElasticityDomainOperator: give both "
+                  "DomainConfig::volume_lambda and volume_mu, or neither");
       material_is_constant_ = false;
       MFEM_VERIFY(material_is_constant_ || method_ == DGMethod::IP,
                   "ElasticityDomainOperator: spatially varying material "
@@ -213,7 +217,11 @@ public:
                              BCMode bc_mode = BCMode::FarField,
                              int face_basis_type = BasisType::GaussLobatto,
                              const FaultFrameSource &fault_frames = {},
-                             const DirichletFunc &dirichlet_func = nullptr)
+                             const DirichletFunc &dirichlet_func = nullptr,
+                             Coefficient *lambda_coef = nullptr,
+                             Coefficient *mu_coef = nullptr,
+                             Coefficient *vol_lambda_coef = nullptr,
+                             Coefficient *vol_mu_coef = nullptr)
       : mesh_(mesh), order_(order),
         lambda_val_(lambda), mu_val_(mu),
         Vp_(Vp), Wf_(Wf), lf_(lf),
@@ -256,6 +264,25 @@ public:
       {
          bdr_config_.dirichlet_attrs = {5};
          bdr_config_.natural_attrs = {1};
+      }
+
+      // heterogeneity plan rev4: a spatially varying lambda, mu for the
+      // integrators (the scalars stay the fallbacks of the scalar-only
+      // paths), as the Coefficient constructor above; IP only
+      if (lambda_coef || mu_coef)
+      {
+         MFEM_VERIFY(lambda_coef && mu_coef, "ElasticityDomainOperator: give both "
+                     "lambda_coef and mu_coef, or neither");
+         MFEM_VERIFY(method_ == DGMethod::IP, "ElasticityDomainOperator: spatially varying "
+                     "material requires DGMethod::IP (BR2 uses the scalar moduli only)");
+         lambda_ptr_ = lambda_coef;
+         mu_ptr_ = mu_coef;
+         material_is_constant_ = false;
+         // volume-only pointwise material (DomainConfig::volume_lambda)
+         MFEM_VERIFY(!vol_lambda_coef == !vol_mu_coef, "ElasticityDomainOperator: give both "
+                     "vol_lambda_coef and vol_mu_coef, or neither");
+         vol_lambda_ptr_ = vol_lambda_coef;
+         vol_mu_ptr_ = vol_mu_coef;
       }
 
       InitOperator();
@@ -361,7 +388,7 @@ public:
       solver_.reset();
       ReleaseStiffness();
       beta_over_mu_ = beta_over_mu;
-      beta_coef_ = std::make_unique<ProductCoefficient>(beta_over_mu_, *mu_ptr_);
+      beta_coef_ = std::make_unique<ProductCoefficient>(beta_over_mu_, VolMu_());
       substrate_shape_ = U_pl1;
       RebuildSubstrateLoad_();
       substrate_t_off_ = std::move(t_offset);
@@ -830,6 +857,12 @@ private:
    // constant members above; the Coefficient constructor repoints them.
    Coefficient *lambda_ptr_ = &lambda_coeff_;
    Coefficient *mu_ptr_ = &mu_coeff_;
+   /// heterogeneity plan rev4: the volume integrals' lambda, mu when they
+   /// differ from the face terms' (DomainConfig::volume_lambda); null: same
+   Coefficient *vol_lambda_ptr_ = nullptr;
+   Coefficient *vol_mu_ptr_ = nullptr;
+   Coefficient &VolLambda_() const { return vol_lambda_ptr_ ? *vol_lambda_ptr_ : *lambda_ptr_; }
+   Coefficient &VolMu_() const { return vol_mu_ptr_ ? *vol_mu_ptr_ : *mu_ptr_; }
    bool material_is_constant_ = true;
 
    // FE spaces

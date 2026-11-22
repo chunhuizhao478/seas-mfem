@@ -186,10 +186,10 @@ void ProbeSwitch(const MPIContext &mpi, const cycle::CycleConfig &cfg, cycle::QD
    int jmax = -1;
    for (int j = 0; j < N; j++)
    {
-      const real_t dd = -(fq.tau_a_dip(j) + fq.tau_b_dip(j) + fq.eta * fq.V_dip(j))
-                        + (fd.tau_a_dip(j) + fd.tau_b_dip(j) + fd.eta * fd.V_dip(j));
-      const real_t ds = -(fq.tau_a_strike(j) + fq.tau_b_strike(j) + fq.eta * fq.V_strike(j))
-                        + (fd.tau_a_strike(j) + fd.tau_b_strike(j) + fd.eta * fd.V_strike(j));
+      const real_t dd = -(fq.tau_a_dip(j) + fq.tau_b_dip(j) + fq.EtaAt(j) * fq.V_dip(j))
+                        + (fd.tau_a_dip(j) + fd.tau_b_dip(j) + fd.EtaAt(j) * fd.V_dip(j));
+      const real_t ds = -(fq.tau_a_strike(j) + fq.tau_b_strike(j) + fq.EtaAt(j) * fq.V_strike(j))
+                        + (fd.tau_a_strike(j) + fd.tau_b_strike(j) + fd.EtaAt(j) * fd.V_strike(j));
       const real_t d = std::sqrt(dd * dd + ds * ds);
       if (d > dmax) { dmax = d; jmax = j; }
    }
@@ -232,8 +232,8 @@ void WriteHandbackTable(const MPIContext &mpi, const cycle::CycleConfig &cfg,
                << " QD DOFs and " << X.Size() / 3 << " positions on rank " << mpi.Rank());
    auto tau = [](const cycle::StationFields &f, int j, bool strike)
    {
-      return strike ? -(f.tau_a_strike(j) + f.tau_b_strike(j) + f.eta * f.V_strike(j))
-                    : -(f.tau_a_dip(j) + f.tau_b_dip(j) + f.eta * f.V_dip(j));
+      return strike ? -(f.tau_a_strike(j) + f.tau_b_strike(j) + f.EtaAt(j) * f.V_strike(j))
+                    : -(f.tau_a_dip(j) + f.tau_b_dip(j) + f.EtaAt(j) * f.V_dip(j));
    };
    // [cycle.opening]: two more columns, the open flags of both regimes; mode
    // contact (B4): two more again, the gap of both regimes
@@ -1384,13 +1384,30 @@ int main(int argc, char *argv[])
                    << cycle::FiniteWidthReport(cfg) << "\n";
       }
       const spatial::SpatialFrictionConfig &s = cfg.shared;
-      const MaterialField material = MaterialField::MakeConstant(
-         s.material_fallback.lambda, s.material_fallback.mu, s.material_fallback.rho);
+      // [velocity] kind = "grid": eta per DOF from the grid material
+      const MaterialField material = cfg.hetero.velocity
+         ? cfg.hetero.Material()
+         : MaterialField::MakeConstant(s.material_fallback.lambda, s.material_fallback.mu,
+                                       s.material_fallback.rho);
       // sigma_n_default is already effective: no pore pressure here (Load
       // refuses a non-zero [pore_pressure]).
       const spatial::PorePressureSpec no_pp;
       cycle::FaultParams par = cycle::BuildFaultParams(
          qd.Table(), *s.rate_state, cfg.fields, material, pmesh, no_pp, cfg.fault_attr);
+      if (cfg.hetero.velocity)
+      {
+         // [velocity] kind = "grid" (plan rev5): eta = 0.5 sqrt(mu rho) from the
+         // grid at each fault DOF's own point (BuildFaultParams took the
+         // centroid of one element).  The gridded material is continuous, so
+         // both sides of the fault have the same impedance there.
+         const cycle::FaultDOFTable &tb = qd.Table();
+         for (int i = 0; i < tb.Size(); i++)
+         {
+            real_t lam_i, mu_i, rho_i;
+            cfg.hetero.MaterialAt(tb.coords.GetData() + 3 * i, lam_i, mu_i, rho_i);
+            par.rs.eta(i) = 0.5 * std::sqrt(mu_i * rho_i);
+         }
+      }
       if (root && !par.a_report.empty())
       {
          std::cout << "  [cycle.fields.a] tip zone: " << par.a_report;
@@ -1408,7 +1425,13 @@ int main(int argc, char *argv[])
          // [stress] kind = "constant_tensor": the tensor's traction on each
          // fault DOF, the dynamic operator's projection (shared function).
          Vector K;
-         qd.ProjectTensor(cfg.stress_tensor, K);
+         if (cfg.hetero.stress)
+         {
+            // [stress] kind = "grid_tensor": the file's tensor at each fault DOF
+            const cycle::HeterogeneityConfig &h = cfg.hetero;
+            qd.ProjectTensor([&h](const real_t x[3], real_t s9[9]) { h.StressAt(x, s9); }, K);
+         }
+         else { qd.ProjectTensor(cfg.stress_tensor, K); }
          pre = cycle::BuildTensorPrestress(par, K, pcfg, qd.Table());
          real_t r[6] = {std::numeric_limits<real_t>::max(), 0.0,
                         std::numeric_limits<real_t>::max(), 0.0,
@@ -1430,13 +1453,21 @@ int main(int argc, char *argv[])
             r[2 * k] = -mpi.GlobalMax(-r[2 * k]);
             r[2 * k + 1] = mpi.GlobalMax(r[2 * k + 1]);
          }
+         if (root && cfg.hetero.stress)
+         {
+            std::cout << "  prestress: [stress] grid_tensor of " << cfg.hetero.str_path
+                      << " at each fault DOF\n";
+         }
          if (root)
          {
             const std::array<real_t, 9> &S = cfg.stress_tensor;
-            std::cout << "  prestress: [stress] constant_tensor sigma_xx yy zz xy yz xz = "
-                      << S[0] << " " << S[4] << " " << S[8] << " " << S[1] << " " << S[5]
-                      << " " << S[2] << " Pa (tension positive)\n"
-                      << "    sigma_n [" << r[0] / 1e6 << ", " << r[1] / 1e6 << "] MPa, |tau0| ["
+            if (!cfg.hetero.stress)
+            {
+               std::cout << "  prestress: [stress] constant_tensor sigma_xx yy zz xy yz xz = "
+                         << S[0] << " " << S[4] << " " << S[8] << " " << S[1] << " " << S[5]
+                         << " " << S[2] << " Pa (tension positive)\n";
+            }
+            std::cout << "    sigma_n [" << r[0] / 1e6 << ", " << r[1] / 1e6 << "] MPa, |tau0| ["
                       << r[2] / 1e6 << ", " << r[3] / 1e6 << "] MPa, |tau0| / sigma_n ["
                       << r[4] << ", " << r[5] << "]; V_init along -tau0 with the deck's |V_init|\n";
          }

@@ -558,6 +558,8 @@ MATERIAL_COEFFICIENTS_HEADERS               = io/material_coefficients.hpp \
                                               io/data_field_3d.hpp
 MATERIAL_COEFFICIENTS_SRC                   = io/material_coefficients.cpp
 TEST_DATA_FIELD_3D_SRC                      = tests/unit/test_data_field_3d.cpp
+# Heterogeneity plan rev4 (H1): 2-D gridded input fields (io/grid_field_2d.hpp, header-only).
+TEST_GRID_FIELD_2D_SRC                      = tests/unit/test_grid_field_2d.cpp
 # PLAN_sidecar_mpi_shared_memory_2026-07-17.md §6: MPI-3 shared-memory
 # sidecar mode (np>=2 parity + cross-rank sharing assertions).
 TEST_DATA_FIELD_3D_SHARED_MEM_SRC           = tests/unit/test_data_field_3d_shared_mem.cpp
@@ -630,6 +632,7 @@ FIELD_COEFFICIENT_OBJ            = $(FIELD_COEFFICIENT_SRC:.cpp=.o)
 HETEROGENEOUS_MATERIAL_OBJ       = $(HETEROGENEOUS_MATERIAL_SRC:.cpp=.o)
 MATERIAL_COEFFICIENTS_OBJ        = $(MATERIAL_COEFFICIENTS_SRC:.cpp=.o)
 TEST_DATA_FIELD_3D_OBJ           = $(TEST_DATA_FIELD_3D_SRC:.cpp=.o)
+TEST_GRID_FIELD_2D_OBJ           = $(TEST_GRID_FIELD_2D_SRC:.cpp=.o)
 TEST_DATA_FIELD_3D_SHARED_MEM_OBJ = $(TEST_DATA_FIELD_3D_SHARED_MEM_SRC:.cpp=.o)
 TEST_DATA_FIELD_3D_SHARED_MEM_FIN_OBJ = $(TEST_DATA_FIELD_3D_SHARED_MEM_FIN_SRC:.cpp=.o)
 TEST_STRESS_FIELD_3D_OBJ         = $(TEST_STRESS_FIELD_3D_SRC:.cpp=.o)
@@ -1309,6 +1312,18 @@ seas_test_lts_nucleation_absolute: $(TEST_LTS_NUCLEATION_ABSOLUTE_OBJ) \
 
 # Data-projection feature: DataField3D / FieldCoefficient / FieldProjector /
 # MaterialField unit tests (Phase 3..5 of plan v2).
+seas_test_grid_field_2d: $(TEST_GRID_FIELD_2D_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_GRID_FIELD_2D_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+$(TEST_GRID_FIELD_2D_OBJ): %.o: $(SRC)%.cpp io/grid_field_2d.hpp io/data_field_3d.hpp \
+                                $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -c $< -o $@
+
+test-grid-field-2d: seas_test_grid_field_2d
+	./seas_test_grid_field_2d
+
 seas_test_data_field_3d: $(TEST_DATA_FIELD_3D_OBJ) $(DATA_FIELD_3D_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_DATA_FIELD_3D_OBJ) \
 	    $(DATA_FIELD_3D_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)

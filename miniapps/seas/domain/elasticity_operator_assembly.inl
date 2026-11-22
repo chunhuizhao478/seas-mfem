@@ -38,12 +38,12 @@
       if (pml_band_ && !pml_penalty_only_)
       {
          cached_a_->AddDomainIntegrator(
-            new PmlBandElasticityIntegrator(*lambda_ptr_, *mu_ptr_, *pml_band_));
+            new PmlBandElasticityIntegrator(VolLambda_(), VolMu_(), *pml_band_));
       }
       else
       {
          cached_a_->AddDomainIntegrator(
-            new ElasticityIntegrator(*lambda_ptr_, *mu_ptr_));
+            new ElasticityIntegrator(VolLambda_(), VolMu_()));
       }
       // 2.5D finite width (SetFiniteWidth): + ∫_Ω β u·v dV, the M_beta of
       // the substrate load

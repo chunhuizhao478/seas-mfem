@@ -65,6 +65,13 @@ struct DomainConfig
    bool match_quad_order = false;
    real_t cfl_factor = 0.5;  ///< CFL stability factor for explicit time stepping
    FaultFrameSource fault_frames;  ///< fault orientation (default: the constants)
+   /// heterogeneity plan rev4 (D11 "quadrature"): lambda, mu of the VOLUME
+   /// integrals only (stiffness, 2.5D beta), read at every quadrature point;
+   /// the face terms (consistency, symmetry, penalty) keep the constructor's
+   /// lambda, mu (a per-element sample, so the Nitsche fault penalty stays
+   /// constant on each face).  Null: the constructor's for both (as before).
+   Coefficient *volume_lambda = nullptr;
+   Coefficient *volume_mu = nullptr;
 };
 
 } // namespace seas

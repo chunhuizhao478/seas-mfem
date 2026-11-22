@@ -1152,6 +1152,10 @@ int main(int argc, char *argv[])
    try
    {
       cfg = spatial::LoadSpatialFrictionConfig(config_path);
+      MFEM_VERIFY(cfg.velocity.kind == "constant"
+                  && cfg.stress.kind != spatial::StressSourceKind::GridTensor,
+                  "spatial driver: [velocity] kind = \"grid\" and [stress] kind = \"grid_tensor\" "
+                  "are fd_cycle inputs (heterogeneity plan rev4); this driver does not read them");
    }
    catch (...)
    {

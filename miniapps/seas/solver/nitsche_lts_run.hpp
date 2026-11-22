@@ -1137,7 +1137,8 @@ public:
       {
          Vector hdt(ne);
          for (int e = 0; e < ne; e++) { hdt(e) = 0.5 * Dt_(cl_[e]); }
-         NitscheMass B(pm, op.GetOrder(), rho, &op.DampingBlocks(), 0.0, &hdt);   // collective
+         NitscheMass B(pm, op.GetOrder(), rho, &op.DampingBlocks(), 0.0, &hdt,
+                          op.PointwiseRho());   // collective
          int q = 0;
          for (const auto &kv : op.DampingBlocks())
          {

@@ -32,11 +32,81 @@ namespace seas
 
 #ifdef MFEM_USE_MPI
 
+/// One element's (lambda, mu, rho) by MaterialField::sampling (centroid,
+/// stiffest quadrature point or SeisSol cell average over IntRules(geom,
+/// 2 order)); Mode::Constant and Mode::Coefficient.  Shared by
+/// NitscheMaterialSample and DynPhase::PlanLts (serial mesh).
+inline void SampleElementMaterial(const MaterialField &material, ElementTransformation &Tr,
+                                  int e, Geometry::Type gtype, int order,
+                                  real_t &lam, real_t &mu, real_t &rho)
+{
+   ElementTransformation *T = &Tr;
+   const IntegrationPoint &ip = Geometries.GetCenter(gtype);
+   T->SetIntPoint(&ip);
+   if (material.mode != MaterialField::Mode::Coefficient
+            || material.sampling == MaterialField::Sampling::Centroid)
+   {
+      material.EvalAt(e, *T, ip, lam, mu, rho);
+   }
+   else
+   {
+      // heterogeneity plan rev4 (D11): reduce the quadrature points of
+      // IntRules(geom, 2 order) to one value per element
+      const IntegrationRule &ir = IntRules.Get(gtype, 2 * order);
+      if (material.sampling == MaterialField::Sampling::StiffestPoint)
+      {
+         real_t best = -1.0;
+         for (int q = 0; q < ir.GetNPoints(); ++q)
+         {
+            const IntegrationPoint &qp = ir.IntPoint(q);
+            T->SetIntPoint(&qp);
+            real_t l, m, r;
+            material.EvalAt(e, *T, qp, l, m, r);
+            const real_t c2 = (l + 2.0 * m) / r;
+            if (c2 > best) { best = c2; lam = l; mu = m; rho = r; }
+         }
+      }
+      else   // CellAverage: SeisSol ParameterDB.cpp computeAveragedMaterial
+      {
+         real_t wsum = 0.0, rho_m = 0.0, mu_inv = 0.0, ve = 0.0;
+         real_t l0 = 0.0, m0 = 0.0, r0 = 0.0;
+         bool uniform = true;   // equal points: return them exactly (gate U4)
+         for (int q = 0; q < ir.GetNPoints(); ++q)
+         {
+            const IntegrationPoint &qp = ir.IntPoint(q);
+            T->SetIntPoint(&qp);
+            real_t l, m, r;
+            material.EvalAt(e, *T, qp, l, m, r);
+            if (q == 0) { l0 = l; m0 = m; r0 = r; }
+            else { uniform = uniform && l == l0 && m == m0 && r == r0; }
+            MFEM_VERIFY(m > 0.0, "NitscheMaterialSample: CellAverage needs mu > 0 (element "
+                        << e << ")");
+            const real_t w = qp.weight;
+            wsum += w;
+            rho_m += w * r;
+            mu_inv += w / m;
+            ve += w * l / (2.0 * m * (3.0 * l + 2.0 * m));
+         }
+         if (uniform) { lam = l0; mu = m0; rho = r0; }
+         else
+         {
+            rho_m /= wsum; mu_inv /= wsum; ve /= wsum;
+            rho = rho_m;
+            mu = 1.0 / mu_inv;
+            lam = 4.0 * mu * mu * ve / (1.0 - 6.0 * mu * ve);
+         }
+      }
+   }
+}
+
 /// Per-element (lambda, mu, rho) sample of a MaterialField on a ParMesh.
 class NitscheMaterialSample
 {
 public:
-   NitscheMaterialSample(ParMesh &pmesh, const MaterialField &material)
+   /// @a order: the DG order, which sets the rule IntRules(geom, 2 order) of
+   /// MaterialField::Sampling::StiffestPoint and ::CellAverage (the mass
+   /// matrix's rule); unused for the centroid sample.
+   NitscheMaterialSample(ParMesh &pmesh, const MaterialField &material, int order = 1)
       : fec_(0, pmesh.Dimension()),
         fes_(&pmesh, &fec_),
         lambda_gf_(&fes_), mu_gf_(&fes_), rho_gf_(&fes_),
@@ -79,10 +149,7 @@ public:
             mu  = material.mu_gf->GetValue(e, ip);
             rho = material.rho_gf->GetValue(e, ip);
          }
-         else
-         {
-            material.EvalAt(e, *T, ip, lam, mu, rho);
-         }
+         else { SampleElementMaterial(material, *T, e, gtype, order, lam, mu, rho); }
          MFEM_VERIFY(rho > 0.0,
                      "NitscheMaterialSample: rho (" << rho
                      << ") must be > 0 at element " << e);

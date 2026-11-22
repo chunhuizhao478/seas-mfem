@@ -190,6 +190,7 @@
 
 #include "../solver/seas_operator.hpp"
 #include "../domain/elasticity_operator.hpp"
+#include "../domain/nitsche_material_sample.hpp"
 #include "../domain/fault_stress_projection.hpp"
 #include "../fault/fault_geometry.hpp"
 #include "../fault/rate_state_fault.hpp"
@@ -263,10 +264,25 @@ public:
       if (cfg.pml.On()) { SetupPmlBand_(pmesh); }
       FaultFrameSource frames;
       frames.config = std::make_shared<const FaultFrameConfig>(CycleFrameConfig(cfg));
+      // [velocity] kind = "grid" (plan rev4): the same material as the
+      // dynamic regime: the grid at every quadrature point ("quadrature"), or
+      // one SeisSol cell average per element ("cell_average", the sample)
+      // The face terms take the per-element sample (stiffest point or cell
+      // average, as the dynamic regime's); "quadrature" adds the pointwise
+      // grid for the volume integrals (DomainConfig::volume_lambda there)
+      Coefficient *lam_c = nullptr, *mu_c = nullptr, *lam_v = nullptr, *mu_v = nullptr;
+      if (cfg.hetero.velocity)
+      {
+         hetero_sample_ = std::make_unique<NitscheMaterialSample>(pmesh, cfg.hetero.Material(),
+                                                                  s.mesh.order);
+         lam_c = &hetero_sample_->Lambda(); mu_c = &hetero_sample_->Mu();
+         if (cfg.hetero.Pointwise()) { lam_v = cfg.hetero.Lambda(); mu_v = cfg.hetero.Mu(); }
+      }
       dom_ = std::make_unique<DomainOp>(pmesh, s.mesh.order, lambda, mu, cfg.plate_rate,
                                         seed_.Wf, seed_.lf, DGMethod::IP, st,
                                         BCMode::FarField, BasisType::GaussLobatto, frames,
-                                        MakeCycleLoading(cfg, pml_wall_factor_));
+                                        MakeCycleLoading(cfg, pml_wall_factor_), lam_c, mu_c,
+                                        lam_v, mu_v);
       if (pml_band_ && cfg.pml.Cfs()) { dom_->SetPmlBand(pml_band_); }
       if (st == SolverType::MUMPS_BLR) { dom_->SetBLRTol(cfg.qd.blr_tol); }
       if (cfg.penalty_factor != 1.0) { dom_->SetPenaltyFactor(cfg.penalty_factor); }
@@ -296,9 +312,15 @@ public:
    /// Collective.
    void ProjectTensor(const std::array<real_t, 9> &S, Vector &K_own)
    {
+      ProjectTensor([S](const real_t[3], real_t s[9]) { for (int i = 0; i < 9; i++) { s[i] = S[i]; } },
+                    K_own);
+   }
+   /// [stress] kind = "grid_tensor": a tensor that depends on the position
+   /// (x, y, z) of the fault point, by the same projection.  Collective.
+   void ProjectTensor(const std::function<void(const real_t[3], real_t[9])> &S, Vector &K_own)
+   {
       Vector K;
-      ProjectStressToFaultKernel(*dom_, [S](const real_t[3], real_t s[9])
-      { for (int i = 0; i < 9; i++) { s[i] = S[i]; } }, K);
+      ProjectStressToFaultKernel(*dom_, S, K);
       dom_->RestrictToOwnedFault(K, K_own, 3);
       MFEM_VERIFY(K_own.Size() == 3 * table_.Size(), "QDPhase::ProjectTensor: "
                   << K_own.Size() << " values for " << table_.Size() << " owned fault DOFs");
@@ -323,7 +345,26 @@ public:
       AssertUniform_(par.rs.f_0, seed_.f0, "f_0");
       AssertUniform_(par.rs.V_0, seed_.V0, "V_0");
       if (!tensor) { AssertUniform_(pre.sigma0, seed_.sigma_n, "sigma0"); }
-      eta_ = GlobalUniform_(par.rs.eta, "eta");
+      if (cfg_.hetero.velocity)
+      {
+         // [velocity] kind = "grid": eta varies with the material; the
+         // kernel reads it per DOF (geom_->SetRateStatePerDOF below), the
+         // outputs through StationFields::eta_dof; eta_ is the global mean
+         real_t lo = std::numeric_limits<real_t>::max(), hi = std::numeric_limits<real_t>::lowest();
+         for (int i = 0; i < N; i++) { lo = std::min(lo, par.rs.eta(i)); hi = std::max(hi, par.rs.eta(i)); }
+         lo = mpi_.GlobalMin(lo);
+         hi = mpi_.GlobalMax(hi);
+         if (lo == hi) { eta_ = lo; }   // a uniform material: the scalar path, bit for bit
+         else
+         {
+            eta_dof_ = par.rs.eta;
+            real_t loc[2] = {0.0, static_cast<real_t>(N)};
+            for (int i = 0; i < N; i++) { loc[0] += par.rs.eta(i); }
+            MPI_Allreduce(MPI_IN_PLACE, loc, 2, MPITypeMap<real_t>::mpi_type, MPI_SUM, mpi_.GetComm());
+            eta_ = loc[0] / loc[1];
+         }
+      }
+      else { eta_ = GlobalUniform_(par.rs.eta, "eta"); }
       MFEM_VERIFY(pre.sigma0.Size() == N, "QDPhase::Setup: " << pre.sigma0.Size()
                   << " sigma0 values for " << N << " owned fault DOFs");
       sigma0_ = pre.sigma0;
@@ -776,6 +817,7 @@ public:
       f.theta = theta;
       SigmaN(f.sigma_n);
       f.eta = eta_;
+      f.eta_dof = eta_dof_;   // empty without [velocity] kind = "grid"
       // [cycle.relaxation]: the reduction the last evaluation used (r at
       // the accepted step, where the monitor reads it)
       if (relax_) { f.sigma_red = relax_->Reduction(); }
@@ -2150,6 +2192,7 @@ private:
    MPIContext &mpi_;
    const CycleConfig &cfg_;
    BP5Params seed_;
+   std::unique_ptr<NitscheMaterialSample> hetero_sample_;   ///< "cell_average" only; before dom_
    std::unique_ptr<DomainOp> dom_;
    std::shared_ptr<const PmlBand> pml_band_;   ///< [cycle.pml] (null: off)
    real_t pml_wall_factor_ = 1.0;              ///< D3 wall speed factor
@@ -2167,6 +2210,7 @@ private:
    mutable Vector gap_refresh_;                     ///< Displacement(), contact
    long reenter_flips_ = 0;
    real_t eta_ = 0.0;
+   Vector eta_dof_;   ///< [velocity] kind = "grid": per owned DOF; else empty
    bool matrix_ = false;
    bool loading_checked_ = false;
    std::unique_ptr<ParGridFunction> vel_gf_;

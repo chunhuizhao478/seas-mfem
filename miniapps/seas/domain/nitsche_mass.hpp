@@ -59,9 +59,17 @@ class NitscheMass
 public:
    NitscheMass(const NitscheMass &) = delete;   // block_ptr_ points into block_inv_
    NitscheMass &operator=(const NitscheMass &) = delete;
+   /// @a rho_pointwise (heterogeneity plan rev4, D11 "quadrature"): when
+   /// given, the element mass is int rho(x) phi_k phi_l, stored as
+   /// M_e = int (rho(x) / rho_e) phi_k phi_l with rho_e = rho_per_elem(e), so
+   /// Apply's 1 / rho_e and the damped block rho_e M_e + dt/2 C_e (and
+   /// NitscheLtsRun, which reads ElementMassInverse and 1 / rho_e) give the
+   /// pointwise mass unchanged.  Null (default): rho constant per element,
+   /// as before.
    NitscheMass(ParMesh &mesh, int order, const Vector &rho_per_elem,
                const std::map<int, DenseMatrix> *damping_blocks = nullptr,
-               real_t half_dt = 0.0, const Vector *half_dt_per_elem = nullptr)
+               real_t half_dt = 0.0, const Vector *half_dt_per_elem = nullptr,
+               Coefficient *rho_pointwise = nullptr)
       : fec_(order, mesh.Dimension(), BasisType::GaussLobatto),
         fes_(&mesh, &fec_), dim_(mesh.Dimension()), half_dt_(half_dt)
    {
@@ -109,7 +117,9 @@ public:
             const IntegrationPoint &ip = ir.IntPoint(j);
             T->SetIntPoint(&ip);
             fe->CalcShape(ip, shape);
-            const real_t w = ip.weight * T->Weight();
+            const real_t w = rho_pointwise
+                             ? ip.weight * T->Weight() * (rho_pointwise->Eval(*T, ip) / rho_per_elem(e))
+                             : ip.weight * T->Weight();
             for (int k = 0; k < nd; ++k)
             {
                for (int l = 0; l < nd; ++l)

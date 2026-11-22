@@ -359,6 +359,7 @@
 #include "mfem.hpp"
 #include "fault_fields.hpp"
 #include "prestress.hpp"
+#include "grid_material.hpp"
 #include "../spatial/code/spatial_friction.hpp"
 #include "../rheology/rheology_config.hpp"
 
@@ -759,6 +760,9 @@ struct CycleConfig
    /// tension positive [Pa] (see the file comment).
    bool tensor_prestress = false;
    std::array<real_t, 9> stress_tensor = {{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
+   /// [velocity] kind = "grid" / [stress] kind = "grid_tensor" (heterogeneity
+   /// plan rev4; cycle/grid_material.hpp): off by default
+   HeterogeneityConfig hetero;
 
    bool IsGold() const { return ic == "gold"; }
    bool TensorPrestress() const { return tensor_prestress; }
@@ -769,6 +773,7 @@ struct CycleConfig
    {
       std::string base = prestress.AMax() ? ic + "+a_max" : ic;
       if (tensor_prestress) { base += "+tensor"; }
+      base += hetero.Tag();   // "" without the grid kinds
       return (prestress.include_eta && !IsGold()) ? base + "+eta_V_init" : base;
    }
 
@@ -1036,10 +1041,29 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
                "fd_cycle: P1 supports the constant material only "
                "([velocity].use_sidecar = false, [material] kind constant)");
    MFEM_VERIFY(s.stress.kind == spatial::StressSourceKind::FaultLocalPrestress ||
-               s.stress.kind == spatial::StressSourceKind::ConstantTensor,
+               s.stress.kind == spatial::StressSourceKind::ConstantTensor ||
+               s.stress.kind == spatial::StressSourceKind::GridTensor,
                "fd_cycle: [stress].kind must be \"fault_local_prestress\" (the cycle "
                "takes sigma_n from it; the shear prestress is BuildPrestress's steady state) "
                "or \"constant_tensor\" (sigma_n and tau0 projected from the tensor)");
+   // heterogeneity plan rev4: [velocity] kind = "grid", [stress] kind =
+   // "grid_tensor" (cycle/grid_material.hpp)
+   if (s.velocity.kind == "grid")
+   {
+      c.hetero.velocity = true;
+      c.hetero.sampling = s.velocity.sampling;
+      c.hetero.vel_path = s.velocity.file;
+      c.hetero.vel_outside = s.velocity.outside;
+   }
+   if (s.stress.kind == spatial::StressSourceKind::GridTensor)
+   {
+      c.hetero.stress = true;
+      c.hetero.str_path = s.stress.grid_file;
+      c.hetero.str_outside = s.stress.grid_outside;
+      // the tensor path with a tensor per fault DOF (QDPhase::ProjectTensor)
+      c.tensor_prestress = true;
+      c.sigma_n = std::numeric_limits<real_t>::quiet_NaN();
+   }
    if (s.stress.kind == spatial::StressSourceKind::ConstantTensor)
    {
       // The loader required all six components; the Nitsche driver's layout.
@@ -1051,7 +1075,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       // No scalar sigma_n: the QD kernel reads the per-DOF values (QDPhase).
       c.sigma_n = std::numeric_limits<real_t>::quiet_NaN();
    }
-   else
+   else if (!c.hetero.stress)
    {
       MFEM_VERIFY(s.stress.tau_strike_pa == 0.0 && s.stress.tau_dip_pa == 0.0 &&
                   s.stress.fault_local_patches.empty(),
@@ -1133,6 +1157,12 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       MFEM_VERIFY(std::isfinite(c.sigma_n_floor) && c.sigma_n_floor > 0.0,
                   "[cycle].sigma_n_floor_pa = " << c.sigma_n_floor << " must be > 0 Pa "
                   "(leave it out for no floor)");
+   }
+   if (c.hetero.On())
+   {
+      MFEM_VERIFY(c.mesh_scale == 1.0, "[velocity] kind = \"grid\" / [stress] kind = "
+                  "\"grid_tensor\" need [cycle].mesh_scale = 1: the file's coordinates are the mesh's");
+      c.hetero.Load();
    }
    if (cy.contains("relaxation"))
    {

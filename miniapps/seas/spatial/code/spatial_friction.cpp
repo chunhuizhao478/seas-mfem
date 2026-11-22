@@ -432,8 +432,9 @@ StressSourceKind parse_stress_kind(const std::string& s)
    if (s == "sidecar_hdf5")         { return StressSourceKind::SidecarHDF5; }
    if (s == "fault_local_prestress"){ return StressSourceKind::FaultLocalPrestress; }
    if (s == "depth_proportional")   { return StressSourceKind::DepthProportionalToShearModulus; }
+   if (s == "grid_tensor")          { return StressSourceKind::GridTensor; }
    MFEM_ABORT("stress.kind must be one of {constant_tensor, sidecar_hdf5, "
-              "fault_local_prestress, depth_proportional}; got '" << s << "'");
+              "fault_local_prestress, depth_proportional, grid_tensor}; got '" << s << "'");
    return StressSourceKind::ConstantTensor;
 }
 
@@ -992,6 +993,32 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       cfg.velocity.use_sidecar  = toml_bool(v, "use_sidecar", true);
       cfg.velocity.far_field_clamp =
          toml_bool(v, "far_field_clamp", false);
+      // heterogeneity plan rev4: kind = "grid" (fd_cycle only)
+      cfg.velocity.kind = toml_str(v, "kind", cfg.velocity.kind);
+      MFEM_VERIFY(cfg.velocity.kind == "constant" || cfg.velocity.kind == "grid",
+                  "[velocity].kind must be \"constant\" or \"grid\"; got '"
+                  << cfg.velocity.kind << "'");
+      if (cfg.velocity.kind == "grid")
+      {
+         MFEM_VERIFY(!v.contains("use_sidecar") || !toml_bool(v, "use_sidecar", false),
+                     "[velocity] kind = \"grid\" with use_sidecar = true: the grid "
+                     "replaces the sidecar; leave use_sidecar out");
+         cfg.velocity.use_sidecar = false;
+         cfg.velocity.file = toml_str(v, "file", std::string());
+         MFEM_VERIFY(!cfg.velocity.file.empty(), "[velocity] kind = \"grid\" needs file");
+         cfg.velocity.sampling = toml_str(v, "sampling", cfg.velocity.sampling);
+         MFEM_VERIFY(cfg.velocity.sampling == "quadrature" || cfg.velocity.sampling == "cell_average",
+                     "[velocity].sampling must be \"quadrature\" or \"cell_average\"; got '"
+                     << cfg.velocity.sampling << "'");
+         cfg.velocity.outside = toml_str(v, "outside", cfg.velocity.outside);
+         MFEM_VERIFY(cfg.velocity.outside == "abort" || cfg.velocity.outside == "clamp",
+                     "[velocity].outside must be \"abort\" or \"clamp\"");
+      }
+      else
+      {
+         MFEM_VERIFY(!v.contains("file") && !v.contains("sampling") && !v.contains("outside"),
+                     "[velocity] file / sampling / outside are for kind = \"grid\" only");
+      }
    }
    // When use_sidecar = false the driver consumes [material_constant_fallback]
    // and never reads model/dataset_root/override_path; relax the non-empty
@@ -1107,6 +1134,20 @@ SpatialFrictionConfig parse_root(const toml::value& root)
                cfg.stress.fault_local_patches.push_back(p);
             }
          }
+      }
+      else if (cfg.stress.kind == StressSourceKind::GridTensor)
+      {
+         // heterogeneity plan rev4 (fd_cycle only): the tensor at each point
+         // from [stress] file
+         MFEM_VERIFY(!has_sxx && !has_syy && !has_szz && !has_sxy && !has_syz && !has_sxz
+                     && !has_path && !has_flp,
+                     "[stress] kind=\"grid_tensor\" takes file (and outside): no sigma_*_pa, "
+                     "sidecar_path or fault-local keys");
+         cfg.stress.grid_file = toml_str(s, "file", std::string());
+         MFEM_VERIFY(!cfg.stress.grid_file.empty(), "[stress] kind=\"grid_tensor\" needs file");
+         cfg.stress.grid_outside = toml_str(s, "outside", cfg.stress.grid_outside);
+         MFEM_VERIFY(cfg.stress.grid_outside == "abort" || cfg.stress.grid_outside == "clamp",
+                     "[stress].outside must be \"abort\" or \"clamp\"");
       }
       else if (cfg.stress.kind ==
                StressSourceKind::DepthProportionalToShearModulus)

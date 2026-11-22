@@ -242,6 +242,16 @@ struct VelocitySpec
    // beyond the CVM data coverage (e.g. safv4_deep).  Default false keeps
    // the strict interpolation-only containment contract (TPV/BP5 unchanged).
    bool          far_field_clamp = false;
+   // heterogeneity plan rev4 (fd_cycle only): kind = "grid" reads lambda,
+   // mu, rho from `file` (a seas_grid2d_v1 NetCDF-4); `sampling` =
+   // "quadrature" (default) or "cell_average"; `outside` = "abort" (default)
+   // or "clamp".  The default "constant" is every deck so far
+   // ([material_constant_fallback], or the SAFS sidecar by use_sidecar).
+   // Other drivers refuse "grid".
+   std::string   kind = "constant";
+   std::string   file;
+   std::string   sampling = "quadrature";
+   std::string   outside = "abort";
 };
 
 enum class StressSourceKind
@@ -249,7 +259,8 @@ enum class StressSourceKind
    ConstantTensor,
    SidecarHDF5,
    FaultLocalPrestress,
-   DepthProportionalToShearModulus   ///< Phase 10 (TPV31): mu(depth)-scaled tensor
+   DepthProportionalToShearModulus,  ///< Phase 10 (TPV31): mu(depth)-scaled tensor
+   GridTensor                        ///< heterogeneity plan rev4: tensor from [stress] file (fd_cycle only)
 };
 
 /// Phase 10 (TPV31): depth-proportional pre-stress.  A constant Cauchy tensor
@@ -310,6 +321,9 @@ struct StressSpec
    real_t sigma_xz_pa = 0.0;
    // SidecarHDF5 (Phase 3):
    std::string sidecar_path;
+   // GridTensor (heterogeneity plan rev4): the file and its outside policy
+   std::string grid_file;
+   std::string grid_outside = "abort";
    // FaultLocalPrestress (Phase 6 / D3.2): constant background pre-stress in
    // the canonical fault-local frame, right-lateral / compression POSITIVE.
    // Seeded directly via FaultGeometry::ComputeParamsFaultLocal — NO Cauchy

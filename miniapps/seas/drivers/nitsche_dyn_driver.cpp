@@ -975,6 +975,9 @@ int main(int argc, char *argv[])
    setup_timer.Mark("deck");
 
    // ------------------------------------------------------------ material
+   MFEM_VERIFY(cfg.velocity.kind == "constant" && cfg.stress.kind != spatial::StressSourceKind::GridTensor,
+               "Nitsche driver: [velocity] kind = \"grid\" and [stress] kind = \"grid_tensor\" "
+               "are fd_cycle inputs (heterogeneity plan rev4); this driver does not read them");
    MFEM_VERIFY(cfg.material.kind == spatial::MaterialKind::Constant && !cfg.velocity.use_sidecar,
                "Nitsche driver (P7): only the constant material "
                "([velocity] use_sidecar = false, [material] kind constant) is "

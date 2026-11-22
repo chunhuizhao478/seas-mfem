@@ -98,6 +98,23 @@ seas_test_cycle_params_parity: $(CYCLE_PARITY_OBJ) $(CYCLE_LINK_OBJS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 CYCLE_TEST_NP ?= 1
+
+# Heterogeneity plan rev4: the grid inputs (parser, coefficients, sampling,
+# rho-weighted mass, volume stiffness)
+CYCLE_HETERO_SRC = tests/cycle/test_cycle_hetero.cpp
+CYCLE_HETERO_OBJ = $(CYCLE_HETERO_SRC:.cpp=.o)
+$(CYCLE_HETERO_OBJ): %.o: $(SRC)%.cpp $(CYCLE_HEADERS) $(CYCLE_STAMP) \
+                     $(CYCLE_SHARED_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
+
+seas_test_cycle_hetero: $(CYCLE_HETERO_OBJ) $(CYCLE_LINK_OBJS)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(CYCLE_HETERO_OBJ) $(CYCLE_LINK_OBJS) \
+	    $(CYCLE_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-cycle-hetero: seas_test_cycle_hetero
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_cycle_hetero
 test-cycle-params-parity: seas_test_cycle_params_parity
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $(CYCLE_TEST_NP) ./seas_test_cycle_params_parity
 

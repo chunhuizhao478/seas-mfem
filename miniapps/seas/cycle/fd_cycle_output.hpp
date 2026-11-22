@@ -295,6 +295,10 @@ struct StationFields
    Vector theta;                     ///< state variable theta [s]
    Vector sigma_n;                   ///< sigma_n_eff, compression positive [Pa]
    real_t eta = 0.0;                 ///< multiplies E(V) in tau
+   /// [velocity] kind = "grid": eta per DOF (the material varies);
+   /// empty: the scalar eta above
+   Vector eta_dof;
+   real_t EtaAt(int j) const { return eta_dof.Size() ? eta_dof(j) : eta; }
    /// [cycle.relaxation]: r per DOF [Pa] (the law sees sigma_n - r, then the
    /// floor); empty when off
    Vector sigma_red;
@@ -694,6 +698,10 @@ public:
    bool InEvent() const { return state_.in_event; }
 
    /// Station value as Probe2DInterpolator::EvaluateScalar computes it.
+   /// eta at a station: the scalar, or the per-DOF field interpolated as the
+   /// other fields ([velocity] kind = "grid")
+   static real_t EtaAt(const StationFields &f, const StationLocation &L)
+   { return f.eta_dof.Size() ? Eval(f.eta_dof, L) : f.eta; }
    static real_t Eval(const Vector &field, const StationLocation &L)
    {
       if (L.exact)
@@ -723,10 +731,11 @@ private:
       const real_t ss = Eval(f.slip_strike, L);
       const real_t vd = std::abs(Eval(f.V_dip, L));
       const real_t vs = std::abs(Eval(f.V_strike, L));
+      const real_t eta_L = EtaAt(f, L);
       const real_t tau_d = -(Eval(f.tau_a_dip, L) + Eval(f.tau_b_dip, L)
-                             + f.eta * Eval(f.V_dip, L)) / 1e6;
+                             + eta_L * Eval(f.V_dip, L)) / 1e6;
       const real_t tau_s = -(Eval(f.tau_a_strike, L) + Eval(f.tau_b_strike, L)
-                             + f.eta * Eval(f.V_strike, L)) / 1e6;
+                             + eta_L * Eval(f.V_strike, L)) / 1e6;
       const real_t th = Eval(f.theta, L);
       if (sigma_n)
       {

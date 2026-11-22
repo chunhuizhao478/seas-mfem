@@ -242,7 +242,18 @@ public:
    {
       MFEM_VERIFY(dim_ == 2 || dim_ == 3, "NitscheWaveOperator: mesh dimension "
                   << dim_ << "; 2 or 3 only");
-      sample_ = std::make_unique<NitscheMaterialSample>(mesh, material);
+      sample_ = std::make_unique<NitscheMaterialSample>(mesh, material, order);
+      // heterogeneity plan rev4 (D11 "quadrature"): K and M at every
+      // quadrature point; the sample keeps the per-element scalars
+      if (material.pointwise)
+      {
+         MFEM_VERIFY(material.mode == MaterialField::Mode::Coefficient && material.lambda_coef
+                     && material.mu_coef && material.rho_coef,
+                     "NitscheWaveOperator: a pointwise material needs Mode::Coefficient");
+         pw_lambda_ = material.lambda_coef;
+         pw_mu_ = material.mu_coef;
+         pw_rho_ = material.rho_coef;
+      }
 
       // Scalar fallbacks for the operator's scalar-only accessors: global
       // element means of the sample (not used by the IP assembly).
@@ -275,6 +286,11 @@ public:
          fc->vertex_normal_max_turn_deg = fault->vertex_normal_max_turn_deg;
          ecfg.fault_frames.config = fc;
       }
+      // heterogeneity plan rev4 (D11 "quadrature"): the volume integrals read
+      // the material at every quadrature point; the face terms keep the
+      // per-element sample, so sigma_F stays constant on each fault face
+      ecfg.volume_lambda = pw_lambda_;
+      ecfg.volume_mu = pw_mu_;
       elast_ = std::make_unique<ElasticityDomainOperator<ParMesh>>(
          mesh, order, sample_->Lambda(), sample_->Mu(), lam_fb, mu_fb,
          /*Vp=*/0.0, /*Wf=*/0.0, /*lf=*/0.0, bc, DGMethod::IP,
@@ -295,7 +311,7 @@ public:
                   "mesh carries no fault faces (attr " << bc.fault_attr << ").");
 
       RhoPerElement(*sample_, rho_e_);
-      mass_ = std::make_unique<NitscheMass>(mesh, order, rho_e_);
+      mass_ = std::make_unique<NitscheMass>(mesh, order, rho_e_, nullptr, 0.0, nullptr, pw_rho_);
       BuildDampingBlocks_();
       // The damped mass (M + dt/2 C) is built in SetTimeStep, and the
       // NitscheMass constructor is COLLECTIVE (it builds a
@@ -331,7 +347,7 @@ public:
       if (has_damping_global_)
       {
          mass_damped_ = std::make_unique<NitscheMass>(
-            mesh_, order_, rho_e_, &damping_blocks_, 0.5 * dt);
+            mesh_, order_, rho_e_, &damping_blocks_, 0.5 * dt, nullptr, pw_rho_);
       }
    }
    real_t GetTimeStep() const { return dt_; }
@@ -429,6 +445,9 @@ public:
    bool EarlySync() const { return early_sync_; }
 
    const NitscheMaterialSample &Sample() const { return *sample_; }
+   /// heterogeneity plan rev4: the pointwise density of K and M (null: the
+   /// per-element sample, as before); NitscheLtsRun's damped blocks use it.
+   Coefficient *PointwiseRho() const { return pw_rho_; }
 
    /// Dynamic PML (PML design plan rev2, Sections 3 and 7.3).  Before
    /// SetTimeStep and the first step; collective.  K becomes K_p (SIPG with
@@ -588,7 +607,7 @@ public:
       AddMassDampingBlocks_([d](int) { return d; });
       // collective (the NitscheMass constructor builds a ParFiniteElementSpace)
       mass_damped_ = std::make_unique<NitscheMass>(mesh_, order_, rho_e_, &damping_blocks_,
-                                                   0.5 * dt_);
+                                                   0.5 * dt_, nullptr, pw_rho_);
       quench_rate_ = d;
       quench_on_ = true;
    }
@@ -1270,10 +1289,15 @@ public:
       kv_lam_coef_ = std::make_unique<GridFunctionCoefficient>(kv_lam_gf_.get());
       kv_mu_coef_ = std::make_unique<GridFunctionCoefficient>(kv_mu_gf_.get());
       // the scalar fallbacks feed BR2-only paths (IP uses the coefficients)
+      // the Kelvin-Voigt copy is per element (kv_lam_gf_): no volume-only
+      // pointwise material there (heterogeneity plan rev4)
+      DomainConfig kvcfg = config_;
+      kvcfg.volume_lambda = nullptr;
+      kvcfg.volume_mu = nullptr;
       kv_ = std::make_unique<ElasticityDomainOperator<ParMesh>>(
          mesh_, order_, *kv_lam_coef_, *kv_mu_coef_, beta_mean * lam_fb_, beta_mean * mu_fb_,
          /*Vp=*/0.0, /*Wf=*/0.0, /*lf=*/0.0, bc_velocity ? *bc_velocity : bc_, DGMethod::IP,
-         SolverType::OperatorOnly, config_);
+         SolverType::OperatorOnly, kvcfg);
       kv_vD_ = (bc_velocity != nullptr);
       MFEM_VERIFY(!kv_vD_ || bc_velocity->dirichlet_attrs == bc_.dirichlet_attrs,
                   "SetKelvinVoigt: bc_velocity must have the same Dirichlet attributes");
@@ -2308,6 +2332,9 @@ private:
    std::unique_ptr<NitscheMass> quench_saved_mass_;
    bool quench_saved_global_ = false;
    Vector rho_e_;
+   /// heterogeneity plan rev4 (D11 "quadrature"): non-owning; null unless
+   /// MaterialField::pointwise
+   Coefficient *pw_lambda_ = nullptr, *pw_mu_ = nullptr, *pw_rho_ = nullptr;
    real_t dt_ = 0.0;
    real_t last_solve_time_ = std::numeric_limits<real_t>::quiet_NaN();
    mutable Vector Kx_, F_, Cv_;
