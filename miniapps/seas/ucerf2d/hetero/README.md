@@ -60,3 +60,10 @@ The reader in seas-mfem is `io/grid_field_2d.hpp`, with the unit test
 - **η:** ½√(μρ) from the grid at each fault point.
 
 Only `seas_fd_cycle_driver` reads these kinds; the other drivers refuse them. `make_test_grid.py` writes the uniform and perturbed files of the gates. The unit test is `tests/cycle/test_cycle_hetero.cpp` (`make -f cycle/cycle.mk test-cycle-hetero`).
+
+## The committed grid file
+
+`ucerf2d_z10km_cvms426_so2.nc`: built by `build_hetero_grid.py` at commit ce003f3a (clean tree; the file's
+`tool_commit` attribute), 1660 x 1512 nodes at 1 km, float64, zlib, 47 MB,
+sha256 `db0d0196ff1f67d45732a094b648bc3b705f030592295eeb7375693740ea547c`.
+Its arrays are bit-identical to the file the H2/H3 gates used.
