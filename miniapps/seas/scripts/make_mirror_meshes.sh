@@ -5,6 +5,8 @@
 # reflects it across Y = 0, so the tets on the two sides of every fault face are mirror images.
 # Run from miniapps/seas with gmsh and python3 on PATH (resolutions in m):
 #   bash scripts/make_mirror_meshes.sh 200 100
+# MIRROR_CASES picks the cases (default "tpv104 tpv205"; 2026-11-22).  tpv104_half.geo uses gmsh's
+# built-in kernel; tpv2053d_half.geo still needs a gmsh with OpenCASCADE, which Vista's module lacks.
 # Writes tpv104/mesh/tpv104_mirror_ext22_<res>m.msh and tpv205/mesh/tpv2053d_mirror_<res>m.msh
 # (gmsh and mirror logs next to them) and prints "sha256  path" for each mesh, also to $SHA_FILE
 # when it is set.  gmsh output depends on the platform, so the sha256 identifies the mesh used.
@@ -13,11 +15,13 @@ cd "$(dirname "$0")/.."
 command -v gmsh > /dev/null || { echo "ERROR: gmsh not on PATH"; exit 2; }
 echo "gmsh $(gmsh --version 2>&1), $(python3 --version 2>&1)"
 sha() { if command -v sha256sum > /dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
+cases=${MIRROR_CASES:-"tpv104 tpv205"}
 meshes=()
 for res in "$@"; do
    for spec in "tpv104/mesh/tpv104_half.geo tpv104/mesh/tpv104_mirror_ext22_${res}m 3" \
                "tpv205/mesh/tpv2053d_half.geo tpv205/mesh/tpv2053d_mirror_${res}m 103"; do
       read -r geo base fault_attr <<< "$spec"
+      case " $cases " in *" ${geo%%/*} "*) ;; *) continue ;; esac
       t=$(date +%s)
       gmsh -3 "$geo" -setnumber lc_fault "$res" -format msh22 -o "$base.half.msh" > "$base.gmsh.log" 2>&1 \
          || { echo "ERROR: gmsh failed on $geo at $res m (log $base.gmsh.log)"; tail -5 "$base.gmsh.log"; exit 1; }

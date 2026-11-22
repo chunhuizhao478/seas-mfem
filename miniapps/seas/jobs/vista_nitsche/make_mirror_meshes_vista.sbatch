@@ -13,6 +13,8 @@
 # Cloud (gmsh 4.15.2, one core): 200 m 3,453,310 tets (TPV104) and 1,976,500 (TPV205) in about 2 and
 # 1 min; 100 m 11,473,766 and 6,036,560 tets in 10.5 and 4.5 min; meshes 1.9 GB in all.
 # Cost: 1 node x <= 1.5 h x 0.33 SU = <= 0.5 SU.
+# 2026-11-22: TPV104 only.  Vista's gmsh/4.15.0 has no OpenCASCADE (job 1159764: empty half mesh);
+# tpv104_half.geo now uses the built-in kernel, tpv2053d_half.geo still needs OpenCASCADE.
 export LC_ALL=C LANG=C
 ROOT=$(cd "$SLURM_SUBMIT_DIR/../../../.." && pwd)          # repository root
 cd $ROOT
@@ -32,7 +34,7 @@ module swap nvidia gcc/14.2.0 2>/dev/null || module load gcc/14.2.0
 module load openmpi/5.0.11 hypre/2.31.0 metis/5.1.0.3 phdf5/1.14.6 gmsh/4.15.0
 cd miniapps/seas
 T0=$(date +%s)
-SHA_FILE=MESH_SHA256_MIRROR_VISTA bash scripts/make_mirror_meshes.sh 200 100
+MIRROR_CASES=tpv104 SHA_FILE=MESH_SHA256_MIRROR_VISTA bash scripts/make_mirror_meshes.sh 200 100
 rc=$?
 echo "make_mirror_meshes.sh exit $rc after $(( $(date +%s) - T0 )) s"
 exit $rc
