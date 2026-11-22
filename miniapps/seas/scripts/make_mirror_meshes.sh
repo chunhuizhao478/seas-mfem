@@ -7,6 +7,8 @@
 #   bash scripts/make_mirror_meshes.sh 200 100
 # MIRROR_CASES picks the cases (default "tpv104 tpv205"; 2026-11-22).  tpv104_half.geo uses gmsh's
 # built-in kernel; tpv2053d_half.geo still needs a gmsh with OpenCASCADE, which Vista's module lacks.
+# Case tpv6 (2026-11-22, TPV6 and TPV7, built-in kernel): tpv6/mesh/tpv6_nitsche_half.geo ->
+# tpv6/mesh/tpv6_nitsche_mirror_<res>m.msh; only when named in MIRROR_CASES.
 # Writes tpv104/mesh/tpv104_mirror_ext22_<res>m.msh and tpv205/mesh/tpv2053d_mirror_<res>m.msh
 # (gmsh and mirror logs next to them) and prints "sha256  path" for each mesh, also to $SHA_FILE
 # when it is set.  gmsh output depends on the platform, so the sha256 identifies the mesh used.
@@ -19,7 +21,8 @@ cases=${MIRROR_CASES:-"tpv104 tpv205"}
 meshes=()
 for res in "$@"; do
    for spec in "tpv104/mesh/tpv104_half.geo tpv104/mesh/tpv104_mirror_ext22_${res}m 3" \
-               "tpv205/mesh/tpv2053d_half.geo tpv205/mesh/tpv2053d_mirror_${res}m 103"; do
+               "tpv205/mesh/tpv2053d_half.geo tpv205/mesh/tpv2053d_mirror_${res}m 103" \
+               "tpv6/mesh/tpv6_nitsche_half.geo tpv6/mesh/tpv6_nitsche_mirror_${res}m 103"; do
       read -r geo base fault_attr <<< "$spec"
       case " $cases " in *" ${geo%%/*} "*) ;; *) continue ;; esac
       t=$(date +%s)
