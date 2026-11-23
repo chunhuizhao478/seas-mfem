@@ -151,6 +151,17 @@ paraview_free_surface  = "off"   # the Nitsche driver writes no free-surface sli
 file             = "tpv205/stations/tpv205_fault_stations.csv"
 snap_tolerance_m = 700.0
 
+# Off-fault stations (SCEC submission runs, Chunhui Zhao, 2026-11-20):
+# uploadTPV5_v2.pdf, four points 3 km on the far side.
+# Components in the description's frame: h along strike (+X), v vertical,
+# positive down (-Z), n horizontal fault normal toward the far side (+Y).
+# Rows every step (--station-every); scripts/export_scec.py thins them.
+[output.body_stations]
+file   = "tpv205/stations/tpv205_body_stations.csv"
+h_axis = [1.0, 0.0,  0.0]
+v_axis = [0.0, 0.0, -1.0]
+n_axis = [0.0, 1.0,  0.0]
+
 # Linear slip weakening: mu = mu_s - (mu_s - mu_d) min(|slip|/d_c, 1).
 # No [[friction.slip_weakening.spatial]] barrier rules (see the header).
 [friction.slip_weakening]

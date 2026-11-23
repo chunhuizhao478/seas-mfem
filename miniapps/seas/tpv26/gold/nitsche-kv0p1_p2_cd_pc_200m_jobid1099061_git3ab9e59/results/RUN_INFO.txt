@@ -1,0 +1,4 @@
+commit 3ab9e59b730f69cfd6e14dc69206c42d301fe8d5
+mesh tpv26/mesh/tpv2627_mirror_200m.msh ed8ce90b30a55999bd34a5ae8c7fa90da3063e8d1377f270e2c988559de4f599
+deck tpv26/configs/tpv26_nitsche_kv0p1.toml
+job 1099061 nodes 24 ranks 3072

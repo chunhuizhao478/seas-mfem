@@ -1,0 +1,29 @@
+{
+ "description": "SCEC TPV34 material table: CVM-H 15.1.0 in the mesh frame of the TPV34 decks (TPV34_Description_v10.pdf, Part 2).",
+ "frame": {
+  "comment": "Mesh frame: X along strike, Y fault normal, Z up; SCEC x = X, y = -Z, z = Y. E = 648446 - 0.5802386 x - 0.8144465 z, N = 3625237 + 0.8144465 x - 0.5802386 z.",
+  "datum": "UTM zone 11, NAD 1927 (Clarke 1866)",
+  "origin_en_m": [648446.0, 3625237.0],
+  "x_axis_en": [-0.5802386, 0.8144465],
+  "y_axis_en": [-0.8144465, -0.5802386]
+ },
+ "grid": {
+  "comment": "200 m within 25 km of the fault and above 15 km depth, 1000 m outside; one plane at 100 m depth (the model is constant above the minimum query depth).",
+  "x_m": [[-80000, -25000, 1000], [-25000, 25000, 200], [25000, 80000, 1000]],
+  "y_m": [[-80000, -25000, 1000], [-25000, 25000, 200], [25000, 80000, 1000]],
+  "depth_m": [[0, 15000, 200], [15000, 80000, 1000]],
+  "extra_depth_planes_m": [100]
+ },
+ "backend": {
+  "comment": "CVM-H vx_lite: reads 'easting northing depth' lines, prints 19 columns; 17, 18, 19 = Vp, Vs, rho.",
+  "command": ["{cvm_bin}/vx_lite", "-s", "-z", "dep", "-m", "{cvm_model}"],
+  "input_format": "%.3f %.3f %.3f",
+  "output_columns_vp_vs_rho": [17, 18, 19],
+  "output_column_count": 19
+ },
+ "rules": {
+  "min_query_depth_m": 100.0,
+  "floor": {"if_vp_le": 2984.0, "or_vs_le": 1400.0, "set_vp": 2984.0, "set_vs": 1400.0, "set_rho": 2220.34}
+ },
+ "table_crs": "mesh-local"
+}

@@ -21,6 +21,23 @@ Sources (each LABEL=DIR, repeatable; the order given is kept):
                             station files are in its results/ subfolder.
 A station's file in DIR is the one whose stem ends in "_station_<name>" or
 in "_<key>", key = x2_<strike km>_x3_<depth km> from the station file.
+With --by-name (complex geometries, where the position is not a key) it is
+also the file whose stem ends in [<tag>_]x2_<a>_x3_<b> with a, b equal as
+numbers to those in the station name (x3 = down-dip km for a dipping
+fault) and, when the name carries a fault tag (main_, branch_, fault1_ ...),
+the same tag right before x2.
+
+Per-side mode (--per-side; TPV6/TPV7, plan 2026-10-19 section 9): every
+source gives two files per station, one for each side of the fault, with the
+DRDG3D split-node columns
+    t h-disp h-vel h-stress v-disp v-vel v-stress n-disp n-vel n-stress
+(FMT side_si: stresses in Pa, the driver's [output.stations] per_side files
+<prefix>_station_<name>_{farside,nearside}.dat, the default for --run;
+side_mpa: stresses in MPa, the DRDG3D files *_{farside,nearside}_<key>.txt,
+the default for --ref and --gold).  A side's file is the one whose stem ends
+in "_station_<name>_<side>" or in "_<side>_<key>".  Slip and slip rate are
+far minus near (SCEC h-slip > 0 right-lateral), the stresses are the far
+file's (the traction is single-valued).
 
 Measures per station (t <= t_end):
   arrival   first time |V| > 1 mm/s (SCEC definition), |V| = |(V_h, V_v)|
@@ -36,6 +53,15 @@ Measures per station (t <= t_end):
             samples of the source's own median dt, w samples dropped at each
             end; |sigma_n| for the normal stress
 
+--signed (complex-geometries plan rev 2, Section 5.8): keep signs.  Our
+n-stress becomes -sigma_n (SCEC: extension positive) and the references'
+n-stress is not made absolute; per station the signed final h-slip and
+v-slip and the t = 0 h-shear, v-shear and n-stress are printed with the
+reference's, and pass item 0 checks that every final slip component above
+--slip-min and every t = 0 stress above 1 MPa has the reference's sign.
+The noise window then starts at the arrival of |V| instead of |V_h|
+(dip-slip faults).  Without the flag the output is unchanged.
+
 Pass test (plan rev 1.3, section 8; accepted by Chunhui Zhao 2026-10-16),
 against the first --ref, for the LAST --run:
   1 arrival within --arrival-tol s (0.1) at every station
@@ -43,6 +69,12 @@ against the first --ref, for the LAST --run:
   3 peak slip rate within --peak-tol (10 %) at >= --peak-min-stations
   4 the median |misfit| of 1-3 decreases along the --run order
   (5, no abort, is read from the driver log, not here)
+  6 per-side mode only: each side's final h-disp within --side-tol (3 %) at
+    every station where the reference side moves more than --slip-min; the
+    far/near ratio of final h-disp is printed for every source
+A station where neither side passes 1 mm/s by t_end (no rupture there in
+the run or the reference) counts as agreeing in 1 and 3; one side only is
+a miss.
 With two or more --ref, the spread between the references is printed too.
 
 Usage (from miniapps/seas):
@@ -53,9 +85,17 @@ Usage (from miniapps/seas):
       --ref drdg3d_200m=tpv205/benchmark_data/DRDG3D_200m_O4 \
       --gold gold_p2=tpv205/gold/mixedflux_p2_rk45_jobid7762880_git04674fc/results \
       --peak-min-stations 14 --json summary.json
+  TPV6 (per side, 5 stations, peaks at 4 of 5):
+  python3 scripts/compare_nitsche_fault_stations.py --per-side \
+      --stations tpv6/stations/tpv6_fault_stations.csv --prefix tpv6 \
+      --run p1_100m=OUT1 --run p2_100m=OUT2 --run p3_100m=OUT3 \
+      --ref drdg3d=tpv6/benchmark_data/scec_drdg3d --peak-min-stations 4
+  TPV7: the same with --prefix tpv7, --stations tpv7/stations/tpv7_fault_stations.csv
+  and --ref drdg3d=tpv7/benchmark_data/scec_drdg3d.
   --list-columns prints the column map of every file found and stops.
 
-Scope: Chunhui Zhao, 2026-10-16 (TPV205/TPV104 plan rev 1.3, phase B0).
+Scope: Chunhui Zhao, 2026-10-16 (TPV205/TPV104 plan rev 1.3, phase B0);
+per-side mode 2026-10-19 (TPV6/TPV7/TPV31 plan rev 1, item A5).
 """
 import argparse
 import csv
@@ -68,6 +108,9 @@ import numpy as np
 
 KEYS = ["t", "h-slip", "h-slip-rate", "h-shear-stress", "v-slip", "v-slip-rate",
         "v-shear-stress", "n-stress", "state"]
+SIDE_KEYS = ["t", "h-disp", "h-vel", "h-stress", "v-disp", "v-vel", "v-stress",
+             "n-disp", "n-vel", "n-stress"]
+SIDES = ("farside", "nearside")
 
 
 # ------------------------------------------------------------------ stations
@@ -83,21 +126,55 @@ def read_stations(path):
     return out
 
 
-def find_file(d, st):
+_X2X3 = re.compile(r"(?:^|_)(?:([A-Za-z]+[0-9]*)_)?x2_(-?[0-9.]+)_x3_(-?[0-9.]+)$")
+
+
+def _parse_x2x3(stem):
+    """-> (tag or None, x2, x3) for a stem ending in [tag_]x2_<a>_x3_<b>, else None."""
+    m = _X2X3.search(stem)
+    if not m:
+        return None
+    try:
+        return m.group(1), float(m.group(2)), float(m.group(3))
+    except ValueError:
+        return None
+
+
+def find_file(d, st, side=None, file_prefix=None, by_name=False):
+    """side None: the station's one file; side 'farside'/'nearside': that
+    side's file.  file_prefix, when given, must start the file name.
+    by_name (no side): also the [tag_]x2_<a>_x3_<b> match of the header."""
+    tail = "" if side is None else "_" + side
     hits = []
+    want = _parse_x2x3(st["name"]) if by_name else None
+    # a station named with a fault tag (main_, fault2_ ...) takes a file found by its position
+    # key only when that file carries the same tag: on two faults one key can name two stations
+    named = _parse_x2x3(st["name"])
+    tag = named[0] if named else None
     for f in sorted(os.listdir(d)):
         stem, ext = os.path.splitext(f)
         if ext not in (".dat", ".txt"):
             continue
-        if stem.endswith("_station_" + st["name"]) or stem.endswith("_" + st["key"]):
+        if file_prefix and not f.startswith(file_prefix):
+            continue
+        by_key = stem.endswith(tail + "_" + st["key"])
+        if by_key and tag is not None:
+            # the tag sits right before x2 once the side is taken out
+            got = _parse_x2x3(stem[: len(stem) - len(tail + "_" + st["key"])] + "_" + st["key"])
+            by_key = got is not None and got[0] == tag
+        if stem.endswith("_station_" + st["name"] + tail) or by_key:
             hits.append(os.path.join(d, f))
+        elif want is not None and "_station_" not in stem:
+            got = _parse_x2x3(stem)
+            if got and got[1] == want[1] and got[2] == want[2] and (want[0] is None or got[0] == want[0]):
+                hits.append(os.path.join(d, f))
     if len(hits) > 1:
         sys.exit(f"{d}: more than one file for station {st['name']}: {hits}")
     return hits[0] if hits else None
 
 
 # ------------------------------------------------------------------- loaders
-def _numeric_rows(path, ncol_max=9):
+def _numeric_rows(path, ncol_max=10):
     rows = []
     for line in open(path):
         w = line.split()
@@ -113,8 +190,9 @@ def _numeric_rows(path, ncol_max=9):
     return np.array([r[:n] for r in rows])
 
 
-def load(path, fmt):
-    """-> dict KEYS -> array (m, m/s, MPa); missing columns are absent."""
+def load(path, fmt, signed=False):
+    """-> dict KEYS -> array (m, m/s, MPa); missing columns are absent.
+    signed: n-stress keeps the SCEC sign (ours, compression positive, is negated)."""
     A = _numeric_rows(path)
     nc = A.shape[1]
     d = {}
@@ -135,19 +213,50 @@ def load(path, fmt):
     else:
         sys.exit(f"unknown format {fmt}")
     if "n-stress" in d:
-        d["n-stress"] = np.abs(d["n-stress"])      # DRDG3D TPV102 writes -120
+        if not signed:
+            d["n-stress"] = np.abs(d["n-stress"])      # DRDG3D TPV102 writes -120
+        elif fmt == "nitsche":
+            d["n-stress"] = -d["n-stress"]             # sigma_n (compression +) -> SCEC
     d["_ncol"] = nc
     return d
 
 
+def load_side(path, fmt):
+    """One side's split-node file -> dict SIDE_KEYS -> array (m, m/s, MPa)."""
+    A = _numeric_rows(path)
+    if A.shape[1] < 10:
+        sys.exit(f"{path}: {A.shape[1]} columns, the per-side layout needs 10")
+    if fmt not in ("side_si", "side_mpa"):
+        sys.exit(f"{path}: format {fmt} is not a per-side format (side_si, side_mpa)")
+    sc = 1e-6 if fmt == "side_si" else 1.0
+    return {k: A[:, i] * (sc if k.endswith("stress") else 1.0) for i, k in enumerate(SIDE_KEYS)}
+
+
+def combine_sides(far, near, path_far):
+    """Far and near files of one station -> the KEYS dict of load(): slip and
+    slip rate far minus near, stresses from the far file; plus the final
+    per-side h-disp series for pass item 6."""
+    t = far["t"]
+    if near["t"].shape != t.shape or np.max(np.abs(near["t"] - t)) > 1e-9 * max(1.0, t[-1]):
+        sys.exit(f"{path_far}: the near-side file has other sample times")
+    d = {"t": t,
+         "h-slip": far["h-disp"] - near["h-disp"], "h-slip-rate": far["h-vel"] - near["h-vel"],
+         "h-shear-stress": far["h-stress"],
+         "v-slip": far["v-disp"] - near["v-disp"], "v-slip-rate": far["v-vel"] - near["v-vel"],
+         "v-shear-stress": far["v-stress"], "n-stress": np.abs(far["n-stress"]),
+         "_h_far": far["h-disp"], "_h_near": near["h-disp"], "_ncol": 10}
+    return d
+
+
 # ------------------------------------------------------------------ measures
-def noise_rms(d, k, window, after):
+def noise_rms(d, k, window, after, signed=False):
     """Noise of column k of d (already cut at t_end): the measure of the
     TPV102 and damping-test reports (rms() in their build scripts).  The
     arrival uses |V_h| where those scripts used V_h > 1 mm/s; the two agree
-    for every benchmark here, whose ruptures slip in +h."""
+    for every benchmark here, whose ruptures slip in +h.  signed: |V|."""
     t = d["t"]
-    i = np.nonzero(np.abs(d["h-slip-rate"]) > 1e-3)[0]
+    v = np.hypot(d["h-slip-rate"], d["v-slip-rate"]) if signed else np.abs(d["h-slip-rate"])
+    i = np.nonzero(v > 1e-3)[0]
     if i.size == 0:
         return float("nan")
     m = t >= t[i[0]] + after
@@ -161,7 +270,7 @@ def noise_rms(d, k, window, after):
     return float(np.sqrt(np.mean(r * r)))
 
 
-def measures(d, t_end, window, after):
+def measures(d, t_end, window, after, signed=False):
     t = d["t"]
     V = np.hypot(d["h-slip-rate"], d["v-slip-rate"])
     m = t <= t_end + 1e-12
@@ -174,18 +283,37 @@ def measures(d, t_end, window, after):
     }
     if "state" in d:
         out["state"] = float(np.interp(t_end, t, d["state"]))
+    if "_h_far" in d:
+        out["h_far"] = float(np.interp(t_end, t, d["_h_far"]))
+        out["h_near"] = float(np.interp(t_end, t, d["_h_near"]))
+    if signed:
+        out["h_slip"] = float(np.interp(t_end, t, d["h-slip"]))
+        out["v_slip"] = float(np.interp(t_end, t, d["v-slip"]))
+        for k, lab in (("h-shear-stress", "th0"), ("v-shear-stress", "tv0"), ("n-stress", "sn0")):
+            if k in d:
+                out[lab] = float(d[k][0])
     dc = {k: v[m] for k, v in d.items() if isinstance(v, np.ndarray)}
     for k, lab in (("n-stress", "noise_sn"), ("h-shear-stress", "noise_th"), ("v-shear-stress", "noise_tv")):
         if k in d:
-            out[lab] = noise_rms(dc, k, window, after)
+            out[lab] = noise_rms(dc, k, window, after, signed)
     return out
+
+
+def sign_rows(mo, mr, slip_min):
+    """-> [(quantity, ours, ref, same sign)] for the signed checks (--signed)."""
+    rows = []
+    for k, lim in (("h_slip", slip_min), ("v_slip", slip_min), ("th0", 1.0), ("tv0", 1.0), ("sn0", 1.0)):
+        if k in mo and k in mr and abs(mr[k]) > lim:
+            rows.append((k, mo[k], mr[k], np.sign(mo[k]) == np.sign(mr[k])))
+    return rows
 
 
 def misfit(mo, mr):
     def rel(a, b):
         return (a - b) / b if b not in (0.0,) and np.isfinite(b) else float("nan")
     return {"d_arrival": mo["arrival"] - mr["arrival"], "r_slip": rel(mo["slip"], mr["slip"]),
-            "r_peak": rel(mo["peak"], mr["peak"]), "ref_slip": mr["slip"]}
+            "r_peak": rel(mo["peak"], mr["peak"]), "ref_slip": mr["slip"],
+            "quiet": not np.isfinite(mo["arrival"]) and not np.isfinite(mr["arrival"])}
 
 
 def _fmt(v, f):
@@ -198,7 +326,7 @@ def parse_src(s, default_fmt):
         sys.exit(f"source {s!r}: expected LABEL=DIR")
     lab, rest = s.split("=", 1)
     fmt = default_fmt
-    if ":" in rest and rest.rsplit(":", 1)[1] in ("scec_si", "scec_mpa", "nitsche"):
+    if ":" in rest and rest.rsplit(":", 1)[1] in ("scec_si", "scec_mpa", "nitsche", "side_si", "side_mpa"):
         rest, fmt = rest.rsplit(":", 1)
     if not os.path.isdir(rest):
         sys.exit(f"source {lab}: {rest} is not a directory")
@@ -222,22 +350,50 @@ def main():
     ap.add_argument("--peak-tol", type=float, default=0.10)
     ap.add_argument("--peak-min-stations", type=int, default=None)
     ap.add_argument("--json", default=None)
+    ap.add_argument("--per-side", action="store_true",
+                    help="two split-node files per station (far, near); see the header")
+    ap.add_argument("--side-tol", type=float, default=0.03, help="pass item 6 tolerance")
+    ap.add_argument("--ref-prefix", default=None,
+                    help="per-side reference and gold files must start with this "
+                         "(default: <--prefix>_, e.g. tpv7_drdg3d_...)")
     ap.add_argument("--list-columns", action="store_true")
+    ap.add_argument("--by-name", action="store_true",
+                    help="also match files by [tag_]x2_<a>_x3_<b> in the station name")
+    ap.add_argument("--signed", action="store_true",
+                    help="keep signs; print and check signed slip and t = 0 stresses (item 0)")
     a = ap.parse_args()
+    if a.per_side and a.by_name:
+        sys.exit("--by-name matches one file per station; it cannot be combined with --per-side")
 
     stations = read_stations(a.stations)
-    srcs = ([("run",) + parse_src(s, "nitsche") for s in a.run]
-            + [("ref",) + parse_src(s, "scec_mpa") for s in a.ref]
-            + [("gold",) + parse_src(s, "scec_si") for s in a.gold])
+    if a.per_side:
+        srcs = ([("run",) + parse_src(s, "side_si") for s in a.run]
+                + [("ref",) + parse_src(s, "side_mpa") for s in a.ref]
+                + [("gold",) + parse_src(s, "side_mpa") for s in a.gold])
+    else:
+        srcs = ([("run",) + parse_src(s, "nitsche") for s in a.run]
+                + [("ref",) + parse_src(s, "scec_mpa") for s in a.ref]
+                + [("gold",) + parse_src(s, "scec_si") for s in a.gold])
     if not srcs:
         sys.exit("give at least one --run, --ref or --gold")
+    ref_prefix = a.ref_prefix if a.ref_prefix is not None else (a.prefix + "_" if a.prefix else None)
     data = {}
     for kind, lab, d, fmt in srcs:
         for st in stations:
-            f = find_file(d, st)
-            if f is None:
-                continue
-            data[(lab, st["name"])] = load(f, fmt)
+            if a.per_side:
+                fp = None if kind == "run" else ref_prefix
+                ff, fn = find_file(d, st, "farside", fp), find_file(d, st, "nearside", fp)
+                if (ff is None) != (fn is None):
+                    sys.exit(f"{d}: station {st['name']} has only its {'far' if fn is None else 'near'}-side file")
+                if ff is None:
+                    continue
+                f = ff
+                data[(lab, st["name"])] = combine_sides(load_side(ff, fmt), load_side(fn, fmt), ff)
+            else:
+                f = find_file(d, st, by_name=a.by_name)
+                if f is None:
+                    continue
+                data[(lab, st["name"])] = load(f, fmt, a.signed)
             if a.list_columns:
                 dd = data[(lab, st["name"])]
                 print(f"{lab:14s} {st['name']:16s} {fmt:8s} {dd['_ncol']} cols "
@@ -261,7 +417,7 @@ def main():
             t_end = min(ends)
     M = {}
     for (lab, name), d in data.items():
-        M[(lab, name)] = measures(d, t_end, a.noise_window, a.noise_after)
+        M[(lab, name)] = measures(d, t_end, a.noise_window, a.noise_after, a.signed)
 
     print(f"# stations {a.stations}; t_end {t_end} s; noise: {a.noise_window} s centred moving average,"
           f" from arrival + {a.noise_after} s")
@@ -279,8 +435,11 @@ def main():
                     f" {_fmt(m.get('noise_tv', float('nan')), '7.3f')}")
             if refs and lab != refs[0] and (refs[0], n) in M:
                 f = misfit(m, M[(refs[0], n)])
-                line += (f"   dt {f['d_arrival']:+.3f} s  slip {100 * f['r_slip']:+6.2f}%"
-                         f"  peak {100 * f['r_peak']:+6.1f}%")
+                if f["quiet"]:
+                    line += "   neither side passes 1 mm/s"
+                else:
+                    line += (f"   dt {f['d_arrival']:+.3f} s  slip {100 * f['r_slip']:+6.2f}%"
+                             f"  peak {100 * f['r_peak']:+6.1f}%")
             print(line)
     summary = {"stations": a.stations, "t_end": t_end, "noise_window": a.noise_window,
                "noise_after": a.noise_after,
@@ -299,6 +458,20 @@ def main():
         _write(a.json, summary)
         return
     r0 = refs[0]
+    if a.signed:
+        print(f"\n# signed checks vs {r0}: final slip (m) where |ref| > {a.slip_min} m, t = 0 stresses"
+              f" (MPa, SCEC signs) where |ref| > 1 MPa")
+        bad = []
+        for lab in runs:
+            for st in stations:
+                n = st["name"]
+                if (lab, n) not in M or (r0, n) not in M:
+                    continue
+                for q, vo, vr, ok in sign_rows(M[(lab, n)], M[(r0, n)], a.slip_min):
+                    print(f"{n:22s} {lab:14s} {q:7s} {vo:+12.5f} {vr:+12.5f}  {'same sign' if ok else 'SIGN DIFFERS'}")
+                    if not ok:
+                        bad.append(f"{lab}|{n}|{q}")
+        summary["signed_mismatch"] = bad
     # reference spread
     for r in refs[1:]:
         fs = [misfit(M[(r, s["name"])], M[(r0, s["name"])]) for s in stations
@@ -307,7 +480,7 @@ def main():
             print(f"\n# reference spread {r} vs {r0}: max |dt| {np.nanmax([abs(f['d_arrival']) for f in fs]):.3f} s,"
                   f" max |slip| {100 * np.nanmax([abs(f['r_slip']) for f in fs]):.2f}%,"
                   f" peak within {100 * a.peak_tol:.0f}% at "
-                  f"{sum(abs(f['r_peak']) <= a.peak_tol for f in fs)} of {len(fs)}")
+                  f"{sum(f['quiet'] or abs(f['r_peak']) <= a.peak_tol for f in fs)} of {len(fs)}")
     # convergence + pass test
     med = {}
     for lab in runs:
@@ -330,9 +503,9 @@ def main():
         fs = {s["name"]: misfit(M[(last, s["name"])], M[(r0, s["name"])]) for s in stations
               if (last, s["name"]) in M and (r0, s["name"]) in M}
         missing = [s["name"] for s in stations if s["name"] not in fs]
-        p1 = all(abs(f["d_arrival"]) <= a.arrival_tol for f in fs.values()) and not missing
+        p1 = all(f["quiet"] or abs(f["d_arrival"]) <= a.arrival_tol for f in fs.values()) and not missing
         p2 = all(abs(f["r_slip"]) <= a.slip_tol for f in fs.values() if f["ref_slip"] > a.slip_min) and not missing
-        npk = sum(abs(f["r_peak"]) <= a.peak_tol for f in fs.values())
+        npk = sum(f["quiet"] or abs(f["r_peak"]) <= a.peak_tol for f in fs.values())
         p3 = None if a.peak_min_stations is None else npk >= a.peak_min_stations
         order = [lab for lab in runs if lab in med]
         p4 = None
@@ -341,6 +514,9 @@ def main():
                      for k in ("arrival", "slip", "peak"))
         print(f"\n# pass test for run {last} against {r0}"
               + (f" (stations missing: {', '.join(missing)})" if missing else ""))
+        if a.signed:
+            p0 = not [b for b in summary["signed_mismatch"] if b.startswith(last + "|")]
+            print(f"  0 signs of final slip and t = 0 stresses agree: {'PASS' if p0 else 'FAIL'}")
         print(f"  1 arrival within {a.arrival_tol} s at every station: {'PASS' if p1 else 'FAIL'}")
         print(f"  2 slip within {100 * a.slip_tol:.0f}% where ref slip > {a.slip_min} m: {'PASS' if p2 else 'FAIL'}")
         print(f"  3 peak within {100 * a.peak_tol:.0f}% at {npk} of {len(fs)} stations"
@@ -349,6 +525,38 @@ def main():
               + ("n/a (one run)" if p4 is None else ("PASS" if p4 else "FAIL")))
         summary["pass"] = {"run": last, "ref": r0, "1": p1, "2": p2, "3": p3, "3_count": npk, "4": p4,
                            "missing": missing}
+        if a.per_side:
+            print(f"\n# per-side final h-disp (m) and far/near ratio")
+            for st in stations:
+                n = st["name"]
+                cells = []
+                for lab in labels:
+                    if (lab, n) in M:
+                        m = M[(lab, n)]
+                        ratio = m["h_far"] / m["h_near"] if m["h_near"] != 0.0 else float("nan")
+                        cells.append(f"{lab} {m['h_far']:+.3f}/{m['h_near']:+.3f} ({_fmt(ratio, '.2f')})")
+                print(f"{n:16s} " + "   ".join(cells))
+            bad, n6 = [], 0
+            for st in stations:
+                n = st["name"]
+                if (last, n) not in M or (r0, n) not in M:
+                    continue
+                for side, k in (("far", "h_far"), ("near", "h_near")):
+                    ref = M[(r0, n)][k]
+                    if abs(ref) <= a.slip_min:
+                        continue
+                    n6 += 1
+                    r = (M[(last, n)][k] - ref) / ref
+                    if abs(r) > a.side_tol:
+                        bad.append(f"{n} {side} {100 * r:+.1f}%")
+            p6 = not bad and not missing and n6 > 0
+            print(f"  6 each side's final h-disp within {100 * a.side_tol:.0f}% where the reference side "
+                  f"moves > {a.slip_min} m ({n6} sides): {'PASS' if p6 else 'FAIL'}"
+                  + (f" ({'; '.join(bad)})" if bad else ""))
+            summary["pass"]["6"] = p6
+            summary["pass"]["6_bad"] = bad
+        if a.signed:
+            summary["pass"]["0"] = p0
     _write(a.json, summary)
 
 

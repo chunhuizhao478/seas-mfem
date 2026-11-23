@@ -43,6 +43,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <vector>
 
 namespace mfem
@@ -295,6 +296,275 @@ public:
       reqs_.resize(nsend + nrecv);
       ok_ = true;
       return true;
+   }
+
+   /// Receives the element and face matrices of one operator (0 = K, 1 = E)
+   /// in the order BilinearForm::Assemble and
+   /// ParBilinearForm::AssembleSharedFaces add them to the local matrix, and
+   /// adds each to its blocks: InitDirect below.
+   class DirectSink
+   {
+   public:
+      /// Element matrix of local element e (nb x nb).
+      void Element(int e, const DenseMatrix &M) { Diag_(e, M, 0); }
+      /// Boundary-face matrix on the one element e of the face (nb x nb).
+      void BdrFace(int e, const DenseMatrix &M) { Diag_(e, M, 0); }
+      /// Interior-face matrix (2 nb x 2 nb), DOFs of e1 then of e2.
+      void InteriorFace(int e1, int e2, const DenseMatrix &M)
+      {
+         DenseBlockStiffness &o = o_;
+         const int nb = o.nb_;
+         if (M.Height() != 2 * nb || M.Width() != 2 * nb || e1 == e2) { bad_++; return; }
+         Diag_(e1, M, 0);
+         Diag_(e2, M, nb);
+         const int lo = std::min(e1, e2), hi = std::max(e1, e2);
+         int f = -1;
+         for (int q = o.own_[lo]; q < o.own_[lo + 1]; q++) { if (o.fhi_[q] == hi) { f = q; break; } }
+         if (f < 0) { bad_++; return; }
+         // rows of the lower element against the columns of the upper one;
+         // the other block must be its transpose
+         const int r0 = (e1 == lo) ? 0 : nb, c0 = (e1 == lo) ? nb : 0;
+         real_t *blk = o.B_.data() + static_cast<std::size_t>(f) * nb * nb * o.nm_;
+         for (int a = 0; a < nb; a++)
+         {
+            real_t *row = blk + (static_cast<std::size_t>(a) * o.nm_ + m_) * nb;
+            for (int b = 0; b < nb; b++)
+            {
+               const real_t v = M(r0 + a, c0 + b);
+               row[b] += v;
+               asym_ = std::max(asym_, std::abs(v - M(c0 + b, r0 + a)));
+            }
+         }
+      }
+      /// Shared-face matrix (2 nb x 2 nb), DOFs of local element e1 then of
+      /// face-neighbour element nbr (its face-neighbour index, from 0).
+      void SharedFace(int e1, int nbr, const DenseMatrix &M)
+      {
+         DenseBlockStiffness &o = o_;
+         const int nb = o.nb_;
+         if (M.Height() != 2 * nb || M.Width() != 2 * nb) { bad_++; return; }
+         Diag_(e1, M, 0);
+         int s = -1;
+         for (int q = o.sptr_[e1]; q < o.sptr_[e1 + 1]; q++) { if (snbr_[q] == nbr) { s = q; break; } }
+         if (s < 0) { bad_++; return; }
+         real_t *blk = o.S_.data() + static_cast<std::size_t>(s) * nb * nb * o.nm_;
+         for (int a = 0; a < nb; a++)
+         {
+            real_t *row = blk + (static_cast<std::size_t>(a) * o.nm_ + m_) * nb;
+            for (int b = 0; b < nb; b++) { row[b] += M(a, nb + b); }
+         }
+      }
+
+   private:
+      friend class DenseBlockStiffness;
+      DirectSink(DenseBlockStiffness &o, int m, const std::vector<int> &snbr)
+         : o_(o), m_(m), snbr_(snbr) { }
+      /// Adds the nb x nb block of M at (off, off) to the diagonal block of e
+      /// (upper triangle stored; the lower one must mirror it).
+      void Diag_(int e, const DenseMatrix &M, int off)
+      {
+         DenseBlockStiffness &o = o_;
+         const int nb = o.nb_;
+         if (M.Height() < off + nb || M.Width() < off + nb || e < 0 || e >= o.ne_) { bad_++; return; }
+         real_t *d = o.D_.data() + static_cast<std::size_t>(e) * o.tri_ * o.nm_;
+         for (int a = 0; a < nb; a++)
+         {
+            const int len = nb - a;
+            real_t *row = d + m_ * len;
+            for (int b = a; b < nb; b++)
+            {
+               const real_t v = M(off + a, off + b);
+               row[b - a] += v;
+               asym_ = std::max(asym_, std::abs(v - M(off + b, off + a)));
+            }
+            d += o.nm_ * len;
+         }
+      }
+      DenseBlockStiffness &o_;
+      const int m_;
+      const std::vector<int> &snbr_;
+      long long bad_ = 0;
+      real_t asym_ = 0.0;
+   };
+
+   /// As Init, but the blocks are filled straight from the element and face
+   /// matrices, so no HypreParMatrix (nor the local SparseMatrix behind it)
+   /// is ever assembled: the memory of the first time step stays at the
+   /// blocks' own size (Chunhui Zhao, 2026-11-18; TPV34 p = 4).  visit[m]
+   /// (m = 0 for K, 1 for E; E empty for K alone) must call the sink once
+   /// for every matrix the assembly of that operator adds, in the assembly's
+   /// order, so every block entry is the same sum in the same order as the
+   /// assembled one.  The halo is the space's face-neighbour exchange
+   /// (ParFiniteElementSpace::ExchangeFaceNbrData) instead of hypre's
+   /// communication package: the same values in another slot order.
+   /// Collective.  False (this rank) when the space is not one block of nb
+   /// DOFs per element, a matrix does not fit a block, or a matrix is not
+   /// symmetric to 1e-12 of the largest entry.
+   bool InitDirect(ParFiniteElementSpace &fes,
+                   const std::function<bool(DirectSink &)> &visitK,
+                   const std::function<bool(DirectSink &)> &visitE)
+   {
+      ok_ = false;
+      nm_ = visitE ? 2 : 1;
+      ParMesh &pm = *fes.GetParMesh();
+      pm.ExchangeFaceNbrData();
+      fes.ExchangeFaceNbrData();
+      n_ = fes.GetVSize();
+      bool good = (fes.GetTrueVSize() == n_ && fes.GetMyDofOffset() == fes.GetMyTDofOffset());
+      ne_ = pm.GetNE();
+      Array<int> vd;
+      nb_ = 0;
+      if (ne_ > 0) { fes.GetElementVDofs(0, vd); nb_ = vd.Size(); }
+      std::vector<char> seen(n_, 0);
+      idx_.assign(static_cast<std::size_t>(ne_) * nb_, 0);
+      for (int e = 0; good && e < ne_; e++)
+      {
+         fes.GetElementVDofs(e, vd);
+         if (vd.Size() != nb_) { good = false; break; }
+         for (int a = 0; a < nb_; a++)
+         {
+            const int i = vd[a];
+            if (i < 0 || i >= n_ || seen[i]) { good = false; break; }
+            seen[i] = 1;
+            idx_[static_cast<std::size_t>(e) * nb_ + a] = i;
+         }
+      }
+      for (int i = 0; good && i < n_; i++) { if (!seen[i]) { good = false; } }
+      if (!good || nb_ > kMaxNB) { return false; }
+      tri_ = nb_ * (nb_ + 1) / 2;
+
+      // interior faces grouped by their lower-numbered element, as Init
+      std::vector<std::pair<int, int>> fl;
+      for (int f = 0; f < pm.GetNumFaces(); f++)
+      {
+         int e1, e2;
+         pm.GetFaceElements(f, &e1, &e2);
+         if (e1 >= 0 && e2 >= 0 && e1 != e2) { fl.emplace_back(std::min(e1, e2), std::max(e1, e2)); }
+      }
+      std::sort(fl.begin(), fl.end());
+      fl.erase(std::unique(fl.begin(), fl.end()), fl.end());
+      nf_ = static_cast<int>(fl.size());
+      own_.assign(ne_ + 1, 0);
+      fhi_.resize(nf_);
+      for (int f = 0; f < nf_; f++) { own_[fl[f].first + 1]++; fhi_[f] = fl[f].second; }
+      for (int e = 0; e < ne_; e++) { own_[e + 1] += own_[e]; }
+
+      // shared faces: (local element, face-neighbour element), sorted by
+      // element; the halo slot of a neighbour DOF is its face-neighbour vdof
+      const int nh = fes.GetFaceNbrVSize();
+      const int nsf = pm.GetNSharedFaces();
+      std::vector<std::pair<int, int>> sl;
+      sl.reserve(nsf);
+      for (int sf = 0; sf < nsf; sf++)
+      {
+         int e1, e2;
+         pm.GetFaceElements(pm.GetSharedFace(sf), &e1, &e2);
+         if (e1 < 0 || e2 >= 0) { return false; }
+         sl.emplace_back(e1, -1 - e2);
+      }
+      std::sort(sl.begin(), sl.end());
+      sl.erase(std::unique(sl.begin(), sl.end()), sl.end());
+      ns_ = static_cast<int>(sl.size());
+      se_.resize(ns_);
+      std::vector<int> snbr(ns_);
+      hcol_.assign(static_cast<std::size_t>(ns_) * nb_, nh);
+      for (int s = 0; s < ns_; s++)
+      {
+         se_[s] = sl[s].first;
+         snbr[s] = sl[s].second;
+         fes.GetFaceNbrElementVDofs(sl[s].second, vd);
+         if (vd.Size() != nb_) { return false; }
+         for (int k = 0; k < nb_; k++)
+         {
+            if (vd[k] < 0 || vd[k] >= nh) { return false; }
+            hcol_[static_cast<std::size_t>(s) * nb_ + k] = vd[k];
+         }
+      }
+      sptr_.assign(ne_ + 1, 0);
+      for (int s = 0; s < ns_; s++) { sptr_[se_[s] + 1]++; }
+      for (int e = 0; e < ne_; e++) { sptr_[e + 1] += sptr_[e]; }
+
+      const std::size_t nb2 = static_cast<std::size_t>(nb_) * nb_;
+      D_.assign(static_cast<std::size_t>(ne_) * tri_ * nm_, 0.0);
+      B_.assign(static_cast<std::size_t>(nf_) * nb2 * nm_, 0.0);
+      S_.assign(static_cast<std::size_t>(ns_) * nb2 * nm_, 0.0);
+      asym_[0] = asym_[1] = amax_[0] = amax_[1] = 0.0;
+      for (int m = 0; m < nm_; m++)
+      {
+         DirectSink sink(*this, m, snbr);
+         if (!(m == 0 ? visitK(sink) : visitE(sink)) || sink.bad_ > 0) { return false; }
+         asym_[m] = sink.asym_;
+      }
+      // largest stored entry of each matrix (rows are interleaved by matrix)
+      {
+         const real_t *d = D_.data();
+         for (int e = 0; e < ne_; e++)
+         {
+            for (int a = 0; a < nb_; a++)
+            {
+               const int len = nb_ - a;
+               for (int m = 0; m < nm_; m++, d += len)
+               {
+                  for (int b = 0; b < len; b++) { amax_[m] = std::max(amax_[m], std::abs(d[b])); }
+               }
+            }
+         }
+         for (const std::vector<real_t> *blk : {&B_, &S_})
+         {
+            const real_t *r = blk->data();
+            const std::size_t rows = blk->size() / nb_;
+            for (std::size_t q = 0; q < rows; q++, r += nb_)
+            {
+               const int m = static_cast<int>(q % nm_);
+               for (int b = 0; b < nb_; b++) { amax_[m] = std::max(amax_[m], std::abs(r[b])); }
+            }
+         }
+      }
+      for (int m = 0; m < nm_; m++) { if (asym_[m] > 1e-12 * amax_[m]) { return false; } }
+
+      // halo: the space's face-neighbour exchange
+      comm_ = fes.GetComm();
+      const int nfn = pm.GetNFaceNeighbors();
+      send_procs_.resize(nfn);
+      recv_procs_.resize(nfn);
+      for (int fn = 0; fn < nfn; fn++) { send_procs_[fn] = recv_procs_[fn] = pm.GetFaceNbrRank(fn); }
+      const int *si = fes.send_face_nbr_ldof.GetI(), *sj = fes.send_face_nbr_ldof.GetJ();
+      const int *ri = fes.face_nbr_ldof.GetI();
+      if (nfn > 0)
+      {
+         send_starts_.assign(si, si + nfn + 1);
+         recv_starts_.assign(ri, ri + nfn + 1);
+         send_map_.assign(sj, sj + send_starts_[nfn]);
+      }
+      else
+      {
+         send_starts_.assign(1, 0);
+         recv_starts_.assign(1, 0);
+         send_map_.clear();
+      }
+      for (int &i : send_map_) { if (i < 0 || i >= n_) { return false; } }
+      MFEM_VERIFY(recv_starts_[nfn] == nh, "DenseBlockStiffness::InitDirect: halo size "
+                  << recv_starts_[nfn] << " != face-neighbour DOFs " << nh);
+      send_buf_.resize(static_cast<std::size_t>(nm_) * send_starts_[nfn]);
+      recv_buf_.assign(static_cast<std::size_t>(nm_) * (nh + 1), 0.0);   // + the zero slot
+      reqs_.resize(2 * nfn);
+      ok_ = true;
+      return true;
+   }
+
+   /// Largest |difference| between the blocks of this object and of `o`
+   /// (same mesh, space and number of matrices), or -1 when the layouts
+   /// differ.  Tests: Init against InitDirect.
+   real_t MaxBlockDifference(const DenseBlockStiffness &o) const
+   {
+      if (nm_ != o.nm_ || nb_ != o.nb_ || D_.size() != o.D_.size() || B_.size() != o.B_.size()
+          || S_.size() != o.S_.size() || idx_ != o.idx_ || own_ != o.own_ || fhi_ != o.fhi_
+          || sptr_ != o.sptr_ || se_ != o.se_) { return -1.0; }
+      real_t d = 0.0;
+      for (std::size_t i = 0; i < D_.size(); i++) { d = std::max(d, std::abs(D_[i] - o.D_[i])); }
+      for (std::size_t i = 0; i < B_.size(); i++) { d = std::max(d, std::abs(B_[i] - o.B_[i])); }
+      for (std::size_t i = 0; i < S_.size(); i++) { d = std::max(d, std::abs(S_[i] - o.S_[i])); }
+      return d;
    }
 
    bool Ok() const { return ok_; }

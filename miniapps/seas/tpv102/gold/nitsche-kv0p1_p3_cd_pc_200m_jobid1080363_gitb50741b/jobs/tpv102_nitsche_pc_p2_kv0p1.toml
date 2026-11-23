@@ -1,0 +1,188 @@
+# =====================================================================
+#  SCEC TPV102 — rate-and-state friction, aging law, run through the
+#  Nitsche dynamic-rupture driver (seas_nitsche_dyn_driver, plan N-07).
+#
+#  Copied from tpv102_spatial.toml (the SAFS driver's deck) with the two
+#  N-07 edits; tpv102_spatial.toml itself is unchanged:
+#
+#   1. [stress] kind = "constant_tensor": the prestress is the GLOBAL Cauchy
+#      tensor sigma_0 in the code frame (X along strike, Y fault normal, Z up),
+#      TENSION POSITIVE (spec I1):
+#         sigma_XY = sigma_YX = +75 MPa,  sigma_YY = -120 MPa,  others 0.
+#      With nhat = (0,-1,0): T_0 = sigma_0 nhat = (-75, 120, 0) MPa, so the
+#      SCEC along-strike traction -T_0.shat = 75 MPa and sigma_n = 120 MPa.
+#
+#      NOT VALID FOR THE SAFS DRIVER (open question 12): its
+#      ConstantTensorStressSource reads the same six keys COMPRESSION
+#      POSITIVE (io/field_coefficient.cpp: sigma_n = n.S.n, tau = t.S.n), so
+#      the same numbers there are the negated tensor.  Run this deck through
+#      seas_nitsche_dyn_driver only.
+#
+#   2. [fault_geometry]: the fault-coordinate specification's keys (rev 8.3,
+#      section 7) beside the ref_normal / up / kind the SAFS parser reads
+#      (its parser ignores the extra keys).
+#
+#  Nitsche-only keys read by the driver itself (the SAFS parser does not
+#  know them): [numerics] penalty_factor, [fault_geometry] specification
+#  keys, [diagnostics] energy_balance.  [numerics] cfl is read as the
+#  fraction of the measured stable constant C(p) of P3 (C = 0.113, 0.212,
+#  0.282, 0.332 at p = 1..4): dt = cfl * C(p) * h_min / (p^2 c_p).
+#  The velocity-stress numerics keys are absent here; the driver lists any
+#  it finds as ignored.
+#
+#  Scope: Chunhui Zhao, 2026-10-14 (P7).
+# =====================================================================
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "SCEC TPV102 (RS aging) via the Nitsche dynamic-rupture driver — global prestress tensor."
+
+[problem]
+tag = "tpv102"   # output file prefix; the stations come from [output.stations]
+
+# Material: homogeneous, native TPV102Params:
+#   mu = rho cs^2, lambda = rho (cp^2 - 2 cs^2), cs = 3464, cp = 6000, rho = 2670.
+[material_constant_fallback]
+lambda = 32043759360.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0     # sigma_min of the Nitsche sigma_n_eff range check
+
+[mesh]
+# 1000 m shakedown mesh (P0); production overrides with --mesh (200 m).
+path  = "tpv102/mesh/tpv102_1000m.msh"
+order = 1
+
+[velocity]
+use_sidecar = false
+
+[stress]
+kind        = "constant_tensor"
+sigma_xx_pa = 0.0
+sigma_yy_pa = -120.0e6
+sigma_zz_pa = 0.0
+sigma_xy_pa = 75.0e6
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+[numerics]
+cfl            = 0.5        # fraction of C(p) (P3); 0.5 as in P4-P6
+penalty_factor = 1.0        # IP penalty scale (Nitsche driver only)
+# Kelvin-Voigt damping (Day et al. 2005 A8; damping-tests thread, Chunhui Zhao 2026-10-15):
+# beta_e = kv_eta (1/3) (h_e/p) / c_s,e with h_e = 6V/A
+kv_eta    = 0.1
+kv_scale  = "node"
+kv_length = "inscribed"
+
+[time]
+tfinal     = "12s"
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.05s"
+
+[output]
+output_dir     = "output_tpv102_nitsche"
+restart_prefix = "cp"
+# Fault ParaView output: ONE <output_dir>/fault.vtkhdf per run (VTKHDF, all
+# snapshots appended), each fault face split into 4 sub-triangles carrying
+# the mean of their corner values.  "vtu" (one file per snapshot) aborts in
+# the Nitsche driver.  zfp_tol = 0 keeps lossless deflate and needs no H5Z-ZFP
+# plugin at run time; deflate level 1 instead of the writer's default 6
+# (1000 m test: 0.071 vs 0.160 s per snapshot on rank 0, 26.3 vs 24.7 MB).
+paraview_enabled       = true
+paraview_fault         = "hdf5"
+paraview_fault_dt      = "0.1s"
+paraview_fault_zfp_tol = 0.0
+paraview_fault_deflate_level = 1
+paraview_free_surface  = "off"   # the Nitsche driver writes no free-surface slice
+
+# On-fault stations (Chunhui Zhao, 2026-10-16): the committed station file
+# (scripts/make_fault_stations.py), each station snapped to the nearest fault
+# node in 3-D; the run aborts if that node is farther than snap_tolerance_m.
+# 700 m covers the 1000 m mesh at p = 1, as in the TPV205 and TPV104 decks:
+# its farthest station, flt_12_3, is 601.7 m from its node on the Mac mesh
+# (the one the TPV102 Nitsche runs used); finer meshes snap closer, and
+# <prefix>_station_snap.txt lists every distance.
+[output.stations]
+file             = "tpv102/stations/tpv102_fault_stations.csv"
+snap_tolerance_m = 700.0
+
+# Rate-and-state, aging law (native TPV102Params).
+#   VW core a = 0.008, VS border a = 0.016 (boxcar_taper rule),
+#   b = 0.012, Dc(L) = 0.02 m, f_0 = 0.6, V_0 = 1e-6, V_init = 1e-12.
+# eta is the quasi-dynamic radiation damping of the SAFS path; the Nitsche
+# closure uses gamma = 1/2 sigma_F dt instead and ignores it.
+[friction.rate_state]
+a_default       = 0.008
+b_default       = 0.012
+Dc_default      = 0.02
+V_0_default     = 1.0e-6
+f_0_default     = 0.6
+V_init_default  = 1.0e-12
+sigma_n_default = 120.0e6
+state_evolution = "aging_law"
+eta             = "auto"
+
+[[friction.rate_state.spatial]]
+kind              = "boxcar_taper"
+a_inner           = 0.008     # a_vw (VW core)
+a_outer           = 0.016     # a_vs (VS border)
+boxcar_center_x_m = 0.0
+boxcar_half_x_m   = 15000.0   # Ls
+boxcar_trans_x_m  = 3000.0    # ws
+boxcar_center_z_m = -7500.0   # hypocentre depth
+boxcar_half_z_m   = 7500.0    # W/2
+boxcar_trans_z_m  = 3000.0    # w
+
+# Nucleation: SCEC compact bell, strike overstress delta_tau F(r) G(t).
+# The Nitsche driver turns it into the global tensor
+#   dsigma = -delta_tau F(r) G(t) (shat (x) nhat + nhat (x) shat)
+# with the pin frame (here = +delta_tau F G (e_X e_Y + e_Y e_X)), so that
+# -(dsigma nhat).shat = +delta_tau F G, as the benchmark specifies.
+[nucleation]
+kind = "gradual_overstress_compact_circular"
+
+[nucleation.gradual_overstress_compact_circular]
+center_x_m   = 0.0
+center_y_m   = 0.0
+center_z_m   = -7500.0
+radius_m     = 3000.0
+delta_tau_pa = 25.0e6
+T_nuc_s      = "1.0s"
+
+[boundary]
+fault_attr      = 3
+natural_attrs   = [1]
+absorbing_attrs = [5]
+
+# SAFS keys (ref_normal, up, kind) + the fault-coordinate specification's
+# keys (section 7).  Values for TPV102 per plan N-07.
+[fault_geometry]
+ref_normal        = [0.0, -1.0, 0.0]
+up                = [0.0,  0.0, 1.0]
+kind              = "vertical_strike_slip"
+orientation       = "propagated"
+pin_by            = "reference"
+tangent           = "pointwise"
+junction_policy   = "refuse"
+pin_min_margin    = 0.1
+
+[hypocenter]
+x_m                 = 0.0
+y_m                 = 0.0
+z_m                 = -7500.0
+nucleation_radius_m = 3000.0
+
+[diagnostics]
+energy_balance = false
+
+# Prakash-Clifton regularization of the normal stress the law sees
+# (Chunhui Zhao, 2026-10-14; SeisSol TPV6/7 values).
+[friction.prakash_clifton]
+v_star = 1.0      # m/s
+length = 0.01     # m

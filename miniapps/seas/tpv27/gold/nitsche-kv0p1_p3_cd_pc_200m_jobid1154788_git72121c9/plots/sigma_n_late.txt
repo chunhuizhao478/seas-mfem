@@ -1,0 +1,17 @@
+# TPV27 200 m: mean sigma_n over 10.5 <= t <= 11.9997 s (DRDG3D ends at 11.9997 s), MPa, compression positive
+# Nitsche: column 8 (sigma_n = -T.nhat, compression positive, Pa) of tpv27_station_<name>.dat, arithmetic mean of all samples in the window
+# DRDG3D: column 8 (n-stress, MPa, tension positive) of tpv27_drdg3d_<name>.txt, sign flipped, arithmetic mean of all samples in the window
+# runs: p1 Vista 1114572, p2 Vista 1114571, p3 Vista 1154788; reference DRDG3D 200 m O4 (miniapps/seas/tpv27/benchmark_data/scec_drdg3d)
+station                p1         p2         p3     DRDG3D       p1-D     p2-D     p3-D
+x2_-15_x3_10      175.880    175.890    175.538    175.529     +0.351   +0.361   +0.008
+x2_-5_x3_0         -0.220     -0.089     -0.078     -0.074     -0.147   -0.015   -0.005
+x2_-5_x3_5         87.899     88.043     87.973     87.948     -0.049   +0.095   +0.024
+x2_-5_x3_10       175.657    175.654    175.652    175.652     +0.005   +0.002   +0.000
+x2_-5_x3_15       263.476    264.334    263.342    263.235     +0.241   +1.099   +0.106
+x2_0_x3_10        175.999    175.768    175.638    175.722     +0.276   +0.046   -0.084
+x2_5_x3_10        173.687    175.705    175.439    175.541     -1.854   +0.164   -0.102
+x2_10_x3_10       176.660    176.089    175.649    175.539     +1.121   +0.550   +0.110
+x2_15_x3_0          0.234     -0.077     -0.089     -0.085     +0.318   +0.007   -0.004
+x2_15_x3_5         87.231     88.211     88.000     87.990     -0.758   +0.221   +0.010
+x2_15_x3_10       174.532    176.166    175.638    175.553     -1.021   +0.613   +0.085
+x2_15_x3_15       262.657    264.308    263.186    262.764     -0.107   +1.544   +0.422

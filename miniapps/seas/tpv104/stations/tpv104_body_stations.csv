@@ -1,0 +1,9 @@
+# SCEC TPV104 off-fault (free-surface) stations, written by scripts/make_fault_stations.py; do not edit by hand.
+# Global frame of the mesh: X along strike, Y fault normal, Z up (m); fault on Y = 0.
+name,x,y,z
+body-060st-120dp000,-12000,-6000,0
+body-090st000dp000,0,-9000,0
+body-060st120dp000,12000,-6000,0
+body060st-120dp000,-12000,6000,0
+body090st000dp000,0,9000,0
+body060st120dp000,12000,6000,0

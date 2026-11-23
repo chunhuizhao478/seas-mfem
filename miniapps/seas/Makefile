@@ -936,7 +936,7 @@ SPATIAL_HEADERS = spatial/code/spatial_friction.hpp \
                   spatial/code/spatial_velocity.hpp
 
 # All headers
-SEAS_HEADERS = $(FRICTION_HEADERS) $(DOMAIN_HEADERS) $(FAULT_HEADERS) $(SOLVER_HEADERS) $(IO_HEADERS) $(CHECKPOINT_HEADERS) $(CONSTITUTIVE_HEADERS) $(CONFIG_HEADERS) $(DYNAMIC_HEADERS) $(SPATIAL_HEADERS)
+SEAS_HEADERS = $(FRICTION_HEADERS) $(DOMAIN_HEADERS) $(FAULT_HEADERS) $(SOLVER_HEADERS) $(IO_HEADERS) $(CHECKPOINT_HEADERS) $(CONSTITUTIVE_HEADERS) $(CONFIG_HEADERS) $(DYNAMIC_HEADERS) $(SPATIAL_HEADERS) $(RHEOLOGY_HEADERS)
 
 # Mesh generation tool
 GENERATE_MESH_SRC = tools/generate_bp2_mesh.cpp
@@ -3174,6 +3174,62 @@ seas_test_nitsche_kv: $(TEST_NITSCHE_KV_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
 test-nitsche-kv: seas_test_nitsche_kv
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_kv
 
+# Rheology plan rev 1 (Chunhui Zhao, 2026-10-20): the pointwise models,
+# initial stress and deck tables of rheology/, unit tests U1-U10, and the
+# TPV26/27 forced rupture of friction/, U11 (no mesh, no MPI; the deck test
+# needs toml11).  Run from miniapps/seas.
+RHEOLOGY_HEADERS = rheology/rheology_model.hpp rheology/drucker_prager.hpp \
+                   rheology/viscoelastic.hpp rheology/damage_breakage.hpp \
+                   rheology/rheology_stack.hpp rheology/initial_stress.hpp \
+                   rheology/rheology_config.hpp \
+                   friction/forced_rupture.hpp friction/slip_weakening_closure.hpp \
+                   rheology/rheology_field.hpp rheology/dg_rheology_operators.hpp \
+                   rheology/rheology_coupler.hpp
+TEST_RHEOLOGY_SRC = tests/unit/test_rheology_pointwise.cpp \
+                    tests/unit/test_rheology_initial_stress.cpp \
+                    tests/unit/test_rheology_config.cpp \
+                    tests/unit/test_rheology_forced_rupture.cpp
+TEST_RHEOLOGY_OBJ = $(TEST_RHEOLOGY_SRC:.cpp=.o)
+TEST_RHEOLOGY_BIN = seas_test_rheology_pointwise seas_test_rheology_initial_stress \
+                    seas_test_rheology_config seas_test_rheology_forced_rupture
+$(TEST_RHEOLOGY_OBJ): %.o: $(SRC)%.cpp $(RHEOLOGY_HEADERS) tests/unit/test_macros.hpp \
+                           $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(TOML_FLAGS) -c $< -o $@
+
+$(TEST_RHEOLOGY_BIN): seas_test_%: tests/unit/test_%.o
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $< $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-rheology: $(TEST_RHEOLOGY_BIN)
+	./seas_test_rheology_pointwise
+	./seas_test_rheology_initial_stress
+	./seas_test_rheology_config
+	./seas_test_rheology_forced_rupture
+
+# Rheology plan rev 1, phase R3 (Chunhui Zhao, 2026-10-20): the bulk coupling
+# (RheologyField, S, P, Q, RheologyCoupler, the operator hooks), operator
+# tests O1-O7 on 1, 2 and 4 ranks.
+TEST_NITSCHE_RHEOLOGY_SRC = tests/verification/test_nitsche_rheology.cpp
+TEST_NITSCHE_RHEOLOGY_OBJ = $(TEST_NITSCHE_RHEOLOGY_SRC:.cpp=.o)
+$(TEST_NITSCHE_RHEOLOGY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             domain/nitsche_wave_operator.hpp \
+                             friction/fault_closure.hpp \
+                             solver/nitsche_cfl.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) $(TOML_FLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_rheology: $(TEST_NITSCHE_RHEOLOGY_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_RHEOLOGY_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-rheology: seas_test_nitsche_rheology
+	for np in 1 2 4; do $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_nitsche_rheology || exit 1; done
+
 test-nitsche-p3: seas_test_nitsche_p3
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_p3
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_p3 --np2
@@ -3226,6 +3282,102 @@ seas_test_nitsche_p5: $(TEST_NITSCHE_P5_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
 test-nitsche-p5: seas_test_nitsche_p5
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_p5
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_p5
+
+# Nitsche TPV6/TPV7/TPV31 setup (plan rev 1, phase A): the deck material per
+# element, the bimaterial fault penalty and time step, the mu-scaled prestress,
+# the instantaneous nucleation and its planar-fault check, the cohesion rule
+# and the per-side station writer.  Reads the TPV6 and TPV31 decks.
+TEST_NITSCHE_TPV_SETUP_SRC = tests/verification/test_nitsche_tpv_setup.cpp
+TEST_NITSCHE_TPV_SETUP_OBJ = $(TEST_NITSCHE_TPV_SETUP_SRC:.cpp=.o)
+$(TEST_NITSCHE_TPV_SETUP_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             domain/nitsche_wave_operator.hpp \
+                             dynamic/fault_side_stations.hpp \
+                             dynamic/body_station_writer.hpp \
+                             dynamic/fault_station_file.hpp \
+                             dynamic/nitsche_deck_fields.hpp \
+                             dynamic/nitsche_table_material.hpp \
+                             io/data_field_3d.hpp \
+                             dynamic/heterogeneous_material.hpp \
+                             friction/slip_weakening_closure.hpp \
+                             solver/nitsche_cfl.hpp \
+                             spatial/code/spatial_friction.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_tpv_setup: $(TEST_NITSCHE_TPV_SETUP_OBJ) $(SPATIAL_FRICTION_OBJ) \
+                             $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
+                             $(DATA_FIELD_3D_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NITSCHE_TPV_SETUP_OBJ) $(SPATIAL_FRICTION_OBJ) $(SPATIAL_NUCLEATION_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) $(DATA_FIELD_3D_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# The 3-D table material of the Nitsche driver (TPV34 plan rev 2, step S2,
+# Chunhui Zhao 2026-11-12): dynamic/nitsche_table_material.hpp.
+TEST_NITSCHE_TABLE_MATERIAL_SRC = tests/unit/test_nitsche_table_material.cpp
+TEST_NITSCHE_TABLE_MATERIAL_OBJ = $(TEST_NITSCHE_TABLE_MATERIAL_SRC:.cpp=.o)
+$(TEST_NITSCHE_TABLE_MATERIAL_OBJ): %.o: $(SRC)%.cpp \
+                             domain/nitsche_material_sample.hpp \
+                             dynamic/nitsche_table_material.hpp \
+                             dynamic/heterogeneous_material.hpp \
+                             io/data_field_3d.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_table_material: $(TEST_NITSCHE_TABLE_MATERIAL_OBJ) \
+                                  $(HETEROGENEOUS_MATERIAL_OBJ) $(DATA_FIELD_3D_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_NITSCHE_TABLE_MATERIAL_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) $(DATA_FIELD_3D_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-table-material: seas_test_nitsche_table_material
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_table_material
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_table_material
+
+# Off-fault ("body") station writer of the Nitsche driver (TPV34 plan rev 2,
+# step S3; Chunhui Zhao 2026-11-12): dynamic/body_station_writer.hpp.
+TEST_BODY_STATIONS_SRC = tests/unit/test_body_stations.cpp
+TEST_BODY_STATIONS_OBJ = $(TEST_BODY_STATIONS_SRC:.cpp=.o)
+$(TEST_BODY_STATIONS_OBJ): %.o: $(SRC)%.cpp \
+                             dynamic/body_station_writer.hpp \
+                             dynamic/fault_station_file.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+seas_test_body_stations: $(TEST_BODY_STATIONS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_BODY_STATIONS_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-body-stations: seas_test_body_stations
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_body_stations
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_body_stations
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 3 ./seas_test_body_stations
+
+# Direct fill of the dense stiffness blocks (DenseBlockStiffness::InitDirect,
+# Chunhui Zhao 2026-11-18): bitwise the blocks read from the assembled K, K_eta.
+TEST_DENSE_FILL_DIRECT_SRC = tests/unit/test_dense_fill_direct.cpp
+TEST_DENSE_FILL_DIRECT_OBJ = $(TEST_DENSE_FILL_DIRECT_SRC:.cpp=.o)
+$(TEST_DENSE_FILL_DIRECT_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+seas_test_dense_fill_direct: $(TEST_DENSE_FILL_DIRECT_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_DENSE_FILL_DIRECT_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-dense-fill-direct: seas_test_dense_fill_direct
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_dense_fill_direct
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_dense_fill_direct
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 3 ./seas_test_dense_fill_direct
+
+test-nitsche-tpv-setup: seas_test_nitsche_tpv_setup
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_tpv_setup
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_nitsche_tpv_setup
 
 # Nitsche dynamic rupture PF (fault coordinate layer: N-08 orientation, N-09
 # frame, the kernel dictionary): T-14, T-16, spec T11(a)/T12.
@@ -3483,6 +3635,35 @@ seas_test_nitsche_srw: $(TEST_NITSCHE_SRW_OBJ)
 test-nitsche-srw: seas_test_nitsche_srw
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_srw
 
+# Nitsche standalone options for complex fault geometries (complex-geometries
+# plan rev 2, gates G-unit and G-inactive): depth prestress table (U1, I1),
+# tension floor (U2, I2), slip-path weakening (U3, I3), forced rupture (U4,
+# I4), fault tip locks (U5) and misspelt option tables (U6).  Pointwise,
+# serial-mesh and one fault advance.
+NITSCHE_OPT_HEADERS = dynamic/nitsche_opt_common.hpp \
+                      dynamic/nitsche_opt_depth_prestress.hpp \
+                      dynamic/nitsche_opt_tip_lock.hpp
+TEST_NITSCHE_OPTIONS_SRC = tests/verification/test_nitsche_options.cpp
+TEST_NITSCHE_OPTIONS_OBJ = $(TEST_NITSCHE_OPTIONS_SRC:.cpp=.o)
+$(TEST_NITSCHE_OPTIONS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(NITSCHE_OPT_HEADERS) \
+                             domain/nitsche_wave_operator.hpp \
+                             friction/fault_closure.hpp \
+                             friction/slip_weakening_closure.hpp \
+                             friction/forced_rupture.hpp \
+                             spatial/code/spatial_friction.hpp \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) $(TOML_FLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_options: $(TEST_NITSCHE_OPTIONS_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_NITSCHE_OPTIONS_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nitsche-options: seas_test_nitsche_options
+	for np in 1 2; do $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_nitsche_options || exit 1; done
+
 # Nitsche dynamic rupture P7: the driver (plan N-07).  Reads the SAFS deck
 # through spatial::LoadSpatialFrictionConfig (toml11) and the constant
 # material; links the friction parser, the material and the nucleation
@@ -3501,11 +3682,20 @@ $(NITSCHE_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
                              domain/nitsche_energy.hpp \
                              spatial/code/spatial_friction.hpp \
                              dynamic/fault_station_file.hpp \
+                             dynamic/fault_side_stations.hpp \
+                             dynamic/body_station_writer.hpp \
+                             dynamic/nitsche_deck_fields.hpp \
+                             dynamic/nitsche_table_material.hpp \
+                             io/data_field_3d.hpp \
+                             dynamic/heterogeneous_material.hpp \
                              dynamic/station_copy_average.hpp \
                              dynamic/mesh_parts.hpp \
+                             $(NITSCHE_OPT_HEADERS) \
                              friction/rate_state_closure.hpp \
                              friction/rate_state_srw_closure.hpp \
                              friction/slip_weakening_closure.hpp \
+                             io/off_fault_stations.hpp \
+                             $(RHEOLOGY_HEADERS) \
                              $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) $(TOML_FLAGS) -DSEAS_USE_MPI \
@@ -3513,10 +3703,11 @@ $(NITSCHE_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
 
 seas_nitsche_dyn_driver: $(NITSCHE_DYN_DRIVER_OBJ) $(SPATIAL_FRICTION_OBJ) \
                          $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
-                         $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ)
+                         $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ) $(DATA_FIELD_3D_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(NITSCHE_DYN_DRIVER_OBJ) \
 	    $(SPATIAL_FRICTION_OBJ) $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
-	    $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ) $(MFEM_LIBS)
+	    $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ) $(DATA_FIELD_3D_OBJ) $(MFEM_LIBS) \
+	    $(HDF5_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Speed-next profiling (Chunhui Zhao, 2026-10-20): the same driver with debug
@@ -3531,10 +3722,11 @@ $(NITSCHE_DYN_DRIVER_G_OBJ): $(SRC)$(NITSCHE_DYN_DRIVER_SRC) $(NITSCHE_DYN_DRIVE
 
 seas_nitsche_dyn_driver_g: $(NITSCHE_DYN_DRIVER_G_OBJ) $(SPATIAL_FRICTION_OBJ) \
                            $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
-                           $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ)
+                           $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ) $(DATA_FIELD_3D_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(NITSCHE_DYN_DRIVER_G_OBJ) \
 	    $(SPATIAL_FRICTION_OBJ) $(SPATIAL_NUCLEATION_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) \
-	    $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ) $(MFEM_LIBS)
+	    $(LTS_PARTITION_OBJ) $(LTS_CLUSTERING_OBJ) $(DATA_FIELD_3D_OBJ) $(MFEM_LIBS) \
+	    $(HDF5_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # P6 long checks (minutes each; np=8 unless noted): T-15 energy balance and

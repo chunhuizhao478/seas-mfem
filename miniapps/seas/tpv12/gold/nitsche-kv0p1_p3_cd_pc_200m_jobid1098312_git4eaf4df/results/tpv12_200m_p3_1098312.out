@@ -1,0 +1,13 @@
+commit 4eaf4df769dfb4eb8279deb02f4efa75dc1fe804
+host i614-011.vista.tacc.utexas.edu  nodes 16  ranks 2304
+deck tpv12/configs/tpv12_nitsche.toml  mesh tpv12/mesh/tpv12_200m.msh sha256 de6ed89eb495194ba1b0c3d88b7b78ea9871bf0a6d38173bc4137b3c57376319  order 3  tfinal 8.0  flags []
+modules: ucc/1.9.0 ucx/1.22.0 cmake/4.1.1 xalt/3.1 TACC gcc/14.2.0 nvpl/26.9 cuda/12.6 openmpi/5.0.5 hypre/2.31.0 metis/5.1.0.3 phdf5/1.14.6 
+driver exit 0 after 3075 s
+  prestress: [prestress_depth_table] (effective stress), 3 nodes over depth [0, 60000] m, 1 jump(s); no fault face crosses a jump
+  fault options: tension floor (the law sees max(sigma_n, 0)) slip-path weakening
+  time in ode.Step per rank after step 1: min 2064.26 s, mean 2405.23 s, max 2573.08 s (27.1602 ms/step at the max); step 1 8.52506 s (with the operator assembly); fast fault on, fused K/K_eta off, dense blocks on (292285 MB over all ranks)
+  fault work: 3.57 ms/step on the busiest rank; cost per step 30.89 us per tet, 7.686 us per fault-face side (w = 0.2488 tets)
+  tension floor: 78941895 DOF-steps with sigma_n < 0 (law saw 0)
+=== done: 94738 steps, t = 8.00006 s; max|V| 49.5013 m/s; max|V|dt/Dc 0.00836018; sigma_n_eff in [-3.68229e+08, 3.82859e+08] Pa; sigma_pc in [-3.68218e+08, 3.82811e+08] Pa; wall 3065.88 s ===
+first node memory: peak in use 162.4 GB of 237.6 GB (2 s samples)
+3.5G	/scratch/10024/zhaochun/complex_geometries/tpv12_200m_p3_1098312

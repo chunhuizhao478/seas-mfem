@@ -1,0 +1,10 @@
+# SCEC TPV22 off-fault stations, written by scripts/make_fault_stations.py; do not edit by hand.
+# Global frame of the mesh: X along strike, Y fault normal (+ = far side), Z up (m).
+# Fault 1 on Y = 0, fault 2 on Y = -1600 m; distances from fault 1, x = global X.
+name,x,y,z
+body030st-050dp000,-5000,3000,0
+body-030st-050dp000,-5000,-3000,0
+body030st050dp000,5000,3000,0
+body-030st050dp000,5000,-3000,0
+body030st150dp000,15000,3000,0
+body-030st150dp000,15000,-3000,0

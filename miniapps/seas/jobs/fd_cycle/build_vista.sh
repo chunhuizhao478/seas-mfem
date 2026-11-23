@@ -275,7 +275,11 @@ stage_seas() {
    cd "${ROOT}/miniapps/seas"
    # Fresh objects: the shared Makefile has no header dependencies.
    find . -name '*.o' -not -path './extern/*' -delete
+   # scec-benchmarks: rule M1 (cycle-owned-check) guards the fully-dynamic-cycle
+   # branch's own paths against nitsche-dynamic-rupture; this branch carries the
+   # merged golds and scripts, so it compares with its own HEAD (nothing to flag).
    make -f cycle/cycle.mk -j"${JOBS}" cycle-all SEAS_FS_LIB= HDF5_DIR="${PETSC_PREFIX}" \
+      CYCLE_BASE="${CYCLE_BASE:-HEAD}" \
       || fail "cycle-all failed"
    git -C "${ROOT}" rev-parse HEAD > BUILD_COMMIT_VISTA
    record seas

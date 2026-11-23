@@ -73,9 +73,15 @@ struct DeviceClosure
    real_t muW = 0.0;      ///< SRW weakening friction coefficient
 };
 
-/// The per-point parameters of `s` in DCParam order.
+/// The per-point parameters of `s` in DCParam order.  Forced rupture
+/// (forced_t0 > 0, friction/forced_rupture.hpp) has no device form yet and
+/// stops here instead of running without it (scec-benchmarks merge into the
+/// 3D branch, 2026-11-23).
 inline void DCPackParams(const FaultPointState &s, real_t q[kDCParams])
 {
+   MFEM_VERIFY(s.forced_t0 == 0.0, "device fault: forced rupture (forced_t0 = "
+               << s.forced_t0 << " s) has no device form yet; run it on the cpu device "
+               "or with --device-fault 0");
    q[kDCa] = s.a;
    q[kDCDc] = s.Dc;
    q[kDCmu_s] = s.mu_s;

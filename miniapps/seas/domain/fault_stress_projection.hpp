@@ -24,6 +24,12 @@
 // to the QD kernel as tau0 and sigma0 and, through hook H2, to the dynamic
 // regime (cycle/prestress.hpp, BuildTensorPrestress).
 //
+// ProjectFaceStressToFaultKernel(E, sig, K): the same with a stress that may
+// depend on the face and its two elements, sig(Tr, x, s) with the
+// integration points of Tr set to the quadrature point (the off-fault
+// rheology's {dsig_h}, merged from scec-benchmarks 2026-11-23);
+// ProjectStressToFaultKernel calls it, arithmetic unchanged.
+//
 // sig(x, s): the Cauchy tensor at the global point x (z = 0 on a 2-D mesh),
 // row major, tension positive.  On a 2-D mesh (the in-plane model) an
 // anti-plane component (sigma_xz, sigma_yz) is refused: it has no unknown to
@@ -48,9 +54,10 @@ namespace seas
 #ifdef MFEM_USE_MPI
 
 /// See the file comment.  K: 3 values per local fault DOF of E.
-inline void ProjectStressToFaultKernel(ElasticityDomainOperator<ParMesh> &E,
-                                       const std::function<void(const real_t[3], real_t[9])> &sig,
-                                       Vector &K)
+inline void ProjectFaceStressToFaultKernel(
+   ElasticityDomainOperator<ParMesh> &E,
+   const std::function<void(FaceElementTransformations &, const real_t *, real_t[9])> &sig,
+   Vector &K)
 {
    ParMesh &mesh = E.GetMesh();
    const int dim = mesh.Dimension();
@@ -97,7 +104,7 @@ inline void ProjectStressToFaultKernel(ElasticityDomainOperator<ParMesh> &E,
          Tr->Transform(ip, xq);
          for (int c = 0; c < 3; c++) { x3[c] = (c < xq.Size()) ? xq(c) : 0.0; }
          real_t s[9];
-         sig(x3, s);
+         sig(*Tr, x3, s);
          if (dim == 2)
          {
             // in-plane: the anti-plane traction sigma_{zx} n_x + sigma_{zy} n_y
@@ -135,6 +142,15 @@ inline void ProjectStressToFaultKernel(ElasticityDomainOperator<ParMesh> &E,
          K(3 * k + 2) = -out(kk);
       }
    }
+}
+
+/// See the file comment.  K: 3 values per local fault DOF of E.
+inline void ProjectStressToFaultKernel(ElasticityDomainOperator<ParMesh> &E,
+                                       const std::function<void(const real_t[3], real_t[9])> &sig,
+                                       Vector &K)
+{
+   ProjectFaceStressToFaultKernel(
+      E, [&sig](FaceElementTransformations &, const real_t *x, real_t s[9]) { sig(x, s); }, K);
 }
 
 #endif // MFEM_USE_MPI

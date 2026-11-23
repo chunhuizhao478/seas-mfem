@@ -66,6 +66,15 @@
 // recorded sigma_eff stay on the actual sigma_eff.  Off (the default) every
 // bit is unchanged.
 //
+// Slip measure and tension (rheology plan rev 1, section 8; TPV26/27
+// description Part 4; Chunhui Zhao, 2026-10-20), both for slip weakening:
+// SetSlipMeasure(Path) hands the law the slip path psi^n as D instead of
+// |d^n|; SetTensionMode(ZeroStrength) skips the range check of box 8 and
+// hands the law max(0, sigma) (the Nitsche penalty keeps the fault closed
+// and the slip path keeps growing in tension).  The defaults, Magnitude and
+// Abort, keep every bit as before.  CloseDOF also sets st.t = t_{n+1} for
+// time-dependent strength (forced rupture).
+//
 // Kelvin-Voigt damping (SetKelvinVoigt; Day et al. 2005 eq. A8; decisions
 // Chunhui Zhao 2026-10-14/15): a stiffness-proportional damping
 // sigma_damp = beta(x) C : eps(v), element-wise constant beta_e, in every
@@ -90,6 +99,25 @@
 // acts on the elastic strain RATE (v and the slip rate V enter as the pair
 // the elastic energy has for (u, d)), so it does not resist slip itself.
 // eta_bar = 0 (never calling SetKelvinVoigt) leaves every bit unchanged.
+//
+// Off-fault rheology (SetRheology; rheology plan rev 1, sections 5 and 6.6;
+// Chunhui Zhao, 2026-10-20): the stress is sigma_0' + C_0 : eps + dsig with
+// dsig from a RheologyCoupler (rheology/rheology_coupler.hpp).  ImplicitSolve
+// runs box R, the coupler's Advance(U^{n+1}), before the fault; once any
+// element has a nonzero dsig the fault traction gains Q dsig (box 8, the
+// average {dsig n} projected like the prestress) and the force P dsig
+// (box 13).  While nothing has yielded the coupler reports no active element
+// and both loads are skipped, so every bit is that of the elastic run; null
+// (never calling SetRheology) is the elastic operator.  Local time stepping
+// refuses a coupler.
+//
+// Complex fault geometries (plan rev 2, Chunhui Zhao 2026-10-20) use the
+// same slip measure (SlipMeasure::Path) and tension mode
+// (TensionMode::ZeroStrength); forced rupture is the closure's
+// (friction/forced_rupture.hpp).  TensionFloorCount() counts the
+// DOF-steps whose law normal stress was raised to 0 (diagnostic only).
+// The device step (below) has none of these three yet and refuses them
+// (scec-benchmarks merge into the 3D branch, 2026-11-23).
 //
 // The product K x (+ K_eta v) has four sources, which agree to round-off:
 // the matrix-free kernels of NitscheSipgOperator (SetMatrixFree; GPU
@@ -185,6 +213,7 @@
 #include "../friction/fault_closure.hpp"
 #include "../fault/fault_normal_stress_modifier.hpp"
 #include "../friction/device_closures.hpp"
+#include "../rheology/rheology_coupler.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -491,6 +520,7 @@ public:
       // that share fault faces, while every rank is at the start of the
       // step), then the band; the two do not read each other's state
       if (pml_ && !early_sync_) { pml_->Advance(xh, t); }
+      if (rc_) { rc_->Advance(xh, t, dt_); }   // box R
       if (has_fault_)
       {
          in_implicit_solve_ = true;
@@ -825,6 +855,19 @@ public:
    real_t PrakashCliftonLength() const { return pc_len_; }
    /// sigma* per owned fault DOF (no), after the last advance.
    const Vector &PrakashCliftonSigma() const { sigpc_.HostRead(); return sigpc_; }
+
+   /// The slip measure D the law sees (header): |d^n| or the slip path psi^n.
+   enum class SlipMeasure { Magnitude, Path };
+   /// Effective normal stress below sigma_min (header): abort the run, or
+   /// give the law max(0, sigma) and go on.
+   enum class TensionMode { Abort, ZeroStrength };
+   void SetSlipMeasure(SlipMeasure m) { slip_measure_ = m; }
+   void SetTensionMode(TensionMode m) { tension_ = m; }
+   SlipMeasure GetSlipMeasure() const { return slip_measure_; }
+   TensionMode GetTensionMode() const { return tension_; }
+   /// DOF-steps (owned, this rank) whose law normal stress was raised to 0
+   /// with TensionMode::ZeroStrength (diagnostic; no effect on the run).
+   long long TensionFloorCount() const { return tension_floored_; }
    /// Projected prestress (3 no) and nucleation spatial traction (3 no);
    /// the nucleation enters as NucleationFactor(t) * NucleationTraction().
    const Vector &PrestressTraction() const { S0_own_.HostRead(); return S0_own_; }
@@ -1095,8 +1138,12 @@ public:
    void CloseDOF(int j, const real_t TS[3], real_t psi, real_t V[3],
                  real_t &sigma_eff, real_t X[2], real_t *sigma_pc = nullptr,
                  real_t E = 0.0, real_t omE = 1.0, real_t slip_abs = 0.0,
-                 bool *open = nullptr, real_t gap = 0.0) const
+                 bool *open = nullptr, real_t gap = 0.0,
+                 real_t t = std::numeric_limits<real_t>::quiet_NaN()) const
    {
+      // TensionMode::ZeroStrength (header): no range check, a sigma_eff that
+      // is not finite still aborts, the law sees max(0, sigma)
+      const bool zero_strength = tension_ == TensionMode::ZeroStrength;
       const real_t *n = &frame_own_(9 * j), *dv = &frame_own_(9 * j + 3),
                     *sv = &frame_own_(9 * j + 6);
       fault_frame::ToLocal(TS, 0.0, n, dv, sv, X[0], X[1], sigma_eff);
@@ -1152,7 +1199,8 @@ public:
                      "finite on rank " << Mpi::WorldRank() << ", owned fault DOF " << j
                      << ", step " << steps_ << ": " << sigma_eff);
       }
-      else if (!relaxed_contact_ && !(sigma_eff >= sigma_min_))
+      else if (zero_strength ? !std::isfinite(sigma_eff)
+                             : (!relaxed_contact_ && !(sigma_eff >= sigma_min_)))
       {
          MFEM_ABORT("NitscheWaveOperator: sigma_n_eff left its range on rank "
                     << Mpi::WorldRank() << ", owned fault DOF " << j
@@ -1164,11 +1212,17 @@ public:
       FaultPointState st = par_own_[j];
       st.psi = psi;
       st.slip_abs = slip_abs;
+      st.t = std::isnan(t) ? GetTime() : t;
       real_t sig_law = sigma_eff;
       if (sigma_pc)
       {
          *sigma_pc = E * (*sigma_pc) + omE * sigma_eff;
          sig_law = *sigma_pc;
+      }
+      if (zero_strength && sig_law < 0.0)
+      {
+         sig_law = std::max(sig_law, real_t(0.0));
+         ++tension_floored_;
       }
       if (nsm_)
       {
@@ -1432,6 +1486,27 @@ public:
       }
    }
    bool HasKelvinVoigt() const { return static_cast<bool>(kv_); }
+
+   /// Off-fault rheology (header).  The coupler must be built on this
+   /// operator's displacement space and outlive the operator's use; null
+   /// switches it off.  Local time stepping and the device step refuse it.
+   void SetRheology(RheologyCoupler *rc)
+   {
+      MFEM_VERIFY(!rc || rc->Field().NumElements() == mesh_.GetNE(),
+                  "NitscheWaveOperator::SetRheology: the coupler has "
+                  << rc->Field().NumElements() << " elements, the mesh " << mesh_.GetNE());
+      rc_ = rc;
+   }
+   const RheologyCoupler *Rheology() const { return rc_; }
+   /// Q dsig on the owned fault DOFs, global three-vectors in the layout of
+   /// PrestressTraction(): {dsig_h} n at the fault quadrature points,
+   /// projected exactly like the prestress.
+   void RheologyTraction(Vector &T_own) const
+   {
+      MFEM_VERIFY(rc_ && has_fault_, "RheologyTraction: no coupler or no fault");
+      ProjectFaceStress_([this](FaceElementTransformations &Tr, const real_t *, real_t s[9])
+      { rc_->FaultStress(Tr, s); }, T_own);
+   }
    /// Profiling plan item 4: compute K x + K_eta v in one sweep over the
    /// union of the two patterns (default on).  Call before the first step.
    void SetFusedStiffness(bool on) { fused_enabled_ = on; fused_state_ = 0; }
@@ -1458,6 +1533,13 @@ public:
    /// the CSR products; when the blocks cannot be built (DenseBlockStiffness
    /// ::Init) the operator falls back to them.  Call before the first step.
    void SetDenseBlocks(bool on) { dense_enabled_ = on; dense_state_ = 0; }
+   /// Fill the dense blocks straight from the element and face matrices
+   /// instead of reading the assembled K and K_eta (off by default): the same
+   /// block entries, without the memory of the two assembled matrices at the
+   /// first time step.  Only with dense blocks on; when the direct fill is
+   /// refused the run stops (no silent fall back to the assembled matrices).
+   void SetDenseFillDirect(bool on) { dense_direct_ = on; dense_state_ = 0; }
+   bool DenseFillDirect() const { return dense_direct_; }
    /// GPU dynamic-rupture plan D2: K x (+ K_eta v) matrix-free
    /// (NitscheSipgOperator; default off).  It takes precedence over the
    /// dense blocks and the fused sweep, and K and K_eta are then never
@@ -1727,6 +1809,8 @@ public:
    void LtsAdvanceFault(const Vector &x, real_t t, const Vector *v)
    {
       MFEM_VERIFY(has_fault_, "LtsAdvanceFault: the operator has no fault");
+      MFEM_VERIFY(!rc_, "LtsAdvanceFault: off-fault rheology needs global stepping "
+                  "(rheology plan phase R6)");
       AdvanceFault_(x, t, v);
    }
    /// F += G d (+ G_eta V with Kelvin-Voigt) at the stored fault state: the
@@ -1734,6 +1818,8 @@ public:
    void LtsAddFaultLoads(Vector &F) const
    {
       MFEM_VERIFY(has_fault_, "LtsAddFaultLoads: the operator has no fault");
+      MFEM_VERIFY(!rc_, "LtsAddFaultLoads: off-fault rheology needs global stepping "
+                  "(rheology plan phase R6)");
       const double tf0 = MPI_Wtime();
       const bool fast = UseFastFault_();
       if (fast)
@@ -1882,6 +1968,7 @@ private:
          }
          fault_sec_ += MPI_Wtime() - tf0;
       }
+      if (rc_ && rc_->AnyActive()) { rc_->AddLoad(F_); }   // rheology: P dsig
       if (!damping_blocks_.empty() && v)
       {
          ScopedStageTimer timer(timers_, StageTimers::DynDamping);
@@ -1981,17 +2068,23 @@ private:
       // here instead of running without it
       MFEM_VERIFY(dim_ == 3 && !pml_ && !sponge_ && !early_sync_ && !quench_on_
                   && !has_mass_damping_ && !contact_ && !opening_ && !relaxed_contact_
-                  && !nsm_ && sigma_floor_ == 0.0,
+                  && !nsm_ && sigma_floor_ == 0.0 && !rc_
+                  && slip_measure_ == SlipMeasure::Magnitude
+                  && tension_ == TensionMode::Abort,
                   "NitscheWaveOperator: the device step (--matrix-free 1 on a device) "
                   "has no 2-D mesh, PML or sponge band, early step sync, quench, mass "
-                  "damping, contact, opening, relaxed contact, normal-stress modifier "
-                  "or sigma floor yet, and this run has one (dim " << dim_ << ", pml "
+                  "damping, contact, opening, relaxed contact, normal-stress modifier, "
+                  "sigma floor, off-fault rheology, slip path or zero-strength tension "
+                  "yet, and this run has one (dim " << dim_ << ", pml "
                   << (pml_ ? 1 : 0) << ", sponge " << (sponge_ ? 1 : 0) << ", early sync "
                   << (early_sync_ ? 1 : 0) << ", quench " << (quench_on_ ? 1 : 0)
                   << ", mass damping " << (has_mass_damping_ ? 1 : 0) << ", contact "
                   << (contact_ ? 1 : 0) << ", opening " << (opening_ ? 1 : 0)
                   << ", relaxed " << (relaxed_contact_ ? 1 : 0) << ", nsm "
-                  << (nsm_ ? 1 : 0) << ", sigma floor " << sigma_floor_
+                  << (nsm_ ? 1 : 0) << ", sigma floor " << sigma_floor_ << ", rheology "
+                  << (rc_ ? 1 : 0) << ", slip path "
+                  << (slip_measure_ == SlipMeasure::Path ? 1 : 0) << ", zero strength "
+                  << (tension_ == TensionMode::ZeroStrength ? 1 : 0)
                   << "); run it on the cpu device");
       if (!dev_ready_)
       {
@@ -2183,10 +2276,29 @@ private:
          int ok = dense_enabled_ ? 1 : 0;
          if (ok)
          {
-            ok = dense_.Init(elast_->GetFESpace(), elast_->ParStiffness(),
-                             kv_ ? &kv_->ParStiffness() : nullptr) ? 1 : 0;
+            if (dense_direct_)
+            {
+               // blocks straight from the element and face matrices: K and
+               // K_eta are never assembled (SetDenseFillDirect)
+               using Sink = DenseBlockStiffness::DirectSink;
+               std::function<bool(Sink &)> vk = [this](Sink &s) {
+                  return elast_->VisitStiffnessMatrices(s);
+               };
+               std::function<bool(Sink &)> ve;
+               if (kv_) { ve = [this](Sink &s) { return kv_->VisitStiffnessMatrices(s); }; }
+               ok = dense_.InitDirect(elast_->GetFESpace(), vk, ve) ? 1 : 0;
+            }
+            else
+            {
+               ok = dense_.Init(elast_->GetFESpace(), elast_->ParStiffness(),
+                                kv_ ? &kv_->ParStiffness() : nullptr) ? 1 : 0;
+            }
          }
          MPI_Allreduce(MPI_IN_PLACE, &ok, 1, MPI_INT, MPI_MIN, mesh_.GetComm());
+         MFEM_VERIFY(ok || !(dense_enabled_ && dense_direct_), "dense fill 'direct': the blocks "
+                     "could not be filled from the element and face matrices on some rank "
+                     "(needs SIPG, one block size per element, symmetric matrices); use the "
+                     "default fill");
          dense_state_ = ok ? 1 : -1;
          if (ok)
          {
@@ -2287,6 +2399,12 @@ private:
                KVTrialTraction(*vt, kv_zero_, kvT_);
                Town_ += kvT_;
             }
+            if (rc_ && rc_->AnyActive())
+            {
+               // rheology: Q dsig^{n+1} (box R ran before the fault)
+               RheologyTraction(rcT_);
+               Town_ += rcT_;
+            }
          }
          BackgroundTraction(t, S_);
          // 9-11
@@ -2329,10 +2447,13 @@ private:
          real_t TS[3], Vn[3], X[2], sig;
          for (int c = 0; c < 3; c++) { TS[c] = Town(3 * j + c) + S(3 * j + c); }
          const real_t *dv = &frame_own_(9 * j + 3), *sv = &frame_own_(9 * j + 6);
-         // |d^n|: d still holds d^n here (box 11 writes d^{n+1} below);
-         // contact: the slip magnitude is tangential (the normal part is g)
+         // D = |d^n| (d still holds d^n here; box 11 writes d^{n+1} below;
+         // contact: the slip magnitude is tangential, the normal part is g)
+         // or, with SlipMeasure::Path, the slip path psi^n (box 10 writes
+         // psi^{n+1} below)
          const real_t *dn = &d(3 * j);
-         const real_t dn_abs = contact_
+         const real_t dn_abs = (slip_measure_ == SlipMeasure::Path) ? psi(j)
+            : contact_
             ? std::hypot(fault_frame::Dot(dn, dv), fault_frame::Dot(dn, sv))
             : std::sqrt(dn[0] * dn[0] + dn[1] * dn[1] + dn[2] * dn[2]);
          bool is_open = false;   // [cycle.opening] (never with Prakash-Clifton)
@@ -2343,7 +2464,7 @@ private:
             const real_t Vo_abs = std::sqrt(Vo[0] * Vo[0] + Vo[1] * Vo[1] + Vo[2] * Vo[2]);
             const real_t xpc = -(Vo_abs + pc_vstar_) * dt / pc_len_;
             CloseDOF(j, TS, psistar_(j), Vn, sig, X, &sigpc(j), std::exp(xpc),
-                     -std::expm1(xpc), dn_abs);
+                     -std::expm1(xpc), dn_abs, nullptr, 0.0, t);
             min_pc = std::min(min_pc, sigpc(j));
             max_pc = std::max(max_pc, sigpc(j));
          }
@@ -2353,7 +2474,7 @@ private:
             const real_t gap = contact_
                ? fault_frame::Dot(&dstar_(3 * j), &frame_own_(9 * j)) : 0.0;
             CloseDOF(j, TS, psistar_(j), Vn, sig, X, nullptr, 0.0, 1.0, dn_abs,
-                     &is_open, gap);
+                     &is_open, gap, t);
          }
          // contact: the slip rate is tangential; the gap rate along n is not
          // a slip and stays out of the state, the stability ratio and the
@@ -2760,8 +2881,20 @@ private:
    void ProjectStress_(const std::function<void(const real_t[3], real_t[9])> &sig,
                        Vector &S_own) const
    {
+      ProjectFaceStress_([&sig](FaceElementTransformations &, const real_t *x, real_t s[9])
+      { sig(x, s); }, S_own);
+   }
+
+   /// ProjectStress_ with a stress that may depend on the face and its two
+   /// elements (the rheology's {dsig_h}): sig(Tr, x_q, s) with the
+   /// integration points of Tr set to the quadrature point
+   /// (ProjectFaceStressToFaultKernel).
+   void ProjectFaceStress_(const std::function<void(FaceElementTransformations &,
+                                                    const real_t *, real_t[9])> &sig,
+                           Vector &S_own) const
+   {
       Vector K;
-      ProjectStressToFaultKernel(*elast_, sig, K);
+      ProjectFaceStressToFaultKernel(*elast_, sig, K);
       Vector S_loc(3 * nd_);
       S_loc = 0.0;
       for (int k = 0; k < nd_; k++)
@@ -3065,6 +3198,8 @@ private:
    Vector sigF_face_, spread_face_;
    Vector S0_own_, Snuc_own_;
    Vector d_, V_, psi_;
+   SlipMeasure slip_measure_ = SlipMeasure::Magnitude;   // (header)
+   TensionMode tension_ = TensionMode::Abort;            // (header)
    bool pc_ = false, pc_seeded_ = false;   // Prakash-Clifton (header)
    real_t pc_vstar_ = 0.0, pc_len_ = 0.0;
    Vector sigpc_;                          // sigma* per owned DOF
@@ -3107,6 +3242,7 @@ private:
    mutable FusedStiffnessPair fused_;
    mutable long long fused_extra_ = 0, fused_nnz_k_ = 0;
    bool dense_enabled_ = true;
+   bool dense_direct_ = false;   ///< SetDenseFillDirect
    mutable int dense_state_ = 0;   ///< 0 not tried, 1 dense blocks, -1 fused or CSR
    mutable DenseBlockStiffness dense_;
    mutable long long dense_bytes_ = 0;
@@ -3137,6 +3273,9 @@ private:
    mutable Vector gbuf_;               ///< GatherFaultDofs
    Array<DFExtremes> dev_red_ws_;      ///< workspace of the reduction
    mutable double fault_sec_ = 0.0;
+   RheologyCoupler *rc_ = nullptr;   ///< off-fault rheology (null: elastic)
+   Vector rcT_;                      ///< Q dsig on owned fault DOFs
+   mutable long long tension_floored_ = 0;   ///< TensionFloorCount()
    StageTimers *timers_ = nullptr;   ///< D0 step-part timers (null: off)
 };
 

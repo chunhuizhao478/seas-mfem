@@ -1,0 +1,148 @@
+# WARNING: DRDG3D ends at 7.9999 s < t_end = 8.0 s; every source is measured to t = 7.9999 s
+# stations /Users/chunhuizhao/projects/seas-mfem-nitsche-results/complex_tools_6e35a58/miniapps/seas/tpv12/stations/tpv12_fault_stations.csv; t_end 7.9998550415039 s; noise: 0.1 s centred moving average, from arrival + 0.5 s
+station          source          arrival   peak V     slip     state  sn rms  th rms  tv rms   misfit vs DRDG3D
+x2_0_x3_0        p1               2.1563   10.019  15.2427   15.2450   0.163   0.001   0.008   dt -0.022 s  slip  +0.88%  peak  -17.8%
+x2_0_x3_0        p2               2.1388   11.076  15.1320   15.1330   0.173   0.004   0.003   dt -0.039 s  slip  +0.14%  peak   -9.1%
+x2_0_x3_0        p3               2.1631   11.446  15.0987   15.0988   0.137   0.001   0.001   dt -0.015 s  slip  -0.08%  peak   -6.1%
+x2_0_x3_0        DRDG3D           2.1783   12.185  15.1102       nan   0.363   0.001   0.019
+x2_4.5_x3_0      p1               2.3136    9.007  15.1795   15.6387   0.082   0.001   0.000   dt -0.008 s  slip  +0.95%  peak  -13.1%
+x2_4.5_x3_0      p2               2.3131    9.768  15.0760   15.5213   0.102   0.001   0.001   dt -0.008 s  slip  +0.26%  peak   -5.8%
+x2_4.5_x3_0      p3               2.3126    9.967  15.0347   15.4628   0.048   0.001   0.000   dt -0.009 s  slip  -0.01%  peak   -3.9%
+x2_4.5_x3_0      DRDG3D           2.3214   10.369  15.0366       nan   0.058   0.001   0.003
+x2_12_x3_0       p1               3.1165    5.013   9.7246   11.3946   0.039   0.004   0.003   dt -0.007 s  slip  -2.07%  peak   -2.3%
+x2_12_x3_0       p2               3.1203    4.856   9.8307   11.5013   0.056   0.002   0.003   dt -0.004 s  slip  -1.00%  peak   -5.4%
+x2_12_x3_0       p3               3.1207    5.056   9.9304   11.6274   0.032   0.002   0.003   dt -0.003 s  slip  -0.00%  peak   -1.5%
+x2_12_x3_0       DRDG3D           3.1238    5.132   9.9305       nan   0.016   0.001   0.002
+x2_0_x3_1.5      p1               1.9299    7.077  15.7727   15.7730   0.077   0.005   0.008   dt -0.032 s  slip  +0.65%  peak  -19.4%
+x2_0_x3_1.5      p2               1.9529    8.155  15.6859   15.6861   0.115   0.006   0.012   dt -0.009 s  slip  +0.10%  peak   -7.2%
+x2_0_x3_1.5      p3               1.9529    8.581  15.6806   15.6806   0.139   0.004   0.014   dt -0.009 s  slip  +0.06%  peak   -2.3%
+x2_0_x3_1.5      DRDG3D           1.9619    8.783  15.6709       nan   0.159   0.002   0.016
+x2_0_x3_3        p1               1.6699    9.180  16.5078   16.5081   0.140   0.006   0.014   dt -0.029 s  slip  +0.75%  peak  -21.7%
+x2_0_x3_3        p2               1.6949   10.632  16.4060   16.4063   0.142   0.008   0.014   dt -0.004 s  slip  +0.13%  peak   -9.3%
+x2_0_x3_3        p3               1.6969   11.508  16.3817   16.3818   0.115   0.006   0.011   dt -0.002 s  slip  -0.02%  peak   -1.8%
+x2_0_x3_3        DRDG3D           1.6986   11.722  16.3845       nan   0.103   0.004   0.010
+x2_0_x3_4.5      p1               1.4016   11.308  17.1273   17.1276   0.144   0.010   0.014   dt -0.029 s  slip  +0.83%  peak  -21.5%
+x2_0_x3_4.5      p2               1.4315   12.408  17.0129   17.0132   0.141   0.010   0.014   dt +0.001 s  slip  +0.16%  peak  -13.8%
+x2_0_x3_4.5      p3               1.4299   14.020  16.9848   16.9849   0.110   0.009   0.011   dt -0.001 s  slip  -0.01%  peak   -2.6%
+x2_0_x3_4.5      DRDG3D           1.4307   14.401  16.9858       nan   0.067   0.004   0.007
+x2_0_x3_7.5      p1               0.8652   13.377  17.5086   17.5090   0.094   0.014   0.009   dt -0.018 s  slip  +0.75%  peak  -22.1%
+x2_0_x3_7.5      p2               0.8729   16.116  17.4085   17.4090   0.120   0.022   0.012   dt -0.010 s  slip  +0.18%  peak   -6.1%
+x2_0_x3_7.5      p3               0.8901   16.883  17.3744   17.3745   0.109   0.015   0.011   dt +0.007 s  slip  -0.02%  peak   -1.7%
+x2_0_x3_7.5      DRDG3D           0.8831   17.169  17.3777       nan   0.050   0.007   0.005
+x2_4.5_x3_7.5    p1               1.3140    9.603  17.3150   17.4367   0.084   0.017   0.012   dt -0.047 s  slip  -0.36%  peak   +0.8%
+x2_4.5_x3_7.5    p2               1.3632    9.616  17.3292   17.4513   0.079   0.037   0.014   dt +0.002 s  slip  -0.28%  peak   +0.9%
+x2_4.5_x3_7.5    p3               1.3645    9.641  17.3404   17.4598   0.040   0.029   0.012   dt +0.003 s  slip  -0.21%  peak   +1.2%
+x2_4.5_x3_7.5    DRDG3D           1.3611    9.530  17.3772       nan   0.025   0.037   0.010
+x2_12_x3_7.5     p1               3.3301   17.948  11.7631   11.7843   0.080   0.036   0.032   dt -0.373 s  slip  -1.92%  peak  -54.1%
+x2_12_x3_7.5     p2               3.5890   24.108  11.8553   11.8852   0.145   0.062   0.036   dt -0.114 s  slip  -1.16%  peak  -38.4%
+x2_12_x3_7.5     p3               3.6128   33.952  11.9513   11.9987   0.092   0.060   0.043   dt -0.090 s  slip  -0.36%  peak  -13.2%
+x2_12_x3_7.5     DRDG3D           3.7027   39.107  11.9939       nan   0.034   0.073   0.023
+x2_0_x3_12       p1               0.0001   10.001  13.6665   13.6668   0.110   0.033   0.012   dt -0.000 s  slip  -0.06%  peak  +10.7%
+x2_0_x3_12       p2               0.0001    9.397  13.6488   13.6494   0.116   0.064   0.011   dt -0.000 s  slip  -0.19%  peak   +4.0%
+x2_0_x3_12       p3               0.0001    9.149  13.7088   13.7090   0.067   0.032   0.006   dt -0.000 s  slip  +0.25%  peak   +1.3%
+x2_0_x3_12       DRDG3D           0.0004    9.032  13.6746       nan   0.025   0.009   0.002
+
+# median noise RMS over stations (MPa)
+p1             sn 0.089  th 0.008  tv 0.011
+p2             sn 0.118  th 0.009  tv 0.012
+p3             sn 0.101  th 0.007  tv 0.011
+DRDG3D         sn 0.054  th 0.004  tv 0.008
+
+# signed checks vs DRDG3D: final slip (m) where |ref| > 0.1 m, t = 0 stresses (MPa, SCEC signs) where |ref| > 1 MPa
+x2_0_x3_0              p1             v_slip     +15.24268    +15.11015  same sign
+x2_4.5_x3_0            p1             h_slip      -1.01495     -0.90369  same sign
+x2_4.5_x3_0            p1             v_slip     +15.14557    +15.00946  same sign
+x2_12_x3_0             p1             h_slip      -3.00132     -3.00156  same sign
+x2_12_x3_0             p1             v_slip      +9.24991     +9.46598  same sign
+x2_0_x3_1.5            p1             v_slip     +15.77271    +15.67093  same sign
+x2_0_x3_1.5            p1             tv0         +5.98233     +6.09506  same sign
+x2_0_x3_1.5            p1             sn0        -10.88000    -11.08502  same sign
+x2_0_x3_3              p1             v_slip     +16.50782    +16.38453  same sign
+x2_0_x3_3              p1             tv0        +12.02289    +12.19012  same sign
+x2_0_x3_3              p1             sn0        -21.86590    -22.17004  same sign
+x2_0_x3_4.5            p1             v_slip     +17.12733    +16.98582  same sign
+x2_0_x3_4.5            p1             tv0        +18.19952    +18.28518  same sign
+x2_0_x3_4.5            p1             sn0        -33.09927    -33.25506  same sign
+x2_0_x3_7.5            p1             v_slip     +17.50860    +17.37769  same sign
+x2_0_x3_7.5            p1             tv0        +30.30060    +30.47531  same sign
+x2_0_x3_7.5            p1             sn0        -55.10737    -55.42509  same sign
+x2_4.5_x3_7.5          p1             h_slip      +0.10720     +0.10698  same sign
+x2_4.5_x3_7.5          p1             v_slip     +17.31468    +17.37686  same sign
+x2_4.5_x3_7.5          p1             tv0        +30.49980    +30.47531  same sign
+x2_4.5_x3_7.5          p1             sn0        -55.46964    -55.42509  same sign
+x2_12_x3_7.5           p1             h_slip      +0.58326     +0.57552  same sign
+x2_12_x3_7.5           p1             v_slip     +11.74865    +11.98005  same sign
+x2_12_x3_7.5           p1             tv0        +30.53143    +30.47531  same sign
+x2_12_x3_7.5           p1             sn0        -55.52717    -55.42509  same sign
+x2_0_x3_12             p1             v_slip     +13.66650    +13.67456  same sign
+x2_0_x3_12             p1             tv0        +48.73696    +48.76049  same sign
+x2_0_x3_12             p1             sn0        -88.63737    -88.68015  same sign
+x2_0_x3_0              p2             v_slip     +15.13199    +15.11015  same sign
+x2_4.5_x3_0            p2             h_slip      -0.96115     -0.90369  same sign
+x2_4.5_x3_0            p2             v_slip     +15.04537    +15.00946  same sign
+x2_12_x3_0             p2             h_slip      -3.00407     -3.00156  same sign
+x2_12_x3_0             p2             v_slip      +9.36044     +9.46598  same sign
+x2_0_x3_1.5            p2             v_slip     +15.68591    +15.67093  same sign
+x2_0_x3_1.5            p2             tv0         +6.01541     +6.09506  same sign
+x2_0_x3_1.5            p2             sn0        -10.94016    -11.08502  same sign
+x2_0_x3_3              p2             v_slip     +16.40604    +16.38453  same sign
+x2_0_x3_3              p2             tv0        +11.99271    +12.19012  same sign
+x2_0_x3_3              p2             sn0        -21.81100    -22.17004  same sign
+x2_0_x3_4.5            p2             v_slip     +17.01293    +16.98582  same sign
+x2_0_x3_4.5            p2             tv0        +18.08658    +18.28518  same sign
+x2_0_x3_4.5            p2             sn0        -32.89387    -33.25506  same sign
+x2_0_x3_7.5            p2             v_slip     +17.40853    +17.37769  same sign
+x2_0_x3_7.5            p2             tv0        +30.55316    +30.47531  same sign
+x2_0_x3_7.5            p2             sn0        -55.56668    -55.42509  same sign
+x2_4.5_x3_7.5          p2             h_slip      +0.11137     +0.10698  same sign
+x2_4.5_x3_7.5          p2             v_slip     +17.32888    +17.37686  same sign
+x2_4.5_x3_7.5          p2             tv0        +30.45617    +30.47531  same sign
+x2_4.5_x3_7.5          p2             sn0        -55.39030    -55.42509  same sign
+x2_12_x3_7.5           p2             h_slip      +0.58287     +0.57552  same sign
+x2_12_x3_7.5           p2             v_slip     +11.84094    +11.98005  same sign
+x2_12_x3_7.5           p2             tv0        +30.58558    +30.47531  same sign
+x2_12_x3_7.5           p2             sn0        -55.62566    -55.42509  same sign
+x2_0_x3_12             p2             v_slip     +13.64876    +13.67456  same sign
+x2_0_x3_12             p2             tv0        +48.77572    +48.76049  same sign
+x2_0_x3_12             p2             sn0        -88.70787    -88.68015  same sign
+x2_0_x3_0              p3             v_slip     +15.09867    +15.11015  same sign
+x2_4.5_x3_0            p3             h_slip      -0.91444     -0.90369  same sign
+x2_4.5_x3_0            p3             v_slip     +15.00688    +15.00946  same sign
+x2_12_x3_0             p3             h_slip      -2.99295     -3.00156  same sign
+x2_12_x3_0             p3             v_slip      +9.46865     +9.46598  same sign
+x2_0_x3_1.5            p3             v_slip     +15.68055    +15.67093  same sign
+x2_0_x3_1.5            p3             tv0         +6.22671     +6.09506  same sign
+x2_0_x3_1.5            p3             sn0        -11.32445    -11.08502  same sign
+x2_0_x3_3              p3             v_slip     +16.38170    +16.38453  same sign
+x2_0_x3_3              p3             tv0        +12.17662    +12.19012  same sign
+x2_0_x3_3              p3             sn0        -22.14547    -22.17004  same sign
+x2_0_x3_4.5            p3             v_slip     +16.98479    +16.98582  same sign
+x2_0_x3_4.5            p3             tv0        +18.29320    +18.28518  same sign
+x2_0_x3_4.5            p3             sn0        -33.26964    -33.25506  same sign
+x2_0_x3_7.5            p3             v_slip     +17.37439    +17.37769  same sign
+x2_0_x3_7.5            p3             tv0        +30.34818    +30.47531  same sign
+x2_0_x3_7.5            p3             sn0        -55.19390    -55.42509  same sign
+x2_4.5_x3_7.5          p3             h_slip      +0.10808     +0.10698  same sign
+x2_4.5_x3_7.5          p3             v_slip     +17.34010    +17.37686  same sign
+x2_4.5_x3_7.5          p3             tv0        +30.46812    +30.47531  same sign
+x2_4.5_x3_7.5          p3             sn0        -55.41202    -55.42509  same sign
+x2_12_x3_7.5           p3             h_slip      +0.57878     +0.57552  same sign
+x2_12_x3_7.5           p3             v_slip     +11.93724    +11.98005  same sign
+x2_12_x3_7.5           p3             tv0        +30.50053    +30.47531  same sign
+x2_12_x3_7.5           p3             sn0        -55.47097    -55.42509  same sign
+x2_0_x3_12             p3             v_slip     +13.70884    +13.67456  same sign
+x2_0_x3_12             p3             tv0        +48.62879    +48.76049  same sign
+x2_0_x3_12             p3             sn0        -88.44064    -88.68015  same sign
+
+# median |misfit| vs DRDG3D along the run order (pass item 4)
+p1             arrival 0.0254 s  slip 0.79%  peak 18.60%
+p2             arrival 0.0060 s  slip 0.18%  peak 6.64%
+p3             arrival 0.0053 s  slip 0.04%  peak 2.07%
+
+# pass test for run p3 against DRDG3D
+  0 signs of final slip and t = 0 stresses agree: PASS
+  1 arrival within 0.1 s at every station: PASS
+  2 slip within 2% where ref slip > 0.1 m: PASS
+  3 peak within 10% at 9 of 10 stations
+  4 medians shrink along the run order: PASS
+# wrote /Users/chunhuizhao/projects/seas-mfem-nitsche-results/tpv12_200m/p123_6e35a58/compare_summary_p123.json

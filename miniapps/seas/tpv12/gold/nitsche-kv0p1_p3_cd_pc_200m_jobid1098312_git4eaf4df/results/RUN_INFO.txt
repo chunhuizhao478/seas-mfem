@@ -1,0 +1,5 @@
+commit 4eaf4df769dfb4eb8279deb02f4efa75dc1fe804
+mesh tpv12/mesh/tpv12_200m.msh de6ed89eb495194ba1b0c3d88b7b78ea9871bf0a6d38173bc4137b3c57376319
+deck tpv12/configs/tpv12_nitsche.toml
+order 3 tfinal 8.0 flags 
+job 1098312 nodes 16 ranks 2304

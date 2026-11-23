@@ -1,0 +1,18 @@
+# TPV15 on-fault station time series downloaded from SCEC CVWS public area
+# source: https://strike.scec.org/cvws/cgi-bin/cvws.cgi (POST m=tpv15, o=1005, mus=pelties, G1059<station>=Raw Data); <pre> block of the page, HTML-unescaped
+# CVWS user pelties: Christian Pelties - Discontinuous Galerkin (with gap) - SeisSol revision 810, 300 m, date 18-Dec-2012 per header; CVWS lists it as the run that keeps the spec junction gap
+# downloaded_name -> file  bytes  sha256
+# files: 13
+branchst020dp000.txt -> tpv15_seissolgap_branch_x2_2_x3_0.txt  5024606  d479408c948e2c0d6dd315b0c99fd229abc302193b981e985acfbcac5f9a1e39
+branchst020dp075.txt -> tpv15_seissolgap_branch_x2_2_x3_7.5.txt  5024617  c7e1de625417b43936599c7631219d07089344e2fc16c0810155c094fca958b7
+branchst050dp000.txt -> tpv15_seissolgap_branch_x2_5_x3_0.txt  5024606  182df1e4c75ba15fcb3e7e04107faf67fba4e2bd9179356231d5cc86f7327f55
+branchst050dp075.txt -> tpv15_seissolgap_branch_x2_5_x3_7.5.txt  5024617  3d566acecb4b96ffa3ba46f5330c03b4031c8070b2cd123284bc7ec07622e0c0
+branchst090dp075.txt -> tpv15_seissolgap_branch_x2_9_x3_7.5.txt  5024617  cd078acadc853e551db4037946fa96d93237c686ebb3ec012023117b755b85c0
+faultst-020dp000.txt -> tpv15_seissolgap_main_x2_-2_x3_0.txt  5024607  23ffb6be2c210712e2399b905ecfed3a18693a0ef812bc6b5d9d39eaaeccd14b
+faultst-020dp075.txt -> tpv15_seissolgap_main_x2_-2_x3_7.5.txt  5024618  86db0eb8d70e4738bffe9fa5471a8e804236afb1d43d99abf73a88ff947f6288
+faultst020dp000.txt -> tpv15_seissolgap_main_x2_2_x3_0.txt  5024606  22339a756e40606a10499ad155e8d1d94cef4112d1f2bef60a69b24e263c673a
+faultst020dp075.txt -> tpv15_seissolgap_main_x2_2_x3_7.5.txt  5024617  6fb1ef55ac982aafa3ac5289085b908fbece4dd7fced917baf47c2e6b490f10e
+faultst050dp000.txt -> tpv15_seissolgap_main_x2_5_x3_0.txt  5024606  78ef9bf419bb3ecff272faed9f684f37197d90353f0c2994893b9d93aab7a9ed
+faultst050dp075.txt -> tpv15_seissolgap_main_x2_5_x3_7.5.txt  5024617  cd8bad0a6615754550e72eb86b64dc413dace736537aef6a86135a5658beda77
+faultst090dp000.txt -> tpv15_seissolgap_main_x2_9_x3_0.txt  5024606  2ce6196ce3f1a17491a6f2fab9c037aba62dc38bc2e0667ec5c671ca3cd94bcc
+faultst090dp075.txt -> tpv15_seissolgap_main_x2_9_x3_7.5.txt  5024617  286d82ea3d7af728e989043ffbc4c404245dc0f9cd4c823c1fa7f1ddbf70f25d

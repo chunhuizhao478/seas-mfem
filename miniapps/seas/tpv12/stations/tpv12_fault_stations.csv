@@ -1,0 +1,14 @@
+# SCEC TPV12 on-fault stations, written by scripts/make_fault_stations.py; do not edit by hand.
+# Global frame of the mesh: X, Y, Z up (m).
+# fault: trace on the X axis, 60 deg dip toward +Y; x3 = down-dip km (depth = x3 sin 60).
+name,x,y,z
+x2_0_x3_0,0,0,0
+x2_4.5_x3_0,4500,0,0
+x2_12_x3_0,12000,0,0
+x2_0_x3_1.5,0,750,-1299.038106
+x2_0_x3_3,0,1500,-2598.076211
+x2_0_x3_4.5,0,2250,-3897.114317
+x2_0_x3_7.5,0,3750,-6495.190528
+x2_4.5_x3_7.5,4500,3750,-6495.190528
+x2_12_x3_7.5,12000,3750,-6495.190528
+x2_0_x3_12,0,6000,-10392.304845

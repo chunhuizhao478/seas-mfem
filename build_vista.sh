@@ -5,7 +5,11 @@
 # never on a login node: Vista login nodes cap processes and threads.
 #
 # Toolchain (TACC modules, no Spack, nothing built from source):
-#   gcc/14.2.0  cuda/12.6 (hierarchy only)  openmpi/5.0.5  hypre/2.31.0 (32-bit ints, no GPU)  metis/5.1.0.3  phdf5/1.14.6
+#   gcc/14.2.0  openmpi/5.0.11  hypre/2.31.0 (32-bit ints, no GPU)  metis/5.1.0.3  phdf5/1.14.6
+# (Until 2026-11-12: cuda/12.6 + openmpi/5.0.5.  The Vista upgrade of 2026-11-11 removed HCOLL, which
+# that libmpi.so is linked against, so nothing links or starts with it any more: jobs 1140189,
+# 1140349.  openmpi/5.0.11 has no HCOLL dependency and shows the same hypre, metis and phdf5 modules
+# without cuda.  Binaries built before the change must be rebuilt.)
 # MFEM features: MPI + METIS 5 + HDF5 (fault.vtkhdf).  No MUMPS, PETSc, LAPACK,
 # Caliper or H5Z-ZFP: the Nitsche driver uses none of them (explicit time
 # stepping; the decks set paraview_fault_zfp_tol = 0).  seas_test_nitsche_p5 is
@@ -30,11 +34,10 @@ type module >/dev/null 2>&1 || fail "no 'module' command"
 module purge
 module load TACC
 module swap nvidia gcc/14.2.0 2>/dev/null || module load gcc/14.2.0
-# cuda/12.6: Lmod hierarchy only. TACC lists hypre/2.31.0 under gcc + cuda + openmpi, but its HYPRE_config.h
-# defines no HYPRE_USING_CUDA/GPU (checked on Vista 2026-10-16). TACC's hypre, metis, phdf5 and gmsh are built with
-# gcc 14 (/home1/apps/gcc14/...); gmsh under gcc/13.2.0 fails on CXXABI_1.3.15, so the whole stack uses gcc/14.2.0.
-module load cuda/12.6
-module load openmpi/5.0.5
+# TACC's hypre, metis, phdf5 and gmsh are built with gcc 14 (/home1/apps/gcc14/...); gmsh under gcc/13.2.0 fails
+# on CXXABI_1.3.15, so the whole stack uses gcc/14.2.0.  hypre/2.31.0's HYPRE_config.h defines no
+# HYPRE_USING_CUDA/GPU (checked on Vista 2026-10-16 and 2026-11-12).
+module load openmpi/5.0.11
 module load hypre/2.31.0
 module load metis/5.1.0.3
 module load phdf5/1.14.6
@@ -57,6 +60,12 @@ grep -E "HYPRE_BIGINT|HYPRE_MIXEDINT" "$TACC_HYPRE_INC/HYPRE_config.h" | grep -q
 grep -qE "^#define HYPRE_USING_(CUDA|GPU|HIP)" "$TACC_HYPRE_INC/HYPRE_config.h" \
    && fail "this hypre is a GPU build; MFEM would need MFEM_USE_CUDA (linalg/hypre.hpp:56)"
 command -v mpicxx >/dev/null || fail "mpicxx not on PATH"
+# the MPI library must resolve completely (HCOLL removal, 2026-11-11)
+MPI_LIBSO="$(dirname "$(dirname "$(command -v mpicxx)")")/lib/libmpi.so"
+if [ -e "$MPI_LIBSO" ] && ldd "$MPI_LIBSO" | grep -q "not found"; then
+   ldd "$MPI_LIBSO" | grep "not found"
+   fail "$MPI_LIBSO has unresolved libraries; this MPI module cannot be used on this system"
+fi
 echo "  mpicxx: $(command -v mpicxx); $(mpicxx --version | head -1)"
 
 # --- toml11 (the driver reads the decks through it).  The login-node clone uses

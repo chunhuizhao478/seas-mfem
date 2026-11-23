@@ -160,6 +160,70 @@
 // before.  The station files are unchanged (sigma_n there stays sigma_eff);
 // sigma* goes to the fault CSV dump and to fault.vtkhdf (normal_stress_pc).
 //
+// Scope (Chunhui Zhao, 2026-10-14): tetrahedral meshes.
+//
+// Material (TPV6/TPV7/TPV31 plan rev 1, Chunhui Zhao, 2026-10-19): [material]
+// kind constant, depth_profile_1d or halfspace_across_fault (the shared
+// loader's tables; dynamic/nitsche_deck_fields.hpp), or sidecar_hdf5 (below).  The operator samples the
+// material once per element at its centroid, so every surface where it jumps
+// (the halfspace plane, a depth where the layer table jumps) must be a mesh
+// surface: the run aborts, naming the surface, when an element has vertices
+// strictly on both sides.  The rate-and-state laws take the constant material
+// only.
+//
+// Table material (TPV34 plan rev 2, Chunhui Zhao, 2026-11-12): [material] kind
+// = "sidecar_hdf5" reads Vp, Vs and density from the 3-D table sidecar_path (a
+// data_projection_v1 HDF5 file, e.g. from scripts/cvm/build_cvm_table.py;
+// --material-table PATH replaces the deck's path), one copy per node.
+// outside_table = "abort" | "edge_value" says what a mesh point outside the
+// table does (typed, no default).  The optional [material.frame] maps a mesh
+// point to the table point: q_xy = origin_m + x_axis X + y_axis Y, q_z = Z
+// (three 2-vectors, all typed); without it the table is in the mesh frame.
+// The table is smooth: no jump surfaces to check.
+//
+// Shear-modulus scaling (same plan, TPV31): optional top-level
+// [stress_scale_by_mu] mu_ref_pa multiplies the prestress (background and
+// [[stress_region]] tensors) by mu(x) / mu_ref_pa at each fault quadrature
+// point.  [nucleation] kind "instantaneous_overstress_circular": strike
+// overstress delta_tau_pa x cosine taper (radius_m, taper_m) x mu(x) /
+// mu_ref_pa (when mu_ref_pa > 0), present from t = 0.  Both need a shear
+// modulus that is single valued on the fault (not halfspace_across_fault).
+// Both nucleation kinds are refused on a fault that is not planar (the
+// overstress is one tensor in the frame of the reference normal).
+// The shared loader skips keys it does not read, so this driver refuses
+// unknown keys in the tables it reads for these features.
+//
+// Per-side stations (same plan, TPV6/TPV7): [output.stations] per_side = true
+// also writes <prefix>_station_<name>_{farside,nearside}.dat, displacement,
+// velocity and traction on each side of the fault in the column order of the
+// SCEC split-node files (dynamic/fault_side_stations.hpp; far side = plus
+// side of the fault orientation).
+// TPV26/27 fault and stress keys (rheology plan rev 1, sections 7-8; Chunhui
+// Zhao, 2026-10-20), all Nitsche-only and off when absent:
+//   [initial_stress]  depth-varying effective initial stress (rheology/
+//                     initial_stress.hpp), the fault prestress in place of
+//                     [stress]; every [stress] sigma_*_pa must then be 0 and
+//                     [[stress_region]] is refused, so nothing counts twice;
+//   [friction.forced_rupture]  hypocenter_x_m, hypocenter_y_m,
+//                     hypocenter_z_m, r_crit_m, vs_m_s, t0_s, all required:
+//                     per-DOF T(r) of friction/forced_rupture.hpp
+//                     (slip weakening only);
+//   [friction.slip_weakening] slip_measure = "magnitude" (default, |d^n|) |
+//                     "path" (the slip path), tension = "abort" (default) |
+//                     "zero_strength" (strength from max(0, sigma_n'));
+//   [rheology]        off-fault rheology (plan phase R3): the enabled
+//                     models (rheology/rheology_stack.hpp) through a
+//                     RheologyCoupler on the operator, with sigma_0' the
+//                     function of the fault prestress; refused with
+//                     --lts rate2 and energy_balance; per log line the
+//                     yielding nodes, active elements and max eta;
+//                     output_dt_s > 0: <output_dir>/rheology.vtkhdf;
+//   [output.off_fault_stations] file = "..." (CSV name,x,y,z): displacement
+//                     and velocity time series at points in the volume
+//                     (io/off_fault_stations.hpp; SCEC TPV26/27 Part 9),
+//                     <prefix>_offfault_<name>.dat, at the fault-station
+//                     cadence (with LTS at sync points only).
+//
 // Scope (Chunhui Zhao, 2026-10-14): tetrahedral meshes; constant material
 // (the sidecar / depth-profile / halfspace selections are P8).
 //
@@ -187,6 +251,30 @@
 // the tolerance.  No table, no station files.  The ninth column is
 // log10 theta (aging law, with V_0, f_0, b from [friction.rate_state]), psi
 // (strong rate weakening) or the slip path (slip weakening).
+//
+// Off-fault stations (TPV34 plan rev 2, step S3; Chunhui Zhao, 2026-11-12):
+// [output.body_stations] file = "..." (CSV name,x,y,z in the mesh frame,
+// written by scripts/make_fault_stations.py) and h_axis, v_axis, n_axis
+// (three orthogonal unit vectors of the mesh frame; all four keys are
+// required, there are no defaults).  Each station writes
+// <prefix>_offfault_<name>.dat with columns t h_disp h_vel v_disp v_vel n_disp
+// n_vel (the SCEC off-fault layout): the displacement and the velocity at
+// the point, along the three axes, as the mean over the element(s) holding
+// the point (dynamic/body_station_writer.hpp).  Rows are taken every
+// --station-every steps and reach the files every --station-flush-every
+// rows and at the end; a killed run loses the rows since the last flush.  A
+// station outside the mesh stops the run.  No table, no files, and the run
+// is the same bit for bit.
+//
+// Station output interval (Chunhui Zhao, 2026-10-25): [output.stations] dt
+// (s, a number or a string such as "1e-4s"; optional) writes the stations (and the copy envelopes) every
+// max(1, round(dt / dt_F)) fault steps and at the last step, dt_F being the
+// fault step (the global step, or with LTS the fault cluster's), as
+// [output] paraview_fault_dt does for the fault frames.  It cannot be
+// combined with --station-every.  Absent, the stations come every
+// --station-every steps (default 1), every bit as before.  [output.stations]
+// takes only file, snap_tolerance_m, per_side and dt: any other key aborts the run, so
+// a misspelt dt cannot fall back to every step.
 //
 // --lts-report 1 (plan item 7, local time stepping, phase P0): rank 0 prints
 // the rate-2 cluster report of solver/nitsche_lts_setup.hpp for the serial
@@ -259,6 +347,20 @@
 // alone (C3).  2-D meshes only; refused with LTS and with [diagnostics]
 // energy_balance (the energy terms carry no beta, C5).  Absent = every bit
 // as before.
+//
+// Complex fault geometries (plan rev 2, Chunhui Zhao 2026-10-20): standalone
+// options, each its own top-level table read only here and its own header
+// dynamic/nitsche_opt_*.hpp; an absent table leaves every bit as before.
+//   O1 [prestress_depth_table]  prestress tensor piecewise linear in depth,
+//                               with explicit jumps (TPV12, TPV22)
+//   O2-O4 (merged into scec-benchmarks, 2026-11-20): the tension floor, the
+//   slip-path weakening and the forced rupture are the [friction.slip_weakening]
+//   keys tension = "zero_strength" and slip_measure = "path" and the table
+//   [friction.forced_rupture] (above); the old tables [fault_tension],
+//   [slip_weakening_distance] and [forced_rupture] abort with the new names.
+//   A forced DOF on a locked tip edge aborts.
+//   O5 [fault_tip_lock]         fault DOFs on the fault border locked, except
+//                               on excluded (free-surface) edges (TPV22)
 
 #include "mfem.hpp"
 #include "../domain/nitsche_wave_operator.hpp"
@@ -267,12 +369,21 @@
 #include "../friction/rate_state_closure.hpp"
 #include "../friction/rate_state_srw_closure.hpp"
 #include "../friction/slip_weakening_closure.hpp"
+#include "../friction/forced_rupture.hpp"
+#include "../rheology/rheology_config.hpp"
+#include "../rheology/rheology_coupler.hpp"
 #include "../fault/fault_frame.hpp"
 #include "../fault/thermal_pressurization_modifier.hpp"
 #include "../spatial/code/spatial_friction.hpp"
 #include "../dynamic/spatial_nucleation.hpp"
 #include "../dynamic/fault_station_file.hpp"
+#include "../dynamic/fault_side_stations.hpp"
+#include "../dynamic/body_station_writer.hpp"
+#include "../dynamic/nitsche_deck_fields.hpp"
+#include "../io/off_fault_stations.hpp"
 #include "../dynamic/station_copy_average.hpp"
+#include "../dynamic/nitsche_opt_depth_prestress.hpp"   // complex geometries O1
+#include "../dynamic/nitsche_opt_tip_lock.hpp"           // complex geometries O5
 #include "../dynamic/lts_partition.hpp"   // METIS with element weights (plan item 6)
 #include "../common/seas_device.hpp"
 #include "../dynamic/mesh_parts.hpp"      // --mesh-setup rank0 (header, "Mesh setup")
@@ -355,6 +466,25 @@ bool TomlBool(const toml::value *t, const char *key, bool def)
 {
    if (!t || !t->contains(key)) { return def; }
    return t->at(key).as_boolean();
+}
+/// Refuse a key of table `t` (named `where` in the message) outside `known`:
+/// the shared loader skips keys it does not read, so a misspelt key of a
+/// table this driver relies on would otherwise be ignored without a word.
+void RefuseUnknownKeys(const toml::value &t, const std::string &where,
+                       const std::vector<std::string> &known)
+{
+   MFEM_VERIFY(t.is_table(), where << " must be a table");
+   for (const auto &kv : t.as_table())
+   {
+      bool ok = false;
+      for (const std::string &k : known) { ok = ok || kv.first == k; }
+      if (!ok)
+      {
+         std::string list;
+         for (const std::string &k : known) { list += (list.empty() ? "" : ", ") + k; }
+         MFEM_ABORT(where << ": unknown key '" << kv.first << "' (known: " << list << ")");
+      }
+   }
 }
 
 /// The station copy average's face data (StationCopyAverage): per owned
@@ -919,7 +1049,8 @@ int main(int argc, char *argv[])
                       " [--station-every n] [--dump-every n] [--log-every n]"
                       " [--station-copies average|first] [--station-comm sub|world]"
                       " [--station-flush-every n] [--fast-fault 0|1]"
-                      " [--fused-spmv 0|1] [--dense-blocks 0|1] [--fault-weight w]"
+                      " [--fused-spmv 0|1] [--dense-blocks 0|1] [--dense-fill assembled|direct]"
+                      " [--fault-weight w]"
                       " [--fast-fault-output 0|1] [--paraview-fault-deflate-level n|none]"
                       " [--stage-timers n] [--max-steps n]"
                       " [--perturb-initial-state seed] [--device cpu|cuda|debug]"
@@ -948,6 +1079,13 @@ int main(int argc, char *argv[])
    const toml::value *t_out = DeckTable(root, "output");
    const toml::value *t_st = (t_out && t_out->contains("stations"))
                              ? &t_out->at("stations") : nullptr;
+   const toml::value *t_bst = (t_out && t_out->contains("body_stations"))
+                              ? &t_out->at("body_stations") : nullptr;
+   const toml::value *t_ofs = (t_out && t_out->contains("off_fault_stations"))
+                              ? &t_out->at("off_fault_stations") : nullptr;
+   MFEM_VERIFY(!(t_bst && t_ofs), "[output.body_stations] (TPV34 writer) and "
+               "[output.off_fault_stations] (TPV26/27 writer) both write "
+               "<prefix>_offfault_<name>.dat; use one of them");
 
    const std::string mesh_path = ArgStr(argc, argv, "--mesh", cfg.mesh.path);
    const int p = ArgInt(argc, argv, "--order", cfg.mesh.order);
@@ -969,6 +1107,15 @@ int main(int argc, char *argv[])
    // item 8a (2026-10-18): K u (+ K_eta v) from dense element and face
    // blocks; takes precedence over --fused-spmv, which applies when it is 0
    const int dense_blocks = ArgInt(argc, argv, "--dense-blocks", 1);
+   // TPV34 p = 4 (Chunhui Zhao, 2026-11-18): --dense-fill direct fills the
+   // dense blocks straight from the element and face matrices, so K and K_eta
+   // are never assembled (the memory peak of the first time step); the block
+   // entries and the run are bitwise those of the default, "assembled".
+   const std::string dense_fill = ArgStr(argc, argv, "--dense-fill", "assembled");
+   MFEM_VERIFY(dense_fill == "assembled" || dense_fill == "direct", "--dense-fill '" << dense_fill
+               << "': expected assembled or direct");
+   MFEM_VERIFY(dense_fill == "assembled" || dense_blocks != 0, "--dense-fill direct needs dense "
+               "blocks (--dense-blocks 1, the default)");
    const int fast_fault_output = ArgInt(argc, argv, "--fast-fault-output", 1);
    // GPU dynamic-rupture plan D2 (header): the matrix-free product and its
    // kernel layout
@@ -1060,6 +1207,8 @@ int main(int argc, char *argv[])
    MFEM_VERIFY(!lts_on || (!Device::IsEnabled() && matrix_free == 0),
                "--lts rate2 runs on the host with assembled cluster blocks: use --device cpu "
                "and --matrix-free 0 (GPU plan D6 ports it)");
+   MFEM_VERIFY(!lts_on || dense_fill == "assembled", "--dense-fill direct: not with --lts rate2 "
+               "(the LTS cluster blocks are read from the assembled matrices)");
    MFEM_VERIFY(station_copies == "average" || station_copies == "first",
                "--station-copies " << station_copies << ": expected average or first");
    MFEM_VERIFY(station_comm == "sub" || station_comm == "world",
@@ -1128,6 +1277,47 @@ int main(int argc, char *argv[])
                   << "\"; use \"backward_euler\" or \"crank_nicolson\"");
       tp_scheme = tp_scheme_s == "backward_euler" ? TPScheme::BackwardEuler
                                                   : TPScheme::CrankNicolson;
+   }
+   // complex geometries O1 (header): [prestress_depth_table]
+   std::shared_ptr<const nitsche_opt::DepthPrestressTable> depth_ps;
+   if (root.contains(nitsche_opt::DepthPrestressTable::kTable))
+   {
+      const real_t up[3] = {cfg.fault_geometry.up[0], cfg.fault_geometry.up[1],
+                            cfg.fault_geometry.up[2]};
+      depth_ps = std::make_shared<const nitsche_opt::DepthPrestressTable>(
+         nitsche_opt::ParseDepthPrestress(root.at(nitsche_opt::DepthPrestressTable::kTable), up));
+      MFEM_VERIFY(cfg.stress.sigma_xx_pa == 0.0 && cfg.stress.sigma_yy_pa == 0.0
+                  && cfg.stress.sigma_zz_pa == 0.0 && cfg.stress.sigma_xy_pa == 0.0
+                  && cfg.stress.sigma_yz_pa == 0.0 && cfg.stress.sigma_xz_pa == 0.0,
+                  "[prestress_depth_table] replaces the [stress] background: set every "
+                  "[stress] sigma_*_pa to 0 (kind = \"constant_tensor\")");
+      MFEM_VERIFY(depth_ps->measure != nitsche_opt::DepthPrestressTable::Measure::Effective
+                  || !root.contains("rheology"),
+                  "[prestress_depth_table] stress_measure = \"effective\" (sigma - P_f I) is "
+                  "exact only for a linear elastic bulk; it is refused with a [rheology] table");
+   }
+   // complex geometries O2-O4 (header): the old tables are refused; the same
+   // options are [friction.slip_weakening] tension / slip_measure and
+   // [friction.forced_rupture]
+   MFEM_VERIFY(!root.contains("fault_tension"), "[fault_tension] is gone: write "
+               "tension = \"zero_strength\" in [friction.slip_weakening]");
+   MFEM_VERIFY(!root.contains("slip_weakening_distance"), "[slip_weakening_distance] is "
+               "gone: write slip_measure = \"path\" in [friction.slip_weakening]");
+   MFEM_VERIFY(!root.contains("forced_rupture"), "[forced_rupture] is gone: write "
+               "[friction.forced_rupture] hypocenter_x_m, hypocenter_y_m, hypocenter_z_m, "
+               "r_crit_m, vs_m_s, t0_s (rupture speed 0.7 vs)");
+   // complex geometries O5 (header): [fault_tip_lock]
+   nitsche_opt::TipLockConfig tip_cfg;
+   if (root.contains(nitsche_opt::TipLockConfig::kTable))
+   {
+      tip_cfg = nitsche_opt::ParseTipLock(root.at(nitsche_opt::TipLockConfig::kTable));
+   }
+   {
+      // complex geometries O1-O5: a misspelt option table would leave its option off
+      const std::string miss = nitsche_opt::OptNearMissTable(root,
+         {nitsche_opt::DepthPrestressTable::kTable, nitsche_opt::TipLockConfig::kTable});
+      MFEM_VERIFY(miss.empty(), "deck table " << miss << ": a misspelt option table would "
+                  "leave the option off; fix the name");
    }
    MFEM_VERIFY(p >= 1 && p <= 4, "order p must be in 1..4 (P3 constants); got " << p);
    MFEM_VERIFY(cfl > 0.0 && cfl <= 1.0, "[numerics] cfl (fraction of C(p)) must be in (0,1]");
@@ -1200,12 +1390,103 @@ int main(int argc, char *argv[])
    setup_timer.Mark("deck");
 
    // ------------------------------------------------------------ material
-   MFEM_VERIFY(cfg.material.kind == spatial::MaterialKind::Constant && !cfg.velocity.use_sidecar,
-               "Nitsche driver (P7): only the constant material "
-               "([velocity] use_sidecar = false, [material] kind constant) is "
-               "wired; the sidecar / depth-profile / halfspace selections are P8.");
-   MaterialField material = MaterialField::MakeConstant(
-      cfg.material_fallback.lambda, cfg.material_fallback.mu, cfg.material_fallback.rho);
+   // (header, "Material").  deck_material owns the coefficients `material`
+   // points to and lives to the end of main.  The heterogeneous kinds read
+   // tables of the shared loader, which fills defaults for absent keys (n_y =
+   // -1, depth_top_m = 0, ...): here every key must be typed and known.
+   if (cfg.material.kind != spatial::MaterialKind::Constant)
+   {
+      const toml::value &tm = root.at("material");
+      RefuseUnknownKeys(tm, "[material]", {"kind", "depth_axis", "halfspace_across_fault",
+                                           "sidecar_path", "outside_table", "frame"});
+      MFEM_VERIFY(cfg.material.kind == spatial::MaterialKind::SidecarHDF5
+                  || !(tm.contains("sidecar_path") || tm.contains("outside_table")
+                       || tm.contains("frame")),
+                  "[material] sidecar_path, outside_table and frame belong to kind "
+                  "\"sidecar_hdf5\" only");
+      auto require_all = [](const toml::value &tb, const std::string &where,
+                            const std::vector<std::string> &keys) {
+         RefuseUnknownKeys(tb, where, keys);
+         for (const std::string &k : keys)
+         {
+            MFEM_VERIFY(tb.contains(k), where << " needs " << k << " (no defaults)");
+         }
+      };
+      if (cfg.material.kind == spatial::MaterialKind::HalfspaceAcrossFault)
+      {
+         require_all(tm.at("halfspace_across_fault"), "[material.halfspace_across_fault]",
+                     {"vp_near", "vs_near", "rho_near", "vp_far", "vs_far", "rho_far",
+                      "x0_x", "x0_y", "x0_z", "n_x", "n_y", "n_z"});
+      }
+      if (cfg.material.kind == spatial::MaterialKind::DepthProfile1D)
+      {
+         MFEM_VERIFY(tm.contains("depth_axis"), "[material] depth_axis is required with kind "
+                     "depth_profile_1d (no default)");
+         const toml::value &mp = root.at("material_profile");
+         RefuseUnknownKeys(mp, "[material_profile]", {"layer"});
+         const toml::value &layers = mp.at("layer");
+         for (size_t i = 0; i < layers.size(); i++)
+         {
+            require_all(layers.at(i), "[[material_profile.layer]] entry " + std::to_string(i + 1),
+                        {"depth_top_m", "depth_bot_m", "vp_ms", "vs_ms", "rho_kgm3", "interp"});
+         }
+      }
+   }
+   TableFrame table_frame;
+   bool table_clamp = false;
+   MPI_Comm table_node_comm = MPI_COMM_NULL;
+   if (cfg.material.kind == spatial::MaterialKind::SidecarHDF5)
+   {
+      const toml::value &tm = root.at("material");
+      cfg.material.sidecar_path = ArgStr(argc, argv, "--material-table", cfg.material.sidecar_path);
+      MFEM_VERIFY(tm.contains("outside_table"), "[material] outside_table (\"abort\" or "
+                  "\"edge_value\") is required with kind sidecar_hdf5 (no default)");
+      const std::string ot = tm.at("outside_table").as_string();
+      MFEM_VERIFY(ot == "abort" || ot == "edge_value", "[material] outside_table must be "
+                  "\"abort\" or \"edge_value\"; got '" << ot << "'");
+      table_clamp = (ot == "edge_value");
+      if (tm.contains("frame"))
+      {
+         const toml::value &tf = tm.at("frame");
+         RefuseUnknownKeys(tf, "[material.frame]", {"origin_m", "x_axis", "y_axis"});
+         auto vec2 = [&tf](const char *key, real_t out[2]) {
+            MFEM_VERIFY(tf.contains(key) && tf.at(key).is_array() && tf.at(key).size() == 2,
+                        "[material.frame] needs " << key << " = [a, b] (no defaults)");
+            for (int c = 0; c < 2; c++)
+            {
+               const auto &v = tf.at(key).at(c);
+               MFEM_VERIFY(v.is_floating() || v.is_integer(), "[material.frame] " << key
+                           << " must hold two numbers");
+               out[c] = v.is_floating() ? static_cast<real_t>(v.as_floating())
+                                        : static_cast<real_t>(v.as_integer());
+            }
+         };
+         vec2("origin_m", table_frame.origin);
+         vec2("x_axis", table_frame.x_axis);
+         vec2("y_axis", table_frame.y_axis);
+         MFEM_VERIFY(std::abs(table_frame.x_axis[0] * table_frame.y_axis[1]
+                              - table_frame.x_axis[1] * table_frame.y_axis[0]) > 1e-12,
+                     "[material.frame] x_axis and y_axis are parallel");
+      }
+      {
+         std::ifstream tfile(cfg.material.sidecar_path);
+         MFEM_VERIFY(tfile.good(), "[material] sidecar_path: cannot open the table '"
+                     << cfg.material.sidecar_path << "' (--material-table PATH replaces the "
+                     "deck's path)");
+      }
+      // one copy of the table per node (DataField3D's shared-memory mode)
+      MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, g_rank, MPI_INFO_NULL,
+                          &table_node_comm);
+   }
+   NitscheDeckMaterial deck_material = BuildNitscheDeckMaterial(cfg, table_frame, table_clamp,
+                                                                table_node_comm);
+   if (table_node_comm != MPI_COMM_NULL) { MPI_Comm_free(&table_node_comm); }
+   MaterialField material = deck_material.field;
+   // The LTS clusters (plan item 7) are sized with one wave speed, the
+   // constant material's (cfg.material_fallback): refuse the other kinds.
+   MFEM_VERIFY((!lts_on && lts_report == 0) || cfg.material.kind == spatial::MaterialKind::Constant,
+               "--lts / --lts-report: the LTS clusters use the constant material's wave speed; "
+               "[material] kind must be constant with LTS (this deck's is not)");
 
    // ------------------------------------------------------------ mesh
    std::unique_ptr<Mesh> smesh;
@@ -1282,6 +1563,64 @@ int main(int argc, char *argv[])
                "MFEM_USE_HDF5=YES");
 #endif
    setup_timer.Mark("mesh read");
+   MFEM_VERIFY(!parts_load || (!depth_ps && !tip_cfg.enabled), "[prestress_depth_table] and "
+               "[fault_tip_lock] read the serial mesh; not with --mesh-parts");
+   if (depth_ps && smesh_here)
+   {
+      // complex geometries O1: every jump depth must be a mesh line on the fault
+      MFEM_VERIFY(cfg.boundary.fault_attr > 0, "[boundary] fault_attr is required");
+      const real_t tol = 1e-6 * (1.0 + depth_ps->depth.back());
+      std::string first;
+      const long long nx = nitsche_opt::CountFaultFacesAcrossDepths(
+         *smesh, cfg.boundary.fault_attr, depth_ps->jump, depth_ps->up, tol, &first);
+      MFEM_VERIFY(nx == 0, "[prestress_depth_table]: " << nx << " fault faces cross a "
+                  "jump depth (" << first << "); the per-face projection would overshoot. "
+                  "Embed each jump_depths_m line in the fault surface of the mesh.");
+      if (g_rank == 0)
+      {
+         std::cout << "  prestress: [prestress_depth_table] (" << (depth_ps->measure ==
+                   nitsche_opt::DepthPrestressTable::Measure::Effective ? "effective" : "total")
+                   << " stress), " << depth_ps->depth.size() << " nodes over depth ["
+                   << depth_ps->depth.front() << ", " << depth_ps->depth.back() << "] m, "
+                   << depth_ps->jump.size() << " jump(s); no fault face crosses a jump\n";
+      }
+   }
+   std::shared_ptr<const nitsche_opt::TipEdges> tip_edges;
+   if (tip_cfg.enabled)
+   {
+      // built from the serial mesh where it is held; with --mesh-setup rank0
+      // rank 0 builds it and broadcasts the segments (TipEdges::Bcast)
+      // complex geometries O5: the tip edges of the serial mesh (header)
+      MFEM_VERIFY(cfg.boundary.fault_attr > 0, "[boundary] fault_attr is required");
+      std::set<int> excl;
+      if (tip_cfg.has_exclude) { excl.insert(tip_cfg.exclude_attrs.begin(), tip_cfg.exclude_attrs.end()); }
+      else { excl.insert(cfg.boundary.natural_attrs.begin(), cfg.boundary.natural_attrs.end()); }
+      MFEM_VERIFY(!excl.count(cfg.boundary.fault_attr), "[fault_tip_lock] exclude_attrs "
+                  "contains the fault attribute " << cfg.boundary.fault_attr);
+      auto te = smesh_here ? std::make_shared<nitsche_opt::TipEdges>(*smesh, cfg.boundary.fault_attr, excl)
+                           : std::make_shared<nitsche_opt::TipEdges>();
+      if (mesh_rank0) { te->Bcast(MPI_COMM_WORLD, 0); }
+      tip_edges = te;
+      MFEM_VERIFY(tip_edges->NumEdges() > 0, "[fault_tip_lock]: the fault (attr "
+                  << cfg.boundary.fault_attr << ", " << tip_edges->NumFaultFaces()
+                  << " faces) has no tip edge outside the excluded attributes");
+      for (int a : excl)
+      {
+         // a listed attribute that touches no fault edge frees nothing (a typo
+         // would lock the trace it was meant to free); the default list may
+         // name surfaces a buried fault never reaches
+         MFEM_VERIFY(!tip_cfg.has_exclude || tip_edges->SharedEdges(a) > 0,
+                     "[fault_tip_lock] exclude_attrs: attribute " << a << " shares no edge "
+                     "with the fault (attr " << cfg.boundary.fault_attr << ")");
+      }
+      if (g_rank == 0)
+      {
+         std::cout << "  fault tips: " << tip_edges->NumEdges() << " tip edges on "
+                   << tip_edges->NumFaultFaces() << " fault faces; edges on attributes";
+         for (int a : excl) { std::cout << " " << a << " (" << tip_edges->SharedEdges(a) << " fault edges)"; }
+         std::cout << " stay free\n";
+      }
+   }
    if (lts_report)
    {
       MFEM_VERIFY(cfg.boundary.fault_attr > 0, "[boundary] fault_attr is required");
@@ -1572,6 +1911,41 @@ int main(int argc, char *argv[])
    smesh.reset();
    setup_timer.Mark("LTS cluster map");
 
+   // the material jumps must be mesh surfaces (material built before the mesh)
+   {
+      const real_t tol = 1e-6;   // m
+      std::vector<long long> across = CountElementsAcrossJumps(pmesh, deck_material.jumps, tol);
+      MPI_Allreduce(MPI_IN_PLACE, across.data(), static_cast<int>(across.size()), MPI_LONG_LONG,
+                    MPI_SUM, MPI_COMM_WORLD);
+      if (g_rank == 0) { std::cout << deck_material.log << std::flush; }
+      if (deck_material.table && !table_clamp)
+      {
+         // every mesh point must lie in the table (a clean message before the
+         // first out-of-table query aborts)
+         Vector lo, hi;
+         pmesh.GetBoundingBox(lo, hi);
+         MFEM_VERIFY(deck_material.table->ContainsMeshBox(lo.GetData(), hi.GetData()),
+                     "[material] sidecar_hdf5: the mesh box x [" << lo(0) << ", " << hi(0)
+                     << "] y [" << lo(1) << ", " << hi(1) << "] z [" << lo(2) << ", " << hi(2)
+                     << "] m (through [material.frame]) is not inside the table "
+                     << cfg.material.sidecar_path << "; extend the table or set outside_table "
+                     "= \"edge_value\"");
+      }
+      const MaterialJumps &J = deck_material.jumps;
+      MFEM_VERIFY(across[0] == 0, "[material] halfspace_across_fault: " << across[0]
+                  << " elements have vertices on both sides of the plane x0 (" << J.x0[0] << ", "
+                  << J.x0[1] << ", " << J.x0[2] << "), n (" << J.n[0] << ", " << J.n[1] << ", "
+                  << J.n[2] << "); the material is sampled once per element, so the plane must "
+                  "be a mesh surface (mesh " << mesh_path << ")");
+      for (size_t k = 0; k < J.depths.size(); k++)
+      {
+         MFEM_VERIFY(across[1 + k] == 0, "[material] depth_profile_1d: " << across[1 + k]
+                     << " elements have vertices above and below the jump at depth "
+                     << J.depths[k] << " m; the material is sampled once per element, so the "
+                     "depth must be a mesh surface (mesh " << mesh_path << ")");
+      }
+   }
+
    // ------------------------------------------------------------ boundary
    MFEM_VERIFY(cfg.boundary.fault_attr > 0, "[boundary] fault_attr is required");
    BoundaryConfig bc;
@@ -1622,6 +1996,78 @@ int main(int argc, char *argv[])
    MFEM_VERIFY(cfg.stress.pore_pressure.P_p_pa == 0.0
                && cfg.stress.pore_pressure.P_p_grad_pa_per_m == 0.0,
                "Nitsche driver (P7): pore pressure is not wired (P_p must be 0)");
+
+   // slip measure and tension (header): Nitsche-only [friction.slip_weakening]
+   // keys, which the SAFS sub-block parser does not read
+   const toml::value *t_sw = (t_fric && t_fric->contains("slip_weakening"))
+                             ? &t_fric->at("slip_weakening") : nullptr;
+   const std::string slip_measure_s = TomlStr(t_sw, "slip_measure", "magnitude");
+   MFEM_VERIFY(slip_measure_s == "magnitude" || slip_measure_s == "path",
+               "[friction.slip_weakening] slip_measure = \"" << slip_measure_s
+               << "\"; use \"magnitude\" (|d^n|) or \"path\" (the slip path)");
+   const std::string tension_s = TomlStr(t_sw, "tension", "abort");
+   MFEM_VERIFY(tension_s == "abort" || tension_s == "zero_strength",
+               "[friction.slip_weakening] tension = \"" << tension_s
+               << "\"; use \"abort\" or \"zero_strength\"");
+
+   // forced rupture (header): per-DOF T(r), slip weakening only
+   const toml::value *t_fr = (t_fric && t_fric->contains("forced_rupture"))
+                             ? &t_fric->at("forced_rupture") : nullptr;
+   const bool forced_on = t_fr != nullptr;
+   ForcedRuptureSpec forced;
+   if (forced_on)
+   {
+      MFEM_VERIFY(law.kind == LawKind::SlipWeakening, "[friction.forced_rupture] needs "
+                  "[meta] law = \"slip_weakening\"");
+      MFEM_VERIFY(t_fr->is_table(), "[friction.forced_rupture] must be a table");
+      const char *fk[6] = {"hypocenter_x_m", "hypocenter_y_m", "hypocenter_z_m",
+                           "r_crit_m", "vs_m_s", "t0_s"};
+      for (const auto &kv : t_fr->as_table())
+      {
+         bool known = false;
+         for (const char *k : fk) { known = known || kv.first == k; }
+         MFEM_VERIFY(known, "[friction.forced_rupture] unknown key '" << kv.first
+                     << "' (hypocenter_x_m, hypocenter_y_m, hypocenter_z_m, r_crit_m, "
+                     "vs_m_s, t0_s)");
+      }
+      real_t v[6];
+      for (int k = 0; k < 6; k++)
+      {
+         MFEM_VERIFY(t_fr->contains(fk[k]), "[friction.forced_rupture] needs " << fk[k]
+                     << " (no default)");
+         v[k] = TomlReal(t_fr, fk[k], 0.0);
+      }
+      for (int i = 0; i < 3; i++) { forced.hypocenter[i] = v[i]; }
+      forced.r_crit = v[3];
+      forced.vs = v[4];
+      forced.t0 = v[5];
+      const std::string e = ForcedRupture::Validate(forced);
+      MFEM_VERIFY(e.empty(), "[friction.forced_rupture] " << e);
+   }
+
+   // [initial_stress] and [rheology] (rheology plan rev 1, section 7)
+   bool is_on = false;
+   InitialStressSpec is_spec;
+   {
+      const real_t up[3] = {cfg.fault_geometry.up[0], cfg.fault_geometry.up[1],
+                            cfg.fault_geometry.up[2]};
+      const std::string e = ParseInitialStressConfig(root, up, is_on, is_spec);
+      MFEM_VERIFY(e.empty(), e);
+   }
+   RheologyConfig rheo;
+   {
+      const std::string e = ParseRheologyConfig(root, rheo);
+      MFEM_VERIFY(e.empty(), e);
+   }
+   {
+#if defined(MFEM_USE_HDF5) && defined(MFEM_PARALLEL_HDF5)
+      const bool phdf5 = true;
+#else
+      const bool phdf5 = false;
+#endif
+      const std::string e = CheckRheologyRun(rheo, lts_on, energy_on, phdf5);
+      MFEM_VERIFY(e.empty(), e);
+   }
 
    // ------------------------------------------------------------ prestress (I1)
    MFEM_VERIFY(cfg.stress.kind == spatial::StressSourceKind::ConstantTensor,
@@ -1697,15 +2143,53 @@ int main(int argc, char *argv[])
          }
       }
    }
-   fs.prestress = [s0, regions](const real_t x[3], real_t s[9]) {
-      const real_t *src = s0;
-      for (const StressRegion &R : regions)
+   if (is_on)
+   {
+      MFEM_VERIFY(!depth_ps, "[prestress_depth_table] and [initial_stress] both set the "
+                  "prestress; give one");
+      bool zero = true;
+      for (int i = 0; i < 9; i++) { zero = zero && s0[i] == 0.0; }
+      const std::string e = CheckInitialStressRun(
+         is_on, zero, !regions.empty(), cfg.stress.pore_pressure.P_p_pa == 0.0
+         && cfg.stress.pore_pressure.P_p_grad_pa_per_m == 0.0);
+      MFEM_VERIFY(e.empty(), e);
+      auto is = std::make_shared<const InitialStress>(is_spec);
+      fs.prestress = [is](const real_t x[3], real_t s[9]) { is->EvalEffective(x, s); };
+   }
+   else
+   {
+      fs.prestress = [s0, regions, depth_ps](const real_t x[3], real_t s[9]) {
+         const real_t *src = s0;
+         for (const StressRegion &R : regions)
+         {
+            if (x[0] >= R.lo[0] && x[0] <= R.hi[0] && x[1] >= R.lo[1] && x[1] <= R.hi[1]
+                && x[2] >= R.lo[2] && x[2] <= R.hi[2]) { src = R.s; }
+         }
+         // complex geometries O1: the depth table is the background
+         if (src == s0 && depth_ps) { depth_ps->Eval(x, s); return; }
+         for (int i = 0; i < 9; i++) { s[i] = src[i]; }
+      };
+   }
+   // [stress_scale_by_mu] (header, "Shear-modulus scaling")
+   if (root.contains("stress_scale_by_mu"))
+   {
+      const toml::value &tsc = root.at("stress_scale_by_mu");
+      RefuseUnknownKeys(tsc, "[stress_scale_by_mu]", {"mu_ref_pa"});
+      MFEM_VERIFY(!is_on, "[stress_scale_by_mu] scales the [stress] / [[stress_region]] "
+                  "tensors; it cannot be combined with [initial_stress] (TPV26/27)");
+      MFEM_VERIFY(tsc.contains("mu_ref_pa"), "[stress_scale_by_mu] needs mu_ref_pa (Pa)");
+      const real_t mu_ref = TomlReal(&tsc, "mu_ref_pa", 0.0);
+      MFEM_VERIFY(mu_ref > 0.0, "[stress_scale_by_mu] mu_ref_pa = " << mu_ref << " must be > 0");
+      MFEM_VERIFY(static_cast<bool>(deck_material.mu_at), "[stress_scale_by_mu] needs a shear "
+                  "modulus that is single valued on the fault; [material] kind "
+                  "halfspace_across_fault has one on each side");
+      fs.prestress = ScaleByShearModulus(fs.prestress, deck_material.mu_at, mu_ref);
+      if (g_rank == 0)
       {
-         if (x[0] >= R.lo[0] && x[0] <= R.hi[0] && x[1] >= R.lo[1] && x[1] <= R.hi[1]
-             && x[2] >= R.lo[2] && x[2] <= R.hi[2]) { src = R.s; }
+         std::cout << "  prestress scaled by mu(x) / " << mu_ref << " Pa at each fault "
+                   "quadrature point\n";
       }
-      for (int i = 0; i < 9; i++) { s[i] = src[i]; }
-   };
+   }
 
    // pin frame (F1 with the reference normal): nhat, shat, dhat
    real_t pn[3], pu[3], ps[3], pd[3];
@@ -1716,11 +2200,33 @@ int main(int argc, char *argv[])
    ff::Cross(ps, pn, pd);
 
    // ------------------------------------------------------------ nucleation
-   if (cfg.nucleation.enabled)
+   if (cfg.nucleation.enabled
+       && cfg.nucleation.kind == spatial::NucleationKind::InstantaneousOverstressCircular)
+   {
+      // (header, "Shear-modulus scaling"): present from t = 0
+      RefuseUnknownKeys(root.at("nucleation").at("instantaneous_overstress_circular"),
+                        "[nucleation.instantaneous_overstress_circular]",
+                        {"center_x_m", "center_y_m", "center_z_m", "radius_m", "taper_m",
+                         "delta_tau_pa", "mu_ref_pa"});
+      const auto &spec = cfg.nucleation.instantaneous_circular;
+      fs.nucleation_spatial = InstantaneousCircularOverstress(spec, ps, pn, pd, deck_material.mu_at);
+      fs.nucleation_temporal = [](real_t) { return real_t(1.0); };
+      if (g_rank == 0)
+      {
+         std::cout << "  nucleation: instantaneous circular, delta_tau " << spec.delta_tau_pa
+                   << " Pa within " << spec.radius_m << " m of (" << spec.center_x_m << ", "
+                   << spec.center_y_m << ", " << spec.center_z_m << "), cosine taper over "
+                   << spec.taper_m << " m";
+         if (spec.mu_ref_pa > 0.0) { std::cout << ", times mu(x) / " << spec.mu_ref_pa << " Pa"; }
+         std::cout << "; from t = 0\n";
+      }
+   }
+   else if (cfg.nucleation.enabled)
    {
       MFEM_VERIFY(cfg.nucleation.kind == spatial::NucleationKind::GradualOverstressCompactCircular,
-                  "Nitsche driver (P7): only [nucleation] kind = "
-                  "\"gradual_overstress_compact_circular\" is wired");
+                  "Nitsche driver: [nucleation] kind must be "
+                  "\"gradual_overstress_compact_circular\" or "
+                  "\"instantaneous_overstress_circular\"");
       const auto spec = cfg.nucleation.compact_circular;
       MFEM_VERIFY(spec.radius_m > 0.0 && spec.T_nuc_s > 0.0, "compact-circular nucleation: "
                   "radius_m and T_nuc_s must be > 0");
@@ -1758,6 +2264,9 @@ int main(int argc, char *argv[])
    real_t b0 = 0.0, f00 = 0.0, V00 = 0.0;
    if (is_rs)
    {
+      MFEM_VERIFY(cfg.material.kind == spatial::MaterialKind::Constant, "Nitsche driver: the "
+                  "rate-and-state laws take the constant material only (ResolveRateState is "
+                  "called with element 0 for every fault point)");
       rs = *cfg.rate_state;
       rs.eta_auto = false;      // eta is quasi-dynamic radiation damping; the
       rs.eta_default = 0.0;     // Nitsche closure uses gamma = 1/2 sigma_F dt
@@ -1799,15 +2308,32 @@ int main(int argc, char *argv[])
          st.mu_d = r.mu_d(0);
          st.Dc = r.d_c(0);
          st.cohesion = r.cohesion(0);
+         if (forced_on)
+         {
+            st.forced_time = ForcedRupture::Time(forced, x);
+            st.forced_t0 = forced.t0;
+         }
       };
    }
 
    setup_timer.Mark("fault setup");
+   if (tip_edges)
+   {
+      // complex geometries O5: lock the DOFs on the tip edges (header)
+      MFEM_VERIFY(law.kind == LawKind::SlipWeakening, "[fault_tip_lock] locks by mu_s and "
+                  "cohesion: it needs [meta] law = \"slip_weakening\"");
+      fs.parameters = nitsche_opt::WrapTipLock(fs.parameters, tip_edges);
+   }
 
    // ------------------------------------------------------------ operator
    DomainConfig dcfg;
    dcfg.penalty_factor = penalty_factor;
    NitscheWaveOperator op(pmesh, p, material, bc, dcfg, &fs);
+   op.SetSlipMeasure(slip_measure_s == "path" ? NitscheWaveOperator::SlipMeasure::Path
+                                              : NitscheWaveOperator::SlipMeasure::Magnitude);
+   op.SetTensionMode(tension_s == "zero_strength"
+                     ? NitscheWaveOperator::TensionMode::ZeroStrength
+                     : NitscheWaveOperator::TensionMode::Abort);
    MFEM_VERIFY(op.Orientation().GetReport().junction_edges == 0,
                "[fault_geometry] junction_policy = \"refuse\": the fault has "
                << op.Orientation().GetReport().junction_edges << " junction edges");
@@ -1863,6 +2389,36 @@ int main(int argc, char *argv[])
                    << std::sqrt(beta / rho) / (2.0 * M_PI) << " Hz; the CFL step times (1 - "
                    << std::scientific << std::setprecision(3) << 1.0 - fw_dt_factor
                    << std::defaultfloat << std::setprecision(6) << ")\n";
+      }
+   }
+   // Both nucleation kinds are one global tensor in the pinned frame (shat,
+   // nhat): the intended along-strike overstress only where the face normal
+   // is nhat, so a fault that is not planar is refused
+   // (nitsche_deck_fields.hpp, MaxFaultNormalDeviation).
+   if (cfg.nucleation.enabled)
+   {
+      real_t dev = MaxFaultNormalDeviation(op.Orientation(), pn);
+      MPI_Allreduce(MPI_IN_PLACE, &dev, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+      MFEM_VERIFY(dev <= 1e-6, "[nucleation]: the overstress is one tensor in the frame of the "
+                  "reference normal, which needs a planar fault; a fault face normal is "
+                  << std::asin(std::min(dev, real_t(1.0))) * 180.0 / M_PI
+                  << " degrees off [fault_geometry] ref_normal (mesh " << mesh_path << ")");
+   }
+   if (tip_edges)
+   {
+      long long nl[2] = {0, op.NumOwnedFaultDOFs()};
+      for (int j = 0; j < op.NumOwnedFaultDOFs(); j++)
+      {
+         if (tip_edges->OnTip(&op.FaultPositions()(3 * j))) { nl[0]++; }
+      }
+      MPI_Allreduce(MPI_IN_PLACE, nl, 2, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+      MFEM_VERIFY(nl[0] > 0, "[fault_tip_lock]: " << tip_edges->NumEdges() << " tip edges "
+                  "but no fault DOF lies on one");
+      if (g_rank == 0)
+      {
+         std::cout << "  fault tips: " << nl[0] << " of " << nl[1] << " fault DOFs locked (mu_s "
+                   << nitsche_opt::TipLockConfig::kLockedMuS << ", cohesion "
+                   << nitsche_opt::TipLockConfig::kLockedCohesion << " Pa)\n";
       }
    }
    const real_t dt_cfl = fw_dt_factor * ComputeMaxDt(op.Sample(), pmesh, p, cfl * Ceig);
@@ -1951,6 +2507,29 @@ int main(int argc, char *argv[])
       }
    }
 
+   // off-fault rheology (rheology plan rev 1, sections 5, 6.6, 6.7): box R
+   // and the loads P dsig, Q dsig through the coupler, sigma_0' = the
+   // prestress function (one field for the bulk and the fault)
+   std::unique_ptr<RheologyCoupler> rheo_c;
+   if (rheo.Any())
+   {
+      rheo_c = std::make_unique<RheologyCoupler>(op.Elasticity().GetFESpace(), op.Sample(),
+                                                 op.Boundary().dirichlet_attrs,
+                                                 BuildRheologyStack(rheo), fs.prestress);
+      op.SetRheology(rheo_c.get());
+      if (g_rank == 0)
+      {
+         std::cout << "  rheology: " << rheo_c->Stack().Describe() << ", "
+                   << rheo_c->Field().NodesPerElement() << " node(s) per element (degree "
+                   << p - 1 << "), " << rheo_c->Stack().NumStateVars() << " state values per node";
+         if (rheo.drucker_prager)
+         {
+            std::cout << "; Drucker-Prager cohesion " << rheo.dp.cohesion << " Pa, bulk friction "
+                      << rheo.dp.bulk_friction << ", Tv " << rheo.dp.relaxation_time << " s";
+         }
+         std::cout << "\n";
+      }
+   }
    setup_timer.Mark("operator");
 
    // initial fault state: d = 0, psi from the continuous friction condition
@@ -1993,6 +2572,21 @@ int main(int argc, char *argv[])
          // sigma*^0 = the initial sigma_n per DOF
          op.SetPrakashClifton(pc_vstar, pc_len);
          op.SetPrakashCliftonState(sig0);
+      }
+      if (forced_on && tip_edges)
+      {
+         // the forcing lowers mu toward mu_d; it must not reach a locked tip DOF
+         long long nf = 0;
+         for (int j = 0; j < no; j++)
+         {
+            const real_t *x = &op.FaultPositions()(3 * j);
+            if (ForcedRupture::Time(forced, x) < ForcedRupture::kNeverForced
+                && tip_edges->OnTip(x)) { nf++; }
+         }
+         MPI_Allreduce(MPI_IN_PLACE, &nf, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+         MFEM_VERIFY(nf == 0, "[friction.forced_rupture]: " << nf << " fault DOFs locked by "
+                     "[fault_tip_lock] lie within r_crit_m of the hypocentre; the forcing "
+                     "would weaken them");
       }
       // initial fault state per owned DOF (generic; e.g. to check psi^0
       // against a benchmark's closed form outside the driver)
@@ -2088,8 +2682,47 @@ int main(int argc, char *argv[])
    // ------------------------------------------------------------ nucleation check
    // The projected SCEC along-strike traction -(S.shat) at the fault DOF
    // nearest the deck's hypocentre against the analytic tau_0 + delta_tau
-   // F(r) G(t) at that DOF's position (plan P7 decision 9).
-   if (cfg.nucleation.enabled)
+   // F(r) G(t) at that DOF's position (plan P7 decision 9).  The
+   // instantaneous kind is on from t = 0, so there the analytic value is the
+   // deck's prestress plus overstress tensors at the DOF, times its nhat.
+   if (cfg.nucleation.enabled
+       && cfg.nucleation.kind == spatial::NucleationKind::InstantaneousOverstressCircular)
+   {
+      const real_t h[3] = {cfg.hypocenter.x_m, cfg.hypocenter.y_m, cfg.hypocenter.z_m};
+      struct { double d; int r; } loc = {1e300, g_rank}, glob;
+      int jh = -1;
+      for (int j = 0; j < no; j++)
+      {
+         const real_t *x = &op.FaultPositions()(3 * j);
+         const real_t dd = std::hypot(x[0] - h[0], x[1] - h[1], x[2] - h[2]);
+         if (dd < loc.d) { loc.d = dd; jh = j; }
+      }
+      MPI_Allreduce(&loc, &glob, 1, MPI_DOUBLE_INT, MPI_MINLOC, MPI_COMM_WORLD);
+      if (glob.r == g_rank && jh >= 0)
+      {
+         const real_t *x = &op.FaultPositions()(3 * jh);
+         const real_t *nn = &op.FaultFrames()(9 * jh), *ss = &op.FaultFrames()(9 * jh + 6);
+         real_t s0[9], s1[9], T[3];
+         fs.prestress(x, s0);
+         fs.nucleation_spatial(x, s1);
+         for (int i = 0; i < 3; i++)
+         {
+            T[i] = 0.0;
+            for (int j = 0; j < 3; j++) { T[i] += (s0[3 * i + j] + s1[3 * i + j]) * nn[j]; }
+         }
+         const real_t ana = -ff::Dot(T, ss);
+         Vector S;
+         op.BackgroundTraction(0.0, S);
+         const real_t proj = -ff::Dot(&S(3 * jh), ss);
+         std::cout << std::setprecision(8) << "  nucleation check at the fault DOF nearest the hypocentre ("
+                   << x[0] << ", " << x[1] << ", " << x[2] << "), " << glob.d << " m away: projected "
+                   "-T.shat " << proj / 1e6 << " MPa, deck prestress + overstress at the DOF "
+                   << ana / 1e6 << " MPa, difference " << proj - ana << " Pa (constant in time)\n"
+                   << std::flush;
+      }
+      MPI_Barrier(MPI_COMM_WORLD);
+   }
+   else if (cfg.nucleation.enabled)
    {
       const auto &spec = cfg.nucleation.compact_circular;
       const real_t h[3] = {cfg.hypocenter.x_m, cfg.hypocenter.y_m, cfg.hypocenter.z_m};
@@ -2138,13 +2771,36 @@ int main(int argc, char *argv[])
    // stations from the station file the deck names (header, "Stations")
    std::unique_ptr<FaultStationWriter> stations;
    std::unique_ptr<StationCopyAverage> station_avg;
+   std::unique_ptr<FaultSideStationWriter> side_stations;
    std::vector<int> station_dofs;   // the owned DOFs the stations read (sorted)
    std::string state_label = "log10_theta";
+   long st_every = station_every;   // header, "Station output interval"
+   bool st_last = false;
    if (t_st)
    {
       MFEM_VERIFY(t_st->is_table() && t_st->contains("file") && t_st->contains("snap_tolerance_m"),
                   "[output.stations] needs file (the station CSV) and snap_tolerance_m (m); "
                   "there are no defaults");
+      RefuseUnknownKeys(*t_st, "[output.stations]", {"file", "snap_tolerance_m", "per_side", "dt"});
+      const bool per_side = TomlBool(t_st, "per_side", false);
+      if (t_st->contains("dt"))
+      {
+         // seconds, a number or a string such as "1e-4s" (as paraview_fault_dt)
+         const toml::value &v = t_st->at("dt");
+         const real_t st_dt = v.is_string() ? spatial::SpatialTimeParseSeconds(v.as_string())
+                              : TomlReal(t_st, "dt", 0.0);
+         MFEM_VERIFY(st_dt > 0.0, "[output.stations] dt = " << st_dt << "; it must be > 0 (s)");
+         MFEM_VERIFY(ArgStr(argc, argv, "--station-every", "").empty(),
+                     "[output.stations] dt and --station-every both set the station output; give one");
+         st_every = std::max(1L, std::lround(st_dt / dt));
+         st_last = true;
+         if (g_rank == 0)
+         {
+            std::cout << std::setprecision(10) << "  stations every " << st_every << " fault steps ("
+                      << st_every * dt << " s; [output.stations] dt = " << st_dt
+                      << " s) and at the last step\n";
+         }
+      }
       const std::string st_path = TomlStr(t_st, "file", "");
       const real_t snap_tol = TomlReal(t_st, "snap_tolerance_m", 0.0);
       MFEM_VERIFY(snap_tol > 0.0, "[output.stations] snap_tolerance_m = " << snap_tol
@@ -2239,6 +2895,21 @@ int main(int argc, char *argv[])
          else { std::cout << "nearest copy only"; }
          std::cout << "; " << nown << " station file(s)\n";
       }
+      if (per_side)
+      {
+         side_stations = std::make_unique<FaultSideStationWriter>(op, st_list, snap, pu, out_dir,
+                                                                  prefix);
+         if (g_rank == 0)
+         {
+            std::cout << "  per-side stations (far = plus side, near = minus side), copies far/near:";
+            for (size_t s = 0; s < st_list.size(); s++)
+            {
+               std::cout << " " << st_list[s].name << " " << side_stations->NumCopies(s, 0) << "/"
+                         << side_stations->NumCopies(s, 1);
+            }
+            std::cout << "\n" << std::flush;
+         }
+      }
       if (g_rank == 0)
       {
          std::ofstream h(out_dir + "/" + prefix + "_station_conventions.txt");
@@ -2247,7 +2918,9 @@ int main(int argc, char *argv[])
            << "), up = (" << pu[0] << ", " << pu[1] << ", " << pu[2] << ")\n"
            << "#        shat = up x nhat / |up x nhat| = (" << ps[0] << ", " << ps[1] << ", " << ps[2]
            << "), dhat = shat x nhat = (" << pd[0] << ", " << pd[1] << ", " << pd[2] << ")\n"
-           << "# pin: orientation propagated, pinned by the reference normal; plus side = side nhat points into\n"
+           << "# pin: orientation propagated, pinned by the reference normal; plus side = the side nhat\n"
+           << "#      points away from (nhat is the plus side's outward normal, FaultOrientation S3),\n"
+           << "#      minus side = the side nhat points into\n"
            << "# columns: t slip1 slip2 V1 V2 tau1 tau2 sigma_n " << state_label
            << (tp_on ? " T p" : "") << "\n"
            << "#   slip1 = delta.dhat (SCEC v-slip)      slip2 = delta.shat (SCEC h-slip)\n"
@@ -2255,6 +2928,10 @@ int main(int argc, char *argv[])
            << "#   tau1  = -T.dhat    (SCEC v-shear-stress, Pa)  tau2 = -T.shat (SCEC h-shear-stress, Pa)\n"
            << "#   sigma_n = -T.nhat (compression positive, Pa); T = total traction on the face with normal nhat\n"
            << "#   delta = u(+) - u(-), V = d delta/dt (SCEC slip definition)\n"
+           << (per_side ? "# per-side files " + prefix + "_station_<name>_{farside,nearside}.dat: far = plus side, "
+                          "near = minus side;\n#   columns t h_disp h_vel h_stress v_disp v_vel v_stress n_disp n_vel "
+                          "n_stress, h = shat, v = dhat,\n#   n = -nhat (near side to far side); h_stress = tau2, "
+                          "v_stress = tau1, n_stress = -sigma_n\n" : std::string())
            << "#   " << state_label << (law.kind == LawKind::Aging
                                         ? ": log10 of theta = (Dc/V_0) exp((psi - f_0)/b), deck constants\n"
                                         : law.kind == LawKind::SlipWeakening
@@ -2271,6 +2948,71 @@ int main(int argc, char *argv[])
    else if (g_rank == 0)
    {
       std::cout << "  no [output.stations] table: no station files\n";
+   }
+   // off-fault stations (header, "Off-fault stations")
+   std::unique_ptr<BodyStationWriter> body_stations;
+   if (t_bst)
+   {
+      MFEM_VERIFY(t_bst->is_table() && t_bst->contains("file") && t_bst->contains("h_axis")
+                  && t_bst->contains("v_axis") && t_bst->contains("n_axis"),
+                  "[output.body_stations] needs file (the station CSV) and h_axis, v_axis, n_axis "
+                  "(unit vectors of the mesh frame); there are no defaults");
+      RefuseUnknownKeys(*t_bst, "[output.body_stations]", {"file", "h_axis", "v_axis", "n_axis"});
+      real_t axes[3][3];
+      const char *an[3] = {"h_axis", "v_axis", "n_axis"};
+      for (int a = 0; a < 3; a++)
+      {
+         const toml::value &v = t_bst->at(an[a]);
+         MFEM_VERIFY(v.is_array() && v.as_array().size() == 3, "[output.body_stations] " << an[a]
+                     << " must be a list of 3 numbers");
+         for (int d = 0; d < 3; d++)
+         {
+            const toml::value &x = v.as_array()[d];
+            MFEM_VERIFY(x.is_floating() || x.is_integer(), "[output.body_stations] " << an[a]
+                        << " must be a list of 3 numbers");
+            axes[a][d] = x.is_floating() ? real_t(x.as_floating()) : real_t(x.as_integer());
+         }
+      }
+      for (int a = 0; a < 3; a++)
+      {
+         for (int b = a; b < 3; b++)
+         {
+            const real_t dot = axes[a][0] * axes[b][0] + axes[a][1] * axes[b][1]
+                               + axes[a][2] * axes[b][2];
+            MFEM_VERIFY(std::fabs(dot - (a == b ? 1.0 : 0.0)) <= 1e-6, "[output.body_stations] "
+                        << an[a] << " . " << an[b] << " = " << dot << "; the three axes must be "
+                        "orthogonal unit vectors");
+         }
+      }
+      const std::string bst_path = TomlStr(t_bst, "file", "");
+      const std::vector<FaultStation> bst_list = ReadFaultStationFile(bst_path);
+      const NitscheMaterialSample &smp = op.Sample();
+      body_stations = std::make_unique<BodyStationWriter>(
+         op.Elasticity().GetFESpace(), bst_list, axes, out_dir, prefix, station_flush_every,
+         [&smp](int e, real_t &vp, real_t &vs, real_t &rho) {
+            const real_t lam = smp.LambdaGF()(e), mu = smp.MuGF()(e);
+            rho = smp.RhoGF()(e);
+            vp = std::sqrt((lam + 2.0 * mu) / rho);
+            vs = std::sqrt(mu / rho);
+         });
+      if (g_rank == 0)
+      {
+         int cmin = 1 << 30, cmax = 0;
+         for (int s = 0; s < body_stations->NumStations(); s++)
+         {
+            cmin = std::min(cmin, body_stations->NumCopies(s));
+            cmax = std::max(cmax, body_stations->NumCopies(s));
+         }
+         std::cout << "  off-fault stations from " << bst_path << " (" << bst_list.size()
+                   << "): displacement and velocity at the point, mean over the " << cmin
+                   << " to " << cmax << " element(s) holding it; files " << prefix
+                   << "_offfault_<name>.dat, rows every " << station_every << " step(s), written "
+                   "every " << station_flush_every << " row(s) and at the end\n";
+      }
+   }
+   else if (g_rank == 0)
+   {
+      std::cout << "  no [output.body_stations] table: no off-fault station files\n";
    }
    std::vector<DOFData> dofdata(no);
    // device fault (plan D3): host copies of the station DOFs only
@@ -2437,6 +3179,31 @@ int main(int argc, char *argv[])
                    << lts_ticks_fault << " tick(s): " << nsteps << " fault steps to t = "
                    << cfg.time.t_initial + lts_nsync * lts_ticks_sync * lts_asg.dt0 << " s\n";
       }
+      if (t_sw)
+      {
+         std::cout << "  slip weakening: D = " << (slip_measure_s == "path" ? "slip path"
+                                                    : "|d^n|")
+                   << "; tension " << tension_s << "\n";
+      }
+      if (forced_on)
+      {
+         std::cout << "  forced rupture: hypocenter (" << forced.hypocenter[0] << ", "
+                   << forced.hypocenter[1] << ", " << forced.hypocenter[2] << ") m, r_crit "
+                   << forced.r_crit << " m, Vs " << forced.vs << " m/s, t0 " << forced.t0
+                   << " s\n";
+      }
+      if (is_on)
+      {
+         std::cout << "  initial stress: "
+                   << (is_spec.kind == InitialStressSpec::Kind::LithostaticRatio
+                       ? "lithostatic_ratio" : "constant_tensor")
+                   << " (effective; replaces [stress])\n";
+      }
+      if (!rheo.Any())
+      {
+         std::cout << "  rheology: " << (rheo.present ? "table present, no model enabled"
+                                          : "linear elastic") << "\n";
+      }
       if (pc_on)
       {
          std::cout << "  Prakash-Clifton regularization of the law's normal stress: v_star = "
@@ -2496,10 +3263,30 @@ int main(int argc, char *argv[])
       }
       return 0;
    }
+   // off-fault stations (header): station frame shat, up, -nhat_ref
+   std::unique_ptr<OffFaultStationWriter> offst;
+   if (t_ofs)
+   {
+      MFEM_VERIFY(t_ofs->is_table() && t_ofs->contains("file") && t_ofs->as_table().size() == 1,
+                  "[output.off_fault_stations] takes one key, file (the station CSV)");
+      const std::string path = TomlStr(t_ofs, "file", "");
+      const std::vector<OffFaultStation> ofs = ReadOffFaultStations(path);
+      const real_t far[3] = {-pn[0], -pn[1], -pn[2]};
+      real_t upn[3] = {pu[0], pu[1], pu[2]};
+      Normalize(upn);
+      offst = std::make_unique<OffFaultStationWriter>(op.Elasticity().GetFESpace(), ofs, ps, upn, far);
+      offst->Open(out_dir, prefix, cfg.problem.tag);
+      if (g_rank == 0)
+      {
+         std::cout << "  off-fault stations from " << path << " (" << ofs.size()
+                   << "): <prefix>_offfault_<name>.dat, h along strike, v down, n toward -ref_normal\n";
+      }
+   }
    setup_timer.Mark("outputs");
    op.SetFastFaultKernels(fast_fault != 0);
    op.SetFusedStiffness(fused_spmv != 0);
    op.SetDenseBlocks(dense_blocks != 0);
+   op.SetDenseFillDirect(dense_fill == "direct");
    StageTimers stage_timers;
    StageTimers *timers = stage_timers_every > 0 ? &stage_timers : nullptr;
    // plan D2: on a GPU, kernels run asynchronously; wait for them at each
@@ -2541,7 +3328,58 @@ int main(int argc, char *argv[])
       fill_dofdata();
       if (station_avg) { station_avg->Apply(t, dofdata, tp_on ? &tp_cols : nullptr); }
       stations->WriteStep(t, dofdata);
+      if (side_stations) { side_stations->WriteStep(t, U, Ud, dofdata); }
    }
+   if (body_stations) { body_stations->WriteStep(t, U, Ud); }
+   if (offst) { offst->WriteStep(t, U, Ud); }
+#if defined(MFEM_USE_HDF5) && defined(MFEM_PARALLEL_HDF5)
+   // [rheology] output_dt_s: every diagnostic of the stack (Drucker-Prager:
+   // plastic strain and eta) as one scalar field on the rheology nodes, all
+   // snapshots in <output_dir>/rheology.vtkhdf
+   std::unique_ptr<L2_FECollection> rheo_fec;
+   std::unique_ptr<ParFiniteElementSpace> rheo_fes;
+   std::vector<std::unique_ptr<ParGridFunction>> rheo_gf;
+   std::unique_ptr<ParaViewHDFDataCollection> rheo_pv;
+   real_t rheo_next = 0.0;
+   auto rheo_write = [&](long step, real_t time)
+   {
+      std::vector<real_t> diag;
+      rheo_c->Diagnostics(diag);
+      const std::size_t N = rheo_gf.size();
+      for (std::size_t a = 0; a < N; a++)
+      {
+         ParGridFunction &g = *rheo_gf[a];
+         for (int k = 0; k < g.Size(); k++) { g(k) = diag[static_cast<std::size_t>(k) * N + a]; }
+      }
+      rheo_pv->SetCycle(static_cast<int>(step));
+      rheo_pv->SetTime(time);
+      rheo_pv->Save();
+      rheo_next += rheo.output_dt;
+   };
+   if (rheo_c && rheo.output_dt > 0.0)
+   {
+      // the scalar space of the rheology nodes: DOF e nr + i is node (e, i)
+      rheo_fec = std::make_unique<L2_FECollection>(p - 1, 3, BasisType::GaussLegendre);
+      rheo_fes = std::make_unique<ParFiniteElementSpace>(&pmesh, rheo_fec.get());
+      MFEM_VERIFY(rheo_fes->GetVSize() == rheo_c->Field().NumElements()
+                  * rheo_c->Field().NodesPerElement(), "rheology output: node count");
+      rheo_pv = std::make_unique<ParaViewHDFDataCollection>("rheology", &pmesh);
+      rheo_pv->SetPrefixPath(out_dir + "/");
+      rheo_pv->SetLevelsOfDetail(std::max(1, p - 1));
+      for (const std::string &nm : rheo_c->DiagnosticNames())
+      {
+         rheo_gf.push_back(std::make_unique<ParGridFunction>(rheo_fes.get()));
+         rheo_pv->RegisterField(nm, rheo_gf.back().get());
+      }
+      rheo_next = t;
+      rheo_write(0, t);
+      if (g_rank == 0)
+      {
+         std::cout << "  rheology output: " << out_dir << "/rheology.vtkhdf every "
+                   << rheo.output_dt << " s (" << rheo_gf.size() << " fields)\n";
+      }
+   }
+#endif
    real_t max_ratio_run = 0.0, max_V_run = 0.0, min_sig_run = 1e300, max_sig_run = -1e300;
    real_t min_pc_run = 1e300, max_pc_run = -1e300;
    // thermal pressurization, this rank: max T, max p, max -(sigma_eff - (p - p_ini))
@@ -2604,12 +3442,18 @@ int main(int argc, char *argv[])
          W_fric += 0.5 * (er.t - er_prev.t) * (er.P_fric + er_prev.P_fric);
          er_prev = er;
       }
-      if (stations && s % station_every == 0)
+      if (stations && (s % st_every == 0 || (st_last && s == nsteps)))
       {
          fill_dofdata();
          if (station_avg) { station_avg->Apply(t, dofdata, tp_on ? &tp_cols : nullptr); }
          stations->WriteStep(t, dofdata);
+         if (side_stations) { side_stations->WriteStep(t, U, Ud, dofdata); }
       }
+      if (body_stations && s % station_every == 0) { body_stations->WriteStep(t, U, Ud); }
+      if (offst && sync && s % station_every == 0) { offst->WriteStep(t, U, Ud); }
+#if defined(MFEM_USE_HDF5) && defined(MFEM_PARALLEL_HDF5)
+      if (rheo_pv && t >= rheo_next - 1e-9 * dt) { rheo_write(s, t); }
+#endif
       if (stations && !station_signal_seen && StationSignal() != 0)
       {
          // header, "Station output cost": this rank's files, from here every row
@@ -2667,6 +3511,8 @@ int main(int argc, char *argv[])
          MPI_Allreduce(MPI_IN_PLACE, tp_now, 3, MPITypeMap<real_t>::mpi_type, MPI_MAX,
                        MPI_COMM_WORLD);
       }
+      // collective: every rank reaches it with the same log_now
+      const real_t rheo_eta = (rheo_c && log_now) ? rheo_c->MaxDiagnostic("eta") : 0.0;
       if (g_rank == 0 && log_now)
       {
          const real_t wall = std::chrono::duration<real_t>(std::chrono::steady_clock::now() - wall0).count();
@@ -2686,6 +3532,12 @@ int main(int argc, char *argv[])
          {
             std::cout << "  E_h = " << er.E_h << "  sum rho = " << mon->SumRho()
                       << "  W_fric = " << W_fric;
+         }
+         if (rheo_c)
+         {
+            std::cout << "  rheology: " << rheo_c->YieldingNodes() << " yielding nodes, "
+                      << rheo_c->ActiveElements() << " active elements, max eta "
+                      << rheo_eta;
          }
          std::cout << "  wall " << wall << " s\n" << std::flush;
          (void)rho;
@@ -2711,6 +3563,9 @@ int main(int argc, char *argv[])
       PrintNitscheStageTimers(*timers, nsteps - 1, MPI_Wtime() - timed_loop0, "end of run");
    }
    if (stations) { stations->Close(); }
+   if (side_stations) { side_stations->Close(); }
+   if (body_stations) { body_stations->Close(); }
+   if (offst) { offst->Close(); }
    if (mon && g_rank == 0)
    {
       std::cout << std::setprecision(6) << "  energy balance: sum rho = " << mon->SumRho()
@@ -2779,6 +3634,7 @@ int main(int argc, char *argv[])
          if (op.DenseBlocksActive())
          {
             std::cout << " (" << op.DenseBlockBytes() / 1e6 << " MB over all ranks)";
+            if (op.DenseFillDirect()) { std::cout << ", filled direct (no assembled K)"; }
          }
          std::cout << ", matrix-free " << (op.MatrixFreeActive() ? "on" : "off");
          if (op.MatrixFreeActive())
@@ -2861,6 +3717,15 @@ int main(int argc, char *argv[])
                     MPI_COMM_WORLD);
    }
    const real_t wall = std::chrono::duration<real_t>(std::chrono::steady_clock::now() - wall0).count();
+   if (tension_s == "zero_strength")
+   {
+      long long nfl = op.TensionFloorCount();
+      MPI_Allreduce(MPI_IN_PLACE, &nfl, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+      if (g_rank == 0)
+      {
+         std::cout << "  tension floor: " << nfl << " DOF-steps with sigma_n < 0 (law saw 0)\n";
+      }
+   }
    if (g_rank == 0)
    {
       std::cout << std::setprecision(6) << "=== done: " << nsteps << " steps, t = " << t

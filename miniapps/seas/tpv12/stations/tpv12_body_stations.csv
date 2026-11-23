@@ -1,0 +1,16 @@
+# SCEC TPV12 off-fault stations, written by scripts/make_fault_stations.py; do not edit by hand.
+# Global frame of the mesh: X along strike, Y fault normal (+ = far side), Z up (m).
+# Fault trace on the X axis, 60 deg dip toward +Y (hanging wall = far side = +Y); a station n km off the fault at depth d km sits at Y = n + d cot 60.
+name,x,y,z
+body-030st000dp000,0,-3000,0
+body-020st000dp000,0,-2000,0
+body-010st000dp000,0,-1000,0
+body010st000dp000,0,1000,0
+body020st000dp000,0,2000,0
+body030st000dp000,0,3000,0
+body-010st000dp003,0,-826.794919,-300
+body-005st000dp003,0,-326.794919,-300
+body005st000dp003,0,673.205081,-300
+body010st000dp003,0,1173.205081,-300
+body-030st120dp000,12000,-3000,0
+body030st120dp000,12000,3000,0
