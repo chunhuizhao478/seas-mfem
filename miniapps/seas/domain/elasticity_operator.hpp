@@ -450,6 +450,12 @@ public:
    /// NitscheLtsRun adds M_beta to each element's own block and the load to
    /// the element's own cluster, piece F-c).
    Coefficient *FiniteWidthBeta() const { return beta_coef_.get(); }
+   /// The volume integrals' moduli when they differ from the face terms'
+   /// ([velocity] kind = "grid", sampling = "quadrature": the grid at every
+   /// quadrature point); null otherwise (the volume uses Lambda / Mu).
+   /// NitscheLtsRun's blocks take them so that K matches AssembleStiffness.
+   Coefficient *VolumeLambda() const { return vol_lambda_ptr_; }
+   Coefficient *VolumeMu() const { return vol_mu_ptr_; }
    real_t SubstrateTimeOffset() const { return substrate_t_off_ ? *substrate_t_off_ : 0.0; }
    /// rhs += (t_off + time) M_beta U_pl1 (nothing without SetFiniteWidth).
    void AddSubstrateLoad(Vector &rhs, real_t time) const

@@ -26,6 +26,7 @@
 #include "../../cycle/grid_material.hpp"
 #include "../../domain/nitsche_material_sample.hpp"
 #include "../../domain/nitsche_mass.hpp"
+#include "../../solver/nitsche_lts_run.hpp"
 
 #include <hdf5.h>
 #include <sys/wait.h>
@@ -335,6 +336,52 @@ int main(int argc, char **argv)
       const double e_x = (Lam(xc, yc) + 2.0 * Mu(xc, yc)) * area;
       std::cout << "    u^T K u = " << e_h << ", exact " << e_x << ", rel " << std::abs(e_h / e_x - 1) << "\n";
       CHECK(std::abs(e_h / e_x - 1) < 1e-12, "u^T K_vol u = int (lambda + 2 mu) dx for u = (x, 0)");
+   }
+
+   std::cout << "T7 local time stepping blocks: the volume moduli per quadrature point\n";
+   {
+      // NitscheLtsBlocks::Build with the operator's volume moduli (H4: the
+      // LTS run took the per-element moduli for K, so K_LTS != K_QD and the
+      // hand-back jumped).  The face terms take lam_e, mu_e in both builds,
+      // so y(vol) - y(no vol) = (K_vol(lambda(x), mu(x)) - K_vol(lam_e, mu_e)) u.
+      L2_FECollection fec(1, 2);
+      ParFiniteElementSpace fes(&pmesh, &fec, 2);
+      pmesh.ExchangeFaceNbrData();
+      ConstantCoefficient lam_e(3.0e10), mu_e(3.2e10);
+      Array<int> dir(pmesh.bdr_attributes.Max()); dir = 0;
+      std::vector<int> cl(pmesh.GetNE(), 0), cl_nbr(pmesh.GetNFaceNeighborElements(), 0);
+      ParGridFunction u(&fes);
+      VectorFunctionCoefficient uc(2, [](const Vector &X, Vector &U)
+      { U(0) = 1e-4 * X(0) + 3e-5 * X(1) + 1e-8 * X(0) * X(1); U(1) = -2e-5 * X(0) + 5e-9 * X(1) * X(1); });
+      u.ProjectCoefficient(uc);
+      auto apply = [&](Coefficient *vl, Coefficient *vm)
+      {
+         NitscheLtsBlocks b;
+         b.Build(fes, lam_e, mu_e, nullptr, nullptr, dir, 10.0, cl, cl_nbr, 1, nullptr, nullptr, vl, vm);
+         Vector y(fes.GetVSize()); y = 0.0;
+         b.MultInterior(0, u, nullptr, y);
+         b.AddShared(0, y);
+         return y;
+      };
+      Vector y_pw = apply(mq.lambda_coef, mq.mu_coef), y_e = apply(nullptr, nullptr);
+      auto kvol = [&](Coefficient &l, Coefficient &m)
+      {
+         ParBilinearForm a(&fes);
+         a.AddDomainIntegrator(new ElasticityIntegrator(l, m));
+         a.Assemble(); a.Finalize();
+         Vector y(fes.GetVSize()); a.Mult(u, y); return y;
+      };
+      Vector d_blk(y_pw); d_blk -= y_e;
+      Vector d_ref = kvol(*mq.lambda_coef, *mq.mu_coef); d_ref -= kvol(lam_e, mu_e);
+      Vector r(d_blk); r -= d_ref;
+      // round-off scale: |K u| (the blocks sum in their own order)
+      const double rel = r.Normlinf() / y_pw.Normlinf();
+      std::cout << "    |K u|_inf " << y_pw.Normlinf() << ", |dK u|_inf " << d_ref.Normlinf()
+                << ", blocks - assembled " << r.Normlinf() << " (rel to |K u| " << rel << ")\n";
+      CHECK(d_ref.Normlinf() > 1e-4 * y_pw.Normlinf() && rel < 1e-12,
+            "LTS blocks with the volume moduli: K_vol per quadrature point, as AssembleStiffness");
+      Vector y_e2 = apply(nullptr, nullptr); y_e2 -= y_e;
+      CHECK(y_e2.Normlinf() == 0.0, "LTS blocks without volume moduli: unchanged (lam_e, mu_e)");
    }
 
    std::remove(grid.c_str()); std::remove(grid_u.c_str());

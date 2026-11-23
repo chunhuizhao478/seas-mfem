@@ -314,10 +314,13 @@ public:
    void Build(ParFiniteElementSpace &fes, Coefficient &lam, Coefficient &mu, Coefficient *klam,
               Coefficient *kmu, const Array<int> &dir_marker, real_t penalty,
               const std::vector<int> &cl, const std::vector<int> &cl_nbr, int nc,
-              const PmlBand *band = nullptr, Coefficient *beta = nullptr)
+              const PmlBand *band = nullptr, Coefficient *beta = nullptr,
+              Coefficient *vol_lam = nullptr, Coefficient *vol_mu = nullptr)
    {
       MFEM_VERIFY((klam == nullptr) == (kmu == nullptr), "NitscheLtsBlocks: give both "
                   "Kelvin-Voigt moduli or neither");
+      MFEM_VERIFY((vol_lam == nullptr) == (vol_mu == nullptr), "NitscheLtsBlocks: give both "
+                  "volume moduli or neither");
       ParMesh &pm = *fes.GetParMesh();
       pm.ExchangeFaceNbrData();
       fes.ExchangeFaceNbrData();
@@ -483,7 +486,10 @@ public:
       // the blocks: the integrators of AssembleStiffness, split by owner
       // (dimension of the mesh: 2D in-plane design rev 3, phase C)
       const int dim = pm.Dimension();
-      ElasticityIntegrator vol(lam, mu);
+      // the volume integrals: the operator's volume moduli when it has them
+      // (grid material per quadrature point; ElasticityDomainOperator::
+      // VolumeLambda), as AssembleStiffness; the face terms keep lam, mu
+      ElasticityIntegrator vol(vol_lam ? *vol_lam : lam, vol_mu ? *vol_mu : mu);
       DGElasticityIPCombinedIntegrator face(lam, mu, dim, -1.0, penalty);   // SIPG: epsilon -1
       if (band) { face.SetPmlBand(band, /*penalty_only=*/true); }   // K_p
       std::unique_ptr<ElasticityIntegrator> kvol;
@@ -1036,7 +1042,8 @@ public:
       blocks_.Build(fes, sample.Lambda(), sample.Mu(), op.KelvinVoigtLambda(),
                     op.KelvinVoigtMu(), dir, penalty, cl, cl_nbr, nc_,
                     op.Pml() ? op.Elasticity().GetPmlBand() : nullptr,
-                    op.Elasticity().FiniteWidthBeta());
+                    op.Elasticity().FiniteWidthBeta(),
+                    op.Elasticity().VolumeLambda(), op.Elasticity().VolumeMu());
       fw_ = op.Elasticity().HasFiniteWidth();
       kv_ = blocks_.NumMatrices() == 2;
       nb_ = blocks_.BlockSize();
