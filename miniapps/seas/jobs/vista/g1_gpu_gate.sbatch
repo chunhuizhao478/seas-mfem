@@ -41,7 +41,7 @@ TOL="$(python3 -c "import json; print(json.load(open('${GOLD}/floor.json'))['tol
 mkdir -p "${OUT}"
 g0_provenance "${OUT}"
 echo "=== ${TAG} on ${NP} GPU(s): TOL ${TOL}, start $(date -u +%T) ==="
-ibrun -n "${NP}" ./seas_bp5_full --mesh "${G0_MESH_PROD}" "${G0_V63_FLAGS[@]}" \
+ibrun -n "${NP}" ./seas_bp5_full --mesh "${G0_MESH_PROD}" "${G0_V63_FLAGS[@]}" --qd-operators loops \
       --order 1 --device cuda \
       --max-steps 50 --write-every-step --checkpoint-interval 0 \
       --output-dir "${OUT}" --output-prefix "${PFX}" \

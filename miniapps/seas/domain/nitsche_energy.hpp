@@ -94,7 +94,7 @@ public:
       Vector MUd(Ud.Size()), MA(A.Size()), KU, Gd, CUd, F;
       mass_->SpMat().Mult(Ud, MUd);
       mass_->SpMat().Mult(A, MA);
-      E_.ApplyStiffness(U, KU);
+      op_.ApplyStiffness(U, KU);   // matrix-free with SetMatrixFree (plan D2)
       op_.SlipLoad(op_.Slip(), Gd);
       op_.ApplyDamping(Ud, CUd);
       E_.AssembleDirichletOnlyRHS(F, t);

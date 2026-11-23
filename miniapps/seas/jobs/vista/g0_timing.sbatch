@@ -42,7 +42,7 @@ PFX="g0_timing_p${ORDER}"
 mkdir -p "${OUT}"
 g0_provenance "${OUT}"
 
-ibrun ./seas_bp5_full --mesh "${G0_MESH_PROD}" "${G0_V63_FLAGS[@]}" \
+ibrun ./seas_bp5_full --mesh "${G0_MESH_PROD}" "${G0_V63_FLAGS[@]}" --qd-operators loops \
       --order "${ORDER}" --max-steps 1000 --stage-timers 100 \
       --checkpoint-interval 250 \
       --output-dir "${OUT}" --output-prefix "${PFX}" > "${OUT}/run.log" 2>&1

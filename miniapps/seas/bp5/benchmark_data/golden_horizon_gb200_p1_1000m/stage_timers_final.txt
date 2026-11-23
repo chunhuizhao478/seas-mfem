@@ -1,0 +1,16 @@
+[STAGE-TIMERS] end of run: 313950 accepted steps, 1968895 stages, loop wall 10454.860 s (3.3301e-02 s/step), 1 ranks
+[STAGE-TIMERS] matrix_setup (assembly + solver setup, once): max 19.795 s, mean 19.795 s
+[STAGE-TIMERS] part                     calls         max s        mean s       ms/call        s/step   % loop
+[STAGE-TIMERS] slip_expand            3937790    1.0040e+02    1.0040e+02    2.5496e-02    3.1979e-04     0.96
+[STAGE-TIMERS] slip_rhs                    62    6.8917e-03    6.8917e-03    1.1116e-01    2.1951e-08     0.00
+[STAGE-TIMERS] dirichlet_rhs               62    1.3073e-02    1.3073e-02    2.1085e-01    4.1639e-08     0.00
+[STAGE-TIMERS] solve                  1968957    1.0012e+04    1.0012e+04    5.0851e+00    3.1892e-02    95.77
+[STAGE-TIMERS] solve_post                  62    2.4801e-03    2.4801e-03    4.0002e-02    7.8998e-09     0.00
+[STAGE-TIMERS] traction               1968957    2.2644e+01    2.2644e+01    1.1500e-02    7.2125e-05     0.22
+[STAGE-TIMERS] friction               1968895    9.3883e+01    9.3883e+01    4.7683e-02    2.9904e-04     0.90
+[STAGE-TIMERS] stage_total            1968895    1.0247e+04    1.0247e+04    5.2044e+00    3.2639e-02    98.01
+[STAGE-TIMERS] monitor_step            313951    8.3808e+00    8.3808e+00    2.6694e-02    2.6695e-05     0.08
+[STAGE-TIMERS] monitor_output          313951    3.6807e+01    3.6807e+01    1.1724e-01    1.1724e-04     0.35
+[STAGE-TIMERS] monitor_checkpoint          63    1.8308e+01    1.8308e+01    2.9060e+02    5.8313e-05     0.18
+[STAGE-TIMERS] monitor_total           313951    6.3495e+01    6.3495e+01    2.0225e-01    2.0225e-04     0.61
+[STAGE-TIMERS] ts_other                313950    1.4447e+02    1.4447e+02    4.6016e-01    4.6016e-04     1.38

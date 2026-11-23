@@ -76,8 +76,11 @@
 //                              t*T_D, built once with blocked solves; no
 //                              volume solve per stage.  Needs --qd-operators
 //                              matrix, a linear elastic bulk and loading
-//                              g(t) = t*g_hat; CPU only.  G is dense,
-//                              (2|3)*N_f x 2*N_f (37.5 GB for production p=1)
+//                              g(t) = t*g_hat.  G is dense, (2|3)*N_f x
+//                              2*N_f (37.5 GB for production p=1).  With
+//                              --device (GPU plan G3c) G is read from
+//                              --qd-green-cache, written by a CPU run, and
+//                              kept on the device (cuBLAS on a GPU)
 //   --qd-green-block M         Unit slips per blocked solve (default 64)
 //   --qd-green-cache FILE      Read G from FILE if it exists, else build it
 //                              and write FILE (any rank count)
@@ -97,6 +100,9 @@
 //                              --qd-green-cache if given) and write FILE
 //   --qd-green-compress-mem G  GiB per node for blocks being compressed or
 //                              read at once (default 64)
+//   --qd-green-gpu-mpi         With --device and more than one rank: give
+//                              MPI device pointers (CUDA-aware MPI) instead
+//                              of staging through the host (default off)
 
 #include "mfem.hpp"
 #ifdef MFEM_USE_PETSC
@@ -120,6 +126,7 @@
 #include "../../io/paraview_output.hpp"
 #include "../../io/hdf5_error_filter.hpp"   // Suppress dual-HDF5 noise on Frontera
 #include "../../common/mpi_context.hpp"
+#include "../../common/seas_device.hpp"
 #include "../../trace/face_trace_logger.hpp"
 #include "../../config/bp5_mesh_utils.hpp"
 
@@ -1369,6 +1376,7 @@ int main(int argc, char *argv[])
       {
          qd_green_config.compress_mem_gib = std::atof(argv[++i]);
       }
+      if (arg == "--qd-green-gpu-mpi") { qd_green_config.gpu_mpi = true; }
       if (arg == "--device-id" && i + 1 < argc)
       {
          device_id_override = std::atoi(argv[++i]);
@@ -1589,31 +1597,9 @@ int main(int argc, char *argv[])
    // MFEM device (GPU plan G1).  Configured before PETSc is initialized,
    // because MFEMInitializePetsc picks PETSc's GPU from it, and before any
    // mesh, space or vector.  It lives to the end of main: its destructor
-   // finalizes hypre.
-   int device_id = device_id_override;
-   if (device_id < 0)
-   {
-      device_id = 0;
-#if defined(MFEM_USE_CUDA) || defined(MFEM_USE_HIP)
-      // One GPU per rank on a node: node-local rank modulo the visible GPUs.
-      // Counted only for a GPU backend: a GPU build may run --device cpu on
-      // a node without a GPU, where the count aborts.
-      const bool gpu_backend = device_str.find("cuda") != std::string::npos ||
-                               device_str.find("hip") != std::string::npos;
-      const int num_gpu = gpu_backend ? Device::GetDeviceCount() : 0;
-      if (num_gpu > 1)
-      {
-         MPI_Comm node_comm;
-         MPI_Comm_split_type(mpi.GetComm(), MPI_COMM_TYPE_SHARED, 0,
-                             MPI_INFO_NULL, &node_comm);
-         int node_rank = 0;
-         MPI_Comm_rank(node_comm, &node_rank);
-         MPI_Comm_free(&node_comm);
-         device_id = node_rank % num_gpu;
-      }
-#endif
-   }
-   Device device(device_str, device_id);
+   // finalizes hypre.  The GPU of each rank: common/seas_device.hpp.
+   Device device(device_str,
+                 SelectDeviceId(device_str, device_id_override, mpi.GetComm()));
    if (mpi.IsRoot()) { device.Print(); }
    // GPU plan G4: on a device the fault RHS writes its rate there, and only
    // PETSc TS keeps the time-stepping vectors there too; the in-house RK45

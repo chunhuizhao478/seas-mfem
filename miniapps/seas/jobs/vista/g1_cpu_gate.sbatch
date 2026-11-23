@@ -70,7 +70,7 @@ for CASE in 1:cpu 2:cpu 4:cpu 8:cpu 8:debug; do
    mkdir -p "${OUT}"
    echo "=== ${TAG}: TOL ${TOL}, start $(date -u +%T) ==="
    ibrun -n "${NP}" -o 0 ./seas_bp5_full --mesh "${G0_MESH_PROD}" \
-         "${G0_V63_FLAGS[@]}" --order 1 --device "${DEVICE}" \
+         "${G0_V63_FLAGS[@]}" --qd-operators loops --order 1 --device "${DEVICE}" \
          --max-steps 50 --write-every-step --checkpoint-interval 0 \
          --output-dir "${OUT}" --output-prefix "${PFX}" \
          --ref-dir "${GOLD}/run_a" --ref-prefix "${GPFX}" \

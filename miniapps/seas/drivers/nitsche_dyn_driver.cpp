@@ -29,6 +29,59 @@
 //   <prefix>_rupture_time_r<rank>.csv  first |V| > 1 mm/s per fault DOF;
 //   stdout log every --log-every steps.
 //
+// Measurement flags (GPU dynamic-rupture plan D0, Chunhui Zhao, 2026-10-19):
+//   --stage-timers N   print the time split of a step (StageTimers::Dyn*)
+//                      every N steps and at the end; step 1, which also
+//                      assembles the operators, is left out.  0 = off.  The
+//                      timers only read clocks: the results are the same bits.
+//   --max-steps N      stop after N steps (before --tfinal if that comes
+//                      later); 0 = no limit.  For the 200-step gates.
+//   --perturb-initial-state SEED  test only: scale the projected prestress
+//                      by 1 + 1e-15 r (NitscheWaveOperator::PerturbPrestress)
+//                      before the initial fault state is seeded, for the
+//                      round-off floor of a golden.  -1 = off.
+//
+// Device (GPU dynamic-rupture plan D1):
+//   --device STR       mfem::Device string: cpu (default), cuda, debug, or
+//                      any other the build supports, made right after MPI
+//                      starts.  U, Udot and the acceleration live on the
+//                      device, so the central-difference updates run there;
+//                      everything else still runs on the host and syncs
+//                      through HostRead/HostWrite.  debug keeps a separate
+//                      "device" copy on the CPU and traps a host access
+//                      that misses a sync; it gives the cpu bits.  It maps
+//                      every allocation on its own, and a rank peaks at about
+//                      one Linux memory map per tet it holds, so run it on
+//                      enough ranks: past vm.max_map_count (65530 by default)
+//                      the exit fails with "Dealloc error!".
+//   --device-id N      GPU for this rank (default: node-local rank modulo
+//                      the number of visible GPUs; common/seas_device.hpp).
+//
+// Matrix-free product (GPU dynamic-rupture plan D2):
+//   --matrix-free 0|1  K u + K_eta v from the matrix-free kernels of
+//                      NitscheSipgOperator instead of the dense blocks, the
+//                      fused sweep or the CSR products (default 0).  With 1
+//                      K and K_eta are never assembled, and the energy
+//                      monitor uses the same product.  Tetrahedra of order 1
+//                      or 2 only; the operator refuses anything else.
+//   --mf-layout L      its kernel layout: auto (default: on a device the
+//                      element layout at p = 1 and team2 at p = 2, the
+//                      faster ones of the D2 bench; on the host the element
+//                      layout), element, team2, team4 or team8 (a team of
+//                      threads per element, 2, 4 or 8 elements per block).
+//   With a device (cuda, or debug to check it on the CPU), --matrix-free 1
+//   also runs the rest of the step there: the slip loads, the dashpot and the
+//   mass inverse (the device step, NitscheWaveOperator).  The fault stays on
+//   the host and reads the values of U and Udot it needs, gathered from the
+//   device each step.  It needs --fast-fault 1 and refuses decks with
+//   Dirichlet faces.
+//   --device-fault 0|1 (GPU plan D3) with 1 the fault (boxes 3-11) runs on
+//                      the device too, and the driver's rupture time with
+//                      it; the station rows copy only the station DOFs to
+//                      the host (default 0: the host fault above).  Needs a
+//                      device and --matrix-free 1; slip weakening and the
+//                      rate-and-state laws (aging, slip, SRW) only.
+//
 // Station copies (Chunhui Zhao, 2026-10-14): a station sits on a fault point
 // that carries one DOF per adjacent fault face (DG copies).  With
 // --station-copies average (default) the station files hold the face-area-
@@ -221,6 +274,7 @@
 #include "../dynamic/fault_station_file.hpp"
 #include "../dynamic/station_copy_average.hpp"
 #include "../dynamic/lts_partition.hpp"   // METIS with element weights (plan item 6)
+#include "../common/seas_device.hpp"
 #include "../dynamic/mesh_parts.hpp"      // --mesh-setup rank0 (header, "Mesh setup")
 #include "../solver/nitsche_lts_setup.hpp"   // --lts-report (plan item 7, P0)
 #include "../solver/nitsche_lts_run.hpp"     // --lts rate2 (plan item 7, P3/P4)
@@ -244,6 +298,9 @@
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
+#ifdef __linux__
+#include <sched.h>   // sched_getcpu (the per-rank core line, GPU plan D5)
+#endif
 #include <utility>
 #include <vector>
 
@@ -613,6 +670,9 @@ public:
       const Vector &d = op_.Slip(), &V = op_.SlipRate(), &psi = op_.State();
       const Vector &Fr = op_.FaultFrames();
       Vector Xs = op_.LastShear(), sg = op_.LastSigmaEff();
+      // with the device fault (plan D3) a copy may be valid on the device only
+      Xs.HostReadWrite();
+      sg.HostReadWrite();
       const bool have_x = Xs.Size() == 2 * no;
       if (!have_x)
       {
@@ -718,6 +778,90 @@ private:
 };
 #endif // MFEM_USE_HDF5
 
+/// --stage-timers: print the time split of the steps timed so far.
+/// Collective: every rank calls it at the same step.  "max" is the slowest
+/// rank, "mean" the average over ranks; per-call and per-step figures use the
+/// slowest rank.  Derived rows (computed per rank, then reduced):
+/// fault_closure = fault_advance - fault_traction - fault_reduce (boxes 3-4
+/// and 9-11), accel_other = acceleration minus its timed parts (vector
+/// sums), newmark = step - fault_advance - acceleration (the solver's
+/// predictor and corrector), loop_other = loop - step - output.
+void PrintNitscheStageTimers(const StageTimers &timers, long steps, double loop_sec,
+                             const char *when)
+{
+   using ST = StageTimers;
+   const int parts[] = {ST::DynStep, ST::DynFaultAdvance, ST::DynFaultTraction,
+                        ST::DynFaultReduce, ST::DynAcceleration, ST::DynStiffness,
+                        ST::DynHaloWait, ST::DynSlipLoad, ST::DynDirichletRHS,
+                        ST::DynDamping, ST::DynMassInverse, ST::DynOutput};
+   const int np = sizeof(parts) / sizeof(parts[0]);
+   const int n = np + 4;   // + fault_closure, accel_other, newmark, loop_other
+   auto sec_of = [&](int part) { return timers.Seconds(part); };
+   std::vector<double> sec(n), sec_max(n), sec_sum(n);
+   std::vector<long long> calls(n, 0), calls_max(n);
+   for (int i = 0; i < np; i++)
+   {
+      sec[i] = sec_of(parts[i]);
+      calls[i] = timers.Calls(parts[i]);
+   }
+   sec[np] = sec_of(ST::DynFaultAdvance) - sec_of(ST::DynFaultTraction)
+             - sec_of(ST::DynFaultReduce);
+   calls[np] = timers.Calls(ST::DynFaultAdvance);
+   sec[np + 1] = sec_of(ST::DynAcceleration) - sec_of(ST::DynStiffness)
+                 - sec_of(ST::DynSlipLoad) - sec_of(ST::DynDirichletRHS)
+                 - sec_of(ST::DynDamping) - sec_of(ST::DynMassInverse);
+   calls[np + 1] = timers.Calls(ST::DynAcceleration);
+   sec[np + 2] = sec_of(ST::DynStep) - sec_of(ST::DynFaultAdvance)
+                 - sec_of(ST::DynAcceleration);
+   calls[np + 2] = timers.Calls(ST::DynStep);
+   sec[np + 3] = loop_sec - sec_of(ST::DynStep) - sec_of(ST::DynOutput);
+   calls[np + 3] = steps;
+   double loop_max = 0.0;
+   MPI_Reduce(sec.data(), sec_max.data(), n, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+   MPI_Reduce(sec.data(), sec_sum.data(), n, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+   MPI_Reduce(calls.data(), calls_max.data(), n, MPI_LONG_LONG, MPI_MAX, 0, MPI_COMM_WORLD);
+   MPI_Reduce(&loop_sec, &loop_max, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+   if (g_rank != 0) { return; }
+
+   const int nranks = Mpi::WorldSize();
+   const long st = std::max(steps, 1L);
+   std::ostringstream o;
+   o << "\n[STAGE-TIMERS] " << when << ": " << steps << " steps after step 1, loop wall "
+     << std::fixed << std::setprecision(3) << loop_max << " s (" << std::scientific
+     << std::setprecision(4) << loop_max / st << " s/step), " << nranks << " ranks\n";
+   o << "[STAGE-TIMERS] " << std::left << std::setw(20) << "part" << std::right
+     << std::setw(10) << "calls" << std::setw(14) << "max s" << std::setw(14) << "mean s"
+     << std::setw(14) << "ms/call" << std::setw(14) << "ms/step" << std::setw(9) << "% loop"
+     << "\n";
+   auto row = [&](const char *name, int i, int indent)
+   {
+      const double per_call = calls_max[i] > 0 ? 1e3 * sec_max[i] / calls_max[i] : 0.0;
+      o << "[STAGE-TIMERS] " << std::string(indent, ' ') << std::left
+        << std::setw(20 - indent) << name << std::right << std::setw(10) << calls_max[i]
+        << std::scientific << std::setprecision(4) << std::setw(14) << sec_max[i]
+        << std::setw(14) << sec_sum[i] / nranks << std::setw(14) << per_call
+        << std::setw(14) << 1e3 * sec_max[i] / st << std::fixed << std::setprecision(2)
+        << std::setw(9) << (loop_max > 0.0 ? 100.0 * sec_max[i] / loop_max : 0.0) << "\n";
+   };
+   row(ST::Name(ST::DynStep), 0, 0);
+   row(ST::Name(ST::DynFaultAdvance), 1, 2);
+   row(ST::Name(ST::DynFaultTraction), 2, 4);
+   row("fault_closure", np, 4);
+   row(ST::Name(ST::DynFaultReduce), 3, 4);
+   row(ST::Name(ST::DynAcceleration), 4, 2);
+   row(ST::Name(ST::DynStiffness), 5, 4);
+   row(ST::Name(ST::DynHaloWait), 6, 6);
+   row(ST::Name(ST::DynSlipLoad), 7, 4);
+   row(ST::Name(ST::DynDirichletRHS), 8, 4);
+   row(ST::Name(ST::DynDamping), 9, 4);
+   row(ST::Name(ST::DynMassInverse), 10, 4);
+   row("accel_other", np + 1, 4);
+   row("newmark", np + 2, 2);
+   row(ST::Name(ST::DynOutput), 11, 0);
+   row("loop_other", np + 3, 0);
+   std::cout << o.str() << std::flush;
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -727,6 +871,42 @@ int main(int argc, char *argv[])
    g_rank = Mpi::WorldRank();
    const int nranks = Mpi::WorldSize();
    auto wall0 = std::chrono::steady_clock::now();
+   // MFEM device (plan D1), before any mesh, space or vector; it lives to
+   // the end of main
+   const std::string device_str = ArgStr(argc, argv, "--device", "cpu");
+   const int device_id_override = ArgInt(argc, argv, "--device-id", -1);
+   MFEM_VERIFY(device_id_override >= -1, "--device-id N needs N >= 0");
+   Device device(device_str, SelectDeviceId(device_str, device_id_override, MPI_COMM_WORLD));
+#if defined(HYPRE_USING_GPU) && (MFEM_HYPRE_VERSION >= 23100)
+   // Plan D1: hypre stays on the host (the Device put it on the GPU).  The
+   // host code reads K's CSR (dense blocks) and writes the vectors it hands
+   // to hypre, so a device copy of either would go stale.
+   HYPRE_SetMemoryLocation(HYPRE_MEMORY_HOST);
+   HYPRE_SetExecutionPolicy(HYPRE_EXEC_HOST);
+#endif
+   MFEM_VERIFY(!HypreUsingGPU(), "plan D1 keeps hypre on the host, which this "
+               "GPU hypre cannot (it needs hypre >= 2.31)");
+   if (g_rank == 0) { device.Print(); }
+   if (Device::Allows(Backend::CUDA_MASK | Backend::HIP_MASK))
+   {
+      // GPU plan D5: which GPU and which CPU core each rank got
+      int mine[2] = {Device::GetId(), -1};
+#ifdef __linux__
+      mine[1] = sched_getcpu();
+#endif
+      std::vector<int> all(2 * nranks);
+      MPI_Gather(mine, 2, MPI_INT, all.data(), 2, MPI_INT, 0, MPI_COMM_WORLD);
+      if (g_rank == 0)
+      {
+         std::ostringstream o;
+         o << "GPU and CPU core per rank (rank:gpu/core):";
+         for (int r = 0; r < nranks; r++)
+         {
+            o << " " << r << ":" << all[2 * r] << "/" << all[2 * r + 1];
+         }
+         std::cout << o.str() << "\n";
+      }
+   }
    SetupTimer setup_timer(wall0);
 
    const std::string cfg_path = ArgStr(argc, argv, "--config", "");
@@ -741,6 +921,10 @@ int main(int argc, char *argv[])
                       " [--station-flush-every n] [--fast-fault 0|1]"
                       " [--fused-spmv 0|1] [--dense-blocks 0|1] [--fault-weight w]"
                       " [--fast-fault-output 0|1] [--paraview-fault-deflate-level n|none]"
+                      " [--stage-timers n] [--max-steps n]"
+                      " [--perturb-initial-state seed] [--device cpu|cuda|debug]"
+                      " [--device-id n] [--matrix-free 0|1] [--device-fault 0|1]"
+                      " [--mf-layout auto|element|team2|team4|team8]"
                       " [--lts-report 0|1]"
                       " [--lts-report-cap n] [--lts-report-ranks a,b,...]"
                       " [--lts off|rate2] [--lts-cap n] [--lts-fault-buffer n]"
@@ -786,6 +970,38 @@ int main(int argc, char *argv[])
    // blocks; takes precedence over --fused-spmv, which applies when it is 0
    const int dense_blocks = ArgInt(argc, argv, "--dense-blocks", 1);
    const int fast_fault_output = ArgInt(argc, argv, "--fast-fault-output", 1);
+   // GPU dynamic-rupture plan D2 (header): the matrix-free product and its
+   // kernel layout
+   const int matrix_free = ArgInt(argc, argv, "--matrix-free", 0);
+   const std::string mf_layout_s = ArgStr(argc, argv, "--mf-layout", "auto");
+   MFEM_VERIFY(matrix_free == 0 || matrix_free == 1, "--matrix-free " << matrix_free
+               << ": expected 0 or 1");
+   // GPU plan D3 (header): the fault on the device
+   const int device_fault = ArgInt(argc, argv, "--device-fault", 0);
+   MFEM_VERIFY(device_fault == 0 || device_fault == 1, "--device-fault " << device_fault
+               << ": expected 0 or 1");
+   NitscheSipgOperator::Layout mf_layout = NitscheSipgOperator::kAuto;
+   int mf_batch = 2;
+   if (mf_layout_s == "element") { mf_layout = NitscheSipgOperator::kElement; }
+   else if (mf_layout_s == "team2" || mf_layout_s == "team4" || mf_layout_s == "team8")
+   {
+      mf_layout = NitscheSipgOperator::kTeam;
+      mf_batch = mf_layout_s[4] - '0';
+   }
+   else
+   {
+      MFEM_VERIFY(mf_layout_s == "auto", "--mf-layout " << mf_layout_s
+                  << ": expected auto, element, team2, team4 or team8");
+   }
+   // GPU dynamic-rupture plan D0 (header): step-part timers, a step limit,
+   // and the test-only round-off perturbation of the prestress
+   const int stage_timers_every = ArgInt(argc, argv, "--stage-timers", 0);
+   const int max_steps = ArgInt(argc, argv, "--max-steps", 0);
+   const long long perturb_seed = std::atoll(
+      ArgStr(argc, argv, "--perturb-initial-state", "-1").c_str());
+   MFEM_VERIFY(stage_timers_every >= 0, "--stage-timers N needs N >= 0");
+   MFEM_VERIFY(max_steps >= 0, "--max-steps N needs N >= 0");
+   MFEM_VERIFY(perturb_seed >= -1, "--perturb-initial-state SEED needs SEED >= 0 (-1 = off)");
    // speed-next O1 (header, "Fault frame filter"): "" = the deck
    const std::string fault_deflate = ArgStr(argc, argv, "--paraview-fault-deflate-level", "");
    MFEM_VERIFY(fault_deflate.empty() || fault_deflate == "none"
@@ -839,6 +1055,11 @@ int main(int argc, char *argv[])
    // the ranks that hold the serial mesh
    const bool smesh_here = !parts_load && (!mesh_rank0 || g_rank == 0);
    MFEM_VERIFY(!lts_same || lts_on, "--lts-same-step needs --lts rate2");
+   // the LTS run works on host vectors with its own cluster blocks; the GPU
+   // dynamic-rupture plan brings it to the device in D6
+   MFEM_VERIFY(!lts_on || (!Device::IsEnabled() && matrix_free == 0),
+               "--lts rate2 runs on the host with assembled cluster blocks: use --device cpu "
+               "and --matrix-free 0 (GPU plan D6 ports it)");
    MFEM_VERIFY(station_copies == "average" || station_copies == "first",
                "--station-copies " << station_copies << ": expected average or first");
    MFEM_VERIFY(station_comm == "sub" || station_comm == "world",
@@ -848,6 +1069,10 @@ int main(int argc, char *argv[])
    const real_t cfl = cfg.numerics.cfl;
    const real_t penalty_factor = TomlReal(t_num, "penalty_factor", 1.0);
    const bool energy_on = TomlBool(t_diag, "energy_balance", false);
+   // The energy monitor runs MFEM kernels (the mass SpMV) on the state, which
+   // with a device would run there on host aliases: not part of plan D1.
+   MFEM_VERIFY(!energy_on || !Device::IsEnabled(),
+               "[diagnostics] energy_balance needs --device cpu (plan D1)");
    const bool pc_on = t_pc != nullptr;
    real_t pc_vstar = 0.0, pc_len = 0.0;
    if (pc_on)
@@ -1696,6 +1921,36 @@ int main(int argc, char *argv[])
       }
    }
 
+   // --matrix-free 1 (plan D2): set before anything takes a product (the
+   // energy monitor's first record), so K and K_eta are never assembled
+   op.SetMatrixFree(matrix_free != 0, mf_layout, mf_batch);
+   if (matrix_free && g_rank == 0)
+   {
+      std::cout << "  matrix-free K u + K_eta v (NitscheSipgOperator), layout " << mf_layout_s
+                << "; K and K_eta are not assembled\n";
+   }
+   // --device-fault 1 (plan D3): the fault step runs inside the device step
+   MFEM_VERIFY(!device_fault || (Device::IsEnabled() && matrix_free == 1),
+               "--device-fault 1 runs the fault inside the device step: use --device cuda "
+               "(or debug) and --matrix-free 1");
+   op.SetDeviceFault(device_fault != 0);
+   if (device_fault && g_rank == 0)
+   {
+      std::cout << "  device fault: boxes 3-11 and the rupture time on the device\n";
+   }
+
+   // --perturb-initial-state (test only): perturb the prestress the initial
+   // fault state is seeded from (header)
+   if (perturb_seed >= 0)
+   {
+      op.PerturbPrestress(static_cast<unsigned long long>(perturb_seed));
+      if (g_rank == 0)
+      {
+         std::cout << "  [perturb] projected prestress scaled by 1 + 1e-15 r (seed "
+                   << perturb_seed << ")\n";
+      }
+   }
+
    setup_timer.Mark("operator");
 
    // initial fault state: d = 0, psi from the continuous friction condition
@@ -2018,9 +2273,16 @@ int main(int argc, char *argv[])
       std::cout << "  no [output.stations] table: no station files\n";
    }
    std::vector<DOFData> dofdata(no);
+   // device fault (plan D3): host copies of the station DOFs only
+   Array<int> station_arr(static_cast<int>(station_dofs.size()));
+   for (int i = 0; i < station_arr.Size(); i++) { station_arr[i] = station_dofs[i]; }
+   Vector sd, sV, spsi, sXs, ssg;
    auto fill_dofdata = [&]() {
-      const Vector &d = op.Slip(), &V = op.SlipRate(), &psi = op.State();
-      const bool have_x = op.LastShear().Size() == 2 * no;
+      const bool dev_fault = op.DeviceFaultActive();
+      if (dev_fault) { op.GatherFaultDofs(station_arr, sd, sV, spsi, sXs, ssg); }
+      const Vector &d = dev_fault ? sd : op.Slip(), &V = dev_fault ? sV : op.SlipRate(),
+                   &psi = dev_fault ? spsi : op.State();
+      const bool have_x = op.HasLastAdvance();
       Vector Xb, sgb;
       if (!have_x)
       {
@@ -2037,7 +2299,8 @@ int main(int argc, char *argv[])
             ff::ToLocal(&S(3 * j), 0.0, n, dd, ss, Xb(2 * j), Xb(2 * j + 1), sgb(j));
          }
       }
-      const Vector &Xs = have_x ? op.LastShear() : Xb, &sg = have_x ? op.LastSigmaEff() : sgb;
+      const Vector &Xs = !have_x ? Xb : dev_fault ? sXs : op.LastShear();
+      const Vector &sg = !have_x ? sgb : dev_fault ? ssg : op.LastSigmaEff();
       for (int j : station_dofs)
       {
          const real_t *dd = &op.FaultFrames()(9 * j + 3), *ss = &op.FaultFrames()(9 * j + 6);
@@ -2090,7 +2353,9 @@ int main(int argc, char *argv[])
       }
       E.RestrictToOwnedFault(cl, cf, 3);
    }
-   std::vector<real_t> trupt(no, -1.0);
+   // first |V| > 1 mm/s per owned DOF (on the device with --device-fault 1)
+   Vector trupt(no);
+   trupt = -1.0;
 
    // fault ParaView output (one fault.vtkhdf per run)
 #ifdef MFEM_USE_HDF5
@@ -2152,6 +2417,9 @@ int main(int argc, char *argv[])
       lts_nsync = std::lround(std::ceil((tfinal - cfg.time.t_initial) / tsync - 1e-9));
       nsteps = lts_nsync * (lts_ticks_sync / lts_ticks_fault);
    }
+   // --max-steps (plan D0): a step limit for global stepping
+   MFEM_VERIFY(max_steps == 0 || !lts_on, "--max-steps limits global stepping; not with --lts rate2");
+   if (max_steps > 0) { nsteps = std::min<long>(nsteps, max_steps); }
    if (g_rank == 0)
    {
       long long nloc = op.Height();
@@ -2180,7 +2448,11 @@ int main(int argc, char *argv[])
 
    // ------------------------------------------------------------ loop
    const int n = op.Height();
+   // on the device (plan D1): the solver's updates of U, Udot and the
+   // acceleration run there; everything that reads them on the host syncs
    Vector U(n), Ud(n);
+   U.UseDevice(true);
+   Ud.UseDevice(true);
    U = 0.0;
    Ud = 0.0;
    real_t t = cfg.time.t_initial;
@@ -2228,6 +2500,17 @@ int main(int argc, char *argv[])
    op.SetFastFaultKernels(fast_fault != 0);
    op.SetFusedStiffness(fused_spmv != 0);
    op.SetDenseBlocks(dense_blocks != 0);
+   StageTimers stage_timers;
+   StageTimers *timers = stage_timers_every > 0 ? &stage_timers : nullptr;
+   // plan D2: on a GPU, kernels run asynchronously; wait for them at each
+   // timer start and stop so each part is charged its own GPU time (as the
+   // quasi-dynamic driver does, GPU plan G3)
+   if (Device::Allows(Backend::CUDA_MASK | Backend::HIP_MASK))
+   {
+      stage_timers.SetDeviceSync([]() { MFEM_DEVICE_SYNC; });
+   }
+   op.SetStageTimers(timers);
+   double timed_loop0 = 0.0;   // MPI_Wtime() at the end of step 1
    CentralDifferenceSolver ode;
    std::unique_ptr<NitscheLtsRun> lts_run;
    if (lts_on)
@@ -2282,15 +2565,18 @@ int main(int argc, char *argv[])
       real_t h = dt;
       const auto ts0 = std::chrono::steady_clock::now();
       bool sync = true;   // v synchronised (always without LTS)
+      if (timers) { timers->Start(StageTimers::DynStep); }
       if (lts_run)
       {
          sync = lts_run->FaultStep(U, Ud, t);
          op.SetTime(t);
       }
       else { ode.Step(U, Ud, t, h); }
+      if (timers) { timers->Stop(StageTimers::DynStep); }
       const double ds = std::chrono::duration<double>(std::chrono::steady_clock::now() - ts0).count();
       if (s == 1) { step1_sec = ds; fault_sec1 = op.FaultSeconds(); }
       else { step_sec += ds; }
+      if (timers) { timers->Start(StageTimers::DynOutput); }
       // with LTS the record is reduced over the ranks once per sync interval
       // (extremes over its fault steps); between sync points it is this
       // rank's, so the run extremes and the log lines use sync points only
@@ -2309,12 +2595,7 @@ int main(int argc, char *argv[])
       }
       MFEM_VERIFY(std::isfinite(rec.max_V), "non-finite slip rate at step " << s);
       if (tp_on) { tp_extremes(tp_run); }
-      const Vector &V = op.SlipRate();
-      for (int j = 0; j < no; j++)
-      {
-         if (trupt[j] < 0.0 && std::sqrt(V(3 * j) * V(3 * j) + V(3 * j + 1) * V(3 * j + 1)
-                                         + V(3 * j + 2) * V(3 * j + 2)) > 1e-3) { trupt[j] = t; }
-      }
+      op.MarkRuptureTime(trupt, t, 1e-3);
       real_t rho = 0.0;
       if (mon && sync)
       {
@@ -2344,7 +2625,7 @@ int main(int argc, char *argv[])
       }
       if (dump && s % dump_every == 0)
       {
-         const Vector &d = op.Slip(), &psi = op.State();
+         const Vector &d = op.Slip(), &V = op.SlipRate(), &psi = op.State();
          const Vector &Xs = op.LastShear(), &sg = op.LastSigmaEff();
          const Vector &X = op.FaultPositions();
          for (int j = 0; j < no; j++)
@@ -2409,6 +2690,25 @@ int main(int argc, char *argv[])
          std::cout << "  wall " << wall << " s\n" << std::flush;
          (void)rho;
       }
+      if (timers)
+      {
+         timers->Stop(StageTimers::DynOutput);
+         if (s == 1)
+         {
+            // step 1 also assembles K, K_eta, the dense blocks and the fault
+            // face operators: leave it out of the split
+            timers->ResetStageParts();
+            timed_loop0 = MPI_Wtime();
+         }
+         else if (s % stage_timers_every == 0 && s != nsteps)
+         {
+            PrintNitscheStageTimers(*timers, s - 1, MPI_Wtime() - timed_loop0, "every N steps");
+         }
+      }
+   }
+   if (timers)
+   {
+      PrintNitscheStageTimers(*timers, nsteps - 1, MPI_Wtime() - timed_loop0, "end of run");
    }
    if (stations) { stations->Close(); }
    if (mon && g_rank == 0)
@@ -2427,9 +2727,10 @@ int main(int argc, char *argv[])
       std::ofstream rt(out_dir + "/" + prefix + "_rupture_time_r" + std::to_string(g_rank) + ".csv");
       rt << std::setprecision(12) << "# x y z t_rupture (first |V| > 1e-3 m/s; -1 = never)\n";
       const Vector &X = op.FaultPositions();
+      trupt.HostRead();
       for (int j = 0; j < no; j++)
       {
-         rt << X(3 * j) << " " << X(3 * j + 1) << " " << X(3 * j + 2) << " " << trupt[j] << "\n";
+         rt << X(3 * j) << " " << X(3 * j + 1) << " " << X(3 * j + 2) << " " << trupt(j) << "\n";
       }
    }
 #ifdef MFEM_USE_HDF5
@@ -2458,6 +2759,9 @@ int main(int argc, char *argv[])
       MPI_Allreduce(MPI_IN_PLACE, &mx, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
       MPI_Allreduce(MPI_IN_PLACE, &sm, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
       MPI_Allreduce(MPI_IN_PLACE, &s1, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+      // device fault (plan D3): owned fault DOFs and bytes of its device data
+      long long dfc[2] = {op.DeviceFaultActive() ? no : 0, op.DeviceFaultBytes()};
+      MPI_Allreduce(MPI_IN_PLACE, dfc, 2, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
       if (g_rank == 0)
       {
          std::cout << std::setprecision(6) << "  time in ode.Step per rank after step 1: min " << mn
@@ -2475,6 +2779,22 @@ int main(int argc, char *argv[])
          if (op.DenseBlocksActive())
          {
             std::cout << " (" << op.DenseBlockBytes() / 1e6 << " MB over all ranks)";
+         }
+         std::cout << ", matrix-free " << (op.MatrixFreeActive() ? "on" : "off");
+         if (op.MatrixFreeActive())
+         {
+            std::cout << " (" << op.MatrixFreeBytes() / 1e6 << " MB over all ranks, layout "
+                      << mf_layout_s << ")";
+         }
+         std::cout << ", device step " << (op.DeviceStepActive() ? "on" : "off");
+         if (op.DeviceFaultActive())
+         {
+            std::cout << " (fault on the device: " << dfc[0] << " owned fault DOFs, "
+                      << dfc[1] / 1e6 << " MB of device fault data over all ranks)";
+         }
+         else if (op.DeviceStepActive() && op.HasFault())
+         {
+            std::cout << " (fault gather " << op.DeviceGatherValues() << " values per step over all ranks)";
          }
          std::cout << "\n";
       }

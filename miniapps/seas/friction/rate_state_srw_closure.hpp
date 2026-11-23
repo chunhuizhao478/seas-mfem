@@ -81,6 +81,9 @@ public:
    }
 
    const SlipLawSRWPsi &StateLaw() const { return srw_; }
+   /// The friction law; the device closure of friction/device_closures.hpp
+   /// reads its constants.
+   const DieterichRuinaFriction &Friction() const { return fr_; }
    real_t WeakeningFriction() const { return srw_.GetMuW(); }
 
 private:

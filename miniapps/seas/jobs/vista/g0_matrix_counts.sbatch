@@ -57,7 +57,7 @@ for r in ${RANKS}; do
    d="${OUT}/r${r}"
    mkdir -p "${d}"
    echo "=== ${MESH} p=${ORDER} ranks=${r}: $(date -u +%T) ==="
-   ibrun -n "${r}" ./seas_bp5_full --mesh "${MESH_FILE}" "${G0_V63_FLAGS[@]}" \
+   ibrun -n "${r}" ./seas_bp5_full --mesh "${MESH_FILE}" "${G0_V63_FLAGS[@]}" --qd-operators loops \
          --order "${ORDER}" --exit-after-assembly \
          --output-dir "${d}" --output-prefix "g0_${MESH}_p${ORDER}_r${r}" \
          > "${d}/run.log" 2>&1

@@ -91,6 +91,43 @@
 // the elastic energy has for (u, d)), so it does not resist slip itself.
 // eta_bar = 0 (never calling SetKelvinVoigt) leaves every bit unchanged.
 //
+// The product K x (+ K_eta v) has four sources, which agree to round-off:
+// the matrix-free kernels of NitscheSipgOperator (SetMatrixFree; GPU
+// dynamic-rupture plan D2, off by default), the dense element and face
+// blocks (SetDenseBlocks, item 8a, the default), the fused CSR sweep
+// (SetFusedStiffness, item 4) and the two hypre products.  The first one
+// takes precedence; with it K and K_eta are never assembled.
+//
+// The device step (GPU dynamic-rupture plan D2): with an enabled
+// mfem::Device and the matrix-free product, Mult and ImplicitSolve work on
+// the solver's device vectors.  K x + K_eta v, the slip loads G d and
+// G_eta V, the dashpot C v and the mass inverse run in device kernels, and
+// the fault (boxes 3-11) stays on the host: it reads the values of U^{n+1}
+// and Udot* its face operators need, gathered from the device each step,
+// and hands the local kernel slip back for the slip loads
+// (nitsche_device_fault.hpp).  It needs the per-face fault operators
+// (SetFastFaultKernels(true)) and refuses Dirichlet faces and the
+// Kelvin-Voigt Dirichlet velocity, which it does not implement yet.  Without
+// a device, or without the matrix-free product, the host code below runs on
+// host views of the vectors (plan D1), unchanged.
+//
+// The device fault (GPU plan D3, SetDeviceFault; off by default): in the
+// device step the fault runs on the device too.  Boxes 3-4 and 9-11 are two
+// kernels over the owned fault DOFs (PredictFaultDevice_, CloseFaultDevice_;
+// the closure through friction/device_closures.hpp), the traction of boxes
+// 5-8 and the owned <-> local fault maps are the device copies of
+// nitsche_device_fault.hpp, and the step record is one reduction before the
+// step's MPI_Allreduce.  Nothing of fault size is copied to the host inside a
+// step: the accessors (Slip(), SlipRate(), ...) copy the fault state when
+// they are read, GatherFaultDofs copies a few DOFs (the stations) and
+// MarkRuptureTime keeps the driver's rupture time on the device.  A kernel
+// cannot print or abort, so a DOF that fails a check of boxes 9-11 (the
+// sigma_n_eff range, the anti-parallel slip rate, |V| dt / Dc <= 2) or of
+// the rate-and-state solve sets a status bit; the step then reruns the host
+// loop of boxes 9-11 on the same inputs, which prints and stops the run
+// where the host step does, and writes nothing (RerunCloseHost_).  The debug
+// device gives the host step's bits.
+//
 // NitscheMaterialSample lives in nitsche_material_sample.hpp (moved there in
 // P3 to break an include cycle with nitsche_mass.hpp); it is re-exported here.
 //
@@ -129,6 +166,7 @@
 #define MFEM_SEAS_NITSCHE_WAVE_OPERATOR_HPP
 
 #include "mfem.hpp"
+#include "linalg/kernels.hpp"   // kernels::Mult in the device kernels (plan D2)
 #include "nitsche_material_sample.hpp"
 #include "nitsche_mass.hpp"
 #include "elasticity_operator.hpp"
@@ -136,18 +174,24 @@
 #include "fused_stiffness_pair.hpp"
 #include "pml_memory.hpp"
 #include "dense_block_stiffness.hpp"
+#include "nitsche_sipg_operator.hpp"
+#include "nitsche_device_fault.hpp"
+#include "../common/stage_timers.hpp"
+#include "../common/seas_device.hpp"
 #include "../integrator/dg_absorbing_bc_integrator.hpp"
 #include "../fault/fault_orientation.hpp"
 #include "../fault/fault_frame_field.hpp"
 #include "../fault/fault_frame.hpp"
 #include "../friction/fault_closure.hpp"
 #include "../fault/fault_normal_stress_modifier.hpp"
+#include "../friction/device_closures.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <functional>
 #include <limits>
 #include <memory>
+#include <random>
 #include <vector>
 #if defined(__GLIBC__)
 #include <malloc.h>   // malloc_trim
@@ -202,6 +246,56 @@ struct NitscheStepRecord
    real_t max_V_dt_over_Dc = 0.0;   ///< predictor stability: abort above 2
    real_t min_sigma_pc = 0.0;       ///< Prakash-Clifton sigma* (0 when off)
    real_t max_sigma_pc = 0.0;
+};
+
+/// Status bits of the device fault step's own checks (plan D3), above the
+/// RSStatus bits of the rate-and-state solve: the box 9 range check, the
+/// anti-parallel slip rate and the predictor stability |V| dt / Dc <= 2.
+enum DFStatus : int
+{
+   kDFSigmaRange   = 1 << 8,
+   kDFAntiParallel = 1 << 9,
+   kDFRatio        = 1 << 10
+};
+/// Status bits after which the host step stops the run.
+constexpr int kDFAbort = kDFSigmaRange | kDFAntiParallel | kDFRatio | kRSNoBracket |
+                         kRSAbortSolve;
+constexpr real_t kDFInf = std::numeric_limits<real_t>::infinity();
+
+/// The device fault step's reduction over the owned fault DOFs: the
+/// extremes of the step record (the minima negated, so every field is a
+/// maximum) and the OR of the DOFs' status words.
+struct DFExtremes
+{
+   real_t neg_min_sig, max_sig, max_V, max_ratio, neg_min_pc, max_pc;
+   int status;
+};
+
+struct DFExtremesReducer
+{
+   using value_type = DFExtremes;
+   static MFEM_HOST_DEVICE void Join(value_type &a, const value_type &b)
+   {
+      a.neg_min_sig = fmax(a.neg_min_sig, b.neg_min_sig);
+      a.max_sig = fmax(a.max_sig, b.max_sig);
+      a.max_V = fmax(a.max_V, b.max_V);
+      a.max_ratio = fmax(a.max_ratio, b.max_ratio);
+      a.neg_min_pc = fmax(a.neg_min_pc, b.neg_min_pc);
+      a.max_pc = fmax(a.max_pc, b.max_pc);
+      a.status |= b.status;
+   }
+   static MFEM_HOST_DEVICE void SetInitialValue(value_type &a)
+   {
+      // the host loop's starting values: +inf minima, -inf maxima, 0 for |V|
+      // and the ratio
+      a.neg_min_sig = -kDFInf;
+      a.max_sig = -kDFInf;
+      a.max_V = 0.0;
+      a.max_ratio = 0.0;
+      a.neg_min_pc = -kDFInf;
+      a.max_pc = -kDFInf;
+      a.status = 0;
+   }
 };
 
 /// Explicit elastodynamics d2u/dt2 = M^{-1} (F(t) - K u - C v + G d), with
@@ -319,6 +413,10 @@ public:
    }
    real_t GetTimeStep() const { return dt_; }
 
+   /// Plan D1: the ODE solver allocates its acceleration on the device, as
+   /// U and Udot are (the driver); HOST without a device.
+   MemoryClass GetMemoryClass() const override { return Device::GetDeviceMemoryClass(); }
+
    /// First-order form (Operator::Mult) is not used: second-order solvers
    /// call the three-argument Mult and ImplicitSolve below.
    void Mult(const Vector &, Vector &) const override
@@ -330,10 +428,19 @@ public:
 
    /// y = M^{-1}(F(t) - K x + G d - C dxdt) at the STORED fault state and
    /// t = GetTime().  Called once by NewmarkSolver for the initial
-   /// acceleration A^0; advances nothing (T-21(a)).
+   /// acceleration A^0; advances nothing (T-21(a)).  x, dxdt and y may live
+   /// on the device (plan D1): the work below is on host views of them.
    void Mult(const Vector &x, const Vector &dxdt, Vector &y) const override
    {
-      Acceleration_(x, &dxdt, has_fault_ ? &d_ : nullptr, *mass_, y);
+      y.SetSize(height);
+      if (UseDeviceStep_())
+      {
+         Acceleration_(x, &dxdt, has_fault_ ? &d_ : nullptr, *mass_, y);
+         return;
+      }
+      const Vector xh = HostReadView(x), vh = HostReadView(dxdt);
+      Vector yh = HostWriteView(y);
+      Acceleration_(xh, &vh, has_fault_ ? &d_ : nullptr, *mass_, yh);
    }
 
    /// Central difference (beta = 0, gamma = 1/2): fac0 = beta dt^2 = 0 and
@@ -357,42 +464,42 @@ public:
                   "NitscheWaveOperator::ImplicitSolve called twice at t = "
                   << t << "; exactly one call per time step is allowed.");
       last_solve_time_ = t;
+      k.SetSize(height);
+      if (UseDeviceStep_())
+      {
+         // plan D2: the work below runs on the device vectors; the fault
+         // gathers the values of x (and dxdt) it reads.  UseDeviceStep_
+         // refuses the PML band and the early step sync, which have no
+         // device form yet.
+         if (has_fault_) { AdvanceFault_(x, t, &dxdt, true); }
+         StepAcceleration_(x, dxdt, fac1, k);
+         if (has_fault_) { last_accel_ = k; }
+         kslip_cached_ = false;
+         return;
+      }
+      // x, dxdt and k may live on the device (plan D1): host views of them
+      // for the fault and the acceleration below; k's device copy is
+      // refreshed from the host view at the solver's next read
+      const Vector xh = HostReadView(x), vh = HostReadView(dxdt);
+      Vector kh = HostWriteView(k);
       // PML memory (plan rev2 Section 3.6): every filter steps once, with
       // U^{n+1}, before the acceleration that reads it
       // early step sync: the stiffness halo of this step's Acceleration_
       // now, while every rank is at the start of the step
-      if (early_sync_ && UseDense_()) { dense_.ExchangeHalo(x, kv_ ? &dxdt : nullptr); }
+      if (early_sync_ && UseDense_()) { dense_.ExchangeHalo(xh, kv_ ? &vh : nullptr); }
       // early step sync: the fault first (its exchanges between the ranks
       // that share fault faces, while every rank is at the start of the
       // step), then the band; the two do not read each other's state
-      if (pml_ && !early_sync_) { pml_->Advance(x, t); }
+      if (pml_ && !early_sync_) { pml_->Advance(xh, t); }
       if (has_fault_)
       {
          in_implicit_solve_ = true;
-         AdvanceFault_(x, t, &dxdt);
+         AdvanceFault_(xh, t, &vh);
          in_implicit_solve_ = false;
       }
-      if (pml_ && early_sync_) { pml_->Advance(x, t); }
-      if (damping_blocks_.empty())
-      {
-         // the Kelvin-Voigt layer needs Udot* (at t_{n+1/2}); without it
-         // the call is P6's
-         kv_tv_shift_ = 0.5 * dt_;
-         Acceleration_(x, kv_ ? &dxdt : nullptr, has_fault_ ? &d_ : nullptr, *mass_, k);
-         kv_tv_shift_ = 0.0;
-      }
-      else
-      {
-         MFEM_VERIFY(mass_damped_ && mass_damped_->HalfDt() == fac1,
-                     "NitscheWaveOperator::ImplicitSolve: the damped mass "
-                     "(M + dt/2 C) was built for dt/2 = "
-                     << (mass_damped_ ? mass_damped_->HalfDt() : 0.0)
-                     << " but fac1 = " << fac1 << "; call SetTimeStep(dt).");
-         kv_tv_shift_ = 0.5 * dt_;
-         Acceleration_(x, &dxdt, has_fault_ ? &d_ : nullptr, *mass_damped_, k);
-         kv_tv_shift_ = 0.0;
-      }
-      if (has_fault_) { last_accel_ = k; }
+      if (pml_ && early_sync_) { pml_->Advance(xh, t); }
+      StepAcceleration_(xh, vh, fac1, kh);
+      if (has_fault_) { last_accel_ = kh; }
       kslip_cached_ = false;
       if (record_pending_) { FinishRecord_(); }
    }
@@ -659,14 +766,19 @@ public:
       V_ = V;
       psi_ = psi;
    }
-   const Vector &Slip() const { return d_; }          ///< d,   3 no
-   const Vector &SlipRate() const { return V_; }      ///< V,   3 no
-   const Vector &State() const { return psi_; }       ///< psi, no
+   // With the device fault (plan D3) the fault state lives on the device:
+   // these accessors copy it to the host when they are read.
+   const Vector &Slip() const { d_.HostRead(); return d_; }          ///< d,   3 no
+   const Vector &SlipRate() const { V_.HostRead(); return V_; }      ///< V,   3 no
+   const Vector &State() const { psi_.HostRead(); return psi_; }     ///< psi, no
    const Vector &FaultPositions() const { return x_own_; }   ///< 3 no
-   const Vector &FaultFrames() const { return frame_own_; }  ///< 9 no: n, d, s
-   const Vector &FaultSigmaF() const { return sigF_own_; }   ///< no
+   // The device fault reads these on the device; HostRead makes the host
+   // copy readable again (a no-op copy, since they do not change in a step;
+   // the debug device needs it).
+   const Vector &FaultFrames() const { frame_own_.HostRead(); return frame_own_; }  ///< 9 no: n, d, s
+   const Vector &FaultSigmaF() const { sigF_own_.HostRead(); return sigF_own_; }    ///< no
    const Vector &FaultA() const { return a_own_; }
-   const Vector &FaultDc() const { return Dc_own_; }
+   const Vector &FaultDc() const { Dc_own_.HostRead(); return Dc_own_; }
    /// Per-point parameters of owned DOF j as NitscheFaultSetup::parameters
    /// gave them (psi and slip_abs zero; the step sets them per call).
    const FaultPointState &FaultParams(int j) const { return par_own_[j]; }
@@ -676,12 +788,15 @@ public:
    const NitscheStepRecord &LastStep() const { return record_; }
    /// Box 8/9 values of the last advance on owned DOFs: X_tan in the frame
    /// (dip, strike; 2 no) and sigma_n_eff (no).
-   const Vector &LastShear() const { return Xlast_; }
-   const Vector &LastSigmaEff() const { return siglast_; }
+   /// True once a fault advance ran (LastShear and LastSigmaEff are set),
+   /// without a copy to the host.
+   bool HasLastAdvance() const { return Xlast_.Size() == 2 * no_; }
+   const Vector &LastShear() const { Xlast_.HostRead(); return Xlast_; }
+   const Vector &LastSigmaEff() const { siglast_.HostRead(); return siglast_; }
    /// Box 6-8 trial traction T_h(U^{n+1}, d*) of the last advance (3 no).
-   const Vector &LastTrialTraction() const { return Town_; }
+   const Vector &LastTrialTraction() const { Town_.HostRead(); return Town_; }
    /// A^{n+1} returned by the last ImplicitSolve (energy diagnostics).
-   const Vector &LastAcceleration() const { return last_accel_; }
+   const Vector &LastAcceleration() const { last_accel_.HostRead(); return last_accel_; }
 
    /// Prakash-Clifton regularization of the normal stress the law sees
    /// (header).  v_star in m/s, length in m, both > 0.  Seed sigma* with
@@ -709,11 +824,11 @@ public:
    real_t PrakashCliftonVStar() const { return pc_vstar_; }
    real_t PrakashCliftonLength() const { return pc_len_; }
    /// sigma* per owned fault DOF (no), after the last advance.
-   const Vector &PrakashCliftonSigma() const { return sigpc_; }
+   const Vector &PrakashCliftonSigma() const { sigpc_.HostRead(); return sigpc_; }
    /// Projected prestress (3 no) and nucleation spatial traction (3 no);
    /// the nucleation enters as NucleationFactor(t) * NucleationTraction().
-   const Vector &PrestressTraction() const { return S0_own_; }
-   const Vector &NucleationTraction() const { return Snuc_own_; }
+   const Vector &PrestressTraction() const { S0_own_.HostRead(); return S0_own_; }
+   const Vector &NucleationTraction() const { Snuc_own_.HostRead(); return Snuc_own_; }
    real_t NucleationFactor(real_t t) const { return nuc_temporal_ ? nuc_temporal_(t) : 0.0; }
    /// Hook H2 (fully-dynamic-cycle, document/fd_cycle_dev/HOOKS.md): replace
    /// the projected prestress after setup by per-DOF values, a global
@@ -751,15 +866,27 @@ public:
       b_const_ = b;
    }
    const Vector &ConstantLoad() const { return b_const_; }
-   /// Hook H3: K x through the path a step uses (the dense blocks, the
-   /// fused K/K_eta sweep with zero velocity, or the assembled K), so a load
+   /// Hook H3: K x through the path a step uses (the matrix-free product,
+   /// the dense blocks or the fused K/K_eta sweep, each with zero velocity
+   /// under Kelvin-Voigt, or the assembled K), so a load
    /// formed from it cancels the step's K x to rounding, and the matrices a
    /// step freed are not assembled again.  Collective on the first call,
    /// as a step.
    void StiffnessMult(const Vector &x, Vector &Kx) const
    {
       Kx.SetSize(height);
-      if (UseDense_())
+      if (UseMatrixFree_())
+      {
+         if (kv_)
+         {
+            zero_v_.SetSize(height);
+            zero_v_.UseDevice(x.UseDevice());
+            zero_v_ = 0.0;
+            mf_->Mult(x, zero_v_, Kx);
+         }
+         else { mf_->Mult(x, Kx); }
+      }
+      else if (UseDense_())
       {
          if (kv_)
          {
@@ -884,6 +1011,22 @@ public:
    /// Fault-face penalty mean and relative spread, in local face order.
    const Vector &FacePenalty() const { return sigF_face_; }
    const Vector &FacePenaltySpread() const { return spread_face_; }
+
+   /// Test only (GPU dynamic-rupture plan D0 floors, as seas_bp5_full
+   /// --perturb-initial-state): scale every entry of the projected prestress
+   /// by 1 + 1e-15 r, r uniform in [-1, 1], from a generator seeded with
+   /// seed + 1000003 rank.  Call before the initial fault state is seeded
+   /// from BackgroundTraction, so that state matches the perturbed
+   /// prestress.  The pattern depends on the partition; any pattern serves
+   /// to show how far a round-off change in the data moves a run.
+   void PerturbPrestress(unsigned long long seed)
+   {
+      MFEM_VERIFY(has_fault_, "PerturbPrestress: the operator has no fault");
+      std::mt19937_64 gen(seed + 1000003ULL
+                          * static_cast<unsigned long long>(Mpi::WorldRank()));
+      std::uniform_real_distribution<double> dist(-1.0, 1.0);
+      for (int i = 0; i < S0_own_.Size(); i++) { S0_own_(i) *= 1.0 + 1e-15 * dist(gen); }
+   }
 
    /// Projected prestress plus nucleation traction at time t (box 8).
    void BackgroundTraction(real_t t, Vector &S) const
@@ -1295,7 +1438,18 @@ public:
    /// Profiling plan item 3: fault traction and slip load through the
    /// precomputed per-face operators (default on).  Call before the first
    /// step; the operators are built (collectively) on first use.
-   void SetFastFaultKernels(bool on) { fast_fault_enabled_ = on; fast_fault_state_ = 0; }
+   void SetFastFaultKernels(bool on)
+   {
+      fast_fault_enabled_ = on;
+      fast_fault_state_ = 0;
+      // the device step's copies of the face operators are made again
+      dev_gather_.reset();
+      dev_slip_.reset();
+      dev_kv_slip_.reset();
+      dev_trac_.reset();
+      dev_kv_trac_.reset();
+      dev_fault_ = false;
+   }
    bool FastFaultKernelsActive() const { return fast_fault_state_ == 1; }
    /// True once the fused sweep is in use (after the first acceleration).
    bool FusedStiffnessActive() const { return fused_state_ == 1; }
@@ -1304,6 +1458,139 @@ public:
    /// the CSR products; when the blocks cannot be built (DenseBlockStiffness
    /// ::Init) the operator falls back to them.  Call before the first step.
    void SetDenseBlocks(bool on) { dense_enabled_ = on; dense_state_ = 0; }
+   /// GPU dynamic-rupture plan D2: K x (+ K_eta v) matrix-free
+   /// (NitscheSipgOperator; default off).  It takes precedence over the
+   /// dense blocks and the fused sweep, and K and K_eta are then never
+   /// assembled: ApplyStiffness and ApplyKVStiffness use it too.  layout and
+   /// team_batch as NitscheSipgOperator::SetLayout.  Call before the first
+   /// step; the operator is built (collectively) on first use and refuses a
+   /// mesh, order or material its kernels do not cover.
+   void SetMatrixFree(bool on, NitscheSipgOperator::Layout layout = NitscheSipgOperator::kAuto,
+                      int team_batch = 2)
+   {
+      mf_enabled_ = on;
+      mf_layout_ = layout;
+      mf_batch_ = team_batch;
+      mf_.reset();
+   }
+   /// True once the matrix-free product is in use (after the first product).
+   bool MatrixFreeActive() const { return static_cast<bool>(mf_); }
+   /// The device step (plan D2; header) ran; with a fault, the values it
+   /// copies to the host per step, summed over all ranks: the gathered
+   /// entries of U^{n+1}, and as many of Udot* with Kelvin-Voigt (one rank's
+   /// share times 8 bytes is its gather copy, jobs/vista/d2_trace_check.py).
+   bool DeviceStepActive() const { return dev_ready_; }
+   long long DeviceGatherValues() const { return dev_gather_global_; }
+   /// GPU dynamic-rupture plan D3 (header): the fault (boxes 3-11) on the
+   /// device in the device step (default off: the host fault of D2).  Call
+   /// before the first step; the device copies are made (collectively) with
+   /// the device step's, and a closure without a device form
+   /// (friction/device_closures.hpp) is refused there.
+   void SetDeviceFault(bool on)
+   {
+      dev_fault_on_ = on;
+      dev_trac_.reset();
+      dev_kv_trac_.reset();
+      dev_fault_ = false;
+   }
+   /// True once the device fault step is set up (from the first step on).
+   bool DeviceFaultActive() const { return dev_fault_; }
+   /// Bytes of the device fault's copies on this rank (face blocks, maps,
+   /// parameters); 0 when off.
+   long long DeviceFaultBytes() const
+   {
+      if (!dev_fault_) { return 0; }
+      return dev_trac_->Bytes() + (dev_kv_trac_ ? dev_kv_trac_->Bytes() : 0)
+             + 8LL * dev_par_.Size();
+   }
+
+   /// The driver's rupture time: trupt(j) = t at the owned DOFs j with
+   /// trupt(j) < 0 and |V_j| > threshold (V of the last advance).  With the
+   /// device fault on the device, where trupt then lives (read it with
+   /// HostRead); else on the host.
+   void MarkRuptureTime(Vector &trupt, real_t t, real_t threshold) const
+   {
+      MFEM_VERIFY(trupt.Size() == no_, "MarkRuptureTime: size " << trupt.Size()
+                  << " != " << no_ << " owned fault DOFs");
+      if (no_ == 0) { return; }
+      const bool dev = dev_fault_;
+      const real_t *V = V_.Read(dev);
+      real_t *tr = trupt.ReadWrite(dev);
+      forall_switch(dev, no_, [=] MFEM_HOST_DEVICE (int j)
+      {
+         if (tr[j] < 0.0 && std::sqrt(V[3 * j] * V[3 * j] + V[3 * j + 1] * V[3 * j + 1]
+                                      + V[3 * j + 2] * V[3 * j + 2]) > threshold) { tr[j] = t; }
+      });
+   }
+
+   /// Host copies of d, V, psi and, once a step ran, X_tan and sigma_n_eff
+   /// (LastShear, LastSigmaEff) at the owned DOFs `dofs` only, for output
+   /// that reads a few DOFs (the stations): with the device fault one gather
+   /// on the device and one small copy.  The other entries of the host
+   /// vectors are left as they are.  Sizes 3 no, 3 no, no, 2 no, no.
+   void GatherFaultDofs(const Array<int> &dofs, Vector &d, Vector &V, Vector &psi, Vector &Xs,
+                        Vector &sg) const
+   {
+      constexpr int nv = 10;
+      const int n = dofs.Size();
+      const bool have_x = Xlast_.Size() == 2 * no_;
+      d.SetSize(3 * no_);
+      V.SetSize(3 * no_);
+      psi.SetSize(no_);
+      Xs.SetSize(2 * no_);
+      sg.SetSize(no_);
+      if (n == 0) { return; }
+      const bool dev = dev_fault_;
+      gbuf_.SetSize(nv * n);
+      const int *J = dofs.Read(dev);
+      const real_t *dd = d_.Read(dev), *dV = V_.Read(dev), *dp = psi_.Read(dev);
+      const real_t *dX = have_x ? Xlast_.Read(dev) : nullptr;
+      const real_t *dsg = have_x ? siglast_.Read(dev) : nullptr;
+      real_t *b = gbuf_.Write(dev);
+      forall_switch(dev, n, [=] MFEM_HOST_DEVICE (int i)
+      {
+         const int j = J[i];
+         real_t *o = b + nv * i;
+         for (int c = 0; c < 3; c++)
+         {
+            o[c] = dd[3 * j + c];
+            o[3 + c] = dV[3 * j + c];
+         }
+         o[6] = dp[j];
+         o[7] = dX ? dX[2 * j] : 0.0;
+         o[8] = dX ? dX[2 * j + 1] : 0.0;
+         o[9] = dsg ? dsg[j] : 0.0;
+      });
+      const real_t *h = gbuf_.HostRead();
+      const int *Jh = dofs.HostRead();
+      for (int i = 0; i < n; i++)
+      {
+         const int j = Jh[i];
+         const real_t *o = h + nv * i;
+         for (int c = 0; c < 3; c++)
+         {
+            d(3 * j + c) = o[c];
+            V(3 * j + c) = o[3 + c];
+         }
+         psi(j) = o[6];
+         Xs(2 * j) = o[7];
+         Xs(2 * j + 1) = o[8];
+         sg(j) = o[9];
+      }
+   }
+   /// Bytes of the matrix-free operator's data summed over the ranks (0 when
+   /// not in use).
+   long long MatrixFreeBytes() const { return mf_bytes_; }
+   /// GPU dynamic-rupture plan D0: time the parts of each step into
+   /// @a timers (StageTimers::Dyn*; null = no timing).  The timers only
+   /// read clocks, so the results are the same bits with and without them.
+   void SetStageTimers(StageTimers *timers)
+   {
+      timers_ = timers;
+      dense_.SetStageTimers(timers);
+      fused_.SetStageTimers(timers);
+      if (mf_) { mf_->SetStageTimers(timers); }
+   }
    /// True once the dense blocks are in use (after the first acceleration).
    bool DenseBlocksActive() const { return dense_state_ == 1; }
    /// Bytes of the dense blocks summed over the ranks (0 when not in use).
@@ -1320,7 +1607,9 @@ public:
    /// end-of-step traction is X* + gamma V.
    real_t ClosureGamma(int j) const
    {
-      return kv_ ? 0.5 * sigF_own_(j) * dt_ + sigFkv_own_(j) : 0.5 * sigF_own_(j) * dt_;
+      // HostRead: the device fault reads them on the device (plan D3)
+      const real_t *sF = sigF_own_.HostRead();
+      return kv_ ? 0.5 * sF[j] * dt_ + sigFkv_own_.HostRead()[j] : 0.5 * sF[j] * dt_;
    }
    /// Element length of KVScale::Node (tetrahedra and triangles).
    real_t KVElementLength(int e, KVLength length) const
@@ -1365,12 +1654,27 @@ public:
    real_t KelvinVoigtBetaMin() const { return kv_beta_min_; }
    real_t KelvinVoigtBetaMax() const { return kv_beta_max_; }
    long long KelvinVoigtLayerElements() const { return kv_layer_elems_; }
+   /// K u: the matrix-free product with SetMatrixFree, else the assembled K
+   /// (assembled on first use).  Collective.
+   void ApplyStiffness(const Vector &u, Vector &Ku) const
+   {
+      if (UseMatrixFree_()) { mf_->Mult(u, Ku); }
+      else { elast_->ApplyStiffness(u, Ku); }
+   }
    /// K_eta v (zero without the layer).
    void ApplyKVStiffness(const Vector &v, Vector &Kv) const
    {
       Kv.SetSize(height);
       if (!kv_) { Kv = 0.0; return; }
-      kv_->ApplyStiffness(v, Kv);
+      if (UseMatrixFree_())
+      {
+         // the product at u = 0 (z = beta v)
+         Vector zero(v.Size());
+         zero.UseDevice(v.UseDevice());
+         zero = 0.0;
+         mf_->Mult(zero, v, Kv);
+      }
+      else { kv_->ApplyStiffness(v, Kv); }
    }
    /// G_eta V for V on owned DOFs.
    void KVSlipLoad(const Vector &V, Vector &GV) const
@@ -1409,7 +1713,7 @@ public:
       elast_->RestrictToOwnedFault(kvTloc_, T, 3);
    }
    /// sigma_F^eta per owned DOF and per local face (empty without the layer).
-   const Vector &FaultSigmaFKV() const { return sigFkv_own_; }
+   const Vector &FaultSigmaFKV() const { sigFkv_own_.HostRead(); return sigFkv_own_; }
    const Vector &FacePenaltyKV() const { return sigFkv_face_; }
 
    // ------------------------------------------------------------------
@@ -1499,27 +1803,45 @@ private:
    void Acceleration_(const Vector &x, const Vector *v, const Vector *d,
                       const NitscheMass &Minv, Vector &a) const
    {
-      const bool dense = UseDense_();
-      const bool fuse = !dense && kv_ && v && UseFused_();
-      if (dense)
+      ScopedStageTimer acc_timer(timers_, StageTimers::DynAcceleration);
+      const bool mf = UseMatrixFree_();
+      const bool dense = !mf && UseDense_();
+      const bool fuse = !mf && !dense && kv_ && v && UseFused_();
       {
-         if (kv_)
+         ScopedStageTimer timer(timers_, StageTimers::DynStiffness);
+         if (mf)
          {
-            MFEM_VERIFY(v, "NitscheWaveOperator: Kelvin-Voigt needs the velocity");
-            const RankCosts::Scope cost(RankCosts::Stiff);
-            dense_.Mult(x, *v, Kx_);   // K x + K_eta v
+            if (kv_)
+            {
+               MFEM_VERIFY(v, "NitscheWaveOperator: Kelvin-Voigt needs the velocity");
+               mf_->Mult(x, *v, Kx_);   // K x + K_eta v
+            }
+            else { mf_->Mult(x, Kx_); }
          }
-         else
+         else if (dense)
          {
-            const RankCosts::Scope cost(RankCosts::Stiff);
-            dense_.Mult(x, Kx_);
+            if (kv_)
+            {
+               MFEM_VERIFY(v, "NitscheWaveOperator: Kelvin-Voigt needs the velocity");
+               const RankCosts::Scope cost(RankCosts::Stiff);
+               dense_.Mult(x, *v, Kx_);   // K x + K_eta v
+            }
+            else
+            {
+               const RankCosts::Scope cost(RankCosts::Stiff);
+               dense_.Mult(x, Kx_);
+            }
          }
+         else if (fuse) { fused_.Mult(x, *v, Kx_); }   // K x + K_eta v
+         else { elast_->ApplyStiffness(x, Kx_); }
       }
-      else if (fuse) { fused_.Mult(x, *v, Kx_); }   // K x + K_eta v
-      else { elast_->ApplyStiffness(x, Kx_); }
+      const bool dev = UseDeviceStep_();
       {
+         ScopedStageTimer timer(timers_, StageTimers::DynDirichletRHS);
          const RankCosts::Scope cost(RankCosts::Rhs);
-         elast_->AssembleDirichletOnlyRHS(F_, GetTime());
+         // the device step has no Dirichlet faces (UseDeviceStep_)
+         if (dev) { F_ = 0.0; }
+         else { elast_->AssembleDirichletOnlyRHS(F_, GetTime()); }
       }
       F_ -= Kx_;
       if (b_const_.Size() > 0) { F_ += b_const_; }   // hook H3
@@ -1532,8 +1854,19 @@ private:
       }
       if (d)
       {
+         ScopedStageTimer timer(timers_, StageTimers::DynSlipLoad);
          const double tf0 = MPI_Wtime();
-         if (UseFastFault_())
+         if (dev && dev_fault_)
+         {
+            dev_maps_->ToKernelLocal(*d, dload_k_);
+            dev_slip_->AddMultDevice(dload_k_, F_);
+         }
+         else if (dev)
+         {
+            ToKernelLocal_(*d, slip_k_);
+            dev_slip_->AddMult(slip_k_, F_);
+         }
+         else if (UseFastFault_())
          {
             if (kslip_cached_ && d == &d_) { elast_->AddSlipLoadFast(slip_kd_, F_); }
             else
@@ -1551,29 +1884,44 @@ private:
       }
       if (!damping_blocks_.empty() && v)
       {
+         ScopedStageTimer timer(timers_, StageTimers::DynDamping);
          const RankCosts::Scope cost(RankCosts::Damp);
-         ApplyDamping(*v, Cv_);
+         if (dev) { ApplyDampingDevice_(*v, Cv_); }
+         else { ApplyDamping(*v, Cv_); }
          F_ -= Cv_;
       }
       if (kv_ && v)
       {
          // Kelvin-Voigt: -(K_eta v - G_eta V) with the stored slip rate V
          // (V^{n+1} in ImplicitSolve, after the fault advance)
-         if (!fuse && !dense)
+         if (!fuse && !dense && !mf)
          {
+            ScopedStageTimer timer(timers_, StageTimers::DynStiffness);
             kv_->ApplyStiffness(*v, Kv_v_);
             F_ -= Kv_v_;
          }
          if (kv_vD_)
          {
+            ScopedStageTimer timer(timers_, StageTimers::DynDirichletRHS);
             const RankCosts::Scope cost(RankCosts::Rhs);
             kv_->AssembleDirichletOnlyRHS(FvD_, GetTime() - kv_tv_shift_);
             F_ += FvD_;
          }
          if (has_fault_)
          {
+            ScopedStageTimer timer(timers_, StageTimers::DynSlipLoad);
             const double tf0 = MPI_Wtime();
-            if (UseFastFault_())
+            if (dev && dev_fault_)
+            {
+               dev_maps_->ToKernelLocal(V_, dload_k_);
+               dev_kv_slip_->AddMultDevice(dload_k_, F_);
+            }
+            else if (dev)
+            {
+               ToKernelLocal_(V_, slip_k_);
+               dev_kv_slip_->AddMult(slip_k_, F_);
+            }
+            else if (UseFastFault_())
             {
                if (kslip_cached_) { kv_->AddSlipLoadFast(slip_kV_, F_); }
                else
@@ -1590,10 +1938,183 @@ private:
             fault_sec_ += MPI_Wtime() - tf0;
          }
       }
+      ScopedStageTimer timer(timers_, StageTimers::DynMassInverse);
       const RankCosts::Scope cost(RankCosts::Mass);
       Minv.Apply(F_, a);
    }
 
+   /// Box 13 of ImplicitSolve at x = U^{n+1}, v = Udot*:
+   /// k = (M + dt/2 C)^{-1}(F - K x + G d - C v ...).
+   void StepAcceleration_(const Vector &x, const Vector &v, real_t fac1, Vector &k)
+   {
+      if (damping_blocks_.empty())
+      {
+         // the Kelvin-Voigt layer needs Udot* (at t_{n+1/2}); without it
+         // the call is P6's
+         kv_tv_shift_ = 0.5 * dt_;
+         Acceleration_(x, kv_ ? &v : nullptr, has_fault_ ? &d_ : nullptr, *mass_, k);
+         kv_tv_shift_ = 0.0;
+      }
+      else
+      {
+         MFEM_VERIFY(mass_damped_ && mass_damped_->HalfDt() == fac1,
+                     "NitscheWaveOperator::ImplicitSolve: the damped mass "
+                     "(M + dt/2 C) was built for dt/2 = "
+                     << (mass_damped_ ? mass_damped_->HalfDt() : 0.0)
+                     << " but fac1 = " << fac1 << "; call SetTimeStep(dt).");
+         kv_tv_shift_ = 0.5 * dt_;
+         Acceleration_(x, &v, has_fault_ ? &d_ : nullptr, *mass_damped_, k);
+         kv_tv_shift_ = 0.0;
+      }
+   }
+
+   /// The device step (plan D2; header): true with an enabled device and the
+   /// matrix-free product.  Collective on the first call and after
+   /// SetFastFaultKernels or SetKelvinVoigt: copies the dashpot blocks and
+   /// the fault's face operators (slip-load blocks, gathered vdofs) to the
+   /// device.
+   bool UseDeviceStep_() const
+   {
+      if (!Device::IsEnabled() || !UseMatrixFree_()) { return false; }
+      // G0 (3D UCERF plan rev5): the device step has none of the cycle
+      // branch's pieces yet (P1 ports them); a deck that turns one on stops
+      // here instead of running without it
+      MFEM_VERIFY(dim_ == 3 && !pml_ && !sponge_ && !early_sync_ && !quench_on_
+                  && !has_mass_damping_ && !contact_ && !opening_ && !relaxed_contact_
+                  && !nsm_ && sigma_floor_ == 0.0,
+                  "NitscheWaveOperator: the device step (--matrix-free 1 on a device) "
+                  "has no 2-D mesh, PML or sponge band, early step sync, quench, mass "
+                  "damping, contact, opening, relaxed contact, normal-stress modifier "
+                  "or sigma floor yet, and this run has one (dim " << dim_ << ", pml "
+                  << (pml_ ? 1 : 0) << ", sponge " << (sponge_ ? 1 : 0) << ", early sync "
+                  << (early_sync_ ? 1 : 0) << ", quench " << (quench_on_ ? 1 : 0)
+                  << ", mass damping " << (has_mass_damping_ ? 1 : 0) << ", contact "
+                  << (contact_ ? 1 : 0) << ", opening " << (opening_ ? 1 : 0)
+                  << ", relaxed " << (relaxed_contact_ ? 1 : 0) << ", nsm "
+                  << (nsm_ ? 1 : 0) << ", sigma floor " << sigma_floor_
+                  << "); run it on the cpu device");
+      if (!dev_ready_)
+      {
+         MFEM_VERIFY(bc_.dirichlet_attrs.empty(),
+                     "NitscheWaveOperator: the device step (--matrix-free 1 on a device) has "
+                     "no Dirichlet loading yet (plan D2 takes the quasi-dynamic D g(t) "
+                     "operator for it), and this deck has Dirichlet faces; run it on the "
+                     "cpu device");
+         for (Vector *w : {&Kx_, &F_, &Cv_}) { w->UseDevice(true); }
+         const int nb = static_cast<int>(damping_blocks_.size()), nd = mass_->ElementDofs();
+         dev_damp_e_.SetSize(nb);
+         dev_damp_C_.SetSize(nb * 9 * nd * nd);
+         int *he = dev_damp_e_.HostWrite();
+         real_t *hc = dev_damp_C_.HostWrite();
+         int b = 0;
+         for (const auto &kv : damping_blocks_)
+         {
+            MFEM_VERIFY(kv.second.Height() == 3 * nd && kv.second.Width() == 3 * nd,
+                        "NitscheWaveOperator: damping block of element " << kv.first
+                        << " is not " << 3 * nd << " x " << 3 * nd);
+            he[b] = kv.first;
+            const real_t *c = kv.second.Data();
+            for (int i = 0; i < 9 * nd * nd; i++) { hc[static_cast<size_t>(b) * 9 * nd * nd + i] = c[i]; }
+            ++b;
+         }
+         dev_ready_ = true;
+      }
+      MFEM_VERIFY(!kv_vD_, "NitscheWaveOperator: the device step has no Kelvin-Voigt "
+                  "Dirichlet velocity (SetKelvinVoigt bc_velocity); run it on the cpu device");
+      if (has_fault_ && (!dev_slip_ || (kv_ && !dev_kv_slip_)))
+      {
+         MFEM_VERIFY(UseFastFault_(), "NitscheWaveOperator: the device step needs the "
+                     "per-face fault operators (SetFastFaultKernels(true), --fast-fault 1)");
+         dev_slip_ = std::make_unique<DeviceSlipLoad>(*elast_);
+         if (kv_) { dev_kv_slip_ = std::make_unique<DeviceSlipLoad>(*kv_); }
+         if (!dev_fault_on_)
+         {
+            // D2: the host fault reads the gathered values of U^{n+1}, Udot*
+            std::vector<int> vd;
+            AppendFaultFaceVDofs(*elast_, vd);
+            if (kv_) { AppendFaultFaceVDofs(*kv_, vd); }
+            dev_gather_ = std::make_unique<FaultGather>(std::move(vd));
+            long long g = static_cast<long long>(dev_gather_->Size()) * (kv_ ? 2 : 1);
+            MPI_Allreduce(MPI_IN_PLACE, &g, 1, MPI_LONG_LONG, MPI_SUM, mesh_.GetComm());
+            dev_gather_global_ = g;
+            xf_.SetSize(height);
+            xf_ = 0.0;
+            vf_.SetSize(height);
+            vf_ = 0.0;
+         }
+      }
+      if (has_fault_ && dev_fault_on_ && (!dev_trac_ || (kv_ && !dev_kv_trac_)))
+      {
+         SetupDeviceFault_();
+      }
+      return true;
+   }
+
+   /// Plan D3 (header): the device copies of the fault step.  Collective.
+   void SetupDeviceFault_() const
+   {
+      MFEM_VERIFY(MakeDeviceClosure(*closure_, dev_cl_),
+                  "NitscheWaveOperator: --device-fault 1 (SetDeviceFault): this friction "
+                  "closure has no device form; friction/device_closures.hpp covers linear slip "
+                  "weakening and rate and state with the aging law, the slip law and strong "
+                  "rate weakening");
+      MPI_Comm comm = mesh_.GetComm();
+      dev_maps_ = std::make_unique<DeviceFaultMaps>(*elast_, Bk_, eps_loc_, comm);
+      dev_trac_ = std::make_unique<DeviceFaultTraction>(*elast_, comm);
+      if (kv_)
+      {
+         dev_kv_trac_ = std::make_unique<DeviceFaultTraction>(*kv_, comm);
+         // T_eta(Udot*, 0) of box 8: the kernel slip of a zero slip rate,
+         // through the same map, once
+         Vector zero(3 * no_);
+         zero = 0.0;
+         dev_maps_->ToKernelLocal(zero, dkv_slip0_);
+      }
+      dev_par_.SetSize(kDCParams * no_);
+      real_t *q = dev_par_.HostWrite();
+      for (int j = 0; j < no_; j++) { DCPackParams(par_own_[j], q + kDCParams * j); }
+      dev_fault_ = true;
+   }
+
+   /// Cv = C v in the device step: one thread per element with a dashpot
+   /// block, the product of ApplyDamping in the same order.
+   void ApplyDampingDevice_(const Vector &v, Vector &Cv) const
+   {
+      Cv.SetSize(v.Size());
+      Cv = 0.0;
+      if (dev_damp_e_.Size() == 0) { return; }
+      switch (mass_->ElementDofs())
+      {
+         case 4: DampingDevice_<4>(v, Cv); break;
+         case 10: DampingDevice_<10>(v, Cv); break;
+         case 20: DampingDevice_<20>(v, Cv); break;
+         default: MFEM_ABORT("NitscheWaveOperator: no device dashpot kernel for "
+                                << mass_->ElementDofs() << " DOFs per element");
+      }
+   }
+public:
+   // The function holding the kernel is public: nvcc refuses an extended
+   // __host__ __device__ lambda inside a private or protected member.
+   template <int ND>
+   void DampingDevice_(const Vector &v, Vector &Cv) const
+   {
+      const int n = mass_->NumScalarDofs(), nb = dev_damp_e_.Size();
+      const int *el = dev_damp_e_.Read(), *dofs = mass_->DeviceElementDofs().Read();
+      const real_t *C = dev_damp_C_.Read(), *dv = v.Read();
+      real_t *dc = Cv.ReadWrite();
+      mfem::forall(nb, [=] MFEM_HOST_DEVICE (int i)
+      {
+         const int *de = dofs + el[i] * ND;
+         real_t x[3 * ND], y[3 * ND];
+         for (int c = 0; c < 3; ++c)
+            for (int k = 0; k < ND; ++k) { x[c * ND + k] = dv[c * n + de[k]]; }
+         kernels::Mult(3 * ND, 3 * ND, C + static_cast<size_t>(i) * 9 * ND * ND, x, y);
+         for (int c = 0; c < 3; ++c)
+            for (int k = 0; k < ND; ++k) { dc[c * n + de[k]] += y[c * ND + k]; }
+      });
+   }
+
+private:
    /// Collective on the first call: build the per-face fault operators of K
    /// (and K_eta).  Every caller is reached on all ranks (has_fault_ is a
    /// global flag).
@@ -1616,6 +2137,38 @@ private:
          kv_->BuildFaultFaceOps(contact_ ? 3 : 2);
       }
       return fast_fault_state_ == 1;
+   }
+
+   /// Collective on the first call: build the matrix-free operator from the
+   /// material sample (and the Kelvin-Voigt moduli), on K's space with its
+   /// Dirichlet faces and penalty.  Built again when the Kelvin-Voigt layer
+   /// was set after the first build (kv_ is a global property).
+   bool UseMatrixFree_() const
+   {
+      if (!mf_enabled_) { return false; }
+      if (mf_ && mf_->HasKelvinVoigt() != static_cast<bool>(kv_)) { mf_.reset(); }
+      if (!mf_)
+      {
+         // K's Dirichlet faces (ElasticityDomainOperator::SetupBoundaryMarkers)
+         Array<int> dmark(mesh_.bdr_attributes.Size() ? mesh_.bdr_attributes.Max() : 0);
+         dmark = 0;
+         for (int a : bc_.dirichlet_attrs) { dmark[a - 1] = 1; }
+         mf_ = std::make_unique<NitscheSipgOperator>(
+                  elast_->GetFESpace(), sample_->LambdaGF(), sample_->MuGF(),
+                  kv_ ? kv_lam_gf_.get() : nullptr, kv_ ? kv_mu_gf_.get() : nullptr, dmark,
+                  config_.penalty_factor);
+         MFEM_VERIFY(mf_layout_ != NitscheSipgOperator::kTeam
+                     || mf_->TeamBatchFits(mf_batch_, static_cast<bool>(kv_)),
+                     "NitscheWaveOperator: the matrix-free team layout with " << mf_batch_
+                     << " elements per block does not fit in a block's shared memory at p = "
+                     << order_ << (kv_ ? " with Kelvin-Voigt" : "") << "; use 2 or 4");
+         mf_->SetLayout(mf_layout_, mf_batch_);
+         mf_->SetStageTimers(timers_);
+         long long b = mf_->Bytes();
+         MPI_Allreduce(MPI_IN_PLACE, &b, 1, MPI_LONG_LONG, MPI_SUM, mesh_.GetComm());
+         mf_bytes_ = b;
+      }
+      return true;
    }
 
    /// Collective on the first call: read K (and K_eta) into dense blocks
@@ -1679,53 +2232,93 @@ private:
    }
 
    /// Boxes 3-11 at t = t_{n+1}, x = U^{n+1}; v = Udot* (used only by the
-   /// Kelvin-Voigt layer).
-   void AdvanceFault_(const Vector &x, real_t t, const Vector *v = nullptr)
+   /// Kelvin-Voigt layer).  device: x and v are the device step's (plan D2);
+   /// the host fault reads the values of them it needs, gathered to the
+   /// host, and the device fault (plan D3) reads them in place.
+   void AdvanceFault_(const Vector &x, real_t t, const Vector *v = nullptr,
+                      bool device = false)
    {
       MFEM_VERIFY(!pc_ || pc_seeded_, "NitscheWaveOperator: Prakash-Clifton is on "
                   "but sigma* was never seeded (SetPrakashCliftonState)");
       ++steps_;
+      ScopedStageTimer adv_timer(timers_, StageTimers::DynFaultAdvance);
       const double tf0 = MPI_Wtime();
       const real_t dt = dt_;
-      // 3, 4
-      dstar_.SetSize(3 * no_);
-      psistar_.SetSize(no_);
-      r0_.SetSize(no_);
-      for (int j = 0; j < no_; j++)
+      real_t ext[6];
+      if (device && dev_fault_) { AdvanceFaultDevice_(x, t, v, ext); }
+      else
       {
-         const real_t *V = &V_(3 * j);
-         for (int c = 0; c < 3; c++) { dstar_(3 * j + c) = d_(3 * j + c) + 0.5 * dt * V[c]; }
-         // contact (B2): V carries a gap rate along n; the state evolves
-         // with the slip (tangential) rate only
-         const real_t Vabs = contact_
-            ? std::hypot(fault_frame::Dot(V, &frame_own_(9 * j + 3)),
-                         fault_frame::Dot(V, &frame_own_(9 * j + 6)))
-            : std::sqrt(V[0] * V[0] + V[1] * V[1] + V[2] * V[2]);
-         // [cycle.opening] D3: no state rate at a DOF open at step n
-         r0_(j) = (opening_ && open_[j]) ? 0.0 : StateRate(j, Vabs, psi_(j));
-         psistar_(j) = psi_(j) + dt * r0_(j);
+         // 3, 4
+         dstar_.SetSize(3 * no_);
+         psistar_.SetSize(no_);
+         r0_.SetSize(no_);
+         for (int j = 0; j < no_; j++)
+         {
+            const real_t *V = &V_(3 * j);
+            for (int c = 0; c < 3; c++) { dstar_(3 * j + c) = d_(3 * j + c) + 0.5 * dt * V[c]; }
+            // contact (B2): V carries a gap rate along n; the state evolves
+            // with the slip (tangential) rate only
+            const real_t Vabs = contact_
+               ? std::hypot(fault_frame::Dot(V, &frame_own_(9 * j + 3)),
+                            fault_frame::Dot(V, &frame_own_(9 * j + 6)))
+               : std::sqrt(V[0] * V[0] + V[1] * V[1] + V[2] * V[2]);
+            // [cycle.opening] D3: no state rate at a DOF open at step n
+            r0_(j) = (opening_ && open_[j]) ? 0.0 : StateRate(j, Vabs, psi_(j));
+            psistar_(j) = psi_(j) + dt * r0_(j);
+         }
+         // 5-8
+         {
+            ScopedStageTimer timer(timers_, StageTimers::DynFaultTraction);
+            const Vector *xt = &x, *vt = v;
+            if (device)
+            {
+               dev_gather_->Gather(x, xf_, kv_ ? v : nullptr, kv_ ? &vf_ : nullptr);
+               xt = &xf_;
+               vt = kv_ ? &vf_ : nullptr;
+            }
+            TrialTraction(*xt, dstar_, Town_);
+            if (kv_)
+            {
+               // Kelvin-Voigt: X* gains T_eta(Udot*, 0); its slope sigma_F^eta in
+               // V^{n+1} goes into gamma (CloseDOF)
+               MFEM_VERIFY(vt, "NitscheWaveOperator: the Kelvin-Voigt layer needs Udot*");
+               kv_zero_.SetSize(3 * no_);
+               kv_zero_ = 0.0;
+               KVTrialTraction(*vt, kv_zero_, kvT_);
+               Town_ += kvT_;
+            }
+         }
+         BackgroundTraction(t, S_);
+         // 9-11
+         CloseFaultHost_(t, dt, Town_, S_, d_, V_, psi_, sigpc_, Xlast_, siglast_, ext);
+         // the normal-stress modifier advances once per step, here and not
+         // in CloseFaultHost_ (which the device rerun also calls)
+         if (nsm_) { nsm_->Advance(dt, nsm_tau_.GetData(), nsm_V_.GetData()); }
       }
-      // 5-8
-      TrialTraction(x, dstar_, Town_);
-      if (kv_)
-      {
-         // Kelvin-Voigt: X* gains T_eta(Udot*, 0); its slope sigma_F^eta in
-         // V^{n+1} goes into gamma (CloseDOF)
-         MFEM_VERIFY(v, "NitscheWaveOperator: the Kelvin-Voigt layer needs Udot*");
-         kv_zero_.SetSize(3 * no_);
-         kv_zero_ = 0.0;
-         KVTrialTraction(*v, kv_zero_, kvT_);
-         Town_ += kvT_;
-      }
-      BackgroundTraction(t, S_);
-      // 9-11
+      fault_sec_ += MPI_Wtime() - tf0;
+      StoreRecord_(t, ext);
+   }
+
+   /// Boxes 9-11 on the host for the owned DOFs: from the trial traction
+   /// Town and the background traction S (3 no each), with dstar_,
+   /// psistar_ and r0_ of boxes 3-4, the state (d, V, psi and, with
+   /// Prakash-Clifton, sigpc) goes from step n to n + 1 in place; Xl and sl
+   /// get X_tan and sigma_n_eff.  ext: min and max sigma_n_eff, max |V|, max
+   /// |V| dt / Dc, min and max sigma* (the record's extremes on this rank).
+   /// With contact, opening or the normal-stress modifier it also writes
+   /// open_, nsm_tau_ and nsm_V_ (host step only: the device step refuses
+   /// those features, UseDeviceStep_).
+   void CloseFaultHost_(real_t t, real_t dt, const Vector &Town, const Vector &S, Vector &d,
+                        Vector &V, Vector &psi, Vector &sigpc, Vector &Xl, Vector &sl,
+                        real_t ext[6])
+   {
       real_t min_sig = std::numeric_limits<real_t>::infinity();
       real_t max_sig = -std::numeric_limits<real_t>::infinity();
       real_t max_V = 0.0, max_ratio = 0.0;
       real_t min_pc = std::numeric_limits<real_t>::infinity();
       real_t max_pc = -std::numeric_limits<real_t>::infinity();
-      Xlast_.SetSize(2 * no_);
-      siglast_.SetSize(no_);
+      Xl.SetSize(2 * no_);
+      sl.SetSize(no_);
       if (nsm_)
       {
          nsm_tau_.SetSize(no_);
@@ -1734,11 +2327,11 @@ private:
       for (int j = 0; j < no_; j++)
       {
          real_t TS[3], Vn[3], X[2], sig;
-         for (int c = 0; c < 3; c++) { TS[c] = Town_(3 * j + c) + S_(3 * j + c); }
+         for (int c = 0; c < 3; c++) { TS[c] = Town(3 * j + c) + S(3 * j + c); }
          const real_t *dv = &frame_own_(9 * j + 3), *sv = &frame_own_(9 * j + 6);
-         // |d^n|: d_ still holds d^n here (box 11 writes d^{n+1} below);
+         // |d^n|: d still holds d^n here (box 11 writes d^{n+1} below);
          // contact: the slip magnitude is tangential (the normal part is g)
-         const real_t *dn = &d_(3 * j);
+         const real_t *dn = &d(3 * j);
          const real_t dn_abs = contact_
             ? std::hypot(fault_frame::Dot(dn, dv), fault_frame::Dot(dn, sv))
             : std::sqrt(dn[0] * dn[0] + dn[1] * dn[1] + dn[2] * dn[2]);
@@ -1746,13 +2339,13 @@ private:
          if (pc_)
          {
             // previous step's slip rate (SeisSol: slipRateMagnitude before the solve)
-            const real_t *Vo = &V_(3 * j);
+            const real_t *Vo = &V(3 * j);
             const real_t Vo_abs = std::sqrt(Vo[0] * Vo[0] + Vo[1] * Vo[1] + Vo[2] * Vo[2]);
             const real_t xpc = -(Vo_abs + pc_vstar_) * dt / pc_len_;
-            CloseDOF(j, TS, psistar_(j), Vn, sig, X, &sigpc_(j), std::exp(xpc),
+            CloseDOF(j, TS, psistar_(j), Vn, sig, X, &sigpc(j), std::exp(xpc),
                      -std::expm1(xpc), dn_abs);
-            min_pc = std::min(min_pc, sigpc_(j));
-            max_pc = std::max(max_pc, sigpc_(j));
+            min_pc = std::min(min_pc, sigpc(j));
+            max_pc = std::max(max_pc, sigpc(j));
          }
          else
          {
@@ -1807,18 +2400,18 @@ private:
                         << ", owned fault DOF " << j << " at (" << x_own_(3 * j)
                         << ", " << x_own_(3 * j + 1) << ", " << x_own_(3 * j + 2)
                         << "), step " << steps_ << ", t = " << t);
-            psi_(j) = psi_(j) + 0.5 * dt * (r0_(j) + StateRate(j, Vabs, psistar_(j)));
+            psi(j) = psi(j) + 0.5 * dt * (r0_(j) + StateRate(j, Vabs, psistar_(j)));
          }
          // [cycle.opening] D3: psi frozen while open
          if (opening_) { open_[j] = is_open ? 1 : 0; }
          for (int c = 0; c < 3; c++)
          {
-            V_(3 * j + c) = Vn[c];
-            d_(3 * j + c) = dstar_(3 * j + c) + 0.5 * dt * Vn[c];
+            V(3 * j + c) = Vn[c];
+            d(3 * j + c) = dstar_(3 * j + c) + 0.5 * dt * Vn[c];
          }
-         Xlast_(2 * j) = X[0];
-         Xlast_(2 * j + 1) = X[1];
-         siglast_(j) = sig;
+         Xl(2 * j) = X[0];
+         Xl(2 * j + 1) = X[1];
+         sl(j) = sig;
          min_sig = std::min(min_sig, sig);
          max_sig = std::max(max_sig, sig);
          if (!is_open)
@@ -1828,8 +2421,22 @@ private:
             max_ratio = std::max(max_ratio, ratio);
          }
       }
-      if (nsm_) { nsm_->Advance(dt, nsm_tau_.GetData(), nsm_V_.GetData()); }
-      fault_sec_ += MPI_Wtime() - tf0;
+      ext[0] = min_sig;
+      ext[1] = max_sig;
+      ext[2] = max_V;
+      ext[3] = max_ratio;
+      ext[4] = min_pc;
+      ext[5] = max_pc;
+   }
+
+   /// The step record from this rank's extremes ext (CloseFaultHost_ or the
+   /// device fault): kept for LtsReduceRecord, or reduced over the ranks
+   /// now (FinishRecord_), or, with the early step sync inside
+   /// ImplicitSolve, at the end of ImplicitSolve.
+   void StoreRecord_(real_t t, const real_t ext[6])
+   {
+      const real_t min_sig = ext[0], max_sig = ext[1], max_V = ext[2], max_ratio = ext[3];
+      const real_t min_pc = ext[4], max_pc = ext[5];
       if (lts_defer_red_)
       {
          const real_t r[6] = {-min_sig, max_sig, max_V, max_ratio, -min_pc, max_pc};
@@ -1876,6 +2483,7 @@ private:
       record_pending_ = false;
       real_t red[4] = {record_red_[0], record_red_[1], record_red_[2], record_red_[3]};
       const RankCosts::Scope wait(RankCosts::WSync);   // to the function's end
+      ScopedStageTimer red_timer(timers_, StageTimers::DynFaultReduce);
       MPI_Allreduce(MPI_IN_PLACE, red, 4, MPITypeMap<real_t>::mpi_type, MPI_MAX,
                     mesh_.GetComm());
       record_.min_sigma_eff = -red[0];
@@ -1892,6 +2500,206 @@ private:
       }
    }
 
+
+   /// Plan D3 (header): boxes 3-11 on the device; ext as CloseFaultHost_.
+   void AdvanceFaultDevice_(const Vector &x, real_t t, const Vector *v, real_t ext[6])
+   {
+      const real_t dt = dt_;
+      PredictFaultDevice_(dt);   // 3, 4
+      {
+         // 5-8
+         ScopedStageTimer timer(timers_, StageTimers::DynFaultTraction);
+         dev_maps_->ToKernelLocal(dstar_, dslip_k_);
+         dev_trac_->Mult(x, dslip_k_, dTk_, dsn_);
+         if (kv_)
+         {
+            MFEM_VERIFY(v, "NitscheWaveOperator: the Kelvin-Voigt layer needs Udot*");
+            dev_kv_trac_->Mult(*v, dkv_slip0_, dkvTk_, dkvsn_);
+         }
+      }
+      // 8-11: the background traction S0 + g(t) Snuc inside the kernel
+      const real_t g = nuc_temporal_ ? nuc_temporal_(t) : 0.0;
+      const DFExtremes r = CloseFaultDevice_(dt, g);
+      if (r.status != 0) { RerunCloseHost_(t, dt, r.status); }
+      d_.Swap(d_new_);
+      V_.Swap(V_new_);
+      psi_.Swap(psi_new_);
+      if (pc_) { sigpc_.Swap(pc_new_); }
+      ext[0] = -r.neg_min_sig;
+      ext[1] = r.max_sig;
+      ext[2] = r.max_V;
+      ext[3] = r.max_ratio;
+      ext[4] = -r.neg_min_pc;
+      ext[5] = r.max_pc;
+   }
+
+   /// Plan D3: a kernel of boxes 9-11 flagged `status` (RSStatus | DFStatus
+   /// bits).  The host loop reruns on the step's inputs (the state at step
+   /// n, which the kernel left in place, and its trial traction): it prints
+   /// and stops the run where the host step does.  It writes nothing: when
+   /// it does not stop (a warning only), the step keeps the kernel's values.
+   void RerunCloseHost_(real_t t, real_t dt, int status)
+   {
+      auto host_copy = [](const Vector &a, Vector &b)
+      {
+         b.SetSize(a.Size());
+         const real_t *h = a.HostRead();
+         real_t *o = b.HostWrite();
+         for (int i = 0; i < a.Size(); i++) { o[i] = h[i]; }
+      };
+      // the kernels read these on the device; the host loop reads them with
+      // operator()
+      for (const Vector *a : {&dstar_, &psistar_, &r0_, &frame_own_, &Dc_own_, &sigF_own_,
+                              &sigFkv_own_, &S0_own_, &Snuc_own_}) { a->HostRead(); }
+      Vector Town, S, d, V, psi, sigpc, Xl, sl;
+      host_copy(Town_, Town);
+      host_copy(d_, d);
+      host_copy(V_, V);
+      host_copy(psi_, psi);
+      if (pc_) { host_copy(sigpc_, sigpc); }
+      BackgroundTraction(t, S);
+      real_t ext[6];
+      CloseFaultHost_(t, dt, Town, S, d, V, psi, sigpc, Xl, sl, ext);
+      MFEM_VERIFY(!(status & kDFAbort), "NitscheWaveOperator: the device fault step flagged "
+                  "status " << status << " (RSStatus | DFStatus) on rank " << Mpi::WorldRank()
+                  << ", step " << steps_ << ", but the host rerun of boxes 9-11 did not stop "
+                  "the run");
+   }
+
+public:
+   // The functions holding the kernels are public: nvcc refuses an extended
+   // __host__ __device__ lambda inside a private or protected member.
+
+   /// Plan D3, boxes 3-4 on the device: d* = d + dt/2 V, r0 = r(|V|, psi),
+   /// psi* = psi + dt r0 (the host loop of AdvanceFault_).
+   void PredictFaultDevice_(real_t dt)
+   {
+      const int no = no_;
+      dstar_.SetSize(3 * no);
+      psistar_.SetSize(no);
+      r0_.SetSize(no);
+      if (no == 0) { return; }
+      const DeviceClosure cl = dev_cl_;
+      const real_t *d = d_.Read(true), *V = V_.Read(true), *psi = psi_.Read(true);
+      const real_t *q = dev_par_.Read(true);
+      real_t *ds = dstar_.Write(true), *ps = psistar_.Write(true), *r0 = r0_.Write(true);
+      mfem::forall(no, [=] MFEM_HOST_DEVICE (int j)
+      {
+         const real_t *Vj = V + 3 * j;
+         for (int c = 0; c < 3; c++) { ds[3 * j + c] = d[3 * j + c] + 0.5 * dt * Vj[c]; }
+         const real_t Vabs = std::sqrt(Vj[0] * Vj[0] + Vj[1] * Vj[1] + Vj[2] * Vj[2]);
+         r0[j] = DCStateRate(cl, q + kDCParams * j, Vabs, psi[j]);
+         ps[j] = psi[j] + dt * r0[j];
+      });
+   }
+
+   /// Plan D3, boxes 8-11 on the device, one owned DOF per thread, in the
+   /// host loop's arithmetic (TrialTraction's FromKernel and restriction,
+   /// BackgroundTraction with g = g(t), CloseDOF, the checks, Heun and box
+   /// 11): writes Town_, Xlast_, siglast_ and the state at n + 1 into
+   /// d_new_, V_new_, psi_new_ (pc_new_), and returns the extremes and the
+   /// OR of the status words.
+   DFExtremes CloseFaultDevice_(real_t dt, real_t g)
+   {
+      const int no = no_;
+      Town_.SetSize(3 * no);
+      Xlast_.SetSize(2 * no);
+      siglast_.SetSize(no);
+      d_new_.SetSize(3 * no);
+      V_new_.SetSize(3 * no);
+      psi_new_.SetSize(no);
+      if (pc_) { pc_new_.SetSize(no); }
+      DFExtremes res;
+      DFExtremesReducer::SetInitialValue(res);
+      if (no == 0) { return res; }
+      const DeviceClosure cl = dev_cl_;
+      const bool kv = static_cast<bool>(kv_), pc = pc_, nuc = (g != 0.0);
+      const real_t sigma_min = sigma_min_, vstar = pc_vstar_, len = pc_len_;
+      const int *own = dev_maps_->OwnedToLocal().Read(true);
+      const real_t *bk = dev_maps_->Triads().Read(true), *ep = dev_maps_->EpsF().Read(true);
+      const real_t *Tk = dTk_.Read(true), *sn = dsn_.Read(true);
+      const real_t *kTk = kv ? dkvTk_.Read(true) : nullptr, *ksn = kv ? dkvsn_.Read(true) : nullptr;
+      const real_t *S0 = S0_own_.Read(true), *Sn = nuc ? Snuc_own_.Read(true) : nullptr;
+      const real_t *fr = frame_own_.Read(true), *sF = sigF_own_.Read(true);
+      const real_t *sFk = kv ? sigFkv_own_.Read(true) : nullptr;
+      const real_t *Dc = Dc_own_.Read(true), *q = dev_par_.Read(true);
+      const real_t *d = d_.Read(true), *V = V_.Read(true), *psi = psi_.Read(true);
+      const real_t *ds = dstar_.Read(true), *ps = psistar_.Read(true), *r0 = r0_.Read(true);
+      const real_t *pco = pc ? sigpc_.Read(true) : nullptr;
+      real_t *To = Town_.Write(true), *Xl = Xlast_.Write(true), *sl = siglast_.Write(true);
+      real_t *dn = d_new_.Write(true), *Vw = V_new_.Write(true), *pn = psi_new_.Write(true);
+      real_t *pcn = pc ? pc_new_.Write(true) : nullptr;
+      reduce(no, res, [=] MFEM_HOST_DEVICE (int j, DFExtremes &r)
+      {
+         int status = 0;
+         // 8: T_h(U^{n+1}, d*) (+ T_eta(Udot*, 0)) at owned DOF j, then + S
+         const int k = own[j];
+         const real_t *nk = bk + 9 * k, *t1k = nk + 3, *t2k = nk + 6;
+         real_t T[3], TS[3];
+         fault_frame::FromKernel(Tk[2 * k], Tk[2 * k + 1], sn[k], ep[k], nk, t1k, t2k, T);
+         if (kv)
+         {
+            real_t Tv[3];
+            fault_frame::FromKernel(kTk[2 * k], kTk[2 * k + 1], ksn[k], ep[k], nk, t1k, t2k, Tv);
+            for (int c = 0; c < 3; c++) { T[c] += Tv[c]; }
+         }
+         for (int c = 0; c < 3; c++)
+         {
+            To[3 * j + c] = T[c];
+            const real_t S = nuc ? S0[3 * j + c] + g * Sn[3 * j + c] : S0[3 * j + c];
+            TS[c] = T[c] + S;
+         }
+         // 9: CloseDOF
+         const real_t *dj = d + 3 * j;
+         const real_t dn_abs = std::sqrt(dj[0] * dj[0] + dj[1] * dj[1] + dj[2] * dj[2]);
+         const real_t *n = fr + 9 * j, *dv = n + 3, *sv = n + 6;
+         real_t X[2], sig;
+         fault_frame::ToLocal(TS, 0.0, n, dv, sv, X[0], X[1], sig);
+         if (!(sig >= sigma_min)) { status |= kDFSigmaRange; }
+         real_t sig_law = sig;
+         if (pc)
+         {
+            const real_t *Vo = V + 3 * j;
+            const real_t Vo_abs = std::sqrt(Vo[0] * Vo[0] + Vo[1] * Vo[1] + Vo[2] * Vo[2]);
+            const real_t xpc = -(Vo_abs + vstar) * dt / len;
+            const real_t E = std::exp(xpc), omE = -std::expm1(xpc);
+            const real_t spc = E * pco[j] + omE * sig;
+            pcn[j] = spc;
+            sig_law = spc;
+            r.neg_min_pc = (r.neg_min_pc < -spc) ? -spc : r.neg_min_pc;
+            r.max_pc = (r.max_pc < spc) ? spc : r.max_pc;
+         }
+         const real_t *qj = q + kDCParams * j;
+         const real_t gamma = kv ? 0.5 * sF[j] * dt + sFk[j] : 0.5 * sF[j] * dt;
+         real_t Vl[2], Vn[3];
+         DCSolveSlipRate(cl, qj, X, gamma, sig_law, ps[j], dn_abs, Vl, status);
+         fault_frame::Embed(Vl[0], Vl[1], dv, sv, Vn);
+         // 10: the checks, Heun
+         const real_t Vabs = std::sqrt(Vn[0] * Vn[0] + Vn[1] * Vn[1] + Vn[2] * Vn[2]);
+         const real_t VX = X[0] * fault_frame::Dot(Vn, dv) + X[1] * fault_frame::Dot(Vn, sv);
+         if (!(Vabs == 0.0 || VX < 0.0)) { status |= kDFAntiParallel; }
+         const real_t ratio = Vabs * dt / Dc[j];
+         if (!(ratio <= 2.0)) { status |= kDFRatio; }
+         pn[j] = psi[j] + 0.5 * dt * (r0[j] + DCStateRate(cl, qj, Vabs, ps[j]));
+         // 11
+         for (int c = 0; c < 3; c++)
+         {
+            Vw[3 * j + c] = Vn[c];
+            dn[3 * j + c] = ds[3 * j + c] + 0.5 * dt * Vn[c];
+         }
+         Xl[2 * j] = X[0];
+         Xl[2 * j + 1] = X[1];
+         sl[j] = sig;
+         r.neg_min_sig = (r.neg_min_sig < -sig) ? -sig : r.neg_min_sig;
+         r.max_sig = (r.max_sig < sig) ? sig : r.max_sig;
+         r.max_V = (r.max_V < Vabs) ? Vabs : r.max_V;
+         r.max_ratio = (r.max_ratio < ratio) ? ratio : r.max_ratio;
+         r.status |= status;
+      }, DFExtremesReducer{}, true, dev_red_ws_);
+      return res;
+   }
+
+private:
    /// Kernel triad (n_k, t1_k, t2_k) of local fault DOF k.
    void KernelTriad_(int k, real_t nk[3], real_t t1k[3], real_t t2k[3]) const
    {
@@ -2302,7 +3110,34 @@ private:
    mutable int dense_state_ = 0;   ///< 0 not tried, 1 dense blocks, -1 fused or CSR
    mutable DenseBlockStiffness dense_;
    mutable long long dense_bytes_ = 0;
+   bool mf_enabled_ = false;
+   NitscheSipgOperator::Layout mf_layout_ = NitscheSipgOperator::kAuto;
+   int mf_batch_ = 2;
+   mutable std::unique_ptr<NitscheSipgOperator> mf_;   ///< built on first use
+   mutable long long mf_bytes_ = 0;
+   // the device step (plan D2; UseDeviceStep_)
+   mutable bool dev_ready_ = false;
+   mutable std::unique_ptr<FaultGather> dev_gather_;
+   mutable std::unique_ptr<DeviceSlipLoad> dev_slip_, dev_kv_slip_;
+   mutable long long dev_gather_global_ = 0;
+   mutable Vector xf_, vf_;            ///< host: gathered U^{n+1}, Udot* for the fault
+   mutable Array<int> dev_damp_e_;     ///< elements with a dashpot block
+   mutable Vector dev_damp_C_;         ///< their blocks C_e, column-major
+   // the device fault (plan D3; SetDeviceFault, SetupDeviceFault_)
+   bool dev_fault_on_ = false;         ///< SetDeviceFault
+   mutable bool dev_fault_ = false;    ///< set up: AdvanceFault_ runs on the device
+   mutable DeviceClosure dev_cl_;
+   mutable std::unique_ptr<DeviceFaultMaps> dev_maps_;
+   mutable std::unique_ptr<DeviceFaultTraction> dev_trac_, dev_kv_trac_;
+   mutable Vector dev_par_;            ///< per-point parameters, kDCParams per owned DOF
+   mutable Vector dkv_slip0_;          ///< kernel slip of a zero slip rate (T_eta(Udot*, 0))
+   Vector dslip_k_, dTk_, dsn_, dkvTk_, dkvsn_;   ///< boxes 5-8 on the device
+   Vector d_new_, V_new_, psi_new_, pc_new_;      ///< state n + 1 until the status check
+   mutable Vector dload_k_;            ///< kernel slip of the slip loads
+   mutable Vector gbuf_;               ///< GatherFaultDofs
+   Array<DFExtremes> dev_red_ws_;      ///< workspace of the reduction
    mutable double fault_sec_ = 0.0;
+   StageTimers *timers_ = nullptr;   ///< D0 step-part timers (null: off)
 };
 
 #endif // MFEM_USE_MPI

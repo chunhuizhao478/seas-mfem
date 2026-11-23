@@ -43,6 +43,11 @@ export NVPL_LAPACK_NUM_THREADS=1
 
 # The v63 production deck (jobs/bp5/bp5_v63_recompute_sliprate_48hr.sbatch)
 # without its output and diagnostic flags.  Each job adds --mesh/--order.
+# The G0 and G1 jobs add --qd-operators loops to these: their goldens and
+# the 1074099 cycle were made with the face loops, the default before QD
+# speed item 1 (95e0ae7) made the stage operators the default for IP runs.
+# Later phases pass their own --qd-operators.  No --qd-operators here: the
+# QD speed jobs (jobs/vista_qd_speed) test the default.
 G0_V63_FLAGS=(
    --mesh-scale 1000
    --dg-method IP

@@ -880,6 +880,7 @@ DOMAIN_HEADERS = common/seas_types.hpp \
                  domain/elasticity_operator_fault_ops.inl \
                  domain/fused_stiffness_pair.hpp \
                  domain/dense_block_stiffness.hpp \
+                 domain/nitsche_sipg_operator.hpp \
                  domain/boundary_config.hpp \
                  domain/domain_config.hpp \
                  domain/seas_boundary_tags.hpp \
@@ -1074,6 +1075,15 @@ TEST_CUDSS_VS_MUMPS_OBJ = $(TEST_CUDSS_VS_MUMPS_SRC:.cpp=.o)
 # GPU plan G4: the fault kernels against the host friction code
 TEST_DEVICE_FRICTION_SRC = tests/parallel/test_device_friction.cpp
 TEST_DEVICE_FRICTION_OBJ = $(TEST_DEVICE_FRICTION_SRC:.cpp=.o)
+
+# GPU dynamic-rupture plan D3: the device Nitsche fault closures against the
+# host closures
+TEST_DEVICE_CLOSURES_SRC = tests/parallel/test_device_closures.cpp
+TEST_DEVICE_CLOSURES_OBJ = $(TEST_DEVICE_CLOSURES_SRC:.cpp=.o)
+
+# GPU plan G3c: the device product of the QD Green's function
+TEST_QD_GREEN_DEVICE_SRC = tests/parallel/test_qd_green_device.cpp
+TEST_QD_GREEN_DEVICE_OBJ = $(TEST_QD_GREEN_DEVICE_SRC:.cpp=.o)
 
 # Parallel wave operator tests (dynamic rupture)
 TEST_PARALLEL_WAVE_SRC = tests/parallel/test_parallel_wave_operator.cpp
@@ -5088,6 +5098,11 @@ test-elasticity-operator: seas_test_elasticity_operator
 test-bp5-gate-check:
 	python3 tests/unit/test_bp5_gate_check.py
 
+# GPU dynamic-rupture plan D0: the Nitsche gate checker
+# (scripts/nitsche_gate_check.py), Python only.
+test-nitsche-gate-check:
+	python3 tests/unit/test_nitsche_gate_check.py
+
 # GPU plan G0: --exit-after-assembly statistics, on 1 and 2 ranks.
 test-g0-matrix-only: seas_test_g0_matrix_only
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_g0_matrix_only
@@ -5960,6 +5975,37 @@ $(TEST_DEVICE_FRICTION_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS
 test-device-friction: seas_test_device_friction
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_device_friction
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_device_friction --device debug --n 100000
+
+# GPU dynamic-rupture plan D3: the device Nitsche fault closures against the
+# host closures (CPU and debug device here; a GPU build runs it again with
+# --device cuda)
+seas_test_device_closures: $(TEST_DEVICE_CLOSURES_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_DEVICE_CLOSURES_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+$(TEST_DEVICE_CLOSURES_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+test-device-closures: seas_test_device_closures
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_device_closures
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_device_closures --device debug --n 100000
+
+# GPU plan G3c: the device product of the QD Green's function against the
+# host product (debug device here; a GPU build runs it with --device cuda)
+seas_test_qd_green_device: $(TEST_QD_GREEN_DEVICE_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_QD_GREEN_DEVICE_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+$(TEST_QD_GREEN_DEVICE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+test-qd-green-device: seas_test_qd_green_device
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_qd_green_device --device debug
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_qd_green_device --device debug
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 3 ./seas_test_qd_green_device --device debug --uneven
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_qd_green_device --device debug --no-normal
 
 # Parallel wave operator tests (dynamic rupture)
 # Match the serial rule (line 847): the test instantiates
@@ -6906,3 +6952,27 @@ $(BENCH_NITSCHE_KERNELS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) 
 seas_bench_nitsche_kernels: $(BENCH_NITSCHE_KERNELS_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) $(LTS_PARTITION_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(BENCH_NITSCHE_KERNELS_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) $(LTS_PARTITION_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# GPU dynamic-rupture plan D2: the matrix-free SIPG product
+# (domain/nitsche_sipg_operator.hpp) against the assembled K u + K_eta v, and
+# its microbenchmark (--reps).  The test target runs the checks on the
+# cloud-sized TPV205 mesh, p = 1 and 2, 1 and 4 ranks, with heterogeneous
+# material and with a Dirichlet boundary.
+TEST_NITSCHE_SIPG_MF_SRC = tests/unit/test_nitsche_sipg_mf.cpp
+TEST_NITSCHE_SIPG_MF_OBJ = $(TEST_NITSCHE_SIPG_MF_SRC:.cpp=.o)
+$(TEST_NITSCHE_SIPG_MF_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -DSEAS_USE_MPI \
+	    -c $< -o $@
+
+seas_test_nitsche_sipg_mf: $(TEST_NITSCHE_SIPG_MF_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_NITSCHE_SIPG_MF_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+SIPG_MF_MESH ?= tpv205/mesh/tpv2053d_1000m.msh
+test-nitsche-sipg-mf: seas_test_nitsche_sipg_mf
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_sipg_mf --mesh $(SIPG_MF_MESH) --order 1
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_nitsche_sipg_mf --mesh $(SIPG_MF_MESH) --order 1 --hetero 0.2
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_nitsche_sipg_mf --mesh $(SIPG_MF_MESH) --order 1 --hetero 0.2 --dirichlet 105
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_nitsche_sipg_mf --mesh $(SIPG_MF_MESH) --order 2 --hetero 0.2
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_nitsche_sipg_mf --mesh $(SIPG_MF_MESH) --order 2 --hetero 0.2 --dirichlet 105

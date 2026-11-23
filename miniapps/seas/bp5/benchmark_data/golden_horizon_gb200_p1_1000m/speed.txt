@@ -1,0 +1,6 @@
+job 69011, QD_PATH green, 1 GPU(s), exit 0
+simulated: 1.500e+03 yr, 7 seismic events
+accepted steps: 313950
+wall (seas_bp5_full, setup included): 10729 s = 2.98 h
+s/step: 0.0342
+vs CPU gold 1074099 (0.36 s/step, 31.6 h for 1500 yr): 10.59x per step

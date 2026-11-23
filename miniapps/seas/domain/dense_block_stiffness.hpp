@@ -39,6 +39,7 @@
 
 #include "mfem.hpp"
 #include "../common/rank_costs.hpp"
+#include "../common/stage_timers.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -52,6 +53,9 @@ namespace seas
 class DenseBlockStiffness
 {
 public:
+   /// Time the halo wait of Mult as StageTimers::DynHaloWait (null: off).
+   void SetStageTimers(StageTimers *timers) { timers_ = timers; }
+
    /// Read the blocks of K (and of E, when not null).  False (nothing
    /// usable) when the space is not DG with one block size, a matrix has an
    /// entry outside the element and face blocks, or the halo cannot be
@@ -539,6 +543,7 @@ private:
       if (!early)
       {
          const RankCosts::Scope wait(RankCosts::WStiff);
+         ScopedStageTimer halo_wait(timers_, StageTimers::DynHaloWait);
          MPI_Waitall(q, reqs_.data(), MPI_STATUSES_IGNORE);
       }
       const real_t *h = recv_buf_.data(), *Sp = S_.data();
@@ -572,6 +577,7 @@ private:
    mutable std::vector<real_t> send_buf_, recv_buf_;
    mutable std::vector<MPI_Request> reqs_;
    mutable const real_t *halo_u_ = nullptr, *halo_v_ = nullptr;   ///< ExchangeHalo's
+   StageTimers *timers_ = nullptr;
 };
 
 } // namespace seas

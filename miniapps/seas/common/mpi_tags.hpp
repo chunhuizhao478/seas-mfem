@@ -23,6 +23,10 @@ namespace MPITag
 {
    /// Fault data scatter: owned → ghost DOF exchange in ExpandOwnedToLocalFault
    constexpr int kFaultScatter = 27183;
+   /// GPU dynamic-rupture plan D3: the device copies of that scatter and of
+   /// the fault-face neighbour exchange of ComputeTractionFast (tag 7312)
+   constexpr int kFaultScatterDevice = 27184;
+   constexpr int kFaultNbrDevice = 27185;
 }
 
 } // namespace seas

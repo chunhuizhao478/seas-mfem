@@ -32,6 +32,7 @@
 // two hypre SpMVs.
 
 #include "mfem.hpp"
+#include "../common/stage_timers.hpp"
 
 #include <algorithm>
 #include <vector>
@@ -44,6 +45,9 @@ namespace seas
 class FusedStiffnessPair
 {
 public:
+   /// Time the halo wait of Mult as StageTimers::DynHaloWait (null: off).
+   void SetStageTimers(StageTimers *timers) { timers_ = timers; }
+
    /// Build the union arrays.  False (nothing usable) when neither offd
    /// column map contains the other on this rank; the caller reduces the
    /// flag over all ranks.
@@ -142,7 +146,10 @@ public:
          }
          py[i] = sk + se;
       }
-      MPI_Waitall(q, reqs_.data(), MPI_STATUSES_IGNORE);
+      {
+         ScopedStageTimer wait(timers_, StageTimers::DynHaloWait);
+         MPI_Waitall(q, reqs_.data(), MPI_STATUSES_IGNORE);
+      }
       if (!oJ_.empty())
       {
          const int *Io = oI_.data(), *Jo = oJ_.data();
@@ -261,6 +268,7 @@ private:
    std::vector<int> send_procs_, send_starts_, send_map_, recv_procs_, recv_starts_;
    mutable std::vector<real_t> w_, send_buf_, recv_buf_;
    mutable std::vector<MPI_Request> reqs_;
+   StageTimers *timers_ = nullptr;
 };
 
 } // namespace seas

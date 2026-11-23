@@ -44,7 +44,7 @@ set -uo pipefail
 source "${SLURM_SUBMIT_DIR}/jobs/vista/g1_cuda_env.sh"
 g1_check_checkout
 
-MODE=cuda GPU_ARCH=90 STAGE="seas" JOBS=72 MODULES=none bash "${SEAS_MFEM_ROOT}/build_horizon.sh" || exit 1
+MODE=cuda GPU_ARCH="${GPU_ARCH:-90}" STAGE="seas" JOBS=72 MODULES=none bash "${SEAS_MFEM_ROOT}/build_horizon.sh" || exit 1
 g0_check_binary
 ( cd "${SEAS_DIR}" && rm -f tests/parallel/test_device_friction.o &&
   make -j8 seas_test_device_friction ) || exit 1
