@@ -52,6 +52,11 @@ This file is the working plan.
   the high frequencies are damped and the two masses agree. The result is
   sensitive to the mass discretization, i.e. the mesh (h = 0.3 mm, l = 0.6 mm)
   is not converged for undamped crack growth.
+  With the CFL from the consistent mass (power iteration on M_c^{-1} K,
+  dt_crit 5.84e-8 vs 9.53e-8 lumped) pff -cm gives at 10 µs crack 79.57 J/m,
+  d_max 0.988, extents 2.170 / 1.358 mm vs M-C2d 79.66, 0.983, 2.170 /
+  1.378 mm; 2x the lumped wall time. MOOSE single pass (M-C2e, 76.2 J/m)
+  rules out the coupling.
 
 ## Phases
 

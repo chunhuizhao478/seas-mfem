@@ -229,7 +229,7 @@ static void Check(Mesh &serial, const char *label)
       opc.SolveAcceleration(r, h, xs, alpha);
       xs -= x;
       TEST_ASSERT(xs.Normlinf() <= 1e-9 * x.Normlinf(),
-                  "consistent mass: PCG solve inverts (1 + h alpha) M_c + h C_b");
+                  "consistent mass: PCG solve inverts M_c + h alpha M_L + h C_b");
       // lumped path through the same interface
       {
          ExplicitElasticityParams pl = pc;

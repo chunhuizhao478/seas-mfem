@@ -101,11 +101,13 @@ public:
          }
    }
 
-   /// y = ((1 + h alpha) M + h C_b) x (consistent or lumped M), y = x on the
+   /// y = (M + h alpha M_L + h C_b) x (M consistent or lumped), y = x on the
    /// fixed dofs: the operator SolveAcceleration inverts.
    void ApplySystem(real_t h, real_t alpha, const Vector &x, Vector &y) const
    {
       y.SetSize(x.Size());
+      // inertia M a (consistent or lumped) + h alpha M_L a: the mass damping
+      // always uses the lumped mass (AddMassForce), so its implicit part does too
       if (Ms_)
       {
          Vector xc, yc;
@@ -121,7 +123,8 @@ public:
          for (int c = 0; c < dim_; c++)
             for (int i = 0; i < nt_; i++) { y(c * nt_ + i) = M_(i) * x(c * nt_ + i); }
       }
-      y *= 1.0 + h * alpha;
+      for (int c = 0; c < dim_; c++)
+         for (int i = 0; i < nt_; i++) { y(c * nt_ + i) += h * alpha * M_(i) * x(c * nt_ + i); }
       Vector cx;
       DashpotForce(x, cx);
       y.Add(h, cx);
@@ -202,7 +205,8 @@ public:
       return std::sqrt(g);
    }
 
-   /// omega_max^2 of M^{-1} K (K the undamaged stiffness, D = 0) by power
+   /// omega_max^2 of M^{-1} K (M lumped, or consistent with -cm; K the
+   /// undamaged stiffness, D = 0) by power
    /// iteration; the fixed dofs are held at 0.
    real_t MaxEigenvalue(int iterations) const
    {
@@ -225,17 +229,20 @@ public:
       real_t lam = 0.0;
       for (int k = 0; k < iterations; k++)
       {
-         // normalise in the M norm
-         real_t xm = 0.0;
-         for (int c = 0; c < dim_; c++)
-            for (int i = 0; i < nt_; i++) { xm += M_(i) * x(c * nt_ + i) * x(c * nt_ + i); }
-         real_t xmg = 0.0;
-         MPI_Allreduce(&xm, &xmg, 1, MPITypeMap<real_t>::mpi_type, MPI_SUM, vfes_.GetComm());
-         x /= std::sqrt(xmg);
+         // normalise in the M norm (x^T M x = 2 KE(x); consistent M with -cm)
+         x /= std::sqrt(2.0 * KineticEnergy(x));
          force_.Mult(x, D0, y);
          lam = InnerProduct(vfes_.GetComm(), x, y);   // Rayleigh quotient, x^T M x = 1
-         for (int c = 0; c < dim_; c++)
-            for (int i = 0; i < nt_; i++) { x(c * nt_ + i) = y(c * nt_ + i) / M_(i); }
+         if (Ms_)
+         {
+            for (int t : fixed_) { y(t) = 0.0; }
+            SolveConsistent(y, 0.0, 0.0, x);         // x = M_c^{-1} K x
+         }
+         else
+         {
+            for (int c = 0; c < dim_; c++)
+               for (int i = 0; i < nt_; i++) { x(c * nt_ + i) = y(c * nt_ + i) / M_(i); }
+         }
          for (int t : fixed_) { x(t) = 0.0; }
       }
       return lam;
@@ -271,7 +278,7 @@ private:
       Ms_.reset(m.ParallelAssemble());
    }
 
-   /// (1 + h alpha) M_c a + h C_b a = rhs, a = 0 on the fixed dofs; PCG with
+   /// (M_c + h alpha M_L + h C_b) a = rhs, a = 0 on the fixed dofs; PCG with
    /// the lumped (M + h C_b diag) as Jacobi preconditioner.
    void SolveConsistent(const Vector &rhs, real_t h, real_t alpha, Vector &a) const
    {
