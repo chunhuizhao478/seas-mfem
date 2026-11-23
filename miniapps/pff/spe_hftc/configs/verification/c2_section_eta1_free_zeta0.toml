@@ -54,6 +54,7 @@ t_free = 2.5e-5
 quench = "stiffness"                     # MOOSE parity; see PLAN.md: explicit needs "mass" or "implicit"
 
 [time]
+mass = "lumped"                          # as validated in C1/C2 (M-C1, M-C2a/b)
 cfl = 0.4
 dt_max = 1e-7
 dt_quiet = 1e-7

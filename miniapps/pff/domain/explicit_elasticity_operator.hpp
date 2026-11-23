@@ -45,9 +45,9 @@ struct ExplicitElasticityParams
    Array<int> confinement_marker; ///< boundary attributes with the constant confinement pressure
    real_t confinement_pressure = 0.0; ///< MOOSE Pressure BC, factor = confinement_pressure, from t = 0
    int quadrature_order = 2;
-   /// Diagnostic: consistent mass (MOOSE ADInertialForce) instead of the row
-   /// sum; each step then solves M a = r by PCG. The dashpots, the mass
-   /// damping and the CFL estimate keep the lumped mass.
+   /// Consistent mass (MOOSE ADInertialForce; [time] mass, the default) or the
+   /// row sum; consistent solves M a = r by PCG each step and sets the CFL from
+   /// M_c^{-1} K. The dashpots and the mass damping keep the lumped mass.
    bool consistent_mass = false;
    real_t Cp() const { return std::sqrt((K + 4.0 / 3.0 * G) / density); }
    real_t Cs() const { return std::sqrt(G / density); }

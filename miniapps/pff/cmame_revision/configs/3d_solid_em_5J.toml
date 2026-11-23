@@ -47,6 +47,7 @@ center = [0.0, 0.0, 0.03]
 num_pulses = 10
 
 [time]
+mass = "consistent"                      # MOOSE ADInertialForce (Andy 2026-11-22; lumped grows ~20% more damage at zeta_pulse = 0)
 end_time = 10e-5
 cfl = 0.4
 

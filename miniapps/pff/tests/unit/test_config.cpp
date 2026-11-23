@@ -32,6 +32,10 @@ static void TestSpe()
    TEST_ASSERT(c.pf.driving == DrivingEnergy::Active, "driving = active");
    const CaseConfig s = CaseConfigParser::ParseFile("spe_hftc/configs/section_homog_eta0p45_absorb.toml");
    TEST_ASSERT(s.dim == 2 && s.fixed_z_bdr.empty(), "2D section: dim 2, no end faces");
+   TEST_ASSERT(s.consistent_mass && s.quench == QuenchMode::Mass && s.zeta_pulse == 0.0 &&
+               s.alpha_mass == 2e5, "2D section: consistent mass, zeta_pulse 0, mass quench 2e5");
+   const CaseConfig v = CaseConfigParser::ParseFile("spe_hftc/configs/verification/c2_section_eta1.toml");
+   TEST_ASSERT(!v.consistent_mass, "C2 verification case keeps the lumped mass it was validated with");
 }
 
 static void TestCmame()

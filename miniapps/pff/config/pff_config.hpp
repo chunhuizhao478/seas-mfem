@@ -16,7 +16,8 @@
 //   [confinement]  static outer pressure
 //   [damping]      zeta_pulse, zeta_quench, t_free, quench ("stiffness" | "mass" | "implicit"),
 //                  alpha_mass
-//   [time]         end_time or num_pulses, cfl, dt_max, dt_quiet
+//   [time]         end_time or num_pulses, cfl, dt_max, dt_quiet, mass ("consistent"
+//                  default, MOOSE ADInertialForce; or "lumped")
 //   [coupling]     scheme, max_passes, tolerance
 //   [poro]         Biot/porosity/permeability parameters (hydromech only)
 //   [output]       directory, interval, fields
@@ -97,6 +98,7 @@ struct CaseConfig
 
    // [time]
    real_t end_time = 0.0, cfl = 0.4, dt_max = 0.0, dt_quiet = 0.0;
+   bool consistent_mass = true;   ///< [time] mass (Andy 2026-11-22: consistent for production)
 
    // [coupling]
    CouplingScheme coupling = CouplingScheme::SinglePass;

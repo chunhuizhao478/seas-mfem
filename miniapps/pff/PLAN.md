@@ -15,7 +15,7 @@ This file is the working plan.
 
 ## Discretisation (decided in the write-up, revisit at the gates)
 
-- **u**: H1 P1 (vector), lumped mass, central difference (Newmark β = 0,
+- **u**: H1 P1 (vector), consistent mass (lumped optional), central difference (Newmark β = 0,
   γ = 1/2), as in `seas` `nitsche_wave_operator.hpp`. Dashpots enter as
   (M + Δt/2 C_b) with a lumped, diagonal C_b. CFL from a power iteration on
   M⁻¹K. Hydromech uses the undrained P-wave speed √((K + α²M + 4G/3)/ρ).
@@ -56,7 +56,9 @@ This file is the working plan.
   dt_crit 5.84e-8 vs 9.53e-8 lumped) pff -cm gives at 10 µs crack 79.57 J/m,
   d_max 0.988, extents 2.170 / 1.358 mm vs M-C2d 79.66, 0.983, 2.170 /
   1.378 mm; 2x the lumped wall time. MOOSE single pass (M-C2e, 76.2 J/m)
-  rules out the coupling.
+  rules out the coupling. **Decided (Andy, 2026-11-22): `[time] mass =
+  "consistent"` (the default) for production; the C1/C2 verification cases keep
+  `mass = "lumped"` as validated.**
 
 ## Phases
 

@@ -8,7 +8,7 @@
 // Phase C2 (this version): explicit elastodynamics plus one bound-constrained
 // damage solve per step (below); -fd/--frozen-damage holds d = 0 (phase C1,
 // output <name>_c1.csv, otherwise <name>_c2.csv). One step:
-// central difference with lumped mass (solver/central_difference.hpp), split
+// central difference with consistent or lumped mass ([time] mass; solver/central_difference.hpp), split
 // internal force (kernels/split_force_kernels.hpp), Lysmer dashpots and the
 // ElkPulseLoadExperiment borehole pressure (domain/explicit_elasticity_operator.hpp).
 //
@@ -138,7 +138,7 @@ int main(int argc, char *argv[])
    const char *output_override = "";
    real_t end_time_override = -1.0;
    bool frozen_damage = false;
-   bool consistent_mass = false;
+   const char *mass_override = "";
    int power_its = 60;
    int pv_interval = 0;
    OptionsParser args(argc, argv);
@@ -149,8 +149,7 @@ int main(int argc, char *argv[])
                   "Hold d = 0 (phase C1: elastodynamics only).");
    args.AddOption(&power_its, "-pi", "--power-iterations",
                   "Power iterations for omega_max^2 of M^-1 K.");
-   args.AddOption(&consistent_mass, "-cm", "--consistent-mass", "-lm", "--lumped-mass",
-                  "Diagnostic: consistent mass (PCG solve per step) instead of the lumped mass.");
+   args.AddOption(&mass_override, "-mass", "--mass", "Override [time] mass: consistent or lumped.");
    args.AddOption(&pv_interval, "-pv", "--paraview-interval",
                   "Write ParaView output every N steps (0: none).");
    args.Parse();
@@ -163,6 +162,9 @@ int main(int argc, char *argv[])
    CaseConfig c = CaseConfigParser::ParseFile(config_file);
    if (std::string(output_override).size()) { c.output_dir = output_override; }
    if (end_time_override > 0.0) { c.end_time = end_time_override; }
+   if (std::string(mass_override) == "consistent") { c.consistent_mass = true; }
+   else if (std::string(mass_override) == "lumped") { c.consistent_mass = false; }
+   else { MFEM_VERIFY(std::string(mass_override).empty(), "-mass must be consistent or lumped"); }
 
    MFEM_VERIFY(c.model == CaseModel::Solid, "pff_driver: hydromech is phase C4");
    MFEM_VERIFY((c.confinement_pressure == 0.0) == c.confinement_bdr.empty(),
@@ -213,7 +215,7 @@ int main(int argc, char *argv[])
    ep.density = c.density;
    ep.decomposition = c.decomposition;
    ep.deg = c.pf.deg;
-   ep.consistent_mass = consistent_mass;
+   ep.consistent_mass = c.consistent_mass;
    ep.pressure_marker = Marker(ResolveAttributes(c.pressure_bdr, names, dim - 1), max_attr);
    ep.absorbing_marker = Marker(ResolveAttributes(c.absorbing_bdr, names, dim - 1), max_attr);
    ep.confinement_marker = Marker(ResolveAttributes(c.confinement_bdr, names, dim - 1), max_attr);

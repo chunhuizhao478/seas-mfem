@@ -57,6 +57,7 @@ quench = "mass"                          # C = alpha_mass M after t_free (Andy 2
 alpha_mass = 2e5                         # decay time 1/alpha = 10 us = MOOSE's 1/zeta_quench design target
 
 [time]
+mass = "consistent"                      # MOOSE ADInertialForce (Andy 2026-11-22; lumped grows ~20% more damage at zeta_pulse = 0)
 cfl = 0.4
 dt_max = 1e-7
 dt_quiet = 1e-7

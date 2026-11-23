@@ -51,6 +51,7 @@ num_pulses = 50
 pressure = 1e6
 
 [time]
+mass = "consistent"                      # MOOSE ADInertialForce (Andy 2026-11-22; lumped grows ~20% more damage at zeta_pulse = 0)
 end_time = 50e-5
 cfl = 0.4
 dt_max = 1e-8

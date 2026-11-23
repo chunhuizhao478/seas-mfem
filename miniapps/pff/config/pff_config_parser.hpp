@@ -160,11 +160,15 @@ private:
       }
       {
          const auto &t = data.at("time");
-         Check(t, "time", {"end_time", "cfl", "dt_max", "dt_quiet"});
+         Check(t, "time", {"end_time", "cfl", "dt_max", "dt_quiet", "mass"});
          c.end_time = Real(t, "end_time", c.pulse.num_pulses * c.pulse.pulse_duration);
          c.cfl = Real(t, "cfl", 0.4);
          c.dt_max = Real(t, "dt_max", 0.0);
          c.dt_quiet = Real(t, "dt_quiet", c.dt_max);
+         const std::string ms = Str(t, "mass", "consistent");
+         if (ms == "consistent") { c.consistent_mass = true; }
+         else if (ms == "lumped") { c.consistent_mass = false; }
+         else { throw std::invalid_argument("[time] mass must be consistent or lumped"); }
       }
       if (data.contains("coupling"))
       {
