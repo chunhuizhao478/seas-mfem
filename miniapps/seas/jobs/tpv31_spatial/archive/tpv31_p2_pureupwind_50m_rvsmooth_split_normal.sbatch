@@ -25,7 +25,7 @@
 #                     over-integration; --fault-resample NOT passed).
 #   * matrix Riemann: [numerics].interior_flux = "matrix"  (MANDATORY for TPV31's
 #                     depth_profile_1d bi-material; config-only, asserted below).
-#   Config: tpv31/configs/tpv31_p2.toml.
+#   Config: tpv31/configs/archive/tpv31_p2.toml.
 #
 # CROSS-RANK SEAM (np>1, branch fix-cross-rank-material-exchange) ----------
 #   This job runs the bi-material Godunov UPWIND seam (mixed_flux=none) on the
@@ -56,7 +56,7 @@ set -euo pipefail
 FAULT_OVERINT=0                                      # no over-integration
 MESH="tpv31/mesh/tpv31_50m_rvsmooth_split.msh"
 TFINAL="${TPV31_TFINAL:-15}"                          # spec p. 9 = 15 s
-CONFIG_TOML="tpv31/configs/tpv31_p2.toml"             # p2, interior_flux="matrix"
+CONFIG_TOML="tpv31/configs/archive/tpv31_p2.toml"             # p2, interior_flux="matrix"
 
 module load intel/19.1.1
 module load impi/19.0.9

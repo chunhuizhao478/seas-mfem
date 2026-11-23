@@ -28,7 +28,7 @@
 #   * scalar Riemann: [numerics].interior_flux = "scalar"  (TPV104 is a
 #                     HOMOGENEOUS half-space → scalar Godunov; config-only, no
 #                     CLI override — asserted below).
-#   Config: tpv104/configs/tpv104_spatial_p2.toml (p2 / ADER-O3 variant).
+#   Config: tpv104/configs/archive/tpv104_spatial_p2.toml (p2 / ADER-O3 variant).
 #
 # TPV104 physics ---------------------------------------------------------
 #   * [meta].law = "rate_state" (Dieterich-Ruina, SLIP law with strong rate
@@ -110,7 +110,7 @@ if [[ ! -x ./seas_spatial_dyn_driver ]]; then
     exit 1
 fi
 
-CONFIG_TOML="${TPV104_CONFIG:-tpv104/configs/tpv104_spatial_p2.toml}"
+CONFIG_TOML="${TPV104_CONFIG:-tpv104/configs/archive/tpv104_spatial_p2.toml}"
 # 200 m mesh (production resolution; the TOML default is the coarse 1000 m mesh).
 MESH="${TPV104_MESH:-tpv104/mesh/tpv104_200m.msh}"
 GEO="${TPV104_GEO:-tpv104/mesh/tpv104_200m.geo}"
@@ -124,7 +124,7 @@ fi
 # MANDATORY for homogeneous TPV104 (and for the pure-upwind scalar Godunov).
 if ! grep -Eq '^[[:space:]]*order[[:space:]]*=[[:space:]]*2([[:space:]]|$)' "${CONFIG_TOML}"; then
     echo "ERROR: ${CONFIG_TOML} does not set [mesh].order = 2 (this job is p2)."
-    echo "       Use tpv104/configs/tpv104_spatial_p2.toml (not _spatial.toml/_p3)."
+    echo "       Use tpv104/configs/archive/tpv104_spatial_p2.toml (not _spatial.toml/_p3)."
     exit 4
 fi
 if ! grep -Eq '^[[:space:]]*interior_flux[[:space:]]*=[[:space:]]*"scalar"' "${CONFIG_TOML}"; then

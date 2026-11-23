@@ -99,7 +99,7 @@ if [[ ! -x ./seas_spatial_dyn_driver ]]; then
     exit 1
 fi
 
-CONFIG_TOML="${TPV104_CONFIG:-tpv104/configs/tpv104_spatial_rk45_mixedflux.toml}"
+CONFIG_TOML="${TPV104_CONFIG:-tpv104/configs/archive/tpv104_spatial_rk45_mixedflux.toml}"
 # 200 m mesh (real work for 500 ranks; the TOML default is the 1000 m mesh).
 MESH="${TPV104_MESH:-tpv104/mesh/tpv104_200m.msh}"
 GEO="${TPV104_GEO:-tpv104/mesh/tpv104_200m.geo}"

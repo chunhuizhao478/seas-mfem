@@ -36,7 +36,7 @@
 #                     under ADER, so this scheme MUST be RK (Phases 4-5).  See
 #                     document/mixed_flux_dev/
 #                     BUILD_mixed_flux_rk_dynamic_rupture_2026-05-28.md.
-#   Config: tpv31/configs/tpv31_p2_rk_mixedflux.toml (variant of tpv31.toml: ONLY
+#   Config: tpv31/configs/archive/tpv31_p2_rk_mixedflux.toml (variant of tpv31.toml: ONLY
 #           mixed_flux none->adjacent; [material].seam_continuous=true is RETAINED
 #           but is now a DEPRECATED no-op — see PARALLEL SEAM MATERIAL below).
 #
@@ -151,7 +151,7 @@ if [[ ! -x ./seas_spatial_dyn_driver ]]; then
     exit 1
 fi
 
-CONFIG_TOML="${TPV31_CONFIG:-tpv31/configs/tpv31_p2_rk_mixedflux.toml}"
+CONFIG_TOML="${TPV31_CONFIG:-tpv31/configs/archive/tpv31_p2_rk_mixedflux.toml}"
 MESH="${TPV31_MESH:-tpv31/mesh/tpv31_50m.msh}"
 GEO="${TPV31_GEO:-tpv31/mesh/tpv31_50m.geo}"
 
@@ -173,12 +173,12 @@ fi
 if ! grep -Eq '^[[:space:]]*mixed_flux[[:space:]]*=[[:space:]]*"adjacent"' "${CONFIG_TOML}"; then
     echo "ERROR: ${CONFIG_TOML} does not set [numerics].mixed_flux = \"adjacent\"."
     echo "       This job validates the bi-material CENTRAL flux; use"
-    echo "       tpv31/configs/tpv31_p2_rk_mixedflux.toml (not tpv31.toml)."
+    echo "       tpv31/configs/archive/tpv31_p2_rk_mixedflux.toml (not tpv31.toml)."
     exit 4
 fi
 if ! grep -Eq '^[[:space:]]*order[[:space:]]*=[[:space:]]*2([[:space:]]|$)' "${CONFIG_TOML}"; then
     echo "ERROR: ${CONFIG_TOML} does not set [mesh].order = 2 (this job is p2)."
-    echo "       Use tpv31/configs/tpv31_p2_rk_mixedflux.toml (not the p1/p3 variant)."
+    echo "       Use tpv31/configs/archive/tpv31_p2_rk_mixedflux.toml (not the p1/p3 variant)."
     exit 4
 fi
 

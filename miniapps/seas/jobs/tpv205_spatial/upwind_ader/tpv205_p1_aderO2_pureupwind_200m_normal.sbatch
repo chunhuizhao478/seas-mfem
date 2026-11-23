@@ -30,7 +30,7 @@
 #                     HOMOGENEOUS half-space → scalar Godunov; config-only, no
 #                     CLI override — asserted below).  This is the key contrast
 #                     with TPV31, which is bi-material and REQUIRES "matrix".
-#   Config: tpv205/configs/tpv205_spatial.toml (p1 / ADER-O2 baseline).
+#   Config: tpv205/configs/archive/tpv205_spatial.toml (p1 / ADER-O2 baseline).
 #
 # TPV205 physics ---------------------------------------------------------
 #   * [meta].law = "slip_weakening" (LINEAR slip weakening, NOT rate-state).
@@ -114,7 +114,7 @@ if [[ ! -x ./seas_spatial_dyn_driver ]]; then
     exit 1
 fi
 
-CONFIG_TOML="${TPV205_CONFIG:-tpv205/configs/tpv205_spatial.toml}"
+CONFIG_TOML="${TPV205_CONFIG:-tpv205/configs/archive/tpv205_spatial.toml}"
 # 200 m mesh (production resolution; the config already points at this 200 m mesh).
 MESH="${TPV205_MESH:-tpv205/mesh/tpv2053d_200m.msh}"
 GEO="${TPV205_GEO:-tpv205/mesh/tpv2053d_200m.geo}"
@@ -129,7 +129,7 @@ fi
 # Both are config-only, so a drifted TOML would silently change the scheme.
 if ! grep -Eq '^[[:space:]]*order[[:space:]]*=[[:space:]]*1([[:space:]]|$)' "${CONFIG_TOML}"; then
     echo "ERROR: ${CONFIG_TOML} does not set [mesh].order = 1 (this job is p1)."
-    echo "       Use tpv205/configs/tpv205_spatial.toml (not _p2/_p3)."
+    echo "       Use tpv205/configs/archive/tpv205_spatial.toml (not _p2/_p3)."
     exit 4
 fi
 if ! grep -Eq '^[[:space:]]*interior_flux[[:space:]]*=[[:space:]]*"scalar"' "${CONFIG_TOML}"; then

@@ -31,7 +31,7 @@
 #   Relative to job 7761452 (PURE UPWIND + ADER), the ONLY thing changed here
 #   is the time integrator (ADER → RK45).  Flux (pure upwind), interior_flux
 #   (scalar), friction law (RS aging), mesh (200 m), stress, nucleation, CFL,
-#   and the same production config tpv102/configs/tpv102_spatial.toml are ALL
+#   and the same production config tpv102/configs/archive/tpv102_spatial.toml are ALL
 #   held identical.  So this isolates ADER-vs-RK45 with the flux held at pure
 #   upwind — i.e. it removes the bulk Zhang-SSO confound that job 7760376 (which
 #   changed BOTH flux AND integrator) could not.
@@ -138,7 +138,7 @@ fi
 
 # Use the SAME production config as job 7761452 (the PURE-UPWIND + ADER run)
 # so the ONLY difference is the integrator (overridden to rk45 on the CLI).
-CONFIG_TOML="${TPV102_CONFIG:-tpv102/configs/tpv102_spatial.toml}"
+CONFIG_TOML="${TPV102_CONFIG:-tpv102/configs/archive/tpv102_spatial.toml}"
 # 200 m mesh (real work for 800 ranks; the TOML default is the 1000 m mesh).
 MESH="${TPV102_MESH:-tpv102/mesh/tpv102_200m.msh}"
 GEO="${TPV102_GEO:-tpv102/mesh/tpv102_200m.geo}"

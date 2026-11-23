@@ -26,7 +26,7 @@ set -euo pipefail
 FAULT_OVERINT=0                                      # no over-integration
 MESH="tpv102/mesh/tpv102_200m_rvsmooth.msh"
 TFINAL=12
-CONFIG_TOML="tpv102/configs/tpv102_spatial_p2.toml"  # p2, interior_flux="scalar"
+CONFIG_TOML="tpv102/configs/archive/tpv102_spatial_p2.toml"  # p2, interior_flux="scalar"
 
 module load intel/19.1.1
 module load impi/19.0.9

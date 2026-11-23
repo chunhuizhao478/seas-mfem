@@ -22,6 +22,6 @@ ORDER=1
 TFINAL=12.0
 GOLD=tpv205/gold/nitsche-kv0p1_p1_cd_pc_lts-rate2-buf3_200m_jobid1082586_gitac3adeb/results
 VARIANTS=(
-   "deflate0|tpv205/configs/tpv205_nitsche_m0_deflate0.toml||gold"
+   "deflate0|tpv205/configs/archive/tpv205_nitsche_m0_deflate0.toml||gold"
 )
 source "$SLURM_SUBMIT_DIR/run_m0_vista.sh"

@@ -30,7 +30,7 @@
 #                     HOMOGENEOUS half-space → scalar Godunov; config-only, no
 #                     CLI override — asserted below).  This is the key contrast
 #                     with TPV31, which is bi-material and REQUIRES "matrix".
-#   Config: tpv104/configs/tpv104_spatial.toml (p1 / ADER-O2 baseline).
+#   Config: tpv104/configs/archive/tpv104_spatial.toml (p1 / ADER-O2 baseline).
 #
 # TPV104 physics ---------------------------------------------------------
 #   * [meta].law = "rate_state" (Dieterich-Ruina, SLIP law with strong rate
@@ -111,7 +111,7 @@ if [[ ! -x ./seas_spatial_dyn_driver ]]; then
     exit 1
 fi
 
-CONFIG_TOML="${TPV104_CONFIG:-tpv104/configs/tpv104_spatial.toml}"
+CONFIG_TOML="${TPV104_CONFIG:-tpv104/configs/archive/tpv104_spatial.toml}"
 # 200 m mesh (production resolution; the TOML default is the coarse 1000 m mesh).
 MESH="${TPV104_MESH:-tpv104/mesh/tpv104_200m.msh}"
 GEO="${TPV104_GEO:-tpv104/mesh/tpv104_200m.geo}"
@@ -126,7 +126,7 @@ fi
 # Both are config-only, so a drifted TOML would silently change the scheme.
 if ! grep -Eq '^[[:space:]]*order[[:space:]]*=[[:space:]]*1([[:space:]]|$)' "${CONFIG_TOML}"; then
     echo "ERROR: ${CONFIG_TOML} does not set [mesh].order = 1 (this job is p1)."
-    echo "       Use tpv104/configs/tpv104_spatial.toml (not _p2/_p3)."
+    echo "       Use tpv104/configs/archive/tpv104_spatial.toml (not _p2/_p3)."
     exit 4
 fi
 if ! grep -Eq '^[[:space:]]*interior_flux[[:space:]]*=[[:space:]]*"scalar"' "${CONFIG_TOML}"; then

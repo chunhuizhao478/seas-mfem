@@ -97,7 +97,7 @@ if [[ ! -x ./seas_spatial_dyn_driver ]]; then
     exit 1
 fi
 
-CONFIG_TOML="${TPV205_CONFIG:-tpv205/configs/tpv205_spatial_rk45_mixedflux.toml}"
+CONFIG_TOML="${TPV205_CONFIG:-tpv205/configs/archive/tpv205_spatial_rk45_mixedflux.toml}"
 MESH="${TPV205_MESH:-tpv205/mesh/tpv2053d_200m.msh}"
 GEO="${TPV205_GEO:-tpv205/mesh/tpv2053d_200m.geo}"
 

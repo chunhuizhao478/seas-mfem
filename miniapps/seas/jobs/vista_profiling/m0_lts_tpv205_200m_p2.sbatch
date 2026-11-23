@@ -27,6 +27,6 @@ VARIANTS=(
    "base|tpv205/configs/tpv205_nitsche.toml||gold"
    "every10|tpv205/configs/tpv205_nitsche.toml|--station-every 10|"
    "first|tpv205/configs/tpv205_nitsche.toml|--station-copies first|"
-   "deflate0|tpv205/configs/tpv205_nitsche_m0_deflate0.toml||gold"
+   "deflate0|tpv205/configs/archive/tpv205_nitsche_m0_deflate0.toml||gold"
 )
 source "$SLURM_SUBMIT_DIR/run_m0_vista.sh"

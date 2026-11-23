@@ -28,7 +28,7 @@
 #   * scalar Riemann: [numerics].interior_flux = "scalar"  (TPV205 is a
 #                     HOMOGENEOUS half-space → scalar Godunov; config-only, no
 #                     CLI override — asserted below).
-#   Config: tpv205/configs/tpv205_spatial_p2.toml (p2 / ADER-O3 variant).
+#   Config: tpv205/configs/archive/tpv205_spatial_p2.toml (p2 / ADER-O3 variant).
 #
 # TPV205 physics ---------------------------------------------------------
 #   * [meta].law = "slip_weakening" (LINEAR slip weakening, NOT rate-state).
@@ -113,7 +113,7 @@ if [[ ! -x ./seas_spatial_dyn_driver ]]; then
     exit 1
 fi
 
-CONFIG_TOML="${TPV205_CONFIG:-tpv205/configs/tpv205_spatial_p2.toml}"
+CONFIG_TOML="${TPV205_CONFIG:-tpv205/configs/archive/tpv205_spatial_p2.toml}"
 # 200 m mesh (production resolution; the config already points at this 200 m mesh).
 MESH="${TPV205_MESH:-tpv205/mesh/tpv2053d_200m.msh}"
 GEO="${TPV205_GEO:-tpv205/mesh/tpv2053d_200m.geo}"
@@ -127,7 +127,7 @@ fi
 # MANDATORY for homogeneous TPV205 (and for the pure-upwind scalar Godunov).
 if ! grep -Eq '^[[:space:]]*order[[:space:]]*=[[:space:]]*2([[:space:]]|$)' "${CONFIG_TOML}"; then
     echo "ERROR: ${CONFIG_TOML} does not set [mesh].order = 2 (this job is p2)."
-    echo "       Use tpv205/configs/tpv205_spatial_p2.toml (not _spatial.toml/_p3)."
+    echo "       Use tpv205/configs/archive/tpv205_spatial_p2.toml (not _spatial.toml/_p3)."
     exit 4
 fi
 if ! grep -Eq '^[[:space:]]*interior_flux[[:space:]]*=[[:space:]]*"scalar"' "${CONFIG_TOML}"; then

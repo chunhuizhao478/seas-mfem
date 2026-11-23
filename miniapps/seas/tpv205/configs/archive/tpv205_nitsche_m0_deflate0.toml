@@ -8,7 +8,7 @@
 #  dynamic-rupture driver (seas_nitsche_dyn_driver; benchmark plan rev 1.3,
 #  phase B4).
 #
-#  Built from tpv102/configs/tpv102_nitsche_pc_p1_kv0p1.toml (the validated
+#  Built from tpv102/configs/archive/tpv102_nitsche_pc_p1_kv0p1.toml (the validated
 #  damped TPV102 deck) with the TPV205 values of the benchmark description
 #  (tpv205/benchmark_document/TPV5_forwebsite.pdf):
 #

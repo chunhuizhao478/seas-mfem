@@ -163,9 +163,9 @@ int main(int, char**)
 
    struct Case { const char* tag; std::string rel; real_t tau_ini; };
    std::vector<Case> cases = {
-      {"TPV205", "tpv205/configs/tpv205_spatial.toml", 70.0e6},
-      {"TPV102", "tpv102/configs/tpv102_spatial.toml", 75.0e6},
-      {"TPV104", "tpv104/configs/tpv104_spatial.toml", 40.0e6},
+      {"TPV205", "tpv205/configs/archive/tpv205_spatial.toml", 70.0e6},
+      {"TPV102", "tpv102/configs/archive/tpv102_spatial.toml", 75.0e6},
+      {"TPV104", "tpv104/configs/archive/tpv104_spatial.toml", 40.0e6},
    };
 
    // Config-level sign chain (always available: parse only).

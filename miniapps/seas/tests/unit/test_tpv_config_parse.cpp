@@ -563,9 +563,9 @@ int main(int, char**)
    T_numerics_dispatch_helpers();
    T_G2_MatrixMixedFluxUnderAder();   // Phase 5 Tests 5.1/5.2 (no files needed)
 
-   const std::string p205 = FindConfig("tpv205/configs/tpv205_spatial.toml");
-   const std::string p102 = FindConfig("tpv102/configs/tpv102_spatial.toml");
-   const std::string p104 = FindConfig("tpv104/configs/tpv104_spatial.toml");
+   const std::string p205 = FindConfig("tpv205/configs/archive/tpv205_spatial.toml");
+   const std::string p102 = FindConfig("tpv102/configs/archive/tpv102_spatial.toml");
+   const std::string p104 = FindConfig("tpv104/configs/archive/tpv104_spatial.toml");
 
    if (p205.empty() || p102.empty() || p104.empty())
    {
@@ -582,11 +582,11 @@ int main(int, char**)
 
    // (Phase 5, Test 5.3) TPV31 (matrix + depth_profile_1d): regression + the
    // new matrix+adjacent+seam_continuous parse.
-   const std::string p31    = FindConfig("tpv31/configs/tpv31.toml");
-   const std::string p31_p2 = FindConfig("tpv31/configs/tpv31_p2.toml");
-   const std::string p31_p3 = FindConfig("tpv31/configs/tpv31_p3.toml");
-   const std::string p31_rkmf = FindConfig("tpv31/configs/tpv31_rk_mixedflux.toml");
-   const std::string p31_p2_rkmf = FindConfig("tpv31/configs/tpv31_p2_rk_mixedflux.toml");
+   const std::string p31    = FindConfig("tpv31/configs/archive/tpv31.toml");
+   const std::string p31_p2 = FindConfig("tpv31/configs/archive/tpv31_p2.toml");
+   const std::string p31_p3 = FindConfig("tpv31/configs/archive/tpv31_p3.toml");
+   const std::string p31_rkmf = FindConfig("tpv31/configs/archive/tpv31_rk_mixedflux.toml");
+   const std::string p31_p2_rkmf = FindConfig("tpv31/configs/archive/tpv31_p2_rk_mixedflux.toml");
    if (!p31.empty())
    {
       T_TPV31_Regression(p31);          // 5.3c
@@ -627,16 +627,16 @@ int main(int, char**)
    }
 
    // Part C / C2: TPV6 / TPV7 bi-material-fault config artifacts.
-   const std::string p6 = FindConfig("tpv6/configs/tpv6.toml");
-   const std::string p7 = FindConfig("tpv7/configs/tpv7.toml");
+   const std::string p6 = FindConfig("tpv6/configs/archive/tpv6.toml");
+   const std::string p7 = FindConfig("tpv7/configs/archive/tpv7.toml");
    if (!p6.empty()) { T_TPV6(p6, "TPV6 config",  3750.0); }  // far = slow (high contrast)
-   else { std::cout << "(tpv6/configs/tpv6.toml not found; TPV6 parse skipped)\n"; }
+   else { std::cout << "(tpv6/configs/archive/tpv6.toml not found; TPV6 parse skipped)\n"; }
    if (!p7.empty()) { T_TPV6(p7, "TPV7 config",  5000.0); }  // far = low-contrast
-   else { std::cout << "(tpv7/configs/tpv7.toml not found; TPV7 parse skipped)\n"; }
+   else { std::cout << "(tpv7/configs/archive/tpv7.toml not found; TPV7 parse skipped)\n"; }
 
    // p2 variants (order=2, ADER-O3): same bi-material-fault contract, [mesh].order=2.
-   const std::string p6_p2 = FindConfig("tpv6/configs/tpv6_p2.toml");
-   const std::string p7_p2 = FindConfig("tpv7/configs/tpv7_p2.toml");
+   const std::string p6_p2 = FindConfig("tpv6/configs/archive/tpv6_p2.toml");
+   const std::string p7_p2 = FindConfig("tpv7/configs/archive/tpv7_p2.toml");
    if (!p6_p2.empty())
    {
       T_TPV6(p6_p2, "TPV6 p2 config", 3750.0);

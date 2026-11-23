@@ -28,14 +28,14 @@
 #   * mixed flux    : --mixed-flux adjacent.
 #   * contrast guard: --mixed-flux-contrast-tol 0.05.
 #   * matrix Riemann: [numerics].interior_flux="matrix" (per-side fault; asserted).
-#   Config: tpv7/configs/tpv7_p2.toml.  sigma_n is PHYSICALLY non-constant — not a leak.
+#   Config: tpv7/configs/archive/tpv7_p2.toml.  sigma_n is PHYSICALLY non-constant — not a leak.
 # NB: p2 dt is smaller than p1 — even 24 h may not reach tfinal; checkpoints every
 # 2000 steps, resubmit with TPV7_RESTART=<out>/cp.
 set -euo pipefail
 
 MESH="tpv6/mesh/tpv6_200m.msh"                      # asymmetric (standard) mesh
 TFINAL="${TPV7_TFINAL:-12.0}"                       # 0-12 s (matches the drdg3d reference window)
-CONFIG_TOML="tpv7/configs/tpv7_p2.toml"
+CONFIG_TOML="tpv7/configs/archive/tpv7_p2.toml"
 
 module load intel/19.1.1
 module load impi/19.0.9

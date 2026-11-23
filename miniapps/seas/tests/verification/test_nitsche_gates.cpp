@@ -607,7 +607,7 @@ static void RunTetIP(int p)
 static void TestDeckMaterial()
 {
    std::cout << "\n=== Deck: tpv102_spatial.toml + constant_tensor stress ===\n";
-   const std::string src = "tpv102/configs/tpv102_spatial.toml";
+   const std::string src = "tpv102/configs/archive/tpv102_spatial.toml";
    std::ifstream in(src);
    TEST_ASSERT(in.good(), "tracked deck readable: " << src);
    if (!in.good()) { return; }

@@ -110,7 +110,7 @@ if [[ ! -x ./seas_spatial_dyn_driver ]]; then
     exit 1
 fi
 
-CONFIG_TOML="${TPV102_CONFIG:-tpv102/configs/tpv102_spatial_rk45_mixedflux.toml}"
+CONFIG_TOML="${TPV102_CONFIG:-tpv102/configs/archive/tpv102_spatial_rk45_mixedflux.toml}"
 # STRIKE-SYMMETRIC 200 m hybrid mesh (the dip-drift fix).  Built from the .geo;
 # pre-generate ONCE on a login node so the compute job does not mesh.
 MESH="${TPV102_MESH:-tpv102/mesh/tpv102_200m_hybrid_xsym.msh}"

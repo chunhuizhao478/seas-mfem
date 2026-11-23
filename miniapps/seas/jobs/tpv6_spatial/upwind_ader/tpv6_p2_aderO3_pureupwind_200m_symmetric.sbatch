@@ -21,7 +21,7 @@
 #   * pure upwind   : --mixed-flux none --fault-overint 0 (no central flux).
 #   * matrix Riemann: [numerics].interior_flux = "matrix" (MANDATORY for the
 #                     per-side bi-material fault; config-only, asserted below).
-#   Config: tpv6/configs/tpv6_p2.toml ([material] halfspace_across_fault; nucleation
+#   Config: tpv6/configs/archive/tpv6_p2.toml ([material] halfspace_across_fault; nucleation
 #           is the STATIC stress patch tau_strike=81.6 MPa, like TPV205 — no
 #           [nucleation] block).  sigma_n is PHYSICALLY non-constant (bi-material)
 #           — do NOT treat its on-fault variation as a leak.
@@ -43,7 +43,7 @@ set -euo pipefail
 FAULT_OVERINT=0
 MESH="tpv6/mesh/tpv6_200m_symmetric.msh"
 TFINAL="${TPV6_TFINAL:-12.0}"                       # 0-12 s (matches the drdg3d reference window)
-CONFIG_TOML="tpv6/configs/tpv6_p2.toml"
+CONFIG_TOML="tpv6/configs/archive/tpv6_p2.toml"
 
 module load intel/19.1.1
 module load impi/19.0.9

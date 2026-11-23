@@ -1663,18 +1663,18 @@ static void T_53_resubmit_configs_smooth_taper()
                 "boxcar_taper rule with native endpoints\n";
    struct Cfg { const char* path; bool is104; };
    const Cfg cfgs[] = {
-      {"tpv102/configs/tpv102_spatial.toml", false},
-      {"tpv102/configs/tpv102_spatial_p2.toml", false},
-      {"tpv102/configs/tpv102_spatial_p3.toml", false},
-      {"tpv102/configs/tpv102_spatial_rk45_mixedflux.toml", false},
-      {"tpv102/configs/tpv102_spatial_p2_rk45_mixedflux.toml", false},
-      {"tpv102/configs/tpv102_spatial_p3_rk45_mixedflux.toml", false},
-      {"tpv104/configs/tpv104_spatial.toml", true},
-      {"tpv104/configs/tpv104_spatial_p2.toml", true},
-      {"tpv104/configs/tpv104_spatial_p3.toml", true},
-      {"tpv104/configs/tpv104_spatial_rk45_mixedflux.toml", true},
-      {"tpv104/configs/tpv104_spatial_p2_rk45_mixedflux.toml", true},
-      {"tpv104/configs/tpv104_spatial_p3_rk45_mixedflux.toml", true},
+      {"tpv102/configs/archive/tpv102_spatial.toml", false},
+      {"tpv102/configs/archive/tpv102_spatial_p2.toml", false},
+      {"tpv102/configs/archive/tpv102_spatial_p3.toml", false},
+      {"tpv102/configs/archive/tpv102_spatial_rk45_mixedflux.toml", false},
+      {"tpv102/configs/archive/tpv102_spatial_p2_rk45_mixedflux.toml", false},
+      {"tpv102/configs/archive/tpv102_spatial_p3_rk45_mixedflux.toml", false},
+      {"tpv104/configs/archive/tpv104_spatial.toml", true},
+      {"tpv104/configs/archive/tpv104_spatial_p2.toml", true},
+      {"tpv104/configs/archive/tpv104_spatial_p3.toml", true},
+      {"tpv104/configs/archive/tpv104_spatial_rk45_mixedflux.toml", true},
+      {"tpv104/configs/archive/tpv104_spatial_p2_rk45_mixedflux.toml", true},
+      {"tpv104/configs/archive/tpv104_spatial_p3_rk45_mixedflux.toml", true},
    };
    for (const auto& c : cfgs)
    {

@@ -42,10 +42,10 @@ static int num_tests = 0, num_passed = 0, num_failed = 0;
 static std::string find_tpv31_toml()
 {
    const char* candidates[] = {
-      "miniapps/seas/tpv31/configs/tpv31.toml",
-      "tpv31/configs/tpv31.toml",
-      "../tpv31/configs/tpv31.toml",
-      "../../tpv31/configs/tpv31.toml",
+      "miniapps/seas/tpv31/configs/archive/tpv31.toml",
+      "tpv31/configs/archive/tpv31.toml",
+      "../tpv31/configs/archive/tpv31.toml",
+      "../../tpv31/configs/archive/tpv31.toml",
    };
    for (const char* p : candidates)
    {
