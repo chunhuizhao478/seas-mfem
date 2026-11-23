@@ -37,7 +37,8 @@ min_sigma_n_pa    = 0.0
 # (ucerf2d/mesh/ucerf2d_saf_sjf_500m_tilted_D415km_R70.json).
 # Tags: 3 faults, 5 the two long walls, 1 the two ends.
 [mesh]
-path  = "ucerf2d/mesh/ucerf2d_saf_sjf_250m_tilted_D415km_R70.msh"   # 250 m within 5 km of the faults (ucerf2d/build_refined_mesh.py)
+# 250 m within 5 km of the faults (ucerf2d/build_refined_mesh.py)
+path  = "ucerf2d/mesh/ucerf2d_saf_sjf_250m_tilted_D415km_R70.msh"
 order = 1
 
 [velocity]
