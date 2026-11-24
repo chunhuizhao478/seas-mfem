@@ -2,7 +2,7 @@
 #SBATCH -J h_gpu_checks
 #SBATCH -o h_gpu_checks_%j.out
 #SBATCH -e h_gpu_checks_%j.err
-#SBATCH -p debug
+#SBATCH -p gpu
 #SBATCH -N 1
 #SBATCH -n 2
 #SBATCH -t 01:00:00

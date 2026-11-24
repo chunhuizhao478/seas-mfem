@@ -5,7 +5,8 @@
 #
 # Horizon differs from Vista's gh nodes in what these settings cover:
 #   - 4 GB200 GPUs per node (sm_100, about 186 GB HBM each), 144 Grace
-#     cores; partitions debug and debug-shared only (Oct 2026);
+#     cores; partitions gpu, gpu-large and gpu-dev (renamed from debug and
+#     debug-shared on 2026-11-24);
 #   - no gcc 13.2, cmake 3.31 or cuda 13.0 modules, so the build uses
 #     gcc 15.3, cmake 4.4 and cuda 13.1 with the same pinned PETSc 3.24.6,
 #     MUMPS, hypre and cuDSS 0.7.1.6 (built from source, build_horizon.sh).

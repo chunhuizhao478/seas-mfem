@@ -2,7 +2,7 @@
 #SBATCH -J h_d2_gate
 #SBATCH -o h_d2_gate_%j.out
 #SBATCH -e h_d2_gate_%j.err
-#SBATCH -p debug
+#SBATCH -p gpu
 #SBATCH -N 1
 #SBATCH -t 10:00:00
 #SBATCH -A EAR26024

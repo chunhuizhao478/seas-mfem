@@ -2,7 +2,7 @@
 #SBATCH -J h_green_cache
 #SBATCH -o h_green_cache_%j.out
 #SBATCH -e h_green_cache_%j.err
-#SBATCH -p debug
+#SBATCH -p gpu
 #SBATCH -N 1
 #SBATCH -n 144
 #SBATCH -t 02:00:00

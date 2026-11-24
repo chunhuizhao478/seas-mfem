@@ -2,7 +2,7 @@
 #SBATCH -J h_d2_build
 #SBATCH -o h_d2_build_%j.out
 #SBATCH -e h_d2_build_%j.err
-#SBATCH -p debug
+#SBATCH -p gpu
 #SBATCH -N 1
 #SBATCH -n 4
 #SBATCH -t 04:00:00

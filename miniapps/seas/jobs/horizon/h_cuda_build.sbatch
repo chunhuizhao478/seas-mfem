@@ -2,7 +2,7 @@
 #SBATCH -J h_cuda_build
 #SBATCH -o h_cuda_build_%j.out
 #SBATCH -e h_cuda_build_%j.err
-#SBATCH -p debug
+#SBATCH -p gpu
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH -t 06:00:00

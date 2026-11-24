@@ -2,7 +2,7 @@
 #SBATCH -J h_full_cycle
 #SBATCH -o h_full_cycle_%j.out
 #SBATCH -e h_full_cycle_%j.err
-#SBATCH -p debug
+#SBATCH -p gpu
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH -t 48:00:00

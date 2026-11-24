@@ -2,7 +2,7 @@
 #SBATCH -J h_d4_200m
 #SBATCH -o h_d4_200m_%j.out
 #SBATCH -e h_d4_200m_%j.err
-#SBATCH -p debug
+#SBATCH -p gpu
 #SBATCH -N 1
 #SBATCH -n 4
 #SBATCH -t 06:00:00
