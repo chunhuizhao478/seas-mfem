@@ -31,6 +31,9 @@
 #      1 km meshes, 1 and 2 ranks), test-2d-absorbing and test-absorbing-all
 #      (the dynamic regime's walls, 1 and 2 ranks); and of the map-view runs
 #      (jobs/2d_inplane/vista_2d_cycle.sbatch; Chunhui Zhao, 2026-11-02):
+#      test-grid-field-2d (the gridded-input reader, deflate-compressed
+#      datasets) and test-cycle-hetero (heterogeneity: grid material and
+#      stress, the LTS blocks; added after Vista job 1164962),
 #      test-sigma-floor (the floor), test-relaxation (sigma_n' relaxation:
 #      the kernels, the update rule, the deck keys, and a restart through a
 #      switch back repeating the run byte for byte), test-tip-zone
@@ -91,7 +94,8 @@ fails=0
 
 # 3. The 2D tests of the BP3-FD path
 for t in test-2d-deck test-prestress-bp3 test-2d-absorbing test-absorbing-all \
-         test-sigma-floor test-relaxation test-tip-zone; do
+         test-sigma-floor test-relaxation test-tip-zone \
+         test-grid-field-2d test-cycle-hetero; do
    s=$(date +%s)
    $MK $t > "$RUNS/$t.log" 2>&1; rc=$?
    echo "$t exit $rc in $(( $(date +%s) - s )) s"

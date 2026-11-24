@@ -132,6 +132,7 @@ PETSC_CONFIGURE_ARGS=(
    --download-ptscotch
    --download-hypre
    --download-hdf5
+   --with-zlib
    --with-packages-download-dir="${DOWNLOADS}"
 )
 
@@ -226,6 +227,11 @@ stage_deps() {
    grep -q "^#define PETSC_HAVE_HDF5 1" "${PETSC_PREFIX}/include/petscconf.h" || fail "PETSc has no HDF5"
    [ -f "${PETSC_PREFIX}/include/hdf5.h" ] && [ -e "${PETSC_PREFIX}/lib/libhdf5.so" ] \
       || fail "no hdf5.h or libhdf5.so in ${PETSC_PREFIX}"
+   # --with-zlib (the system libz): HDF5's deflate filter, which the zlib-
+   # compressed NetCDF-4 inputs need (the heterogeneity grid file; Vista job
+   # 1164962 stopped at "required filter ... is not registered" without it)
+   grep -q "^#define H5_HAVE_FILTER_DEFLATE 1" "${PETSC_PREFIX}/include/H5pubconf.h" \
+      || fail "PETSc's HDF5 has no deflate filter (zlib); remove ${PETSC_PREFIX} and rebuild"
    record deps
    {
       echo "petsc configure options: $(grep -m1 '^CONFIGURE_OPTIONS' "${PETSC_PREFIX}/lib/petsc/conf/petscvariables" | cut -d= -f2-)"
