@@ -349,16 +349,34 @@
              || solver_type_ == SolverType::MUMPS
              || solver_type_ == SolverType::MUMPS_BLR
 #endif
+             || solver_type_ == SolverType::QD_PCG
             )
          {
             const QDLinearSolverKind kind =
                (solver_type_ == SolverType::CUDSS) ? QDLinearSolverKind::CUDSS
+               : (solver_type_ == SolverType::QD_PCG) ? QDLinearSolverKind::PCG
                : (solver_type_ == SolverType::MUMPS) ? QDLinearSolverKind::MUMPS
                : QDLinearSolverKind::MUMPS_BLR;
+            if (kind == QDLinearSolverKind::PCG)
+            {
+               // CG needs K symmetric positive definite: symmetric interior
+               // penalty (epsilon = -1) with Dirichlet faces.  BR2 and the
+               // non-symmetric IP variants are refused (plan rev5 U-Q2).
+               MFEM_VERIFY(method_ == DGMethod::IP && epsilon_ == -1.0,
+                  "ERROR: [cycle.qd] solver = \"pcg\" needs a symmetric "
+                  "positive definite K: SIPG (DGMethod::IP, epsilon = -1); "
+                  "this operator has method "
+                  << (method_ == DGMethod::IP ? "IP" : "BR2")
+                  << ", epsilon " << epsilon_);
+               MFEM_VERIFY(!bdr_config_.dirichlet_attrs.empty(),
+                  "ERROR: [cycle.qd] solver = \"pcg\" needs Dirichlet "
+                  "faces: without them K is singular");
+            }
             QDLinearSolverSetup setup;
             solver_ = MakeQDLinearSolver(kind, *cached_Ah_.As<HypreParMatrix>(),
                                          matrix_stats_enabled_ ? 2 : 1,
-                                         blr_tol_, &setup);
+                                         blr_tol_, &setup, &qd_pcg_config_,
+                                         dynamic_cast<ParFiniteElementSpace *>(fes_.get()));
             if (kind == QDLinearSolverKind::CUDSS)
             {
                B_.UseDevice(true);

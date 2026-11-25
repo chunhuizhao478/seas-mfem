@@ -96,7 +96,13 @@
 //                   strength -> 0 continuously at opening; needs
 //                   [cycle].sigma_n_floor_pa > 0.  Also refused with
 //                   [cycle.qd.green] compress or check_every.
-//   [cycle.qd]      solver ("mumps" | "mumps_blr"), blr_tol,
+//   [cycle.qd]      solver ("mumps" | "mumps_blr" | "pcg"), blr_tol,
+//                   pcg_rel_tol [1e-10], pcg_max_it [1000],
+//                   pcg_preconditioner ["amg" | "aux_h1"],
+//                   pcg_amg_strength [0.8] ("amg" only), pcg_smoother
+//                   ["default" | "l1_jacobi"] (the pcg_* keys need solver =
+//                   "pcg"; solver/qd_linear_solver.hpp, plan rev5 Q1.1, not
+//                   with [cycle.qd.green]),
 //                   petsc_options (PETSc TS options file; it must pick an RK
 //                   tableau with the FSAL property, see qd_phase.hpp),
 //                   ts_atol, ts_rtol,
@@ -451,7 +457,19 @@ struct QDGreenDeck
 /// [cycle.qd]
 struct QDConfig
 {
-   std::string solver = "mumps";   ///< "mumps" or "mumps_blr"
+   std::string solver = "mumps";   ///< "mumps", "mumps_blr" or "pcg"
+   /// solver = "pcg" only (UCERF 3-D plan rev5, Q1.1): PCG
+   /// (solver/qd_linear_solver.hpp).  Relative residual tolerance, the
+   /// iteration limit (a solve that reaches it aborts the run), the
+   /// preconditioner ("amg": BoomerAMG on K; "aux_h1": two-level, smoother
+   /// on K plus AMG on the continuous p = 1 space), the AMG strength
+   /// threshold ("amg" only), and the smoother: "default" (l1 Gauss-Seidel)
+   /// or "l1_jacobi" (the GPU-friendly one).
+   real_t pcg_rel_tol = 1e-10;
+   int pcg_max_it = 1000;
+   std::string pcg_preconditioner = "amg";
+   real_t pcg_amg_strength = 0.8;
+   std::string pcg_smoother = "default";
    /// MUMPS-BLR tolerance.  1e-12 is the operator's default, and the value
    /// seas_bp5_full's BLR runs use: its --blr-tol default of 1e-10 is passed
    /// to SetBLRTol only when it differs from 1e-10.
@@ -1172,8 +1190,26 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
                                "operators", "green", "exact_retry", "integrator",
                                "esdirk_type", "newton_tol", "newton_max_it",
                                "jacobian_reuse", "newton_local", "dense_lu",
-                               "stage_guess"});
+                               "stage_guess", "pcg_rel_tol", "pcg_max_it",
+                               "pcg_preconditioner", "pcg_amg_strength",
+                               "pcg_smoother"});
       c.qd.solver = Str(q, "cycle.qd", "solver", c.qd.solver);
+      for (const char *k : {"pcg_rel_tol", "pcg_max_it", "pcg_preconditioner",
+                            "pcg_amg_strength", "pcg_smoother"})
+      {
+         MFEM_VERIFY(c.qd.solver == "pcg" || !q.contains(k), "[cycle.qd]." << k
+                     << " needs [cycle.qd].solver = \"pcg\"");
+      }
+      c.qd.pcg_rel_tol = Real(q, "cycle.qd", "pcg_rel_tol", c.qd.pcg_rel_tol);
+      c.qd.pcg_max_it = Int(q, "cycle.qd", "pcg_max_it", c.qd.pcg_max_it);
+      c.qd.pcg_preconditioner = Str(q, "cycle.qd", "pcg_preconditioner",
+                                    c.qd.pcg_preconditioner);
+      MFEM_VERIFY(c.qd.pcg_preconditioner == "amg" || !q.contains("pcg_amg_strength"),
+                  "[cycle.qd].pcg_amg_strength needs [cycle.qd].pcg_preconditioner "
+                  "= \"amg\" (the aux_h1 coarse AMG uses hypre's systems defaults)");
+      c.qd.pcg_amg_strength = Real(q, "cycle.qd", "pcg_amg_strength",
+                                   c.qd.pcg_amg_strength);
+      c.qd.pcg_smoother = Str(q, "cycle.qd", "pcg_smoother", c.qd.pcg_smoother);
       c.qd.blr_tol = Real(q, "cycle.qd", "blr_tol", c.qd.blr_tol);
       c.qd.petsc_options = Str(q, "cycle.qd", "petsc_options", c.qd.petsc_options);
       c.qd.ts_atol = Real(q, "cycle.qd", "ts_atol", c.qd.ts_atol);
@@ -1225,8 +1261,29 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
                      "> 0, check_every >= 0");
       }
    }
-   MFEM_VERIFY(c.qd.solver == "mumps" || c.qd.solver == "mumps_blr",
-               "[cycle.qd].solver must be \"mumps\" or \"mumps_blr\"");
+   MFEM_VERIFY(c.qd.solver == "mumps" || c.qd.solver == "mumps_blr"
+               || c.qd.solver == "pcg",
+               "[cycle.qd].solver must be \"mumps\", \"mumps_blr\" or \"pcg\"");
+   if (c.qd.solver == "pcg")
+   {
+      MFEM_VERIFY(c.qd.pcg_rel_tol > 0.0 && c.qd.pcg_rel_tol < 1.0,
+                  "[cycle.qd].pcg_rel_tol must lie in (0, 1), got " << c.qd.pcg_rel_tol);
+      MFEM_VERIFY(c.qd.pcg_max_it >= 1,
+                  "[cycle.qd].pcg_max_it must be >= 1, got " << c.qd.pcg_max_it);
+      MFEM_VERIFY(c.qd.pcg_amg_strength > 0.0 && c.qd.pcg_amg_strength < 1.0,
+                  "[cycle.qd].pcg_amg_strength must lie in (0, 1), got "
+                  << c.qd.pcg_amg_strength);
+      MFEM_VERIFY(c.qd.pcg_preconditioner == "amg"
+                  || c.qd.pcg_preconditioner == "aux_h1",
+                  "[cycle.qd].pcg_preconditioner must be \"amg\" or \"aux_h1\", got \""
+                  << c.qd.pcg_preconditioner << "\"");
+      MFEM_VERIFY(c.qd.pcg_smoother == "default" || c.qd.pcg_smoother == "l1_jacobi",
+                  "[cycle.qd].pcg_smoother must be \"default\" or "
+                  "\"l1_jacobi\", got \"" << c.qd.pcg_smoother << "\"");
+      MFEM_VERIFY(!c.qd.green.enabled, "[cycle.qd] solver = \"pcg\" with "
+                  "[cycle.qd.green]: the Green's function is a direct-solver "
+                  "build; use one or the other");
+   }
    MFEM_VERIFY(c.qd.operators == "loops" || c.qd.operators == "matrix",
                "[cycle.qd].operators must be \"loops\" or \"matrix\"");
    MFEM_VERIFY(!c.qd.green.enabled || c.qd.operators == "matrix",

@@ -58,8 +58,12 @@ namespace seas
 /// OperatorOnly: assemble K as a HypreParMatrix for ApplyStiffness and
 /// build no solver; the serial bilinear form is released after
 /// ParallelAssemble (explicit time stepping never calls Solve).
+/// QD_PCG: the quasi-dynamic PCG + BoomerAMG back end of
+/// solver/qd_linear_solver.hpp (UCERF 3-D plan rev5, Q1.1), set with
+/// SetQDPCGConfig before the first assembly; SIPG only (K must be SPD).
+/// CG_AMG is the older elasticity-mode path and is left as it was.
 enum class SolverType { CG_AMG, MUMPS, MUMPS_BLR, GMRES_BlockILU, GMRES_AMG, SUPERLU, STRUMPACK,
-                        CUDSS, OperatorOnly };
+                        CUDSS, OperatorOnly, QD_PCG };
 
 /// Boundary condition mode for the elasticity domain operator
 ///
@@ -657,6 +661,16 @@ public:
    // Kept for backward compatibility with existing drivers/tests.
    void SetCheckResidual(bool check) { check_residual_ = check; }
    void SetBLRTol(real_t tol) { blr_tol_ = tol; }
+#ifdef MFEM_USE_MPI
+   /// PCG settings for SolverType::QD_PCG; before the first assembly.
+   void SetQDPCGConfig(const QDPCGConfig &c) { qd_pcg_config_ = c; }
+   const QDPCGConfig &GetQDPCGConfig() const { return qd_pcg_config_; }
+   /// The PCG back end, or nullptr (another solver type, or before assembly).
+   const QDPCGSolver *GetQDPCGSolver() const
+   {
+      return dynamic_cast<const QDPCGSolver *>(solver_.get());
+   }
+#endif
    void SetMatchQuadOrder(bool v) { match_quad_order_ = v; }
    void SetPenaltyFactor(real_t f) { penalty_factor_ = f; }
    void SetFaceBasisType(int bt) { face_basis_type_ = bt; }
@@ -787,6 +801,9 @@ private:
    BCMode bc_mode_;  // Legacy — kept for backward compatibility
    bool check_residual_;  // Post-solve residual check
    real_t blr_tol_ = 1e-12;  // MUMPS-BLR factorization tolerance (v48: tightened from 1e-10)
+#ifdef MFEM_USE_MPI
+   QDPCGConfig qd_pcg_config_;  // SolverType::QD_PCG (plan rev5 Q1.1)
+#endif
 
    // Reference normal for skeleton Dirichlet orientation sign.
    // Matches Tandem's ref_normal from bp5.toml (default (0,-1,0) for BP5).

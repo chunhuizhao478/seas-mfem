@@ -250,6 +250,7 @@ public:
       seed_.Vp = cfg.plate_rate;
 
       const SolverType st = (cfg.qd.solver == "mumps_blr") ? SolverType::MUMPS_BLR
+                            : (cfg.qd.solver == "pcg")     ? SolverType::QD_PCG
                                                            : SolverType::MUMPS;
       // Legacy ctor: Dirichlet {5} (walls and creep plane), natural {1},
       // fault 3 (BCMode::FarField), exactly as seas_bp5_full builds it, with
@@ -269,6 +270,16 @@ public:
                                         MakeCycleLoading(cfg, pml_wall_factor_));
       if (pml_band_ && cfg.pml.Cfs()) { dom_->SetPmlBand(pml_band_); }
       if (st == SolverType::MUMPS_BLR) { dom_->SetBLRTol(cfg.qd.blr_tol); }
+      if (st == SolverType::QD_PCG)
+      {
+         QDPCGConfig pc;
+         pc.rel_tol = cfg.qd.pcg_rel_tol;
+         pc.max_it = cfg.qd.pcg_max_it;
+         pc.preconditioner = cfg.qd.pcg_preconditioner;
+         pc.amg_strength = cfg.qd.pcg_amg_strength;
+         pc.l1_jacobi = (cfg.qd.pcg_smoother == "l1_jacobi");
+         dom_->SetQDPCGConfig(pc);
+      }
       if (cfg.penalty_factor != 1.0) { dom_->SetPenaltyFactor(cfg.penalty_factor); }
       // [cycle.finite_width]: the 2.5D term, before the first K is used
       if (cfg.finite_width.On()) { SetupFiniteWidth_(); }
