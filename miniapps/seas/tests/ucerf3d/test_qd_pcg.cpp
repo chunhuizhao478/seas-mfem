@@ -45,6 +45,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <algorithm>
 #include <random>
 #include <sstream>
 #include <string>
@@ -218,7 +219,7 @@ int main(int argc, char *argv[])
    std::string mesh_file = "ucerf3d/mesh/T-plane.msh";
    int order = 1, nrhs = 10, refuse = 0, seed = 2026;
    real_t tol = 1e-10, strength = 0.8;
-   std::string smoother = "default", precs = "amg aux_h1";
+   std::string smoother = "default", precs = "amg aux_h1", reference = "mumps";
    OptionsParser args(argc, argv);
    args.AddOption(&mesh_file, "-m", "--mesh", "Gmsh mesh (T-plane).");
    args.AddOption(&order, "-o", "--order", "Polynomial order.");
@@ -229,6 +230,9 @@ int main(int argc, char *argv[])
    args.AddOption(&smoother, "-x", "--smoother", "default or l1_jacobi.");
    args.AddOption(&seed, "-r", "--seed", "Random seed.");
    args.AddOption(&refuse, "-R", "--refuse", "Refusal case 1..9 (must abort).");
+   args.AddOption(&reference, "-ref", "--reference",
+                  "mumps (U-Q1) or none (timing only, for meshes whose MUMPS "
+                  "factor does not fit: checks |b - K u|/|b| <= 10 x tol).");
    args.Parse();
    if (!args.Good())
    {
@@ -236,6 +240,9 @@ int main(int argc, char *argv[])
       return 1;
    }
    if (refuse) { return Refuse(refuse, mesh_file); }
+   MFEM_VERIFY(reference == "mumps" || reference == "none",
+               "--reference must be mumps or none");
+   const bool ref = (reference == "mumps");
 
    Mesh smesh(mesh_file.c_str(), 1, 1);
    ParMesh pmesh(comm, smesh);
@@ -251,9 +258,11 @@ int main(int argc, char *argv[])
    const long long N = K.GetGlobalNumRows();
    if (myrank == 0)
    {
-      std::printf("U-Q1 PCG against MUMPS: %s, p = %d, %d ranks, %lld DOFs, "
+      std::printf("%s: %s, p = %d, %d ranks, %lld DOFs, "
                   "%d right-hand sides, tol %.1e, preconditioners %s, AMG strength "
-                  "%.2f, smoother %s\n", mesh_file.c_str(), order, Mpi::WorldSize(),
+                  "%.2f, smoother %s\n",
+                  ref ? "U-Q1 PCG against MUMPS" : "PCG timing (no reference)",
+                  mesh_file.c_str(), order, Mpi::WorldSize(),
                   N, nrhs, tol, precs.c_str(), strength, smoother.c_str());
    }
 
@@ -270,6 +279,7 @@ int main(int argc, char *argv[])
    }
 
    // ---- MUMPS, then freed
+   if (ref)
    {
       QDLinearSolverSetup setup;
       auto mumps = MakeQDLinearSolver(QDLinearSolverKind::MUMPS, K, 0, 1e-12, &setup);
@@ -300,7 +310,8 @@ int main(int argc, char *argv[])
       const auto *pcg = dynamic_cast<const QDPCGSolver *>(solver.get());
       MFEM_VERIFY(pcg, "the factory did not return a QDPCGSolver");
 
-      real_t worst_u = 0.0, worst_T = 0.0, worst_N = 0.0;
+      real_t worst_u = 0.0, worst_T = 0.0, worst_N = 0.0, worst_r = 0.0;
+      std::vector<double> times;
       for (int k = 0; k < nrhs; k++)
       {
          Vector x(b[k].Size());
@@ -309,19 +320,26 @@ int main(int argc, char *argv[])
          const double t0 = MPI_Wtime();
          solver->Mult(b[k], x);   // aborts when it does not converge
          const double sec = MPI_Wtime() - t0;
-         Vector Tm, Tc, Nm, Nc;
-         dom->QDStageTraction(xm[k], slip[k], Tm, &Nm);
-         dom->QDStageTraction(x, slip[k], Tc, &Nc);
-         const real_t eu = RelDiff(xm[k], x), eT = RelDiff(Tm, Tc);
+         times.push_back(sec);
          // true residual |b - K x| / |b| (CG stops on the preconditioned norm)
          Vector r(b[k].Size());
          K.Mult(x, r);
          r -= b[k];
          const real_t rr = std::sqrt(InnerProduct(comm, r, r) / InnerProduct(comm, b[k], b[k]));
-         // normal traction relative to the shear scale (T_n may be ~0 for slip)
-         Vector dN(Nm);
-         dN -= Nc;
-         const real_t eN = GlobalMaxAbs(dN) / std::max(GlobalMaxAbs(Nm), GlobalMaxAbs(Tm));
+         worst_r = std::max(worst_r, rr);
+         real_t eu = -1.0, eT = -1.0, eN = -1.0;
+         if (ref)
+         {
+            Vector Tm, Tc, Nm, Nc;
+            dom->QDStageTraction(xm[k], slip[k], Tm, &Nm);
+            dom->QDStageTraction(x, slip[k], Tc, &Nc);
+            eu = RelDiff(xm[k], x);
+            eT = RelDiff(Tm, Tc);
+            // normal traction relative to the shear scale (T_n may be ~0 for slip)
+            Vector dN(Nm);
+            dN -= Nc;
+            eN = GlobalMaxAbs(dN) / std::max(GlobalMaxAbs(Nm), GlobalMaxAbs(Tm));
+         }
          worst_u = std::max(worst_u, eu);
          worst_T = std::max(worst_T, eT);
          worst_N = std::max(worst_N, eN);
@@ -334,10 +352,15 @@ int main(int argc, char *argv[])
       }
       if (myrank == 0)
       {
-         std::printf("  %s: mean iterations %.1f over %lld solves\n", prec.c_str(),
+         std::vector<double> ts(times);
+         std::sort(ts.begin(), ts.end());
+         std::printf("  %s: mean iterations %.1f over %lld solves, median %.3f s per "
+                     "solve (rank 0)\n", prec.c_str(),
                      double(pcg->TotalIterations()) / double(pcg->NumSolves()),
-                     pcg->NumSolves());
+                     pcg->NumSolves(), ts.empty() ? 0.0 : ts[ts.size() / 2]);
       }
+      Check(prec + " true residual |b - K u|/|b|, worst", worst_r, 10.0 * tol);
+      if (!ref) { continue; }
       Check("U-Q1 " + prec + " displacement, max over right-hand sides", worst_u,
             100.0 * tol);
       Check("U-Q1 " + prec + " fault shear traction", worst_T, 100.0 * tol);
