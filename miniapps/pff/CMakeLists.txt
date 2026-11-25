@@ -51,3 +51,10 @@ add_mfem_miniapp(pff_driver
 target_include_directories(pff_driver PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/extern/toml11)
+
+add_mfem_miniapp(pff_partition
+  MAIN drivers/pff_partition.cpp
+  LIBRARIES mfem)
+target_include_directories(pff_partition PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/extern/toml11)

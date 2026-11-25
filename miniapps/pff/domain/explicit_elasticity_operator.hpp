@@ -294,10 +294,13 @@ private:
       for (int c = 0; c < D; c++)
          for (int i = 0; i < nt_; i++)
          {
-            pdiag(c * nt_ + i) = 1.0 / ((1.0 + h * alpha) * M_(i) + h * Cb_(Block(i, c, c)));
+            pdiag(c * nt_ + i) = (1.0 + h * alpha) * M_(i) + h * Cb_(Block(i, c, c));
          }
       for (int t : fixed_) { pdiag(t) = 1.0; }
-      OperatorJacobiSmoother P(pdiag, Array<int>(), 1.0);
+      // OperatorJacobiSmoother takes the diagonal itself (it inverts it in Setup)
+      // and keeps a pointer to the essential-dof list, so pass a named one
+      const Array<int> no_ess;
+      OperatorJacobiSmoother P(pdiag, no_ess, 1.0);
       Vector b(rhs);
       for (int t : fixed_) { b(t) = 0.0; }
       CGSolver cg(vfes_.GetComm());

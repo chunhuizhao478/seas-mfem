@@ -3,7 +3,9 @@
 // pff_driver.cpp — explicit dynamic phase-field fracture (phases C1-C5).
 //
 //   mpirun -np N ./pff_driver -c spe_hftc/configs/section_homog_eta0p45_absorb.toml
-//                             [-fd] [-tf END_TIME] [-o DIR] [-pi ITERS] [-pv INTERVAL]
+//                             [-fd] [-tf END_TIME] [-o DIR] [-pi ITERS] [-pv INTERVAL] [-pm PARTS_DIR]
+//   -pm: read the mesh as per-rank parts from pff_partition (large 3D meshes),
+//        instead of loading the serial mesh on every rank.
 //
 // Phase C2 (this version): explicit elastodynamics plus one bound-constrained
 // damage solve per step (below); -fd/--frozen-damage holds d = 0 (phase C1,
@@ -57,6 +59,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <map>
 #include <memory>
 
 using namespace mfem;
@@ -141,6 +144,7 @@ int main(int argc, char *argv[])
    const char *mass_override = "";
    int power_its = 60;
    int pv_interval = 0;
+   const char *parts_dir = "";
    OptionsParser args(argc, argv);
    args.AddOption(&config_file, "-c", "--config", "Case TOML file.");
    args.AddOption(&output_override, "-o", "--output-dir", "Override [output] directory.");
@@ -152,6 +156,8 @@ int main(int argc, char *argv[])
    args.AddOption(&mass_override, "-mass", "--mass", "Override [time] mass: consistent or lumped.");
    args.AddOption(&pv_interval, "-pv", "--paraview-interval",
                   "Write ParaView output every N steps (0: none).");
+   args.AddOption(&parts_dir, "-pm", "--partitioned-mesh",
+                  "Read the [mesh] file as per-rank parts written by pff_partition (one per MPI rank).");
    args.Parse();
    if (!args.Good() || std::string(config_file).empty())
    {
@@ -180,15 +186,45 @@ int main(int argc, char *argv[])
    // Mesh (path relative to the config file).
    const std::filesystem::path cfg_dir = std::filesystem::path(config_file).parent_path();
    const std::string mesh_path = (cfg_dir / c.mesh_file).string();
-   PhysicalNameMap names = ReadPhysicalNames(mesh_path);
-   Mesh serial(mesh_path.c_str(), 1, 1);
-   MFEM_VERIFY(serial.Dimension() == c.dim, "mesh dimension " << serial.Dimension()
-               << " != [mesh] dim " << c.dim);
-   for (int r = 0; r < c.uniform_refinements; r++) { serial.UniformRefinement(); }
-   const int dim = serial.Dimension();
-   const int max_attr = serial.bdr_attributes.Max();
-   ParMesh pmesh(comm, serial);
-   serial.Clear();
+   PhysicalNameMap names;
+   std::unique_ptr<ParMesh> pmesh_ptr;
+   int max_attr = 0;
+   if (std::string(parts_dir).empty())
+   {
+      // every rank loads the serial mesh, ParMesh partitions it (METIS)
+      names = ReadPhysicalNames(mesh_path);
+      Mesh serial(mesh_path.c_str(), 1, 1);
+      MFEM_VERIFY(serial.Dimension() == c.dim, "mesh dimension " << serial.Dimension()
+                  << " != [mesh] dim " << c.dim);
+      for (int r = 0; r < c.uniform_refinements; r++) { serial.UniformRefinement(); }
+      max_attr = serial.bdr_attributes.Max();
+      pmesh_ptr.reset(new ParMesh(comm, serial));
+   }
+   else
+   {
+      // each rank reads its own part (pff_partition, same METIS partitioning)
+      namespace fs = std::filesystem;
+      const fs::path pdir(parts_dir);
+      std::ifstream info(pdir / "info.txt");
+      MFEM_VERIFY(info, "pff_driver: no " << (pdir / "info.txt") << " (run pff_partition)");
+      std::map<std::string, std::string> kv;
+      for (std::string k, v; info >> k && std::getline(info >> std::ws, v);) { kv[k] = v; }
+      MFEM_VERIFY(std::stoi(kv["np"]) == Mpi::WorldSize(), "pff_driver: " << pdir << " has "
+                  << kv["np"] << " parts, the run has " << Mpi::WorldSize() << " ranks");
+      MFEM_VERIFY(fs::path(kv["source"]).filename() == fs::path(mesh_path).filename(),
+                  "pff_driver: parts in " << pdir << " are of " << kv["source"]
+                  << ", the config's [mesh] file is " << mesh_path);
+      names = ReadPhysicalNames((pdir / "physical_names.msh").string());
+      max_attr = std::stoi(kv["max_bdr_attribute"]);
+      std::ifstream part(pdir / MakeParFilename("mesh.", Mpi::WorldRank()));
+      MFEM_VERIFY(part, "pff_driver: cannot open part " << Mpi::WorldRank() << " in " << pdir);
+      pmesh_ptr.reset(new ParMesh(comm, part));
+      MFEM_VERIFY(pmesh_ptr->Dimension() == c.dim, "mesh dimension " << pmesh_ptr->Dimension()
+                  << " != [mesh] dim " << c.dim);
+      for (int r = 0; r < c.uniform_refinements; r++) { pmesh_ptr->UniformRefinement(); }
+   }
+   ParMesh &pmesh = *pmesh_ptr;
+   const int dim = pmesh.Dimension();
 
    H1_FECollection h1(1, dim);
    ParFiniteElementSpace Vfes(&pmesh, &h1, dim, Ordering::byNODES);

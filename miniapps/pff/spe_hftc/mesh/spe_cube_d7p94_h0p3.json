@@ -1,0 +1,55 @@
+{
+  "file": "spe_cube_d7p94_h0p3.msh",
+  "args": {
+    "lx": 0.05111,
+    "ly": 0.05192,
+    "lz": 0.04914,
+    "rb": 0.00397,
+    "h_fine": 0.0003,
+    "h_coarse": 0.001,
+    "r_fine": 0.028,
+    "transition": 0.003,
+    "msh_version": "2.2",
+    "threads": 4
+  },
+  "physical_ids": {
+    "xmin": 1,
+    "ymin": 2,
+    "zmax": 3,
+    "ymax": 4,
+    "zmin": 5,
+    "xmax": 6,
+    "borehole": 7,
+    "acrylic": 8
+  },
+  "n_nodes": 2386745,
+  "n_tets": 14618527,
+  "n_tris": 230244,
+  "tris_per_surface": {
+    "borehole": 31524,
+    "xmin": 22992,
+    "xmax": 22992,
+    "zmax": 56630,
+    "ymax": 19732,
+    "ymin": 19732,
+    "zmin": 56642
+  },
+  "areas_m2": {
+    "borehole": 0.0012257602321993754,
+    "xmin": 0.0025513488,
+    "xmax": 0.0025513488,
+    "zmax": 0.0026041168723460366,
+    "ymax": 0.0025115454,
+    "ymin": 0.0025115454,
+    "zmin": 0.0026041168723460366
+  },
+  "area_borehole_expected_m2": 0.0012257602321993752,
+  "volume_m3": 0.00012796630310708427,
+  "volume_expected_m3": 0.00012796630310708427,
+  "gamma_min": 0.198662956435576,
+  "gamma_mean": 0.7792074191150952,
+  "gamma_below_0p1": 0,
+  "mesh_seconds": 33.0,
+  "total_seconds": 60.3,
+  "gmsh_version": "4.15.2"
+}

@@ -33,7 +33,7 @@ HEADERS = $(wildcard common/*.hpp config/*.hpp constitutive/*.hpp phasefield/*.h
                      domain/*.hpp integrator/*.hpp kernels/*.hpp solver/*.hpp tests/*.hpp)
 
 # Drivers: drivers/*.cpp, one executable each in the miniapp directory
-DRIVERS = qs_driver pff_driver
+DRIVERS = qs_driver pff_driver pff_partition
 
 .PHONY: all test clean
 
@@ -43,6 +43,9 @@ qs_driver: drivers/qs_driver.cpp $(HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	$(MFEM_CXX) $(CXXFLAGS_PFF) $< -o $@ $(LIBS_PFF)
 
 pff_driver: drivers/pff_driver.cpp $(HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	$(MFEM_CXX) $(CXXFLAGS_PFF) $< -o $@ $(LIBS_PFF)
+
+pff_partition: drivers/pff_partition.cpp $(HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	$(MFEM_CXX) $(CXXFLAGS_PFF) $< -o $@ $(LIBS_PFF)
 
 # Verification programs (tests/verification/*.cpp)
