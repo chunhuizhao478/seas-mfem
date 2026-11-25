@@ -15,7 +15,7 @@
 #   sbatch jobs/horizon/h_ucerf3d_cudss.sbatch   (from miniapps/seas of the
 #                                                 Horizon 3-D clone)
 #
-# Uses tests/parallel/test_cudss_vs_mumps (GPU plan G3a) unchanged.  It
+# Uses tests/parallel/test_cudss_vs_mumps (GPU plan G3a) with --backends.  It
 # assembles K with BP5's boundary set: fault attr 3, Dirichlet attr 5 (the
 # UCERF side walls), natural attr 1 (top).  The UCERF bottom (2) and creep
 # faces (6) get no special treatment (bottom free, creep faces ordinary
@@ -42,9 +42,9 @@
 # check_ucerf3d_mesh.py (M1-M5) on each, and stops on a mismatch.
 #
 # Binary: MFEM and its deps are the clone's last CUDA build
-# (BUILD_COMMIT_CUDA, h_d2_build.sbatch); the job stops unless every change
-# from that commit to HEAD is under miniapps/seas/ucerf3d/, this script or
-# the test's own source, then builds seas_test_cudss_vs_mumps
+# (BUILD_COMMIT_CUDA, h_d2_build.sbatch); the job stops if anything outside
+# miniapps/seas changed from that commit to HEAD, then builds
+# seas_test_cudss_vs_mumps
 # (build_horizon.sh STAGE=seas).
 # Output: $SCRATCH/ucerf3d_cudss/job<id>/.
 
@@ -78,13 +78,13 @@ T0=$(date +%s)
 BC="${ROOT}/miniapps/seas/BUILD_COMMIT_CUDA"
 [ -f "${BC}" ] || { echo "ERROR: no ${BC}; run h_d2_build.sbatch first"; exit 2; }
 BUILT=$(cat "${BC}")
-OTHER=$(git diff --name-only "${BUILT}" HEAD -- . \
-        ':(exclude)miniapps/seas/ucerf3d' \
-        ':(exclude)miniapps/seas/jobs/horizon/h_ucerf3d_cudss.sbatch' \
-        ':(exclude)miniapps/seas/tests/parallel/test_cudss_vs_mumps.cpp')
-[ -z "${OTHER}" ] || { echo "ERROR: changes since the CUDA build ${BUILT} outside ucerf3d/:"; \
+# seas_test_cudss_vs_mumps is one object linked against libmfem only, and
+# it is recompiled below, so miniapps/seas changes (headers included) are
+# picked up; anything outside miniapps/seas would need a new libmfem.
+OTHER=$(git diff --name-only "${BUILT}" HEAD -- . ':(exclude)miniapps/seas')
+[ -z "${OTHER}" ] || { echo "ERROR: changes since the CUDA build ${BUILT} outside miniapps/seas:"; \
                        echo "${OTHER}"; echo "rebuild with h_d2_build.sbatch first"; exit 2; }
-echo "MFEM: CUDA build at ${BUILT} (no change outside ucerf3d/ since)" | tee -a "${OUT}/RUN_INFO.txt"
+echo "MFEM: CUDA build at ${BUILT} (no change outside miniapps/seas since)" | tee -a "${OUT}/RUN_INFO.txt"
 rm -f miniapps/seas/tests/parallel/test_cudss_vs_mumps.o miniapps/seas/seas_test_cudss_vs_mumps
 if ! MODE=cuda GPU_ARCH="${GPU_ARCH}" STAGE="seas" WITH_HDF5=1 \
       DEPS_ROOT="${DEPS_ROOT}" HDF5_ROOT="${HDF5_ROOT}" \
