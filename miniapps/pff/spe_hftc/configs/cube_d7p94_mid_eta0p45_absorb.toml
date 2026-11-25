@@ -2,7 +2,7 @@
 # Reproduces the Vista/LS6 production run cube_d7p94_mid_eta0p45_absorb:
 #   farms@cdms pulsepower/spe_hftc/code_3d/elasticity_absorbing.i + fracture.i
 #   with the job-script overrides  eta=0.45 zeta_pulse=1e-8 Np=20 dt_quiet=5e-7
-#   (code_3d/cases_ls6/submit_ls6_3d_eta0p45.sbatch).
+#   (code_3d/cases_vista/submit_vista_3d_eta0p45.sbatch; Vista run cube_d7p94_mid).
 #   pff departs from those runs in [damping] (Andy, 2026-11-22): zeta_pulse = 0 and a
 #   mass-proportional quench instead of zeta_quench = 1e-5 (explicit-step limit).
 
