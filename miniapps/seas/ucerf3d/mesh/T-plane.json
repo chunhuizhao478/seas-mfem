@@ -1,0 +1,54 @@
+{
+ "what": "T-plane test mesh, plan rev5 section 10.1",
+ "command": "build_ucerf3d_mesh.py test --name T-plane --hf 1500 --hmax 15000 --out mesh/T-plane.msh",
+ "gmsh": "4.13.1",
+ "fault": {
+  "length_km": 40.0,
+  "depth_km": 20.0,
+  "dip_deg": 90.0,
+  "dipdir": null,
+  "bend_deg": 0.0,
+  "creep_bottom_km": 30.0,
+  "top_trace_m": [
+   [
+    -20000.0,
+    0.0
+   ],
+   [
+    20000.0,
+    0.0
+   ]
+  ]
+ },
+ "box": {
+  "interior_km": 120.0,
+  "band_km": 0.0,
+  "half_width_km": 60.0,
+  "depth_km": 60.0
+ },
+ "size": {
+  "hf_m": 1500.0,
+  "d0_m": 5000.0,
+  "grade": 0.2,
+  "hmax_m": 15000.0
+ },
+ "attributes": {
+  "top": 1,
+  "bottom": 2,
+  "friction": 3,
+  "walls": 5,
+  "creep": 6,
+  "volume": 1
+ },
+ "counts": {
+  "2:1": 1806,
+  "2:2": 296,
+  "2:3": 872,
+  "2:5": 496,
+  "2:6": 371,
+  "3:1": 35753
+ },
+ "mesh_seconds": 0.5052597522735596,
+ "msh": "T-plane.msh",
+ "msh_sha256": "ae3e1d6bd186952cbbfd5dffe77b10f289991306df74c0a2bd9fbecd5f25b7fa"
+}

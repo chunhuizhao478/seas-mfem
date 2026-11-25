@@ -1,0 +1,54 @@
+{
+ "what": "T-pml test mesh, plan rev5 section 10.1",
+ "command": "build_ucerf3d_mesh.py test --name T-pml --hf 1500 --hmax 15000 --out mesh/T-pml.msh",
+ "gmsh": "4.13.1",
+ "fault": {
+  "length_km": 40.0,
+  "depth_km": 20.0,
+  "dip_deg": 90.0,
+  "dipdir": null,
+  "bend_deg": 0.0,
+  "creep_bottom_km": 30.0,
+  "top_trace_m": [
+   [
+    -20000.0,
+    0.0
+   ],
+   [
+    20000.0,
+    0.0
+   ]
+  ]
+ },
+ "box": {
+  "interior_km": 120.0,
+  "band_km": 30.0,
+  "half_width_km": 90.0,
+  "depth_km": 90.0
+ },
+ "size": {
+  "hf_m": 1500.0,
+  "d0_m": 5000.0,
+  "grade": 0.2,
+  "hmax_m": 15000.0
+ },
+ "attributes": {
+  "top": 1,
+  "bottom": 2,
+  "friction": 3,
+  "walls": 5,
+  "creep": 6,
+  "volume": 1
+ },
+ "counts": {
+  "2:1": 2102,
+  "2:2": 346,
+  "2:3": 872,
+  "2:5": 708,
+  "2:6": 371,
+  "3:1": 39072
+ },
+ "mesh_seconds": 0.5378389358520508,
+ "msh": "T-pml.msh",
+ "msh_sha256": "a11274318ac32b10a27d0bc68ab46cb8d71aa190b04730491d6190daf9f28a60"
+}

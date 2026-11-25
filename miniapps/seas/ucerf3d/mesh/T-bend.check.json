@@ -1,0 +1,57 @@
+{
+ "mesh": "T-bend.msh",
+ "M5 sha256": {
+  "passed": true,
+  "sha256": "7cd5cc4b65668102..."
+ },
+ "M4 counts": {
+  "passed": true,
+  "triangles": {
+   "1": 1803,
+   "2": 300,
+   "3": 888,
+   "5": 511,
+   "6": 368
+  },
+  "tets": 35814
+ },
+ "M4 faces of the tets": {
+  "passed": true,
+  "wrong_by_attribute": {}
+ },
+ "M4 creep meets friction at its bottom edge only": {
+  "passed": true,
+  "shared_vertices": 29,
+  "max_dz_m": 0.0,
+  "bottom_z_m": -20000.0
+ },
+ "M1 vertices on source surfaces": {
+  "passed": true,
+  "vertices": 671,
+  "max_dist_m": 0.0,
+  "tol_m": 1.0
+ },
+ "M2 quality": {
+  "passed": true,
+  "tets": 35814,
+  "min_dihedral_deg": 21.23,
+  "n_below_15deg": 0,
+  "h_min_m": 1014.3,
+  "h_max_m": 23875.2,
+  "fault_edge_m": {
+   "min": 1014.3,
+   "median": 1485.8,
+   "max": 1780.0
+  },
+  "dihedral_hist_deg": [
+   0,
+   0,
+   0,
+   0,
+   1135,
+   14415,
+   20264
+  ]
+ },
+ "all_passed": true
+}
