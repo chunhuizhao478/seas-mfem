@@ -14,7 +14,7 @@
 //
 //   mpirun -np N ./seas_test_cudss_vs_mumps [--mesh FILE] [--mesh-scale S]
 //          [--order P] [--nrhs 10] [--seed K] [--tol 1e-10] [--device cuda]
-//          [--estimate-only]
+//          [--estimate-only] [--backends both|mumps|cudss]
 //
 // Default: each back end analyses and factors K once; then --nrhs stage
 // right-hand sides b_k = B·δ_k + D·g(t_k) (random slip up to 10 m on every
@@ -30,6 +30,11 @@
 // --estimate-only: no factorization and no MUMPS; cuDSS's analysis phase
 // alone on K and its estimates, for meshes whose factor may not fit
 // (500 m, 250 m).
+//
+// --backends mumps|cudss: one back end alone (default both), to time each
+// at its own rank count: MUMPS on many CPU ranks (--device cpu), cuDSS on
+// one rank per GPU.  Only that back end's residual is checked; there is no
+// cuDSS-vs-MUMPS comparison.
 //
 // A build without cuDSS (MFEM_USE_CUDSS=NO) runs the MUMPS half, says so,
 // and exits 2.  Exit code 0 when every check passes.
@@ -252,6 +257,7 @@ int main(int argc, char *argv[])
    std::string device_str = "cpu";
 #endif
    bool estimate_only = false;
+   std::string backends = "both";
    OptionsParser args(argc, argv);
    args.AddOption(&mesh_file, "-m", "--mesh", "Gmsh BP5 mesh.");
    args.AddOption(&mesh_scale, "-s", "--mesh-scale", "Coordinate scale.");
@@ -264,12 +270,21 @@ int main(int argc, char *argv[])
                   "--no-estimate-only",
                   "cuDSS analysis estimates only (no factorization, no "
                   "MUMPS).");
+   args.AddOption(&backends, "-b", "--backends",
+                  "both, mumps or cudss: the back ends to factor and time.");
    args.Parse();
    if (!args.Good())
    {
       if (myrank == 0) { args.PrintUsage(std::cout); }
       return 1;
    }
+   if (backends != "both" && backends != "mumps" && backends != "cudss")
+   {
+      if (myrank == 0) { std::cout << "--backends: both, mumps or cudss\n"; }
+      return 1;
+   }
+   const bool use_mumps = backends != "cudss";
+   const bool want_cudss = backends != "mumps";
 
    // One GPU per rank on a node, as seas_bp5_full chooses it.
    int device_id = 0;
@@ -338,6 +353,7 @@ int main(int argc, char *argv[])
    }
 
 #ifdef MFEM_USE_CUDSS
+   if (want_cudss)
    {
       const CuDSSEstimate est = EstimateCuDSS(K);
       PrintEstimate(est);
@@ -379,16 +395,21 @@ int main(int argc, char *argv[])
    // ---- Back ends: one analysis and factorization each ----
    std::unique_ptr<Solver> mumps, cudss;
    QDLinearSolverSetup s_mumps, s_cudss;
-   mumps = MakeQDLinearSolver(QDLinearSolverKind::MUMPS, K, 0, 0.0, &s_mumps);
-   if (myrank == 0) { std::cout << QDLinearSolverSummary(s_mumps) << "\n"; }
-   const bool have_cudss = QDLinearSolverAvailable(QDLinearSolverKind::CUDSS);
+   if (use_mumps)
+   {
+      mumps = MakeQDLinearSolver(QDLinearSolverKind::MUMPS, K, 0, 0.0,
+                                 &s_mumps);
+      if (myrank == 0) { std::cout << QDLinearSolverSummary(s_mumps) << "\n"; }
+   }
+   const bool have_cudss =
+      want_cudss && QDLinearSolverAvailable(QDLinearSolverKind::CUDSS);
    if (have_cudss)
    {
       cudss = MakeQDLinearSolver(QDLinearSolverKind::CUDSS, K, 0, 0.0,
                                  &s_cudss);
       if (myrank == 0) { std::cout << QDLinearSolverSummary(s_cudss) << "\n"; }
    }
-   else if (myrank == 0)
+   else if (want_cudss && myrank == 0)
    {
       std::cout << "cuDSS: not in this build (MFEM_USE_CUDSS=NO); the MUMPS "
                 << "half only\n";
@@ -399,7 +420,7 @@ int main(int argc, char *argv[])
    um.UseDevice(true);
    uc.UseDevice(true);
    r.UseDevice(true);
-   std::vector<double> t_mumps(nrhs), t_cudss(nrhs, 0.0);
+   std::vector<double> t_mumps(nrhs, 0.0), t_cudss(nrhs, 0.0);
    real_t worst_res_c = 0.0, worst_res_m = 0.0, worst_diff = 0.0;
    if (myrank == 0)
    {
@@ -409,17 +430,21 @@ int main(int argc, char *argv[])
    for (int k = 0; k < nrhs; k++)
    {
       const real_t bnorm = GlobalNorm2(b[k]);
-      um = 0.0;
-      DeviceSync();
-      MPI_Barrier(comm);
-      t0 = MPI_Wtime();
-      mumps->Mult(b[k], um);
-      DeviceSync();
-      t_mumps[k] = MaxOverRanks(MPI_Wtime() - t0);
-      K.Mult(um, r);
-      r -= b[k];
-      const real_t res_m = GlobalNorm2(r) / bnorm;
-      worst_res_m = std::max(worst_res_m, res_m);
+      real_t res_m = -1.0;
+      if (use_mumps)
+      {
+         um = 0.0;
+         DeviceSync();
+         MPI_Barrier(comm);
+         t0 = MPI_Wtime();
+         mumps->Mult(b[k], um);
+         DeviceSync();
+         t_mumps[k] = MaxOverRanks(MPI_Wtime() - t0);
+         K.Mult(um, r);
+         r -= b[k];
+         res_m = GlobalNorm2(r) / bnorm;
+         worst_res_m = std::max(worst_res_m, res_m);
+      }
 
       real_t res_c = -1.0, diff = -1.0;
       if (have_cudss)
@@ -434,10 +459,13 @@ int main(int argc, char *argv[])
          K.Mult(uc, r);
          r -= b[k];
          res_c = GlobalNorm2(r) / bnorm;
-         subtract(uc, um, r);
-         diff = GlobalMaxAbs(r) / GlobalMaxAbs(um);
          worst_res_c = std::max(worst_res_c, res_c);
-         worst_diff = std::max(worst_diff, diff);
+         if (use_mumps)
+         {
+            subtract(uc, um, r);
+            diff = GlobalMaxAbs(r) / GlobalMaxAbs(um);
+            worst_diff = std::max(worst_diff, diff);
+         }
       }
       if (myrank == 0)
       {
@@ -457,14 +485,29 @@ int main(int argc, char *argv[])
                   1e3 * median(t_cudss));
    }
 
-   Check("MUMPS ||K u - b||_2/||b||_2, worst (reference)", worst_res_m, tol);
-   if (!have_cudss)
+   if (use_mumps)
+   {
+      Check("MUMPS ||K u - b||_2/||b||_2, worst (reference)", worst_res_m,
+            tol);
+   }
+   if (!want_cudss)
+   {
+      if (myrank == 0) { std::cout << "--backends mumps: cuDSS not run\n"; }
+   }
+   else if (!have_cudss)
    {
       if (myrank == 0) { std::cout << "cuDSS checks SKIPPED (no cuDSS)\n"; }
       return 2;
    }
-   Check("cuDSS ||K u - b||_2/||b||_2, worst", worst_res_c, tol);
-   Check("cuDSS vs MUMPS ||uc - um||_inf/||um||_inf, worst", worst_diff, tol);
+   else
+   {
+      Check("cuDSS ||K u - b||_2/||b||_2, worst", worst_res_c, tol);
+      if (use_mumps)
+      {
+         Check("cuDSS vs MUMPS ||uc - um||_inf/||um||_inf, worst",
+               worst_diff, tol);
+      }
+   }
    if (myrank == 0)
    {
       std::cout << (failures == 0 ? "ALL PASSED" : "FAILURES") << " ("
