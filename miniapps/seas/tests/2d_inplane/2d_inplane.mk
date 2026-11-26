@@ -681,7 +681,7 @@ seas_test_tip_zone: $(TEST_TIP_ZONE_OBJ) $(CYCLE_LINK_OBJS)
 	    $(CYCLE_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
-TIP_ZONE_REFUSALS = 1:three or more fault faces|2:form closed chains|3:has no free tip|4:"tip_zone" is for [cycle.fields.a] only|5:needs a 2-D mesh (fault lines with tips)|6:is shorter than the taper|7:taper must be in [0, width]|8:has an unknown key|9:lies on no fault segment|10:max_fraction must be > 0
+TIP_ZONE_REFUSALS = 1:three or more fault faces|2:form closed chains|3:has no free tip|4:"tip_zone" is for [cycle.fields.a] only|5:max_fraction is for 2-D fault chains|6:is shorter than the taper|7:taper must be in [0, width]|8:has an unknown key|9:lies on no fault segment|10:max_fraction must be > 0|11:are 3-D keys
 test-tip-zone: seas_test_tip_zone
 	@for n in 1 2; do \
 	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_tip_zone || exit 1; \

@@ -204,13 +204,19 @@
 //                   axis2 and half2 are left out and the taper runs along
 //                   axis1 alone (CheckDimension)                   [required]
 //                   kind ["rect_taper"].  [cycle.fields.a] may instead be
-//                   kind = "tip_zone" (2-D only; Chunhui Zhao, 2026-10-29):
+//                   kind = "tip_zone" (Chunhui Zhao, 2026-10-29):
 //                   width W, taper, inside, tip [all required] and
 //                   max_fraction [none]: a = tip within W - taper of the
 //                   nearer free tip of the DOF's own fault chain (the
 //                   distance along the chain), linear to inside at W, inside
 //                   beyond; W = min(width, max_fraction L) on a chain of
-//                   length L (cycle/fault_chains.hpp)
+//                   length L (cycle/fault_chains.hpp).  On a 3-D mesh
+//                   (UCERF 3-D plan rev5, P1.2) d is the straight-line
+//                   distance to the lateral tip edges of the DOF's fault
+//                   surface, max_fraction is refused, and top_depth,
+//                   top_taper, lower_depth or lower_depth_file, bottom_taper
+//                   add velocity-strengthening depth zones
+//                   (cycle/fault_surface_zones.hpp)
 //   [cycle.output]  prefix, fast_V, dt_fast, dt_slow, event_V,
 //                   event_dwell, plane_origin, plane_axis1, plane_axis2,
 //                   station_sigma_n (a ninth station column, the normal
@@ -800,9 +806,15 @@ struct CycleConfig
       // [cycle.fields]: two axes on a fault plane, one on a fault line.
       const std::pair<const char *, const RectTaperSpec *> fl[] =
       {{"a", &fields.a}, {"Dc", &fields.Dc}, {"V_init", &fields.V_init}};
-      MFEM_VERIFY(!fields.a_tip_zone.set || dim == 2,
-                  "[cycle.fields.a] kind = \"tip_zone\" needs a 2-D mesh (fault lines with "
-                  "tips); the mesh is 3-D");
+      // UCERF 3-D plan rev5, P1.2: on a 3-D mesh the tip zone runs on the
+      // fault surfaces (cycle/fault_surface_zones.hpp), with optional depth
+      // zones; max_fraction (a chain length) is 2-D only
+      MFEM_VERIFY(!fields.a_tip_zone.set || dim == 3 || !fields.a_tip_zone.Has3DKeys(),
+                  "[cycle.fields.a] kind = \"tip_zone\": top_depth, top_taper, lower_depth, "
+                  "lower_depth_file and bottom_taper are 3-D keys; the mesh is 2-D");
+      MFEM_VERIFY(!fields.a_tip_zone.set || dim == 2 || fields.a_tip_zone.max_fraction == 0.0,
+                  "[cycle.fields.a] kind = \"tip_zone\": max_fraction is for 2-D fault chains "
+                  "(a chain length); the mesh is 3-D");
       for (const auto &f : fl)
       {
          MFEM_VERIFY(!f.second->set || f.second->two_axes == (dim == 3),
@@ -999,7 +1011,8 @@ inline TipZoneSpec TipZone(const toml::value &fields, const std::string &name)
    if (!fields.contains(name)) { return f; }
    const toml::value &t = fields.at(name);
    if (Str(t, sec, "kind", "rect_taper") != "tip_zone") { return f; }
-   OnlyKeys(t, sec, {"kind", "width", "taper", "inside", "tip", "max_fraction"});
+   OnlyKeys(t, sec, {"kind", "width", "taper", "inside", "tip", "max_fraction", "top_depth",
+                     "top_taper", "lower_depth", "lower_depth_file", "bottom_taper"});
    f.width = Real(t, sec, "width", 0.0, true);
    f.taper = Real(t, sec, "taper", 0.0, true);
    f.inside = Real(t, sec, "inside", 0.0, true);
@@ -1009,6 +1022,20 @@ inline TipZoneSpec TipZone(const toml::value &fields, const std::string &name)
       f.max_fraction = Real(t, sec, "max_fraction", 0.0);
       MFEM_VERIFY(f.max_fraction > 0.0, "[" << sec << "] max_fraction must be > 0");
    }
+   // 3-D surfaces (UCERF 3-D plan rev5, P1.2; cycle/fault_surface_zones.hpp)
+   if (t.contains("top_depth"))
+   {
+      f.top_depth = Real(t, sec, "top_depth", 0.0);
+      MFEM_VERIFY(f.top_depth >= 0.0, "[" << sec << "] top_depth must be >= 0");
+   }
+   f.top_taper = Real(t, sec, "top_taper", 0.0);
+   if (t.contains("lower_depth"))
+   {
+      f.lower_depth = Real(t, sec, "lower_depth", 0.0);
+      MFEM_VERIFY(f.lower_depth > 0.0, "[" << sec << "] lower_depth must be > 0");
+   }
+   f.lower_depth_file = Str(t, sec, "lower_depth_file", "");
+   f.bottom_taper = Real(t, sec, "bottom_taper", 0.0);
    f.set = true;
    f.Validate(name);
    return f;

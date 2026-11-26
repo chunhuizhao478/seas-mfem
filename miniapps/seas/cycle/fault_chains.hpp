@@ -70,7 +70,20 @@ struct TipZoneSpec
    real_t inside = 0.0;         ///< value from W on (away from the tips)
    real_t tip = 0.0;            ///< value within W - taper of a free tip
    real_t max_fraction = 0.0;   ///< > 0: W_eff = min(W, max_fraction L); 0 = no cap
+   // 3-D surfaces only (fault_surface_zones.hpp; UCERF 3-D plan rev5, P1.2)
+   real_t top_depth = -1.0;     ///< >= 0: tip value above this depth [m]; < 0 = no top zone
+   real_t top_taper = 0.0;      ///< ramp below top_depth [m]
+   real_t lower_depth = -1.0;   ///< > 0: tip value below this depth [m] (constant D)
+   std::string lower_depth_file;   ///< or D(x) from this CSV (chain,x_m,y_m,lower_depth_m)
+   real_t bottom_taper = 0.0;   ///< ramp below D [m]
    bool set = false;            ///< the deck gave this field
+
+   /// True when a 3-D-only key is set.
+   bool Has3DKeys() const
+   {
+      return top_depth >= 0.0 || lower_depth > 0.0 || !lower_depth_file.empty()
+             || top_taper != 0.0 || bottom_taper != 0.0;
+   }
 
    /// Refuses width <= 0, a taper outside [0, width], max_fraction < 0.
    void Validate(const std::string &name) const
@@ -80,6 +93,10 @@ struct TipZoneSpec
                   "[cycle.fields." << name << "] taper must be in [0, width]");
       MFEM_VERIFY(max_fraction >= 0.0,
                   "[cycle.fields." << name << "] max_fraction must be > 0");
+      MFEM_VERIFY(top_taper >= 0.0 && bottom_taper >= 0.0,
+                  "[cycle.fields." << name << "] top_taper and bottom_taper must be >= 0");
+      MFEM_VERIFY(lower_depth <= 0.0 || lower_depth_file.empty(),
+                  "[cycle.fields." << name << "] lower_depth and lower_depth_file: give one");
    }
 
    /// W_eff on a chain of length L.

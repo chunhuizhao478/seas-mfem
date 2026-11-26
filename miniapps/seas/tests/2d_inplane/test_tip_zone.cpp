@@ -42,17 +42,19 @@
 //       taper 2 km, inside 0.004, outside 0.04 (1e-15 abs.)
 //   On 2 ranks the cut x = 2.3 km (unrotated) crosses A, B and C.
 //
-// Modes: (default) G1, D1-D5;  --refuse N (N = 1..10) must abort with:
+// Modes: (default) G1, D1-D5;  --refuse N (N = 1..11) must abort with:
 //   1 a junction                          "three or more fault faces"
 //   2 a closed chain                      "form closed chains"
 //   3 a chain with both ends on the outer boundary  "has no free tip"
 //   4 kind = "tip_zone" on Dc             "\"tip_zone\" is for [cycle.fields.a] only"
-//   5 a 3-D deck and mesh                 "needs a 2-D mesh (fault lines with tips)"
+//   5 max_fraction on a 3-D mesh          "max_fraction is for 2-D fault chains"
+//     (UCERF 3-D P1.2 lifted the 3-D refusal; 3-D faces: tests/ucerf3d/test_a_field_3d)
 //   6 max_fraction 0.1 (C: 0.8 km < taper)  "is shorter than the taper"
 //   7 taper > width                       "taper must be in [0, width]"
 //   8 an unknown key (half1)              "has an unknown key"
 //   9 a point off the fault               "lies on no fault segment"
 //  10 max_fraction = 0                    "max_fraction must be > 0"
+//  11 a 3-D key (top_depth) on a 2-D mesh  "are 3-D keys"
 // --dump-mesh PATH --order P --out PREFIX [--width W --taper T --inside A
 //   --tip A --max-fraction F]: the chains of a mesh file (fault attr 3) and,
 //   per local fault face, its p + 1 Gauss-Lobatto nodes (the QD operator's
@@ -610,7 +612,7 @@ static int Refuse(int n, MPIContext &mpi)
          return 0;
       }
       case 4: sp.dc_extra = "kind = \"tip_zone\"\n"; break;
-      case 5: sp.dim = 3; break;
+      case 5: sp.dim = 3; sp.a_table = TipZoneTable(0.1); break;
       case 6: sp.a_table = TipZoneTable(0.1); break;
       case 7: sp.a_table = "kind = \"tip_zone\"\nwidth = 1000.0\ntaper = 1500.0\ninside = 0.004\n"
                            "tip = 0.04\n"; break;
@@ -626,11 +628,12 @@ static int Refuse(int n, MPIContext &mpi)
          return 0;
       }
       case 10: sp.a_table = TipZoneTable(0.0, "max_fraction = 0.0\n"); break;
-      default: MFEM_ABORT("--refuse N: N = 1..10");
+      case 11: sp.a_table = TipZoneTable(0.0, "top_depth = 1.0\n"); break;
+      default: MFEM_ABORT("--refuse N: N = 1..11");
    }
    if (g_rank == 0) { std::cout << "--refuse " << n << ": loading the deck\n"; }
    cycle::CycleConfig cfg = LoadText(DeckText(sp));   // 4, 7, 8, 10 abort here
-   cfg.CheckDimension(sp.dim);                         // 5 aborts here
+   cfg.CheckDimension(sp.dim);                         // 5, 11 abort here
    std::unique_ptr<ParMesh> pm = ParBox(l, Rot(), mpi);
    std::unique_ptr<cycle::QDPhase> qd;
    Build(cfg, *pm, mpi, qd);                           // 6 aborts here

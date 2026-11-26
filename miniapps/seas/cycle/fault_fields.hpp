@@ -30,6 +30,7 @@
 #include "../spatial/code/spatial_friction.hpp"
 #include "../dynamic/heterogeneous_material.hpp"
 #include "fault_chains.hpp"
+#include "fault_surface_zones.hpp"
 
 #include <algorithm>
 #include <array>
@@ -141,7 +142,9 @@ struct FaultParams
 /// BuildFaultParams (plan 3.3 b):
 ///   fields.a, fields.Dc = RectTaperField(cfg.a), RectTaperField(cfg.Dc)
 ///                         (a: TipZoneField(cfg.a_tip_zone) on the chains of
-///                         the faces of fault_attr when the deck gives it)
+///                         the faces of fault_attr when the deck gives it; on
+///                         a 3-D mesh FaultSurfaceZones::Value on its
+///                         surfaces, UCERF 3-D plan rev5 P1.2)
 ///   fields.V_w          = constant (required by the struct; aging ignores it)
 ///   rs = SpatialFrictionResolver(fields).ResolveRateState(block, table, ...)
 ///   V_init(dip, strike) = (cfg.V_init_dip, RectTaperField(cfg.V_init))
@@ -180,7 +183,15 @@ inline FaultParams BuildFaultParams(const FaultDOFTable &table,
    auto fields = std::make_shared<spatial::RateStateSidecarFields>();
    const RectTaperSpec fa = cfg.a, fdc = cfg.Dc;
    FaultParams out;
-   if (cfg.a_tip_zone.set)
+   if (cfg.a_tip_zone.set && pmesh.Dimension() == 3)
+   {
+      // UCERF 3-D plan rev5, P1.2: the surface version (collective)
+      auto zones = std::make_shared<const FaultSurfaceZones>(pmesh, fault_attr, cfg.a_tip_zone);
+      fields->a = [zones](real_t x, real_t y, real_t z)
+      { const real_t p[3] = {x, y, z}; return zones->Value(p); };
+      out.a_report = zones->Report();
+   }
+   else if (cfg.a_tip_zone.set)
    {
       // collective: every rank's fault faces
       auto chains = std::make_shared<const FaultChains>(pmesh, fault_attr);
