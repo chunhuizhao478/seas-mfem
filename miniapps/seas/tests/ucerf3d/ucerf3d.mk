@@ -110,3 +110,23 @@ test-a-field-3d: seas_test_a_field_3d
 	done
 
 .PHONY: test-a-field-3d
+
+# P1.3 (plan rev5 U-C1 to U-C3; Chunhui Zhao, 2026-11-26: "proceed next"):
+# unilateral contact in the 3-D Nitsche dynamic phase, on 1 and 2 ranks.
+TEST_CT3D_SRC = tests/ucerf3d/test_contact_3d.cpp
+TEST_CT3D_OBJ = $(TEST_CT3D_SRC:.cpp=.o)
+$(TEST_CT3D_OBJ): %.o: $(SRC)%.cpp $(CYCLE_HEADERS) domain/nitsche_energy.hpp $(CYCLE_STAMP) \
+                  $(CYCLE_SHARED_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
+
+seas_test_contact_3d: $(TEST_CT3D_OBJ) $(CYCLE_LINK_OBJS)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_CT3D_OBJ) $(CYCLE_LINK_OBJS) $(CYCLE_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-contact-3d: seas_test_contact_3d
+	@for n in 1 2; do \
+	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_contact_3d || exit 1; \
+	done
+
+.PHONY: test-contact-3d

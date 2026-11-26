@@ -800,9 +800,12 @@ struct CycleConfig
                      << ((dim == 2) ? "[x, y]" : "[x, y, z]"));
       }
       spatial::CheckFaultGeometryDimension(shared.fault_geometry, dim);
-      MFEM_VERIFY(dim == 2 || !opening.On(), "[cycle.opening] is built and tested on "
-                  "2-D meshes only (fault opening design rev 1.1, Section 6: 2-D first); "
-                  "the mesh is 3-D");
+      // UCERF 3-D plan rev5: the 3-D dynamic phase has contact (P1.3,
+      // tests/ucerf3d/test_contact_3d.cpp); a cycle also needs the QD phase's
+      // open set, which is 2-D until P3.2, so the deck is still refused here
+      MFEM_VERIFY(dim == 2 || !opening.On(), "[cycle.opening] on a 3-D mesh: the dynamic "
+                  "phase has contact (UCERF 3-D plan rev5, P1.3), the QD phase does not yet "
+                  "(P3.2: contact in the volume QD solve); the mesh is 3-D");
       // [cycle.fields]: two axes on a fault plane, one on a fault line.
       const std::pair<const char *, const RectTaperSpec *> fl[] =
       {{"a", &fields.a}, {"Dc", &fields.Dc}, {"V_init", &fields.V_init}};

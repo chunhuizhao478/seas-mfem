@@ -858,7 +858,7 @@ seas_test_fault_opening: $(TEST_FAULT_OPENING_OBJ) $(CYCLE_LINK_OBJS)
 
 FAULT_OPENING_DECKS = simple_cases/configs/D9f_arc08L2p5_h250_avg_floor10_open.toml \
                       config/fd_cycle/ucerf2d_saf_sjf_500m_R70_avg_tip_relax_open_fd.toml
-FAULT_OPENING_REFUSALS = 1:check_every: the solve-path check does not carry|2:use "shear_free"|3:max_passes = 0 must be >= 1|4:[cycle.opening] needs [cycle.qd.green]|5:[cycle.opening] is built and tested on 2-D meshes only|6:[cycle.opening] with [friction.prakash_clifton]|7:[cycle.probe] with [cycle.opening]|8:H-matrix path carries no opening columns|9:belong to mode = "contact"|10:floor_taper needs [cycle].sigma_n_floor_pa > 0|11:must be >= 0 (0 = the pure law, D-B7)
+FAULT_OPENING_REFUSALS = 1:check_every: the solve-path check does not carry|2:use "shear_free"|3:max_passes = 0 must be >= 1|4:[cycle.opening] needs [cycle.qd.green]|5:[cycle.opening] on a 3-D mesh: the dynamic phase has contact|6:[cycle.opening] with [friction.prakash_clifton]|7:[cycle.probe] with [cycle.opening]|8:H-matrix path carries no opening columns|9:belong to mode = "contact"|10:floor_taper needs [cycle].sigma_n_floor_pa > 0|11:must be >= 0 (0 = the pure law, D-B7)
 test-fault-opening: seas_test_fault_opening
 	@for n in 1 2; do \
 	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_fault_opening < /dev/null || exit 1; \

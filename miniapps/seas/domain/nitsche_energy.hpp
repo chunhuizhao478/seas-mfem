@@ -30,6 +30,10 @@
 // traction projection, on owned faces only.  Dot products of DOF fields are
 // frame-invariant, so the kernel's own components are used for the parts.
 //
+// With SetContactOpening the fault powers use the slip rate with its normal
+// (gap-rate) part reversed, the rate conjugate to T_h under the kernel's
+// opening embedding (Evaluate); the open DOFs then do the work -S . V only.
+//
 // An observer: it reads the operator through accessors and changes nothing
 // in the step.  Scope (Chunhui Zhao, 2026-10-14).
 
@@ -98,7 +102,27 @@ public:
       op_.SlipLoad(op_.Slip(), Gd);
       op_.ApplyDamping(Ud, CUd);
       E_.AssembleDirichletOnlyRHS(F, t);
-      const Vector &d = op_.Slip(), &V = op_.SlipRate();
+      const Vector &d = op_.Slip();
+      // Contact (fault opening B2): the stored d carries the gap as
+      // +g n_frame, while the kernel embeds the opening with the opposite
+      // sign to a tangential slip (ToKernelLocal_ / EmbedOpening), so
+      // dE_el/dd . W = int_F T_h . (W - 2 (W . n) n): the rate conjugate to
+      // T_h has its normal part reversed.  Measured on T-bend (UCERF 3-D
+      // P1.3, 2026-11-26): dE_el/dd along n = -int_F T_h . n, along dip
+      // and strike = +int_F T_h . t.  Without contact V is used as it is.
+      Vector Vc;
+      if (op_.ContactOpening())
+      {
+         Vc = op_.SlipRate();
+         const Vector &fr = op_.FaultFrames();
+         for (int j = 0; j < op_.NumOwnedFaultDOFs(); j++)
+         {
+            real_t vn = 0.0;
+            for (int c = 0; c < 3; c++) { vn += Vc(3 * j + c) * fr(9 * j + c); }
+            for (int c = 0; c < 3; c++) { Vc(3 * j + c) -= 2.0 * vn * fr(9 * j + c); }
+         }
+      }
+      const Vector &V = op_.ContactOpening() ? Vc : op_.SlipRate();
       r.E_kin = 0.5 * Dot_(Ud, MUd);
       const real_t pen_dd = 0.5 * FaultDot_(d, d, true);
       r.E_el = 0.5 * Dot_(U, KU) - Dot_(U, Gd) + pen_dd;
@@ -121,11 +145,12 @@ public:
       {
          Vector KvU, GvV, Tkv;
          op_.ApplyKVStiffness(Ud, KvU);
-         op_.KVSlipLoad(V, GvV);
-         op_.KVTrialTraction(Ud, V, Tkv);
+         const Vector &Vs = op_.SlipRate();   // the kernel's own embedding
+         op_.KVSlipLoad(Vs, GvV);
+         op_.KVTrialTraction(Ud, Vs, Tkv);
          TS += Tkv;
          r.P_kv = -(Dot_(Ud, KvU) - 2.0 * Dot_(Ud, GvV)
-                    + FaultDot_(V, V, true, &op_.FacePenaltyKV()));
+                    + FaultDot_(Vs, Vs, true, &op_.FacePenaltyKV()));
       }
       r.P_fric = FaultDot_(TS, V, false);
       real_t nm[2] = {-1e300, 0.0};

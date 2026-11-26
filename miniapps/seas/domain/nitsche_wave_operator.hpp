@@ -2494,7 +2494,10 @@ private:
             ? std::sqrt(Vn[0] * Vn[0] + Vn[1] * Vn[1] + Vn[2] * Vn[2]) : Vabs;
          const real_t vx_allow = 8.0 * std::numeric_limits<real_t>::epsilon()
                                  * std::hypot(X[0], X[1]) * V3;
-         MFEM_VERIFY(Vabs == 0.0 || VX < vx_allow,
+         // "<=": with no shear at all (X = 0, a pure opening; UCERF 3-D
+         // P1.3 U-C1) the allowance is 0 and the rounding leak gives V.X =
+         // 0, which is no wrong direction
+         MFEM_VERIFY(Vabs == 0.0 || VX <= vx_allow,
                      "NitscheWaveOperator: slip rate not anti-parallel to the "
                      "shear traction on rank " << Mpi::WorldRank() << ", owned "
                      "fault DOF " << j << ", step " << steps_ << ": V.X = " << VX
