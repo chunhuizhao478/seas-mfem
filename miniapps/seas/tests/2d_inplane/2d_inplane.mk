@@ -686,6 +686,8 @@ test-tip-zone: seas_test_tip_zone
 	@for n in 1 2; do \
 	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_tip_zone || exit 1; \
 	done
+	@$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_tip_zone --free-tips \
+	   ucerf2d/mesh/ucerf2d_saf_sjf_500m_tilted_D415km_R70.msh 10 | grep -E "PASSED|FAILED" || exit 1
 	@list='$(TIP_ZONE_REFUSALS)'; set -f; IFS='|'; for r in $$list; do n=$${r%%:*}; msg=$${r#*:}; \
 	   out=$$($(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_tip_zone --refuse $$n 2>&1); rc=$$?; \
 	   if [ $$rc -ne 0 ] && printf '%s' "$$out" | grep -qF "$$msg"; then \
