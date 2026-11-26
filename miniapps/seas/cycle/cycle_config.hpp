@@ -340,8 +340,9 @@
 //               junction_policy ["refuse"] (the only implemented values),
 //               pin_min_margin [the orientation's default], vertex_normals
 //               ["face" | "averaged"; vertex-normal plan rev1: "averaged"
-//               only on 2-D meshes (CheckDimension), without [cycle.lts]
-//               and not in a GPU build (D3)], vertex_normal_max_turn_deg
+//               on 2-D meshes, and on 3-D meshes from UCERF 3-D plan rev5
+//               P1.1; without [cycle.lts] and not in a GPU build (D3)],
+//               vertex_normal_max_turn_deg
 //               [5; > 0]
 //   [pore_pressure] min_sigma_n_pa: the lower bound of sigma_n_eff [0]
 //
@@ -793,9 +794,6 @@ struct CycleConfig
                      << ((dim == 2) ? "[x, y]" : "[x, y, z]"));
       }
       spatial::CheckFaultGeometryDimension(shared.fault_geometry, dim);
-      MFEM_VERIFY(dim == 2 || !dyn.averaged_vertex_normals, "[fault_geometry] "
-                  "vertex_normals = \"averaged\" is implemented for 2-D meshes only "
-                  "(vertex-normal plan rev1, D3); the mesh is 3-D");
       MFEM_VERIFY(dim == 2 || !opening.On(), "[cycle.opening] is built and tested on "
                   "2-D meshes only (fault opening design rev 1.1, Section 6: 2-D first); "
                   "the mesh is 3-D");

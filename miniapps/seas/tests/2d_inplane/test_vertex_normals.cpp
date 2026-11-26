@@ -44,8 +44,10 @@
 //   seas_test_vertex_normals              (1, 2 or 4 ranks)
 //   seas_test_vertex_normals --refuse N   one refusal, must exit non-zero:
 //     1 a Y-shaped fault (a vertex with three fault faces: "junction"),
-//     2 a 3-D mesh ("2-D meshes only"), 3 vertex_normal_max_turn_deg = 0
-//     ("must be > 0")
+//     3 vertex_normal_max_turn_deg = 0
+//     ("must be > 0"); 2 (a 3-D mesh, "2-D meshes only") is gone since
+//     UCERF 3-D plan rev5, P1.1 accepts 3-D faults
+//     (tests/ucerf3d/test_vertex_normals_3d.cpp)
 //
 //   make -f tests/2d_inplane/2d_inplane.mk test-vertex-normals
 //
@@ -474,13 +476,6 @@ static int Refuse(int which, MPI_Comm comm)
       std::unique_ptr<Mesh> s(YMesh());
       ParMesh pm(comm, *s);
       auto op = MakeOp(pm, Source(ref, up, true));
-      (void)op;
-   }
-   else if (which == 2)
-   {
-      std::unique_ptr<Mesh> s(frame_box::FrameBox(0, frame_box::Rot()));
-      ParMesh pm(comm, *s);
-      auto op = MakeOp(pm, Source(ref, up, true), {5, 6});   // 6: the band, as in test_fault_frame_field
       (void)op;
    }
    else if (which == 3)

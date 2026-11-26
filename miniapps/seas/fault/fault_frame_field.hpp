@@ -76,8 +76,31 @@
 // vertex use exactly n_v there), nhat_i = n_v at a smooth vertex, else the
 // face normal.  A face whose nhat_0 and nhat_1 both equal its normal returns
 // Frame(fi) unchanged, and so does every face with the option off.  P1 only
-// builds and reports these; the operators read them from phase P2/P3.  3-D
-// meshes are refused with the option on.
+// builds and reports these; the operators read them from phase P2/P3.
+//
+// 3-D surfaces (UCERF 3-D plan rev5, P1.1; Chunhui Zhao, 2026-11-25: "start
+// P1"): on a tetrahedral mesh the fault faces are triangles.  Every fault
+// vertex v with fan F_v (the fault faces that contain it) gets
+//    n_v = sum_{f in F_v} n_f / |sum_{f in F_v} n_f|                  (1')
+// when the turn dtheta_v = max over pairs f, g in F_v of angle(n_f, n_g)
+// is <= vertex_normal_max_turn_deg (n_v = n_f exactly when every n_f of the
+// fan is the same component by component, so a planar fault keeps its face
+// normals bit for bit; (1') is (1) for a fan of two).  Kinds: 0 tip (a fan
+// of one face: its normal kept), 1 smooth (an interior vertex: n_v), 2 kink
+// (turn above the threshold: each face keeps its own normal), 3 edge (a
+// vertex on the fault's boundary curve, its fan two or more faces on one
+// side, turn within the threshold: n_v of that one-sided fan, so the normal
+// is continuous across every interior edge of the fault; the boundary curve
+// includes the seam with a prescribed-slip surface, whose faces are not in
+// the fault census).  An edge shared by three or more fault faces
+// (junction) and a vertex whose fan is not one edge-connected set (two
+// sheets touching at a point) are refused.  FrameAt(fi, x) in 3-D:
+//    n(x) = sum_a lambda_a nhat_a / |...|,  then the F1 rule           (2')
+// with lambda the barycentric coordinates of x in face fi (x projected on
+// the face's plane); lambda_a within 1e-12 of 1 snaps to that vertex
+// (n = nhat_a exactly), and lambda_a within 1e-12 of 0 puts x on the
+// opposite edge, where (2) is used along that edge from its lower-key
+// vertex, so the two faces of an interior edge give the same bits there.
 //
 // Scope (Chunhui Zhao, 2026-10-24): tetrahedral meshes, planar triangular
 // faces (the scope of FaultOrientation); 2D triangle meshes from phase B.
@@ -111,7 +134,7 @@ struct FaultFrameConfig
    FaultOrientationConfig orientation;   ///< ref_normal, pin, margins, fault attrs
    real_t up[3] = {0.0, 0.0, 1.0};       ///< F1 up vector, both regimes
    /// [fault_geometry] vertex_normals: false = "face" (default), true =
-   /// "averaged" (the file comment; 2-D only)
+   /// "averaged" (the file comment; 2-D segments and 3-D triangles)
    bool averaged_vertex_normals = false;
    /// [fault_geometry] vertex_normal_max_turn_deg: the turn above which a
    /// vertex is a kink and keeps the face normals (> 0)
@@ -145,6 +168,7 @@ struct FaultFrameReport
    int smooth_vertices = 0;        ///< two faces, turn <= the threshold: n_v by (1)
    int kink_vertices = 0;          ///< two faces, turn above it: face normals kept
    int tip_vertices = 0;           ///< one face: its normal kept
+   int edge_vertices = 0;          ///< 3-D: on the fault's boundary, n_v of its fan
    real_t max_turn_smooth_deg = 0; ///< largest turn among the smooth vertices
    real_t max_turn_kink_deg = 0;   ///< largest turn among the kinks
 };
@@ -260,27 +284,32 @@ public:
 
    // ---- vertex normals (file comment; P1 of the vertex-normal plan) ----
    bool AveragedVertexNormals() const { return cfg_.averaged_vertex_normals; }
-   /// Vertex a (0 or 1, key order) of 2-D fault face fi: its coordinates,
-   /// the normal nhat_a that (2) uses there (n_v at a smooth vertex, else
-   /// the face normal; always the face normal with the option off), its kind
-   /// (0 tip, 1 smooth, 2 kink; 1 also for the faces of a straight line) and
-   /// its turn angle [deg] (0 at a tip).
+   /// Vertex a (0 or 1 in 2-D, 0 to 2 in 3-D, key order) of fault face fi:
+   /// its coordinates, the normal nhat_a that (2)/(2') uses there (n_v at a
+   /// smooth or edge vertex, else the face normal; always the face normal
+   /// with the option off), its kind (0 tip, 1 smooth, 2 kink, 3 edge (3-D);
+   /// 1 also for the faces of a straight line or a plane) and its turn angle
+   /// [deg] (0 at a tip).
    const real_t *VertexX(int fi, int a) const { return vx_[fi][a].data(); }
    const real_t *VertexNormal(int fi, int a) const { return vn_[fi][a].data(); }
    int VertexKind(int fi, int a) const { return vkind_[fi][a]; }
    real_t VertexTurnDeg(int fi, int a) const { return vturn_[fi][a]; }
    /// True when the frame changes along fault face fi: the option on and
-   /// nhat_0 or nhat_1 not equal to the face normal component by component.
+   /// some nhat_a not equal to the face normal component by component.
    bool FrameVaries(int fi) const
    {
       if (!cfg_.averaged_vertex_normals) { return false; }
-      const real_t *n0 = vn_[fi][0].data(), *n1 = vn_[fi][1].data();
       const real_t *nf = Normal(fi);
-      return !(n0[0] == nf[0] && n0[1] == nf[1] && n0[2] == nf[2]
-               && n1[0] == nf[0] && n1[1] == nf[1] && n1[2] == nf[2]);
+      for (int a = 0; a < fault_->FaceVertices(); a++)
+      {
+         const real_t *na = vn_[fi][a].data();
+         if (!(na[0] == nf[0] && na[1] == nf[1] && na[2] == nf[2])) { return true; }
+      }
+      return false;
    }
-   /// The frame (n, d, s) at the point x of fault face fi, by (2); Frame(fi)
-   /// itself where the frame does not vary (FrameVaries false).
+   /// The frame (n, d, s) at the point x of fault face fi, by (2) (2-D) or
+   /// (2') (3-D); Frame(fi) itself where the frame does not vary
+   /// (FrameVaries false).
    void FrameAt(int fi, const real_t x[3], fault_frame::Frame &fr) const
    {
       if (!FrameVaries(fi))
@@ -288,8 +317,24 @@ public:
          fr = frame_[fi];
          return;
       }
-      const real_t *n0 = vn_[fi][0].data(), *n1 = vn_[fi][1].data();
-      const real_t *a = vx_[fi][0].data(), *b = vx_[fi][1].data();
+      real_t n[3];
+      if (fault_->FaceVertices() == 2) { NormalOnSegment_(fi, 0, 1, x, n); }
+      else { NormalOnTriangle_(fi, x, n); }
+      fault_frame::FaceVertices fv;
+      fv.nv = fault_->FaceVertices();
+      fault_->FaceVertexData(fi, fv.key, fv.x);
+      const bool ok = fault_frame::ComputeFrame(n, cfg_.up, fault_frame::DegeneracyThreshold(1.0),
+                                                fv, fr);
+      MFEM_VERIFY(ok, "FaultFrameField::FrameAt: degenerate frame (F6(b)) on local fault face "
+                  << fi);
+   }
+
+   // (2) on the segment from vertex a to vertex b of face fi (2-D: the face;
+   // 3-D: an edge, a the lower key): n at x, normalized.
+   void NormalOnSegment_(int fi, int ia, int ib, const real_t x[3], real_t n[3]) const
+   {
+      const real_t *n0 = vn_[fi][ia].data(), *n1 = vn_[fi][ib].data();
+      const real_t *a = vx_[fi][ia].data(), *b = vx_[fi][ib].data();
       real_t ab2 = 0.0, t = 0.0;
       for (int d = 0; d < 3; d++)
       {
@@ -300,7 +345,7 @@ public:
       real_t xi = t / ab2;
       if (xi < 1e-12) { xi = 0.0; }
       if (xi > 1.0 - 1e-12) { xi = 1.0; }
-      real_t n[3], nl = 0.0;
+      real_t nl = 0.0;
       for (int d = 0; d < 3; d++)
       {
          n[d] = (1.0 - xi) * n0[d] + xi * n1[d];
@@ -308,13 +353,54 @@ public:
       }
       nl = std::sqrt(nl);
       for (int d = 0; d < 3; d++) { n[d] /= nl; }
-      fault_frame::FaceVertices fv;
-      fv.nv = fault_->FaceVertices();
-      fault_->FaceVertexData(fi, fv.key, fv.x);
-      const bool ok = fault_frame::ComputeFrame(n, cfg_.up, fault_frame::DegeneracyThreshold(1.0),
-                                                fv, fr);
-      MFEM_VERIFY(ok, "FaultFrameField::FrameAt: degenerate frame (F6(b)) on local fault face "
-                  << fi);
+   }
+
+   // (2') on triangle fi (file comment): barycentric coordinates of x
+   // projected on the face's plane, snapped at the vertices and the edges.
+   void NormalOnTriangle_(int fi, const real_t x[3], real_t n[3]) const
+   {
+      const real_t *p0 = vx_[fi][0].data(), *p1 = vx_[fi][1].data(), *p2 = vx_[fi][2].data();
+      real_t e1[3], e2[3], r[3];
+      for (int d = 0; d < 3; d++)
+      {
+         e1[d] = p1[d] - p0[d];
+         e2[d] = p2[d] - p0[d];
+         r[d] = x[d] - p0[d];
+      }
+      const real_t d11 = fault_frame::Dot(e1, e1), d12 = fault_frame::Dot(e1, e2),
+                   d22 = fault_frame::Dot(e2, e2), r1 = fault_frame::Dot(r, e1),
+                   r2 = fault_frame::Dot(r, e2);
+      const real_t det = d11 * d22 - d12 * d12;
+      real_t lam[3];
+      lam[1] = (d22 * r1 - d12 * r2) / det;
+      lam[2] = (d11 * r2 - d12 * r1) / det;
+      lam[0] = 1.0 - lam[1] - lam[2];
+      for (int a = 0; a < 3; a++)
+      {
+         if (lam[a] > 1.0 - 1e-12)
+         {
+            for (int d = 0; d < 3; d++) { n[d] = vn_[fi][a][d]; }
+            return;
+         }
+      }
+      for (int a = 0; a < 3; a++)
+      {
+         if (lam[a] < 1e-12)
+         {
+            // on the edge opposite vertex a: (2) from its lower-key vertex
+            const int i = (a == 0) ? 1 : 0, j = (a == 2) ? 1 : 2;
+            NormalOnSegment_(fi, i, j, x, n);
+            return;
+         }
+      }
+      real_t nl = 0.0;
+      for (int d = 0; d < 3; d++)
+      {
+         n[d] = lam[0] * vn_[fi][0][d] + lam[1] * vn_[fi][1][d] + lam[2] * vn_[fi][2][d];
+         nl += n[d] * n[d];
+      }
+      nl = std::sqrt(nl);
+      for (int d = 0; d < 3; d++) { n[d] /= nl; }
    }
 
    // ---- prescribed-slip (creep) faces, by local face index ----
@@ -378,7 +464,9 @@ public:
             << " deg): " << rep_.smooth_vertices << " smooth (largest turn "
             << rep_.max_turn_smooth_deg << " deg), " << rep_.kink_vertices
             << " kinks kept (largest turn " << rep_.max_turn_kink_deg << " deg), "
-            << rep_.tip_vertices << " tips\n";
+            << rep_.tip_vertices << " tips";
+         if (dim_ == 3) { os << ", " << rep_.edge_vertices << " edge vertices averaged"; }
+         os << "\n";
       }
    }
 
@@ -502,14 +590,15 @@ private:
       const int nf = NumFaultFaces();
       vx_.resize(nf);
       vn_.resize(nf);
-      vkind_.assign(nf, {{0, 0}});
-      vturn_.assign(nf, {{0.0, 0.0}});
+      vkind_.assign(nf, {{0, 0, 0}});
+      vturn_.assign(nf, {{0.0, 0.0, 0.0}});
+      const int nv = fault_->FaceVertices();
       for (int fi = 0; fi < nf; fi++)
       {
          long long key[3];
          real_t x[3][3];
          fault_->FaceVertexData(fi, key, x);
-         for (int a = 0; a < 2; a++)
+         for (int a = 0; a < 3; a++)
             for (int d = 0; d < 3; d++)
             {
                vx_[fi][a][d] = x[a][d];
@@ -517,12 +606,10 @@ private:
             }
       }
       if (!cfg_.averaged_vertex_normals) { return; }
-      MFEM_VERIFY(dim_ == 2, "FaultFrameField: [fault_geometry] vertex_normals = \"averaged\" "
-                  "is implemented for 2-D meshes only (vertex-normal plan rev1, D3); this mesh "
-                  "is " << dim_ << "-D");
       MFEM_VERIFY(cfg_.vertex_normal_max_turn_deg > 0.0, "FaultFrameField: "
                   "vertex_normal_max_turn_deg = " << cfg_.vertex_normal_max_turn_deg
                   << " must be > 0");
+      if (nv == 3) { VertexNormals3D_(pm); return; }
       MPI_Comm comm = pm.GetComm();
       // record: the two vertex keys, the oriented normal
       const int R = 5;
@@ -616,6 +703,147 @@ private:
       }
    }
 
+   // (1') on a 3-D fault (file comment): every rank gathers every fault
+   // triangle (its three vertex keys and oriented normal), de-duplicates,
+   // and decides each vertex from its fan, so the result is the same on
+   // every partition.
+   void VertexNormals3D_(ParMesh &pm)
+   {
+      const int nf = NumFaultFaces();
+      MPI_Comm comm = pm.GetComm();
+      const int R = 6;   // record: three vertex keys (key order), the normal
+      std::vector<double> loc;
+      for (int fi = 0; fi < nf; fi++)
+      {
+         long long key[3];
+         real_t x[3][3];
+         fault_->FaceVertexData(fi, key, x);
+         for (int a = 0; a < 3; a++) { loc.push_back(static_cast<double>(key[a])); }
+         for (int d = 0; d < 3; d++) { loc.push_back(Normal(fi)[d]); }
+      }
+      int nl = static_cast<int>(loc.size()), np = 0;
+      MPI_Comm_size(comm, &np);
+      std::vector<int> cnt(np), dsp(np, 0);
+      MPI_Allgather(&nl, 1, MPI_INT, cnt.data(), 1, MPI_INT, comm);
+      for (int r = 1; r < np; r++) { dsp[r] = dsp[r - 1] + cnt[r - 1]; }
+      std::vector<double> all(dsp[np - 1] + cnt[np - 1]);
+      MPI_Allgatherv(loc.data(), nl, MPI_DOUBLE, all.data(), cnt.data(), dsp.data(),
+                     MPI_DOUBLE, comm);
+      using N3 = std::array<real_t, 3>;
+      using K3 = std::array<long long, 3>;
+      std::map<K3, N3> faces;   // shared faces arrive twice
+      for (size_t o = 0; o + R <= all.size(); o += R)
+      {
+         K3 k{std::llround(all[o]), std::llround(all[o + 1]), std::llround(all[o + 2])};
+         std::sort(k.begin(), k.end());
+         faces.emplace(k, N3{all[o + 3], all[o + 4], all[o + 5]});
+      }
+      // edges -> number of faces; vertices -> fan (faces, in key order)
+      std::map<std::pair<long long, long long>, int> edge_faces;
+      std::map<long long, std::vector<const std::pair<const K3, N3> *>> fan;
+      for (const auto &f : faces)
+      {
+         const K3 &k = f.first;
+         edge_faces[{k[0], k[1]}]++;
+         edge_faces[{k[0], k[2]}]++;
+         edge_faces[{k[1], k[2]}]++;
+         for (int a = 0; a < 3; a++) { fan[k[a]].push_back(&f); }
+      }
+      int junction = 0;
+      for (const auto &e : edge_faces) { if (e.second >= 3) { junction++; } }
+      MFEM_VERIFY(junction == 0, "FaultFrameField: " << junction << " fault edges are "
+                  "shared by three or more fault faces (a junction): [fault_geometry] "
+                  "vertex_normals = \"averaged\" refuses junctions (junction_policy \"refuse\")");
+      struct V { int kind = 0; N3 n{{0.0, 0.0, 0.0}}; real_t turn = 0.0; };
+      std::map<long long, V> vert;
+      int pinched = 0;
+      const real_t rad = M_PI / 180.0;
+      for (const auto &kv : fan)
+      {
+         const long long v0 = kv.first;
+         const auto &F = kv.second;
+         V v;
+         if (F.size() == 1) { v.kind = 0; rep_.tip_vertices++; vert[v0] = v; continue; }
+         // the fan must be one edge-connected set; a boundary edge at v0
+         // (one face) puts v0 on the fault's boundary curve
+         const int m = static_cast<int>(F.size());
+         std::vector<int> comp(m);
+         for (int i = 0; i < m; i++) { comp[i] = i; }
+         auto root = [&](int i) { while (comp[i] != i) { i = comp[i]; } return i; };
+         std::map<long long, std::vector<int>> by_w;   // other vertex of an edge at v0
+         for (int i = 0; i < m; i++)
+            for (long long w : F[i]->first) { if (w != v0) { by_w[w].push_back(i); } }
+         bool boundary = false;
+         for (const auto &bw : by_w)
+         {
+            if (bw.second.size() == 1) { boundary = true; continue; }
+            const int a = root(bw.second[0]), b = root(bw.second[1]);
+            if (a != b) { comp[std::max(a, b)] = std::min(a, b); }
+         }
+         int ncomp = 0;
+         for (int i = 0; i < m; i++) { if (root(i) == i) { ncomp++; } }
+         if (ncomp != 1) { pinched++; continue; }
+         bool same = true;
+         real_t turn = 0.0;
+         for (int i = 0; i < m; i++)
+            for (int j = i + 1; j < m; j++)
+            {
+               const N3 &A = F[i]->second, &B = F[j]->second;
+               if (!(A == B)) { same = false; }
+               real_t c[3];
+               fault_frame::Cross(A.data(), B.data(), c);
+               turn = std::max(turn, std::atan2(std::sqrt(fault_frame::Dot(c, c)),
+                                                fault_frame::Dot(A.data(), B.data())) / rad);
+            }
+         v.turn = turn;
+         if (same) { v.kind = boundary ? 3 : 1; v.n = F[0]->second; v.turn = 0.0; }
+         else if (turn <= cfg_.vertex_normal_max_turn_deg)
+         {
+            v.kind = boundary ? 3 : 1;
+            real_t s = 0.0;
+            for (int d = 0; d < 3; d++)
+            {
+               v.n[d] = 0.0;
+               for (int i = 0; i < m; i++) { v.n[d] += F[i]->second[d]; }
+               s += v.n[d] * v.n[d];
+            }
+            s = std::sqrt(s);
+            for (int d = 0; d < 3; d++) { v.n[d] /= s; }
+         }
+         else { v.kind = 2; }
+         if (v.kind == 2)
+         {
+            rep_.kink_vertices++;
+            rep_.max_turn_kink_deg = std::max(rep_.max_turn_kink_deg, v.turn);
+         }
+         else
+         {
+            if (v.kind == 1) { rep_.smooth_vertices++; } else { rep_.edge_vertices++; }
+            rep_.max_turn_smooth_deg = std::max(rep_.max_turn_smooth_deg, v.turn);
+         }
+         vert[v0] = v;
+      }
+      MFEM_VERIFY(pinched == 0, "FaultFrameField: " << pinched << " fault vertices have "
+                  "a fan that is not one edge-connected set (two fault sheets touch at a "
+                  "point): [fault_geometry] vertex_normals = \"averaged\" refuses them");
+      for (int fi = 0; fi < nf; fi++)
+      {
+         long long key[3];
+         real_t x[3][3];
+         fault_->FaceVertexData(fi, key, x);
+         for (int a = 0; a < 3; a++)
+         {
+            const V &v = vert.at(key[a]);
+            vkind_[fi][a] = v.kind;
+            vturn_[fi][a] = v.turn;
+            if (v.kind == 1 || v.kind == 3)
+            {
+               for (int d = 0; d < 3; d++) { vn_[fi][a][d] = v.n[d]; }
+            }
+         }
+      }
+   }
+
    // 2D: the inputs that must lie in the mesh plane (derivation 10.2).  up in
    // the plane gives s = -+e_z (slip in the dip slot), up = +-e_z gives d =
    // -+e_z (slip in the strike slot); any other up mixes the slots.
@@ -642,10 +870,11 @@ private:
    std::vector<int> creep_slot_;               ///< local face -> creep census index
    std::vector<fault_frame::Frame> frame_;
    std::vector<real_t> sigma_;
-   // vertex normals, per fault face and vertex (key order); file comment
-   std::vector<std::array<std::array<real_t, 3>, 2>> vx_, vn_;
-   std::vector<std::array<int, 2>> vkind_;
-   std::vector<std::array<real_t, 2>> vturn_;
+   // vertex normals, per fault face and vertex (key order; 2-D uses the
+   // first two); file comment
+   std::vector<std::array<std::array<real_t, 3>, 3>> vx_, vn_;
+   std::vector<std::array<int, 3>> vkind_;
+   std::vector<std::array<real_t, 3>> vturn_;
    FaultFrameReport rep_;
 };
 

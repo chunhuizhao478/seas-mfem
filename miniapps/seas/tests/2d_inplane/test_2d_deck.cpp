@@ -43,12 +43,14 @@
 //   10 a 4-entry cycle vector                     "must be an array of 3 numbers (2 on a 2-D mesh)"
 //   (vertex-normal plan rev1, 2026-11-01: the [fault_geometry] keys
 //   vertex_normals and vertex_normal_max_turn_deg; 12-13 refused while
-//   parsing, 11 by the check against the dimension; phase P3)
-//   11 3-D, vertex_normals = "averaged"           "is implemented for 2-D meshes only"
+//   parsing; phase P3)
 //   12 vertex_normals = "smooth"                  "\"face\" or \"averaged\""
 //   13 vertex_normal_max_turn_deg = 0             "vertex_normal_max_turn_deg must be > 0"
 //   ("averaged" with [cycle.lts] rate2 was case 14 until piece P-d of the
-//   LTS work accepted it, caf10f60; make test-lts-avg-normals covers it)
+//   LTS work accepted it, caf10f60; make test-lts-avg-normals covers it.
+//   "averaged" on a 3-D mesh was case 11 until UCERF 3-D plan rev5, P1.1
+//   accepted it; K5 checks that CheckDimension(3) passes, and
+//   tests/ucerf3d/test_vertex_normals_3d.cpp covers the 3-D field)
 // The make target also runs the two drivers on a 3-D mesh with a 2-entry
 // ref_normal, which they must refuse right after reading the mesh.
 //
@@ -250,6 +252,12 @@ static void TestVertexNormalKeys()
                "K5 \"averaged\", 3 deg: in DynamicConfig and in CycleFrameConfig");
    c.CheckDimension(2);
    TEST_ASSERT(true, "K5 \"averaged\": CheckDimension(2) passes");
+   // UCERF 3-D plan rev5, P1.1: "averaged" on a 3-D mesh (was refusal 11)
+   const cycle::CycleConfig c3 = LoadText("k5a3", ReplaceLine(ReadFile(kDeck), kRef3, kRef3
+      + "\nvertex_normals = \"averaged\""));
+   c3.CheckDimension(3);
+   TEST_ASSERT(c3.dyn.averaged_vertex_normals, "K5 \"averaged\" on a 3-D deck: CheckDimension(3) "
+               "passes (UCERF 3-D plan rev5, P1.1)");
 }
 
 // ---------------------------------------------------------------------- K4
@@ -296,10 +304,9 @@ static int Refuse(int n)
       case 8: text = ReplaceLine(d2, "ref_normal      = [0.0, -1.0]", ""); dim = 2; break;
       case 9: text = ReplaceLine(deck, kRef3, "ref_normal = [0.0, -1.0, 0.0, 0.0]"); break;
       case 10: text = ReplaceLine(deck, st3, "x    = [0.0, 0.0, -22.0e3, 0.0]"); break;
-      case 11: text = ReplaceLine(deck, kRef3, kRef3 + "\nvertex_normals = \"averaged\""); break;
       case 12: text = ReplaceLine(deck, kRef3, kRef3 + "\nvertex_normals = \"smooth\""); break;
       case 13: text = ReplaceLine(deck, kRef3, kRef3 + "\nvertex_normal_max_turn_deg = 0.0"); break;
-      default: MFEM_ABORT("--refuse N: N = 1..13");
+      default: MFEM_ABORT("--refuse N: N = 1..10, 12, 13 (11 accepted since P1.1)");
    }
    if (g_rank == 0) { std::cout << "--refuse " << n << ": a " << dim << "-D check\n"; }
    const cycle::CycleConfig c = LoadText("refuse" + std::to_string(n), text);

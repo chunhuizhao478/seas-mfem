@@ -52,43 +52,61 @@ inline FaultFrameConfig CycleFrameConfig(const CycleConfig &cfg)
    return f;
 }
 
-/// Columns of FaultVertexRows (the output's _vertices.txt).
-inline std::vector<std::string> FaultVertexColumns()
+/// Columns of FaultVertexRows (the output's _vertices.txt) on a mesh of
+/// dimension dim.
+inline std::vector<std::string> FaultVertexColumns(int dim = 2)
 {
+   if (dim == 3)
+   {
+      return {"key", "x(m)", "y(m)", "z(m)", "kind", "turn(deg)", "nv_x", "nv_y", "nv_z"};
+   }
    return {"key", "x(m)", "y(m)", "kind", "turn(deg)", "nv_x", "nv_y"};
 }
 
 /// Vertex-normal plan rev1, P3 (Chunhui Zhao, 2026-11-01): one row per
-/// vertex of the 2-D fault, for checking the averaged vertex normals: the
+/// vertex of the fault, for checking the averaged vertex normals: the
 /// census vertex key, the position, the kind (0 tip, 1 smooth, 2 kink; a
 /// straight line is smooth), the turn angle between the two faces [deg]
 /// (0 at a tip) and the vertex normal n_v, with (0, 0) where each face keeps
 /// its own normal (a tip or a kink).  Collective: on the root the rows of
 /// every rank, one per key in increasing key order (a vertex shared by
 /// faces or ranks is written once), so the table does not depend on the
-/// partition; empty on the other ranks.  The field must be 2-D with the
-/// option on.
+/// partition; empty on the other ranks.  The field must have the option
+/// on.  UCERF 3-D plan rev5, P1.1: on a 3-D fault the rows add z and nv_z
+/// (FaultVertexColumns(3)) and kind 3 (an edge vertex, n_v of its one-sided
+/// fan); the 2-D rows are unchanged.
 inline void FaultVertexRows(const FaultFrameField &field, MPI_Comm comm, Vector &rows)
 {
    MFEM_VERIFY(field.AveragedVertexNormals(), "FaultVertexRows: vertex_normals = \"face\"");
    const FaultOrientation &census = field.FaultCensus();
-   MFEM_VERIFY(census.FaceVertices() == 2, "FaultVertexRows: 2-D faults only");
-   const int ncol = static_cast<int>(FaultVertexColumns().size());
+   const int nfv = census.FaceVertices();
+   const int ncol = static_cast<int>(FaultVertexColumns(nfv).size());
    std::vector<real_t> loc;
    for (int fi = 0; fi < field.NumFaultFaces(); fi++)
    {
       long long key[3];
       real_t x[3][3];
       census.FaceVertexData(fi, key, x);
-      for (int a = 0; a < 2; a++)
+      for (int a = 0; a < nfv; a++)
       {
          const int kind = field.VertexKind(fi, a);
          const real_t *xv = field.VertexX(fi, a);
          const real_t *nv = field.VertexNormal(fi, a);
-         const bool own = (kind == 1);
-         loc.insert(loc.end(), {static_cast<real_t>(key[a]), xv[0], xv[1],
-                                static_cast<real_t>(kind), field.VertexTurnDeg(fi, a),
-                                own ? nv[0] : 0.0, own ? nv[1] : 0.0});
+         if (nfv == 2)
+         {
+            const bool own = (kind == 1);
+            loc.insert(loc.end(), {static_cast<real_t>(key[a]), xv[0], xv[1],
+                                   static_cast<real_t>(kind), field.VertexTurnDeg(fi, a),
+                                   own ? nv[0] : 0.0, own ? nv[1] : 0.0});
+         }
+         else
+         {
+            const bool own = (kind == 1 || kind == 3);
+            loc.insert(loc.end(), {static_cast<real_t>(key[a]), xv[0], xv[1], xv[2],
+                                   static_cast<real_t>(kind), field.VertexTurnDeg(fi, a),
+                                   own ? nv[0] : 0.0, own ? nv[1] : 0.0,
+                                   own ? nv[2] : 0.0});
+         }
       }
    }
    int rank = 0, nr = 1;

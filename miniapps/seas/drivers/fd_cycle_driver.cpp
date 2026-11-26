@@ -1552,12 +1552,16 @@ int main(int argc, char *argv[])
          Vector vrows;
          cycle::FaultVertexRows(*qd.Domain().FrameField(), mpi.GetComm(), vrows);
          std::ostringstream vd;
+         const int vdim = pmesh.Dimension();
          vd << "fd_cycle fault vertices: [fault_geometry] vertex_normals = \"averaged\", "
                "vertex_normal_max_turn_deg = " << cfg.dyn.vertex_normal_max_turn_deg
             << "; kind 0 tip, 1 smooth (n_v averaged), 2 kink (each face keeps its normal, "
-               "n_v = 0); commit " << commit;
+               "n_v = 0)";
+         if (vdim == 3) { vd << ", 3 edge (n_v of the one-sided fan)"; }
+         vd << "; commit " << commit;
          cycle::WriteFaultTable(cfg.output.dir + "/" + cfg.output.prefix + "_vertices.txt",
-                                mpi.GetComm(), vd.str(), cycle::FaultVertexColumns(), vrows);
+                                mpi.GetComm(), vd.str(), cycle::FaultVertexColumns(vdim),
+                                vrows);
       }
       std::unique_ptr<cycle::BenchmarkOutput> bench;
       if (cfg.bench.enabled)
