@@ -128,29 +128,51 @@ GH200). The CPU result is the reference of each GPU gate.
 4. **C3/G3 pulse trains and the quench**: 20-pulse spe_hftc 2D η sweep and
    100 pulses of the cmame 2D solid benchmark; extents per pulse within one
    element, the energy budget closes.
-   Status (2026-11-26): code done (mass-proportional quench, zeta_pulse = 0,
-   consistent mass). 2D section η sweep, 20 pulses to 1.2 ms (Mac, 2 ranks,
-   commit 85ac281, configs = section_homog_eta0p45_absorb.toml with only
-   [pulse] efficiency, [case] name and the mesh path changed; runs in
-   ~/pff_runs/c3_eta_sweep): η = 0.3 crack energy 5.54 J/m after pulse 1,
-   creep of 0.07-0.2 J/m per pulse, first d >= 0.5 at pulse 19, 17.41 J/m and
-   d >= 0.5 to 3.23 mm (d >= 0.9 to 2.71 mm) after pulse 20; energy error
-   -0.46 J/m of 9969 J/m (0.005 %); 3055 s. η = 1.0: 80.28 J/m and d >= 0.5 to
-   2.17 mm after pulse 1 (MOOSE M-C2d, zeta_pulse = 0, dt 3e-8: 79.66 J/m and
-   2.17 mm), cracks reach the section corner (32.28 mm) at pulses 6-7, 2659.6
-   J/m after pulse 20; energy error -93.4 J/m of 45283 J/m (0.21 %, grows
-   once the section is cut through); 6015 s. No MOOSE 20-pulse runs exist at
-   η = 0.3 or 1.0 (Vista has η 0.4-0.5 at zeta_pulse = 1e-8, farms mesh), so
-   only pulse 1 is compared. 3D cube η = 0.45, 20 pulses (Vista 1168452,
-   4 nodes, 2.6 h): crack 4.917 J, d >= 0.5 to 11.0 mm, energy error 0.016 %.
-   Open: the cmame 2D solid 100 pulses; per-pulse extents against a MOOSE
-   pulse train.
+   Status (2026-11-26): done. Andy 2026-11-24: bit-for-bit agreement with
+   MOOSE is not required; the gate is pff reliability (convergence in dt,
+   energy closure), MOOSE is a sanity check. All runs: ζ_pulse = 0, mass
+   quench α = 2e5 /s after t_free = 25 µs (spe_hftc; cmame has no quench, as
+   in MOOSE), consistent mass, cfl 0.4, single pass. energy_error is the
+   budget residual, quoted against W_ext.
+   - spe_hftc 2D section, 20 pulses (extents are d ≥ 0.5 from the wall):
+     | η | pulse 1 crack (J/m) | pulse 20 crack (J/m) | extent (mm) | energy_error |
+     |---|---|---|---|---|
+     | 0.3 | 5.54 | 17.4 | 3.23 (first d ≥ 0.5 at pulse 19) | 0.005 % |
+     | 0.45 | (d_max 0.43, no crack) | 887.9 | equal at cfl 0.4 and 0.2 (gold README) | −38.8 J/m; cfl 0.2: 895.6, −10.5 J/m |
+     | 1.0 | 80.28 | 2660 | 32.28 = corner, reached at pulse 6 | 0.21 % |
+     η 0.45: cfl 0.4 vs 0.2 differ 0.9 % in crack energy with equal extents
+     and equal crack counts every pulse; the error falls at second order.
+     MOOSE (Vista 1162848 + 1164181, recover-corrected) gives 703.8 J/m with
+     a different crack pattern (6/3 cracks at 8/15 mm against 4/5), a
+     bifurcation and not a pff time-step error
+     (spe_hftc/gold/moose_c3_section_eta0p45_zetapulse0_*). η 1.0 pulse 1
+     against M-C2d: 80.28 vs 79.66 J/m, 2.17 mm in both. No MOOSE 20-pulse
+     runs exist at η 0.3 or 1.0 with ζ_pulse = 0. Runs: Mac, 2 ranks, commit
+     85ac281, 3055 s (η 0.3) and 6015 s (η 1.0); configs =
+     section_homog_eta0p45_absorb.toml with only [pulse] efficiency, [case]
+     name and the mesh path changed.
+   - cmame 2D solid benchmark, 100 pulses (cloud, 4 ranks, commit 85ac281,
+     8074 s): pulse 1 crack 1.882 J/m and front at 5.94 mm (M-C2f 1.883,
+     5.94); the d ≥ 0.5 front reaches the outer edge (12.5 mm) at pulse 5;
+     crack energy less the 0.2645 J/m seed 5.40 / 17.6 / 51.3 J/m at pulses
+     10 / 50 / 100; energy_error < 0.003 % through pulse 40 and 0.31 % at
+     pulse 100. No MOOSE output beyond pulse 1 is reachable (Frontera).
+   - The energy residual grows with the amount of damage: η 1.0 0.04 % at
+     pulse 2, 0.14 % at pulse 5 and 0.21 % at pulse 20; η 0.45 0.27 % at
+     cfl 0.4 and 0.07 % at cfl 0.2 (it falls with the step); cmame 0.3 % only
+     after pulse 50, when the disc is fragmented.
 5. **C4/G4 hydromech** (`multiphysics/poroelastic/`): Terzaghi, Mandel, the
    undrained column speed; cmame 2D hydromech pp(t) and damage pattern; the
    static initial state uses the phase-R quasi-static solver.
 6. **C5/G5 3D and timing**: spe_hftc cube and cmame 3D em_5J first pulses
    against MOOSE; a wall-time table against Vista/LS6 MOOSE and between CPU
    and GPU.
+   Status (2026-11-26), spe_hftc cube only: cube_d7p94_mid η 0.45, 20 pulses
+   on Vista (job 1168452, commit 85ac281, 4 gg nodes, 576 ranks, 14.6 M
+   tets): 2 h 37 min, 73,860 steps, 0.126 s/step; crack 4.917 J, d ≥ 0.5
+   extent 11.01 mm, energy_error 0.016 %. Large meshes are partitioned once
+   (`pff_partition`, `pff_driver -pm`). The MOOSE run of the same case takes
+   days on 16 nodes (owned by the 3D SPE thread). cmame 3D and GPU: open.
 7. **Optional**: AMR, Weibull/Gaussian Gc fields, the other permeability and
    porosity variants.
 
