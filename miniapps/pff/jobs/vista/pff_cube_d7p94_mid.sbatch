@@ -1,5 +1,5 @@
 #!/bin/bash
-# pff 3D SPE cube cube_d7p94_mid_eta0p45_absorb, 20 pulses (1.2 ms), on Vista Grace nodes.
+# pff 3D SPE cube cube_d7p94_mid_eta<eta>_absorb (default eta0p45; set NAME to pick a config), 20 pulses (1.2 ms), on Vista Grace nodes.
 # pff counterpart of the MOOSE Vista run $SCRATCH/spe3d_vista/cube_d7p94_mid_eta0p45_absorb
 # (farms@cdms 46ad2eb code_3d/elasticity_absorbing.i), on the same mesh: MOOSE's
 # spe_cube_d7p94_h0p3.msh (md5 9109e05c) converted to msh 2.2 (md5 482e9a25).
@@ -20,7 +20,7 @@ SRC=$WORK/pff_build/seas-mfem
 PFF=$SRC/miniapps/pff
 MESH=$SCRATCH/pff/mesh/spe_cube_d7p94_h0p3_moose_msh22.msh
 MESH_MD5=482e9a2520cf39c02bf24fdb35b8ae92
-NAME=cube_d7p94_mid_eta0p45_absorb
+NAME=${NAME:-cube_d7p94_mid_eta0p45_absorb}   # eta sweep: sbatch --export=ALL,NAME=cube_d7p94_mid_eta0p55_absorb ...
 RUN=$SCRATCH/pff/${NAME}_${SLURM_JOB_ID}
 
 module reset
