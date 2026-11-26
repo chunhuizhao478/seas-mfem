@@ -354,7 +354,8 @@ void PrintQDImplicit(const MPIContext &mpi, cycle::QDPhase &qd, const std::strin
    s << std::setprecision(4) << "  esdirk in the QD regime " << when << ": " << f.steps
      << " steps over " << (f.t1 - f.t0) / yr << " yr; per step " << f.newton_its / n
      << " Newton iterations and " << f.factors / n << " LU factors; " << f.failed_solves
-     << " failed stage solves; " << f.columns << " new gap columns; most open points in a "
+     << " failed stage solves; " << f.columns << " new gap columns (" << f.dropped
+     << " released after failed solves, " << f.cached << " held); most open points in a "
      << "solve so far " << f.max_open << "; QD loop " << f.wall << " s (" << f.wall / n
      << " s per step, output included)\n";
    std::cout << s.str() << std::flush;

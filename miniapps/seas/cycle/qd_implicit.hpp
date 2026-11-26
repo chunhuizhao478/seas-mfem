@@ -298,6 +298,7 @@ public:
       long residuals = 0, jacobians = 0, factors = 0, slope_solves = 0;
       long branch_changes = 0;   ///< Jacobian evaluations whose branch set moved
       long columns = 0;          ///< gap columns fetched
+      long dropped = 0;          ///< gap columns released after a failed Newton solve
       long newton_its = 0, newton_solves = 0, newton_fails = 0;
       long clipped_its = 0;      ///< Newton iterations whose psi change moved > 10%
       long plain_applies = 0;    ///< newton_local: updates that fell back to F (not expected)
@@ -378,6 +379,12 @@ public:
    const Problem &GetProblem() const { return P_; }
    const QDImplicitSettings &Settings() const { return S_; }
    const Counts &GetCounts() const { return counts_; }
+   /// Gap columns held now (each 2 N values on every rank).
+   long CachedColumns() const { return static_cast<long>(cols_t_.size()); }
+   /// What a failed Newton solve does to the gap-column cache (public for
+   /// the tests): release the columns fetched since the last converged solve,
+   /// the consistent start or EnsureColumn.  Collective.
+   void ReleaseUnacceptedColumns() { ReleaseFailedColumns_(); }
    void ResetCounts() { counts_ = Counts(); }
    /// The column of global point l is cached.
    bool HasColumn(int l) const { return slot_[l] >= 0; }
@@ -395,6 +402,7 @@ public:
    {
       MFEM_VERIFY(0 <= l && l < P_.N, "QDImplicitFault::EnsureColumn: point " << l);
       if (slot_[l] < 0) { FetchColumn_(l); }
+      keep_ = cols_t_.size();   // a state's column: never released
    }
 
    /// Slip rate, tractions and branch at the owned points of state U at
@@ -867,6 +875,7 @@ public:
          }
          if (open == prev) { break; }
          for (int j = 0; j < N; j++) { if (open[j] && slot_[j] < 0) { FetchColumn_(j); } }
+         keep_ = cols_t_.size();   // the consistent start's columns: never released
          std::vector<int> O;
          for (int j = 0; j < N; j++) { if (open[j]) { O.push_back(j); } }
          const int m = static_cast<int>(O.size());
@@ -1079,9 +1088,38 @@ private:
       MFEM_VERIFY(cs[l] > 0.0, "QDImplicitFault: gap column of point " << l << ": its own "
                   "normal stress per unit opening is " << cs[l] << " Pa/m (must be > 0)");
       slot_[l] = static_cast<int>(cols_t_.size());
+      col_point_.push_back(l);
       cols_t_.push_back(std::move(ct));
       cols_s_.push_back(std::move(cs));
       counts_.columns++;
+   }
+
+   /// A Newton solve failed: release the gap columns fetched since the last
+   /// converged solve (or the consistent start, or EnsureColumn).  Before
+   /// this, every point that any failed iterate put on the open branch kept
+   /// its column for good (2 N values on every rank); after +V's event-1
+   /// hand-back every step's first trial failed and the cache filled the
+   /// node (Vista 1167994, 1170201, 1171010).  A later solve fetches a column
+   /// again when it needs it.  Accepted steps are unchanged.  If the factor
+   /// used a released column, it is dropped (refactor at the next Jacobian).
+   /// Collective in effect: every rank holds the same list.
+   void ReleaseFailedColumns_()
+   {
+      if (cols_t_.size() <= keep_) { return; }
+      bool factor_used = false;
+      for (size_t k = keep_; k < cols_t_.size(); k++)
+      {
+         const int l = col_point_[k];
+         slot_[l] = -1;
+         if (have_factor_ && l < static_cast<int>(fa_.open.size()) && fa_.open[l]) { factor_used = true; }
+      }
+      counts_.dropped += static_cast<long>(cols_t_.size() - keep_);
+      cols_t_.resize(keep_);
+      cols_s_.resize(keep_);
+      col_point_.resize(keep_);
+      cols_t_.shrink_to_fit();
+      cols_s_.shrink_to_fit();
+      if (factor_used) { DropFactor(); }
    }
 
    /// Assemble the reduced matrix from ev_ and factor it.
@@ -1331,9 +1369,23 @@ private:
       PetscFunctionReturn(PETSC_SUCCESS);
    }
 
-   /// The Newton test (header).  Collective.
+   /// The Newton test, then the gap-column cache: a converged solve's
+   /// columns are kept, a failed solve's are released
+   /// (ReleaseFailedColumns_).  Collective.
    static PetscErrorCode Converged_(SNES snes, PetscInt it, PetscReal xnorm, PetscReal gnorm,
                                     PetscReal fnorm, SNESConvergedReason *reason, void *ctx)
+   {
+      PetscFunctionBeginUser;
+      PetscCall(NewtonTest_(snes, it, xnorm, gnorm, fnorm, reason, ctx));
+      QDImplicitFault *self = static_cast<QDImplicitFault *>(ctx);
+      if (*reason > 0) { self->keep_ = self->cols_t_.size(); }
+      else if (*reason < 0) { self->ReleaseFailedColumns_(); }
+      PetscFunctionReturn(PETSC_SUCCESS);
+   }
+
+   /// The Newton test (header).  Collective.
+   static PetscErrorCode NewtonTest_(SNES snes, PetscInt it, PetscReal xnorm, PetscReal gnorm,
+                                     PetscReal fnorm, SNESConvergedReason *reason, void *ctx)
    {
       PetscFunctionBeginUser;
       QDImplicitFault *self = static_cast<QDImplicitFault *>(ctx);
@@ -1439,6 +1491,8 @@ private:
    std::vector<real_t> delta_all_, g_all_;
    std::vector<int> slot_;                       ///< global point -> column slot
    std::vector<std::vector<real_t>> cols_t_, cols_s_;
+   std::vector<int> col_point_;   ///< the point of each cached column
+   size_t keep_ = 0;              ///< columns [0, keep_) belong to accepted states
    std::vector<char> res_branch_;                ///< owned: open at the last residual
    std::vector<real_t> res_U_;                   ///< owned: the last residual's U
    long res_serial_ = 0, loc_serial_ = -1;       ///< residuals so far; at the last Jacobian

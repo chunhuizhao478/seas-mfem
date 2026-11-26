@@ -1346,6 +1346,8 @@ public:
       long steps = 0;
       real_t t0 = 0.0, t1 = 0.0;    ///< [s]
       long newton_its = 0, factors = 0, failed_solves = 0, columns = 0;
+      long dropped = 0;             ///< gap columns released after failed solves
+      long cached = 0;              ///< gap columns held at the end
       long max_open = 0;            ///< most open points in one solve (whole run)
       double wall = 0.0;            ///< [s]
    };
@@ -1361,6 +1363,8 @@ public:
       r.factors = c.factors - imp_mark_.factors;
       r.failed_solves = c.newton_fails - imp_mark_.newton_fails;
       r.columns = c.columns - imp_mark_.columns;
+      r.dropped = c.dropped - imp_mark_.dropped;
+      r.cached = imp_->CachedColumns();
       r.max_open = c.max_open;
       r.wall = imp_wall_;
       imp_mark_ = c;

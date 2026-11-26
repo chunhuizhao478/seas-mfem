@@ -621,6 +621,53 @@ void TestT0d(MPI_Comm comm)
    Check(cols, "T0d a gap column for exactly the points with g > 0");
 }
 
+// ---- T0e ---------------------------------------------------------------------------
+
+// The gap-column cache after a failed Newton solve (Vista 1167994 / 1171010:
+// the columns of points opened only by failed iterates filled the node).
+void TestT0e(MPI_Comm comm)
+{
+   Say("T0e: gap columns of a failed solve are released, accepted ones kept");
+   const int N = 6;
+   const double k = 5e7, gam = 1e8;
+   auto s0 = [](int j) { return (j == 1) ? -4e5 : ((j == 2) ? -1e5 : ((j == 4) ? -2e5 : 5e6)); };
+   auto tp = [](int) { return -1e6; };
+   QDImplicitFault f(comm, Chain(comm, N, k, gam, tp, s0, 0.0), QDImplicitSettings());
+   const int n = f.NumOwned();
+   std::vector<real_t> U(3 * n, 0.0), Ud(3 * n, 0.0);
+   for (int o = 0; o < n; o++) { U[3 * o] = 1e-3; U[3 * o + 1] = 0.6; }
+   // (a) a Jacobian at g = 0 with points in tension fetches their columns
+   //     (as a Newton iterate does); a failed solve releases them all
+   f.Jacobian(0.0, U.data(), Ud.data(), 1.0);
+   const long c1 = f.CachedColumns();
+   std::vector<real_t> b(3 * n), y1(3 * n), y2(3 * n);
+   // slip and psi rows only: a closed point carries no gap residual
+   for (int i = 0; i < 3 * n; i++) { b[i] = (i % 3 == 2) ? 0.0 : 1.0 + 0.1 * i; }
+   f.ApplyInverse(b.data(), y1.data());
+   f.ReleaseUnacceptedColumns();
+   bool none = true;
+   for (int j = 0; j < N; j++) { none = none && !f.HasColumn(j); }
+   Check(c1 >= 1 && f.CachedColumns() == 0 && none && f.GetCounts().dropped == c1,
+         "T0e (a) " + std::to_string(c1) + " iterate columns released by a failed solve");
+   // (b) the next Jacobian fetches them again and gives the same inverse
+   f.Jacobian(0.0, U.data(), Ud.data(), 1.0);
+   f.ApplyInverse(b.data(), y2.data());
+   Check(f.CachedColumns() == c1 && y1 == y2,
+         "T0e (b) refetched: the same columns and the same Newton inverse bit for bit");
+   // (c) columns of an accepted state are kept: the consistent start's and
+   //     EnsureColumn's survive a failed solve
+   QDImplicitFault h(comm, Chain(comm, N, k, gam, tp, s0, 0.0), QDImplicitSettings());
+   std::vector<real_t> W(3 * n, 0.0);
+   for (int o = 0; o < n; o++) { W[3 * o] = 1e-3; W[3 * o + 1] = 0.6; }
+   h.ConsistentStart(0.0, W.data());
+   h.EnsureColumn(5);
+   const long kept = h.CachedColumns();
+   h.ReleaseUnacceptedColumns();
+   Check(kept >= 2 && h.CachedColumns() == kept && h.HasColumn(5) && h.GetCounts().dropped == 0,
+         "T0e (c) the consistent start's and EnsureColumn's " + std::to_string(kept) +
+         " columns are kept");
+}
+
 // ---- T1a ---------------------------------------------------------------------------
 
 void TestT1a(MPI_Comm comm)
@@ -1142,6 +1189,7 @@ int main(int argc, char **argv)
 
    TestT0ab(MPI_COMM_WORLD);
    TestT0d(MPI_COMM_WORLD);
+   TestT0e(MPI_COMM_WORLD);
    TestT1a(MPI_COMM_WORLD);
    TestT1b(MPI_COMM_WORLD);
    TestT1c(MPI_COMM_WORLD);
