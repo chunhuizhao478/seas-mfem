@@ -55,6 +55,10 @@
 //   9 a point off the fault               "lies on no fault segment"
 //  10 max_fraction = 0                    "max_fraction must be > 0"
 //  11 a 3-D key (top_depth) on a 2-D mesh  "are 3-D keys"
+// --free-tips MESH N: G2, the chains of MESH (fault attr 3) must have N free
+//   tips; the make target runs the UCERF saf_sjf 500 m mesh on 4 ranks, where
+//   the partition puts a tip on a face between ranks (before 2026-11-26 that
+//   tip was taken as bound: /mnt/project-files/2d-inplane/partition-tip-bug/)
 // --dump-mesh PATH --order P --out PREFIX [--width W --taper T --inside A
 //   --tip A --max-fraction F]: the chains of a mesh file (fault attr 3) and,
 //   per local fault face, its p + 1 Gauss-Lobatto nodes (the QD operator's
@@ -716,7 +720,8 @@ int main(int argc, char *argv[])
    MPIContext mpi(&argc, &argv);
    g_rank = mpi.Rank();
    int refuse = 0, order = 1;
-   std::string mesh, deck, out;
+   std::string mesh, deck, out, tips_mesh;
+   int tips_want = -1;
    cycle::TipZoneSpec tz;
    tz.width = 20.0e3;
    tz.taper = 2.0e3;
@@ -730,6 +735,11 @@ int main(int argc, char *argv[])
       if (a == "--refuse" && more) { refuse = std::atoi(argv[++i]); }
       else if (a == "--dump-mesh" && more) { mesh = argv[++i]; }
       else if (a == "--dump-deck" && more) { deck = argv[++i]; }
+      else if (a == "--free-tips" && i + 2 < argc)
+      {
+         tips_mesh = argv[++i];
+         tips_want = std::atoi(argv[++i]);
+      }
       else if (a == "--order" && more) { order = std::atoi(argv[++i]); }
       else if (a == "--out" && more) { out = argv[++i]; }
       else if (a == "--width" && more) { tz.width = std::atof(argv[++i]); }
@@ -742,6 +752,24 @@ int main(int argc, char *argv[])
    MFEMInitializePetsc(&argc, &argv, nullptr, nullptr);
    int rc = 0;
    if (refuse) { rc = Refuse(refuse, mpi); }
+   else if (!tips_mesh.empty())
+   {
+      // G2 (2026-11-26): a free tip on a partition face stays free.
+      Mesh sm(tips_mesh.c_str(), 1, 1);
+      ParMesh pm(MPI_COMM_WORLD, sm);
+      sm.Clear();
+      cycle::FaultChains ch(pm, 3);
+      int got = 0;
+      for (int c = 0; c < ch.NumChains(); c++) { got += ch.FreeFirst(c) + ch.FreeLast(c); }
+      if (g_rank == 0)
+      {
+         std::cout << ch.Report();
+         std::cout << (got == tips_want ? "  PASSED" : "  FAILED") << ": G2 " << tips_mesh << " on "
+                   << mpi.Size() << " rank(s): " << got << " free tips (expected " << tips_want
+                   << ")\n";
+      }
+      rc = (got == tips_want) ? 0 : 1;
+   }
    else if (!mesh.empty())
    {
       MFEM_VERIFY(!out.empty(), "--dump-mesh needs --out PREFIX");

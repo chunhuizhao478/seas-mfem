@@ -230,9 +230,15 @@ public:
       // ---- free tips: an end on the outer boundary or on another boundary
       //      attribute is not one
       std::set<XY> other;
+      // A face between ranks reads IsBoundary() until ExchangeFaceNbrData, so
+      // skip those: otherwise a tip on a partition face is taken as bound
+      // (2026-11-26: saf_sjf 500 m lost 1 of 10 tips on 4 ranks, 2 on 128;
+      // /mnt/project-files/2d-inplane/partition-tip-bug/).
+      std::vector<char> shared(pmesh.GetNumFaces(), 0);
+      for (int s = 0; s < pmesh.GetNSharedFaces(); s++) { shared[pmesh.GetSharedFace(s)] = 1; }
       for (int f = 0; f < pmesh.GetNumFaces(); f++)
       {
-         if (!pmesh.GetFaceInformation(f).IsBoundary()) { continue; }
+         if (shared[f] || !pmesh.GetFaceInformation(f).IsBoundary()) { continue; }
          Array<int> v;
          pmesh.GetFaceVertices(f, v);
          for (int k = 0; k < v.Size(); k++)
