@@ -128,6 +128,23 @@ GH200). The CPU result is the reference of each GPU gate.
 4. **C3/G3 pulse trains and the quench**: 20-pulse spe_hftc 2D η sweep and
    100 pulses of the cmame 2D solid benchmark; extents per pulse within one
    element, the energy budget closes.
+   Status (2026-11-26): code done (mass-proportional quench, zeta_pulse = 0,
+   consistent mass). 2D section η sweep, 20 pulses to 1.2 ms (Mac, 2 ranks,
+   commit 85ac281, configs = section_homog_eta0p45_absorb.toml with only
+   [pulse] efficiency, [case] name and the mesh path changed; runs in
+   ~/pff_runs/c3_eta_sweep): η = 0.3 crack energy 5.54 J/m after pulse 1,
+   creep of 0.07-0.2 J/m per pulse, first d >= 0.5 at pulse 19, 17.41 J/m and
+   d >= 0.5 to 3.23 mm (d >= 0.9 to 2.71 mm) after pulse 20; energy error
+   -0.46 J/m of 9969 J/m (0.005 %); 3055 s. η = 1.0: 80.28 J/m and d >= 0.5 to
+   2.17 mm after pulse 1 (MOOSE M-C2d, zeta_pulse = 0, dt 3e-8: 79.66 J/m and
+   2.17 mm), cracks reach the section corner (32.28 mm) at pulses 6-7, 2659.6
+   J/m after pulse 20; energy error -93.4 J/m of 45283 J/m (0.21 %, grows
+   once the section is cut through); 6015 s. No MOOSE 20-pulse runs exist at
+   η = 0.3 or 1.0 (Vista has η 0.4-0.5 at zeta_pulse = 1e-8, farms mesh), so
+   only pulse 1 is compared. 3D cube η = 0.45, 20 pulses (Vista 1168452,
+   4 nodes, 2.6 h): crack 4.917 J, d >= 0.5 to 11.0 mm, energy error 0.016 %.
+   Open: the cmame 2D solid 100 pulses; per-pulse extents against a MOOSE
+   pulse train.
 5. **C4/G4 hydromech** (`multiphysics/poroelastic/`): Terzaghi, Mandel, the
    undrained column speed; cmame 2D hydromech pp(t) and damage pattern; the
    static initial state uses the phase-R quasi-static solver.
