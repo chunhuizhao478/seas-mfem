@@ -110,6 +110,7 @@
 #include "../cycle/pml_partition.hpp"
 #include "../cycle/snapshots.hpp"
 #include "../cycle/bench_output.hpp"
+#include "../common/seas_device.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1128,6 +1129,8 @@ int main(int argc, char *argv[])
    const char *green_hcache = "";
    bool rank_costs = false;
    bool early_sync = false;
+   const char *device_str = "cpu";
+   int device_id = -1;
 
    OptionsParser args(argc, argv);
    args.AddOption(&deck, "-d", "--deck", "Cycle deck (TOML): [cycle] and the shared sections.");
@@ -1173,6 +1176,12 @@ int main(int argc, char *argv[])
                   "of a dynamic step and reduce the fault record at its end, so the ranks "
                   "do not wait for each other in between (same results bit for bit; "
                   "NitscheWaveOperator::SetEarlySync).");
+   args.AddOption(&device_str, "-dev", "--device",
+                  "mfem device for the dynamic regime's step: cpu (default), cuda, or debug "
+                  "(the device code on the CPU).  Other than cpu needs [cycle].device_step "
+                  "= true in the deck (UCERF 3-D plan rev5, P1.7).");
+   args.AddOption(&device_id, "-did", "--device-id",
+                  "GPU of this rank (default -1: node-local rank modulo the visible GPUs).");
    args.Parse();
    if (!args.Good())
    {
@@ -1180,10 +1189,30 @@ int main(int argc, char *argv[])
       return 1;
    }
    RankCosts::On() = rank_costs;
+   // The mfem device, before any mesh, space or vector (as seas_nitsche_dyn_driver,
+   // GPU plan D1).  With the default cpu nothing is made and the run is as before.
+   const bool on_device = std::string(device_str) != "cpu";
+   std::unique_ptr<Device> device;
+   if (on_device)
+   {
+      MFEM_VERIFY(device_id >= -1, "--device-id N needs N >= 0");
+      device.reset(new Device(device_str, SelectDeviceId(device_str, device_id, MPI_COMM_WORLD)));
+#if defined(HYPRE_USING_GPU) && (MFEM_HYPRE_VERSION >= 23100)
+      // hypre stays on the host (GPU plan D1)
+      HYPRE_SetMemoryLocation(HYPRE_MEMORY_HOST);
+      HYPRE_SetExecutionPolicy(HYPRE_EXEC_HOST);
+#endif
+      MFEM_VERIFY(!HypreUsingGPU(), "--device keeps hypre on the host, which this GPU hypre "
+                  "cannot (it needs hypre >= 2.31)");
+      if (root) { device->Print(); }
+   }
 
    const double wall_start = MPI_Wtime();
    const std::string commit = cycle::BuildCommit();
    cycle::CycleConfig cfg = cycle::CycleConfig::Load(deck);
+   MFEM_VERIFY(on_device == cfg.device_step, "--device " << device_str << " and [cycle].device_step = "
+               << (cfg.device_step ? "true" : "false") << " do not agree: the device step needs "
+               "both a device (cuda, debug) and the deck key; a cpu run needs neither");
    // Run-time overrides: where the files go and how often to checkpoint.
    if (output_dir[0] != '\0') { cfg.output.dir = output_dir; }
    if (checkpoint_every >= 0) { cfg.checkpoint_every = checkpoint_every; }
@@ -1759,6 +1788,7 @@ int main(int argc, char *argv[])
          const real_t Vmax = qd.MaxV();
          bool bad = !std::isfinite(Vmax);
          const Vector &st = qd.State();
+         st.HostRead();   // on an mfem device the QD kernels leave the state there (P1.7)
          // the first 100 entries per rank, or all with [cycle.qd].exact_retry
          // (Vista 1127480: the bad entry lay further down its rank's list)
          const int nscan = cfg.qd.exact_retry ? st.Size() : std::min(st.Size(), 100);

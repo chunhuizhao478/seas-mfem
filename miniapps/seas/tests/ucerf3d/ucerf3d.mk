@@ -200,3 +200,28 @@ test-loading-3d: seas_test_loading_3d
 	done
 
 .PHONY: test-loading-3d
+
+# P1.7 (plan rev5 U-G1): the cycle's dynamic phase on the mfem device
+# ([cycle].device_step) against the host: a switch-in, 300 steps and the
+# hand-back state on T-plane, debug device, 1 and 2 ranks.
+TEST_DC3D_SRC = tests/ucerf3d/test_device_cycle_3d.cpp
+TEST_DC3D_OBJ = $(TEST_DC3D_SRC:.cpp=.o)
+$(TEST_DC3D_OBJ): %.o: $(SRC)%.cpp $(CYCLE_HEADERS) $(CYCLE_STAMP) \
+                  $(CYCLE_SHARED_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
+
+seas_test_device_cycle_3d: $(TEST_DC3D_OBJ) $(CYCLE_LINK_OBJS)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_DC3D_OBJ) $(CYCLE_LINK_OBJS) $(CYCLE_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-device-cycle-3d: seas_test_device_cycle_3d
+	@for n in 1 2; do \
+	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_device_cycle_3d --device cpu \
+	      --write test_device_cycle_3d_np$$n.bin || exit 1; \
+	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_device_cycle_3d --device debug \
+	      --compare test_device_cycle_3d_np$$n.bin || exit 1; \
+	   rm -f test_device_cycle_3d_np$$n.bin; \
+	done
+
+.PHONY: test-device-cycle-3d

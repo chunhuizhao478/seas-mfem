@@ -287,10 +287,42 @@ public:
          wmesh = dmesh_.get();
       }
 
+      // [cycle].device_step (P1.7): checks before the operator is built
+      if (cfg.device_step)
+      {
+         MFEM_VERIFY(Device::IsEnabled(), "DynPhase: [cycle].device_step = true needs an mfem "
+                     "device (--device cuda, or debug to check the device path on the CPU)");
+         MFEM_VERIFY(!(lts != nullptr && lts->on), "DynPhase: [cycle].device_step with "
+                     "[cycle.lts]: the device step has no local time stepping yet");
+         // The device step has no Dirichlet loading yet (P1.11).  With
+         // [cycle.absorbing] every outer Dirichlet face may have moved to an
+         // absorbing attribute: if no face keeps a Dirichlet attribute, the
+         // operator is built without the (unused) Dirichlet list.
+         long long nd = 0;
+         for (int be = 0; be < wmesh->GetNBE(); be++)
+         {
+            if (bc_.dirichlet_attrs.count(wmesh->GetBdrAttribute(be))) { nd++; }
+         }
+         MPI_Allreduce(MPI_IN_PLACE, &nd, 1, MPI_LONG_LONG, MPI_SUM, pmesh.GetComm());
+         if (nd == 0)
+         {
+            bc_.dirichlet_attrs.clear();
+            bc_.skeleton_funcs.clear();
+         }
+      }
+
       DomainConfig dcfg;
       dcfg.penalty_factor = cfg.penalty_factor;
       dcfg.fault_frames.field = frames;
       W_ = std::make_unique<NitscheWaveOperator>(*wmesh, p, *material_, bc_, dcfg, &fs);
+      if (cfg.device_step)
+      {
+         // the matrix-free product and the device fault, before any product
+         W_->SetMatrixFree(true);
+         W_->SetFastFaultKernels(true);
+         W_->SetDeviceFault(true);
+         device_step_ = true;
+      }
       if (pml && cfg.pml.Sponge())
       {
          // the comparator: the band damping alone, K unchanged
@@ -496,6 +528,11 @@ public:
       const int n = W_->Height();
       U_.SetSize(n);
       Ud_.SetSize(n);
+      if (device_step_)
+      {
+         U_.UseDevice(true);
+         Ud_.UseDevice(true);
+      }
       U_ = 0.0;
       Ud_ = 0.0;
    }
@@ -533,6 +570,8 @@ public:
          W_->Elasticity().AssembleDirichletOnlyRHS(Fc, W_->GetTime());   // t_s
          b_.SetSize(Ku.Size());
          b_ = 0.0;
+         // on an mfem device the products are left there (P1.7)
+         Ku.HostRead(); Gd.HostRead(); Fc.HostRead(); b_.HostReadWrite();
          for (int i : wall_vdofs_) { b_(i) = Ku(i) - Gd(i) - Fc(i); }
          W_->SetConstantLoad(b_);                                     // hook H3
       }
@@ -951,8 +990,10 @@ public:
    NitscheWaveOperator &Op() { return *W_; }
    const NitscheWaveOperator &Op() const { return *W_; }
    const FrameMap &Frames() const { return frames_; }
-   const Vector &U() const { return U_; }
-   const Vector &Ud() const { return Ud_; }
+   /// With [cycle].device_step the fields live on the device: HostRead makes
+   /// the host copy readable for the output and the hand-back (P1.7).
+   const Vector &U() const { if (device_step_) { U_.HostRead(); } return U_; }
+   const Vector &Ud() const { if (device_step_) { Ud_.HostRead(); } return Ud_; }
    const DieterichRuinaFriction &Friction() const { return *fr_; }
    const BoundaryConfig &Boundaries() const { return bc_; }
    /// [cycle.absorbing]: the re-tagged faces (zero counts when off).
@@ -994,9 +1035,11 @@ public:
          W_->BackgroundTraction(tau_, S);
          T += S;
       }
+      T.HostRead();   // on an mfem device the trial traction is left there (P1.7)
       frames_.TractionToKernel(T, tau_k, sn);
       const bool stepped = (steps_ > 0 && W_->LastSigmaEff().Size() == N);
       f.sigma_n = stepped ? W_->LastSigmaEff() : sn;
+      f.sigma_n.HostRead();   // the copy of a device vector is valid there only
       for (Vector *v : {&f.slip_dip, &f.slip_strike, &f.V_dip, &f.V_strike,
                         &f.tau_a_dip, &f.tau_a_strike, &f.tau_b_dip, &f.tau_b_strike,
                         &f.theta})
@@ -1156,6 +1199,7 @@ private:
    long fault_steps_ = 0;
    FrameMap frames_;
    Vector U_, Ud_;
+   bool device_step_ = false;         ///< [cycle].device_step (P1.7)
    real_t tau_ = 0.0;
    real_t dt_ = 0.0, dt_cfl_ = 0.0, ceig_ = 0.0;
    long steps_ = 0;

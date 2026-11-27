@@ -235,6 +235,7 @@ public:
          MFEM_VERIFY(u && v && u->Size() == fes_.GetVSize() && v->Size() == fes_.GetVSize(),
                      "BenchmarkOutput: the regime's displacement or velocity is not a "
                      "vector of the displacement space (" << fes_.GetVSize() << ")");
+         u->HostRead(); v->HostRead();   // mfem device: the valid copy may be there (P1.7)
          ParGridFunction ug(const_cast<ParFiniteElementSpace *>(&fes_),
                             const_cast<real_t *>(u->GetData()));
          ParGridFunction vg(const_cast<ParFiniteElementSpace *>(&fes_),

@@ -44,6 +44,14 @@
 //   qd_radiation_damping true; false is refused with "gold"         [true]
 //   mesh_scale           vertex scale before the partition          [1.0]
 //   plate_rate           Vp of the far-field and creep loading     [required]
+//   device_step          the dynamic regime's step on the mfem device (UCERF
+//                        3-D plan rev5, P1.7): the matrix-free product and
+//                        the device fault of the Nitsche operator
+//                        (SetMatrixFree, SetDeviceFault; the Nitsche driver's
+//                        --matrix-free 1 --device-fault 1).  Needs an enabled
+//                        device (--device cuda, or debug to check it on the
+//                        CPU) and global time stepping; the operator refuses
+//                        what its device step does not have yet       [false]
 //   penalty_factor       IP penalty scale of BOTH regimes' K (one value,
 //                        so the two stiffness matrices agree, plan 6.1) [1.0]
 //   sigma_n_floor_pa     opt-in floor of the normal stress the friction law
@@ -752,6 +760,9 @@ struct CycleConfig
    real_t plate_rate = 0.0;   ///< Vp [m/s] of the Dirichlet loading
    real_t penalty_factor = 1.0;   ///< IP penalty scale of both regimes
    real_t sigma_n_floor = 0.0;    ///< [cycle].sigma_n_floor_pa [Pa]; 0 = off
+   /// [cycle].device_step (UCERF 3-D plan rev5, P1.7): the dynamic regime
+   /// steps on the mfem device (matrix-free K u, device fault); off = host
+   bool device_step = false;
    real_t relax_t = 0.0;          ///< [cycle.relaxation].t_relax_yr [s]; 0 = off
    bool Relaxation() const { return relax_t > 0.0; }
    /// [cycle.relaxation].opening: "elastic" (the default) or "relaxed"
@@ -1151,7 +1162,8 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
                   "\"constant_tensor\": the tensor gives sigma_n at every fault DOF");
    }
    OnlyKeys(cy, "cycle", {"ic", "switching", "qd_radiation_damping", "mesh_scale",
-                          "plate_rate", "penalty_factor", "sigma_n_floor_pa", "qd", "switch",
+                          "plate_rate", "penalty_factor", "sigma_n_floor_pa", "device_step",
+                          "qd", "switch",
                           "probe", "quench", "relaxation", "opening",
                           "prestress", "fields", "output", "checkpoint", "snapshots",
                           "benchmark", "lts", "loading", "absorbing", "finite_width",
@@ -1165,6 +1177,7 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
                "at V = V_i = 0.01 m/s = V_on, so the start regime would depend on "
                "round-off (plan 4.2); use ic = \"scec_fd\"");
    c.qd_radiation_damping = Bool(cy, "cycle", "qd_radiation_damping", true);
+   c.device_step = Bool(cy, "cycle", "device_step", false);
    MFEM_VERIFY(c.qd_radiation_damping || !c.IsGold(),
                "[cycle].qd_radiation_damping = false is refused with ic = \"gold\": "
                "that set's tau0 contains eta V (BP5 eq. 20)");

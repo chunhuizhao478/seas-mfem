@@ -967,6 +967,7 @@ private:
    {
       MFEM_VERIFY(w.Size() == fes_.GetVSize(), "snapshots: displacement vector size "
                   << w.Size() << " != " << fes_.GetVSize() << " (the QD regime's DG space)");
+      w.HostRead();   // on an mfem device the valid copy may be there (P1.7)
       ParGridFunction gf(const_cast<ParFiniteElementSpace *>(&fes_), const_cast<real_t *>(w.GetData()));
       out.SetSize(3 * static_cast<int>(at.elem.size()));
       Vector val(dim_);

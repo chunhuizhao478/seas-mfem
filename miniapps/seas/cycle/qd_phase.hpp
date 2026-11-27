@@ -456,6 +456,7 @@ public:
       MFEM_VERIFY(slip_k.Size() == 2 * N && psi.Size() == N,
                   "QDPhase::SetFaultState: " << slip_k.Size() << " slip and " << psi.Size()
                   << " psi values for " << N << " owned fault DOFs");
+      state_.HostReadWrite(); slip_k.HostRead(); psi.HostRead();   // mfem device (P1.7)
       for (int i = 0; i < N; i++)
       {
          state_(FaultOp::StatePerNode * i + FaultOp::SlipIndex) = slip_k(2 * i);
@@ -739,16 +740,20 @@ public:
    void SlipRateMagnitude(Vector &s) const
    {
       const Vector &V = fault_->GetSlipRate();
+      V.HostRead();
       const int N = fault_->NumNodes();
       s.SetSize(N);
       for (int i = 0; i < N; i++) { s(i) = std::hypot(V(2 * i), V(2 * i + 1)); }
    }
    void Slip(Vector &s) const { fault_->GetSlip(state_, s); }
-   const Vector &SlipRate() const { return fault_->GetSlipRate(); }
+   // HostRead (here and below): on an mfem device the QD kernels leave their
+   // results there; the cycle's hand-over and output read them on the host.
+   const Vector &SlipRate() const { fault_->GetSlipRate().HostRead(); return fault_->GetSlipRate(); }
    void Psi(Vector &psi) const
    {
       const int N = fault_->NumNodes();
       psi.SetSize(N);
+      state_.HostRead();   // mfem device (P1.7)
       for (int i = 0; i < N; i++) { psi(i) = state_(FaultOp::StatePerNode * i + FaultOp::PsiIndex); }
    }
    /// sigma_n_eff of the last friction solve (N values): sigma0 plus the
@@ -758,14 +763,19 @@ public:
    {
       const int N = fault_->NumNodes();
       const Vector *nt = op_->GetFrictionNormalTraction();
+      if (nt) { nt->HostRead(); }   // on an mfem device the QD kernels leave it there
       sn.SetSize(N);
       for (int i = 0; i < N; i++) { sn(i) = nt ? sigma0_(i) + (*nt)(i) : sigma0_(i); }
    }
    /// The kernel's traction of the last evaluation (2 N, kernel frame) and
    /// the elastic normal traction (N, compression positive; empty unless
    /// elastic sigma_n was on in that evaluation).
-   const Vector &Traction() const { return op_->GetTraction(); }
-   const Vector &NormalTraction() const { return op_->GetNormalTraction(); }
+   const Vector &Traction() const { op_->GetTraction().HostRead(); return op_->GetTraction(); }
+   const Vector &NormalTraction() const
+   {
+      op_->GetNormalTraction().HostRead();
+      return op_->GetNormalTraction();
+   }
 
    /// Station fields from the accepted state, as ParallelBP5BenchmarkOutput::
    /// Write forms them: V re-solved from (traction, state) and the normal
@@ -780,6 +790,8 @@ public:
       fault_->GetTheta(state_, theta);
       fault_->RecomputeSlipRate(trac, state_, V, op_->GetFrictionNormalTraction());
       const Vector &tau_pre = geom_->GetTauPre();
+      // on an mfem device the kernels leave these there (P1.7)
+      trac.HostRead(); slip.HostRead(); theta.HostRead(); V.HostRead(); tau_pre.HostRead();
       const int N = fault_->NumNodes();
       for (Vector *v : {&f.slip_dip, &f.slip_strike, &f.V_dip, &f.V_strike,
                         &f.tau_a_dip, &f.tau_a_strike, &f.tau_b_dip, &f.tau_b_strike})
