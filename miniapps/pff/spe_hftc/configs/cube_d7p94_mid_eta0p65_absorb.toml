@@ -1,0 +1,82 @@
+# SPE-HFTC acrylic cube, 3D, homogeneous Gc, eta = 0.65, absorbing side faces.
+# eta variant of cube_d7p94_mid_eta0p45_absorb.toml (3D eta sweep to match the experimental
+# crack extent, Andy 2026-11-26). Differs ONLY in [pulse] efficiency, [case] name, [output] directory
+# and [damage_solver] max_it (see below).
+
+[case]
+name = "cube_d7p94_mid_eta0p65_absorb"
+model = "solid"
+source = "pulsepower/spe_hftc/code_3d/elasticity_absorbing.i"
+
+[mesh]
+# make_spe_cube_mesh.py --rb 3.97e-3 --h-fine 0.3e-3 --h-coarse 1.0e-3 --r-fine 28e-3 (14.6 M tets);
+# export with msh_version="2.2" for MFEM
+file = "../mesh/spe_cube_d7p94_h0p3.msh"
+dim = 3
+corner = [-25.555e-3, -25.96e-3, 0.0]   # (-Lx/2, -Ly/2, 0): pinned in x and y
+
+[boundaries]
+pressure = ["borehole"]
+absorbing = ["xmin", "xmax", "ymin", "ymax"]
+fixed_z = ["zmin", "zmax"]              # holder plates
+
+[material]                               # cast acrylic, paper Table 1
+E = 2.80e9
+nu = 0.35
+density = 1190
+
+[phase_field]
+model = "AT1"
+ft = 69e6                                # Gc = 8 l ft^2 / (3E) = 2720.57 J/m^2
+l = 6e-4
+eta = 1e-6
+p = 2
+decomposition = "spectral"
+driving = "active"                       # psi = alpha Gc/c0/l + g psie_active
+
+[pulse]                                  # ElkPulseLoadExperiment
+shape_alpha = 4.1032e5                   # t_r = 0.3 us, t_d = 6 us
+shape_beta = 1.1529e7
+rise_time = 3e-7
+pulse_duration = 6e-5
+EM = 0.144
+gap = 7.17e-3
+efficiency = 0.65
+kappa = 0.35
+m_exp = 0.25
+base_factor = 8000
+center = [0.0, 0.0, 24.57e-3]            # zc = Lz/2 (Andy 2026-11-17)
+num_pulses = 20
+
+[damping]
+zeta_pulse = 0.0                         # Andy 2026-11-22 (MOOSE runs: 1e-8, removes ~12% of the pulse energy)
+zeta_quench = 0.0
+t_free = 2.5e-5
+quench = "mass"                          # C = alpha_mass M after t_free (Andy 2026-11-22); MOOSE: zeta_quench = 1e-5
+alpha_mass = 2e5                         # decay time 1/alpha = 10 us = MOOSE's 1/zeta_quench design target
+
+[time]
+mass = "consistent"                      # MOOSE ADInertialForce (Andy 2026-11-22; lumped grows ~20% more damage at zeta_pulse = 0)
+cfl = 0.4
+dt_max = 1e-7
+dt_quiet = 5e-7
+
+[coupling]
+scheme = "single_pass"
+
+[damage_solver]
+# eta 0.60 (Vista 1173071) aborted at step 29783 (t = 484 us, pulse 9) when the damage
+# QP hit the former hard cap of 50 iterations (|r_I| 3.9e-10 vs target 1.4e-12).
+# Same tolerances; more iterations allowed. Slow (>= 20 its) and failed solves print
+# their iteration history to the log. (Andy 2026-11-27: "fix this and rerun at higher eta")
+max_it = 200
+
+[output]
+directory = "out/cube_d7p94_mid_eta0p65_absorb"
+interval = 100
+fields = ["d", "vel_mag"]
+
+[metrics]
+d_threshold = 0.5
+r_core = 15e-3
+r_hole = 3.97e-3                          # 7.94 mm borehole (Andy 2026-11-17)

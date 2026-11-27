@@ -1,6 +1,7 @@
 # SPE-HFTC acrylic cube, 3D, homogeneous Gc, eta = 0.60, absorbing side faces.
 # eta variant of cube_d7p94_mid_eta0p45_absorb.toml (3D eta sweep to match the experimental
-# crack extent, Andy 2026-11-26). Differs ONLY in [pulse] efficiency, [case] name, [output] directory.
+# crack extent, Andy 2026-11-26). Differs ONLY in [pulse] efficiency, [case] name, [output] directory
+# and [damage_solver] max_it (see below).
 
 [case]
 name = "cube_d7p94_mid_eta0p6_absorb"
@@ -62,6 +63,13 @@ dt_quiet = 5e-7
 
 [coupling]
 scheme = "single_pass"
+
+[damage_solver]
+# eta 0.60 (Vista 1173071) aborted at step 29783 (t = 484 us, pulse 9) when the damage
+# QP hit the former hard cap of 50 iterations (|r_I| 3.9e-10 vs target 1.4e-12).
+# Same tolerances; more iterations allowed. Slow (>= 20 its) and failed solves print
+# their iteration history to the log. (Andy 2026-11-27: "fix this and rerun at higher eta")
+max_it = 200
 
 [output]
 directory = "out/cube_d7p94_mid_eta0p6_absorb"

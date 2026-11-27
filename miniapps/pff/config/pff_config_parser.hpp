@@ -40,7 +40,7 @@ private:
    {
       CaseConfig c;
       Check(data, "root", {"case", "mesh", "boundaries", "material", "phase_field", "pulse",
-                           "confinement", "damping", "time", "coupling", "poro", "output",
+                           "confinement", "damping", "time", "coupling", "damage_solver", "poro", "output",
                            "metrics"
                           });
 
@@ -187,6 +187,19 @@ private:
          else { throw std::invalid_argument("[coupling] scheme must be single_pass or fixed_point"); }
          c.max_passes = Int(t, "max_passes", 1);
          c.coupling_tol = Real(t, "tolerance", 1e-6);
+      }
+      if (data.contains("damage_solver"))
+      {
+         const auto &t = data.at("damage_solver");
+         Check(t, "damage_solver", {"rel_tol", "abs_tol", "max_it", "print_level"});
+         c.damage_rel_tol = Real(t, "rel_tol", 1e-8);
+         c.damage_abs_tol = Real(t, "abs_tol", 1e-10);
+         c.damage_max_it = Int(t, "max_it", 50);
+         c.damage_print_level = Int(t, "print_level", 0);
+         if (c.damage_rel_tol <= 0.0 || c.damage_abs_tol <= 0.0 || c.damage_max_it < 1)
+         {
+            throw std::invalid_argument("[damage_solver] rel_tol, abs_tol must be > 0 and max_it >= 1");
+         }
       }
       if (data.contains("poro"))
       {

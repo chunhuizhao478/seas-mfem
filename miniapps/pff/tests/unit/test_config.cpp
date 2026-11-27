@@ -14,6 +14,7 @@
 #include "../../io/gmsh_physical_names.hpp"
 #include "../test_framework.hpp"
 
+#include <fstream>
 #include <sstream>
 
 using namespace mfem;
@@ -36,6 +37,28 @@ static void TestSpe()
                s.alpha_mass == 2e5, "2D section: consistent mass, zeta_pulse 0, mass quench 2e5");
    const CaseConfig v = CaseConfigParser::ParseFile("spe_hftc/configs/verification/c2_section_eta1.toml");
    TEST_ASSERT(!v.consistent_mass, "C2 verification case keeps the lumped mass it was validated with");
+}
+
+static void TestDamageSolver()
+{
+   std::cout << "\n[damage_solver table]\n";
+   const std::string f = "spe_hftc/configs/cube_d7p94_mid_eta0p45_absorb.toml";
+   const CaseConfig d = CaseConfigParser::ParseFile(f);
+   // Defaults = the values hard-coded in pff_driver before the table existed
+   // (rel 1e-8, abs 1e-10 x max A_ii = farms fracture.i nl_abs_tol, 50 its).
+   TEST_ASSERT(d.damage_rel_tol == 1e-8 && d.damage_abs_tol == 1e-10 &&
+               d.damage_max_it == 50 && d.damage_print_level == 0,
+               "no [damage_solver]: the former hard-coded QP settings");
+   std::ifstream in(f);
+   std::stringstream ss;
+   ss << in.rdbuf() << "\n[damage_solver]\nmax_it = 200\nrel_tol = 1e-9\nprint_level = 1\n";
+   const CaseConfig e = CaseConfigParser::ParseString(ss.str());
+   TEST_ASSERT(e.damage_max_it == 200 && e.damage_rel_tol == 1e-9 && e.damage_abs_tol == 1e-10 &&
+               e.damage_print_level == 1, "[damage_solver] keys read, abs_tol keeps its default");
+   bool threw = false;
+   try { CaseConfigParser::ParseString(ss.str() + "max_iter = 3\n"); }
+   catch (const std::exception &) { threw = true; }
+   TEST_ASSERT(threw, "unknown [damage_solver] key refused");
 }
 
 static void TestCmame()
@@ -169,6 +192,7 @@ static void TestRaccoonMode2()
 int main()
 {
    TestSpe();
+   TestDamageSolver();
    TestCmame();
    TestStrictKeys();
    TestPhysicalNames();

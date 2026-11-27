@@ -348,9 +348,11 @@ int main(int argc, char *argv[])
    Dgf = 0.0;
    std::unique_ptr<QsDamageOperator> damage;
    BoundConstrainedQP qp;
-   qp.rel_tol = 1e-8;
+   qp.rel_tol = c.damage_rel_tol;
+   qp.max_it = c.damage_max_it;
+   qp.print_level = c.damage_print_level;
    real_t damage_abs_tol = -1.0;   // set at the first damage step
-   const real_t fracture_nl_abs_tol = 1e-10;
+   const real_t fracture_nl_abs_tol = c.damage_abs_tol;
    Vector seed, lo(D.Size()), hi(D.Size()), rd(D.Size()), dx(D.Size()), psi_el;
    hi = 1.0;
    Vector m_lump(D.Size());   // int phi_i
@@ -659,7 +661,24 @@ int main(int argc, char *argv[])
             if (!assembled) { damage->Assemble(Dgf); }
             qp.abs_tol = damage_abs_tol;
             BoundConstrainedQP::Stats st;
-            if (!qp.Solve(damage->A(), damage->b(), lo, hi, dx, st))
+            const bool qp_ok = qp.Solve(damage->A(), damage->b(), lo, hi, dx, st);
+            // Print the iteration history of a failed solve and of a slow one
+            // (>= 20 iterates; production steps take <= 7), so a stall can be
+            // diagnosed from the log (Vista 1173071, step 29783: cap of 50 hit).
+            if ((!qp_ok || st.iterations >= 20) && Mpi::Root())
+            {
+               mfem::out << "  damage QP " << (qp_ok ? "slow" : "FAILED") << " at step " << step_n
+                         << " (t = " << S.t << "), " << st.iterations
+                         << " its: it |r_I| active set_changes step cg_its\n";
+               for (size_t k = 0; k < st.history.size(); k++)
+               {
+                  const auto &h = st.history[k];
+                  mfem::out << "    " << k << " " << h.r << " " << h.active << " "
+                            << h.set_changes << " " << h.step << " " << h.cg_its << "\n";
+               }
+               mfem::out << std::flush;
+            }
+            if (!qp_ok)
             {
                MFEM_ABORT("step " << step_n << " (t = " << S.t << "): damage QP did not converge, |r_I| = "
                           << st.r << " (|r_I,0| = " << st.r0 << ")");

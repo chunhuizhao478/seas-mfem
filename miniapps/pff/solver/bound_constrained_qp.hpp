@@ -25,6 +25,7 @@
 #include "mfem.hpp"
 
 #include <memory>
+#include <vector>
 
 namespace mfem
 {
@@ -34,12 +35,26 @@ namespace pff
 class BoundConstrainedQP
 {
 public:
+   /// One entry per iterate: the inactive residual norm, the global active
+   /// count, how many indices left/entered the active set relative to the
+   /// previous iterate (-1 at it 0), and the line-search step s and PCG
+   /// iterations of the step taken FROM this iterate (0 for the last one).
+   struct IterRecord
+   {
+      real_t r = 0.0;
+      int active = 0;
+      int set_changes = -1;
+      real_t step = 0.0;
+      int cg_its = 0;
+   };
+
    struct Stats
    {
       int iterations = 0;
       int linear_iterations = 0;
       int active = 0;
       real_t r0 = 0.0, r = 0.0;
+      std::vector<IterRecord> history;
    };
 
    real_t rel_tol = 1e-8;
@@ -75,10 +90,15 @@ public:
          st.r = rn;
          st.iterations = it;
          st.active = GlobalCount(comm, active.Size());
+         IterRecord rec;
+         rec.r = rn;
+         rec.active = st.active;
+         if (it > 0) { rec.set_changes = SymmetricDifference(comm, active, prev_active); }
+         st.history.push_back(rec);
          if (print_level > 0 && Mpi::Root())
          {
             mfem::out << "    damage QP it " << it << " |r_I| = " << rn
-                      << " active = " << st.active << "\n";
+                      << " active = " << st.active << " set changes = " << rec.set_changes << "\n";
          }
          // Converged on a repeated active set, or when the tolerance is met on
          // two consecutive iterates: a node on a bound with r_i at round-off
@@ -117,6 +137,7 @@ public:
                        << " iterations)");
          }
          st.linear_iterations += cg.GetNumIterations();
+         st.history.back().cg_its = cg.GetNumIterations();
 
          // Projected step with energy backtracking.
          const real_t e0 = Energy(A, b, x);
@@ -135,6 +156,7 @@ public:
          {
             MFEM_ABORT("BoundConstrainedQP: line search failed at iteration " << it);
          }
+         st.history.back().step = s;
          x = xt;
       }
       return false;
@@ -173,6 +195,20 @@ private:
       int g = 0;
       MPI_Allreduce(&n, &g, 1, MPI_INT, MPI_SUM, comm);
       return g;
+   }
+
+   /// Global size of the symmetric difference of two sorted index sets.
+   static int SymmetricDifference(MPI_Comm comm, const Array<int> &a, const Array<int> &b)
+   {
+      int i = 0, j = 0, d = 0;
+      while (i < a.Size() && j < b.Size())
+      {
+         if (a[i] == b[j]) { i++; j++; }
+         else if (a[i] < b[j]) { i++; d++; }
+         else { j++; d++; }
+      }
+      d += (a.Size() - i) + (b.Size() - j);
+      return GlobalCount(comm, d);
    }
 
    static bool SameSet(MPI_Comm comm, const Array<int> &a, const Array<int> &b)

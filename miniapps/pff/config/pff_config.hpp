@@ -22,6 +22,7 @@
 //   [time]         end_time or num_pulses, cfl, dt_max, dt_quiet, mass ("consistent"
 //                  default, MOOSE ADInertialForce; or "lumped")
 //   [coupling]     scheme, max_passes, tolerance
+//   [damage_solver] rel_tol, abs_tol (x max A_ii), max_it, print_level of the damage QP
 //   [poro]         Biot/porosity/permeability parameters (hydromech only),
 //                  drained_pressure = "zero" | "pulse" (value on [boundaries]
 //                  drained), preconditioner = "amg" | "jacobi"
@@ -110,6 +111,14 @@ struct CaseConfig
    CouplingScheme coupling = CouplingScheme::SinglePass;
    int max_passes = 1;
    real_t coupling_tol = 1e-6;
+
+   // [damage_solver]  BoundConstrainedQP of pff_driver; the defaults are the
+   // values hard-coded before 2026-11-27.  abs_tol is scaled by max_i A_ii of
+   // the first damage solve (MOOSE automatic_scaling).
+   real_t damage_rel_tol = 1e-8;
+   real_t damage_abs_tol = 1e-10;
+   int damage_max_it = 50;
+   int damage_print_level = 0;
 
    // [poro]
    PoroDamageParams poro;
