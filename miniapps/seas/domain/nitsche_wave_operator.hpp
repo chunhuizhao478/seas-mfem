@@ -1011,6 +1011,7 @@ public:
       opening_ = on;
       contact_ = false;
       open_.assign(no_, char(0));
+      dev_open_state_ = 1;
    }
    bool ShearFreeOpening() const { return opening_ && !contact_; }
 
@@ -1040,6 +1041,7 @@ public:
       opening_ = on;
       contact_ = on;
       open_.assign(no_, char(0));
+      dev_open_state_ = 1;
    }
    bool ContactOpening() const { return contact_; }
    /// [cycle.relaxation] opening = "relaxed" (cycle/normal_stress_relaxation.hpp;
@@ -1073,7 +1075,17 @@ public:
    }
    bool FloorTaper() const { return floor_taper_; }
    /// Per owned DOF: 1 where the last step was open (or SetOpenFlags set it).
-   const std::vector<char> &OpenFlags() const { return open_; }
+   const std::vector<char> &OpenFlags() const
+   {
+      if (dev_open_state_ == 2)
+      {
+         // the device fault step wrote the flags (P1.9)
+         const int *f = dev_open_.HostRead();
+         for (int j = 0; j < no_; j++) { open_[j] = f[j] ? 1 : 0; }
+         dev_open_state_ = 0;
+      }
+      return open_;
+   }
    /// The open flags the next step's predictor sees (the switch from QD).
    void SetOpenFlags(const std::vector<char> &f)
    {
@@ -1081,9 +1093,13 @@ public:
       MFEM_VERIFY(static_cast<int>(f.size()) == no_, "SetOpenFlags: " << f.size()
                   << " flags for " << no_ << " owned DOFs");
       for (int j = 0; j < no_; j++) { open_[j] = f[j] ? 1 : 0; }
+      dev_open_state_ = 1;
    }
    int OpenDOFs() const
-   { return static_cast<int>(std::count(open_.begin(), open_.end(), char(1))); }
+   {
+      const std::vector<char> &o = OpenFlags();
+      return static_cast<int>(std::count(o.begin(), o.end(), char(1)));
+   }
    /// Global number of shared (cross-rank) fault faces, each counted once.
    int NumSharedFaultFacesGlobal() const { return n_shared_global_; }
    /// Fault-face penalty mean and relative spread, in local face order.
@@ -1979,7 +1995,7 @@ private:
          const double tf0 = MPI_Wtime();
          if (dev && dev_fault_)
          {
-            dev_maps_->ToKernelLocal(*d, dload_k_);
+            dev_maps_->ToKernelLocal(*d, dload_k_, contact_ ? 3 : 2);
             dev_slip_->AddMultDevice(dload_k_, F_);
          }
          else if (dev)
@@ -2035,7 +2051,7 @@ private:
             const double tf0 = MPI_Wtime();
             if (dev && dev_fault_)
             {
-               dev_maps_->ToKernelLocal(V_, dload_k_);
+               dev_maps_->ToKernelLocal(V_, dload_k_, contact_ ? 3 : 2);
                dev_kv_slip_->AddMultDevice(dload_k_, F_);
             }
             else if (dev)
@@ -2103,22 +2119,21 @@ private:
       // branch's pieces yet (P1 ports them); a deck that turns one on stops
       // here instead of running without it
       MFEM_VERIFY(dim_ == 3 && !pml_ && !sponge_ && !early_sync_
-                  && !has_mass_damping_ && !contact_ && !opening_ && !relaxed_contact_
-                  && !floor_taper_ && (!nsm_ || nsm_->Constant()) && !rc_
+                  && !has_mass_damping_ && !(opening_ && !contact_)
+                  && (!nsm_ || nsm_->Constant()) && !rc_
                   && slip_measure_ == SlipMeasure::Magnitude
                   && tension_ == TensionMode::Abort,
                   "NitscheWaveOperator: the device step (--matrix-free 1 on a device) "
                   "has no 2-D mesh, PML or sponge band, early step sync, mass "
-                  "damping, contact, opening, relaxed contact, floor taper, normal-stress "
+                  "damping, shear-free opening (version A), normal-stress "
                   "modifier that changes during a phase, off-fault rheology, slip path or "
                   "zero-strength tension "
                   "yet, and this run has one (dim " << dim_ << ", pml "
                   << (pml_ ? 1 : 0) << ", sponge " << (sponge_ ? 1 : 0) << ", early sync "
                   << (early_sync_ ? 1 : 0)
-                  << ", mass damping " << (has_mass_damping_ ? 1 : 0) << ", contact "
-                  << (contact_ ? 1 : 0) << ", opening " << (opening_ ? 1 : 0)
-                  << ", relaxed " << (relaxed_contact_ ? 1 : 0) << ", floor taper "
-                  << (floor_taper_ ? 1 : 0) << ", changing nsm "
+                  << ", mass damping " << (has_mass_damping_ ? 1 : 0)
+                  << ", shear-free opening " << ((opening_ && !contact_) ? 1 : 0)
+                  << ", changing nsm "
                   << ((nsm_ && !nsm_->Constant()) ? 1 : 0) << ", rheology "
                   << (rc_ ? 1 : 0) << ", slip path "
                   << (slip_measure_ == SlipMeasure::Path ? 1 : 0) << ", zero strength "
@@ -2186,7 +2201,7 @@ private:
          // through the same map, once
          Vector zero(3 * no_);
          zero = 0.0;
-         dev_maps_->ToKernelLocal(zero, dkv_slip0_);
+         dev_maps_->ToKernelLocal(zero, dkv_slip0_, contact_ ? 3 : 2);
       }
       dev_par_.SetSize(kDCParams * no_);
       real_t *q = dev_par_.HostWrite();
@@ -2724,11 +2739,19 @@ private:
    void AdvanceFaultDevice_(const Vector &x, real_t t, const Vector *v, real_t ext[6])
    {
       const real_t dt = dt_;
+      if (opening_ && (dev_open_state_ == 1 || dev_open_.Size() != no_))
+      {
+         // P1.9: the open flags the predictor reads (SetOpenFlags, or none)
+         dev_open_.SetSize(no_);
+         int *h = dev_open_.HostWrite();
+         for (int j = 0; j < no_; j++) { h[j] = open_[j] ? 1 : 0; }
+         dev_open_state_ = 0;
+      }
       PredictFaultDevice_(dt);   // 3, 4
       {
          // 5-8
          ScopedStageTimer timer(timers_, StageTimers::DynFaultTraction);
-         dev_maps_->ToKernelLocal(dstar_, dslip_k_);
+         dev_maps_->ToKernelLocal(dstar_, dslip_k_, contact_ ? 3 : 2);
          dev_trac_->Mult(x, dslip_k_, dTk_, dsn_);
          if (kv_)
          {
@@ -2756,6 +2779,7 @@ private:
       const DFExtremes r = CloseFaultDevice_(dt, g);
       floor_hits_ += r.floor_hits;
       if (r.status != 0) { RerunCloseHost_(t, dt, r.status); }
+      if (opening_) { dev_open_state_ = 2; }
       d_.Swap(d_new_);
       V_.Swap(V_new_);
       psi_.Swap(psi_new_);
@@ -2796,10 +2820,11 @@ private:
       real_t ext[6];
       // the kernel counted this step's floor hits already
       const long hits = floor_hits_;
-      const std::vector<char> floored = floored_;
+      const std::vector<char> floored = floored_, open = open_;
       CloseFaultHost_(t, dt, Town, S, d, V, psi, sigpc, Xl, sl, ext);
       floor_hits_ = hits;
       floored_ = floored;
+      open_ = open;
       MFEM_VERIFY(!(status & kDFAbort), "NitscheWaveOperator: the device fault step flagged "
                   "status " << status << " (RSStatus | DFStatus) on rank " << Mpi::WorldRank()
                   << ", step " << steps_ << ", but the host rerun of boxes 9-11 did not stop "
@@ -2822,12 +2847,20 @@ public:
       const DeviceClosure cl = dev_cl_;
       const real_t *d = d_.Read(true), *V = V_.Read(true), *psi = psi_.Read(true);
       const real_t *q = dev_par_.Read(true);
+      // P1.9 contact: the state evolves with the tangential rate, and not
+      // at all at a DOF open at step n (the host loop of AdvanceFault_)
+      const bool contact = contact_, opening = opening_;
+      const real_t *fr = contact ? frame_own_.Read(true) : nullptr;
+      const int *opn = opening ? dev_open_.Read(true) : nullptr;
       real_t *ds = dstar_.Write(true), *ps = psistar_.Write(true), *r0 = r0_.Write(true);
       mfem::forall(no, [=] MFEM_HOST_DEVICE (int j)
       {
          const real_t *Vj = V + 3 * j;
          for (int c = 0; c < 3; c++) { ds[3 * j + c] = d[3 * j + c] + 0.5 * dt * Vj[c]; }
-         const real_t Vabs = std::sqrt(Vj[0] * Vj[0] + Vj[1] * Vj[1] + Vj[2] * Vj[2]);
+         const real_t Vabs = contact
+            ? std::hypot(fault_frame::Dot(Vj, fr + 9 * j + 3), fault_frame::Dot(Vj, fr + 9 * j + 6))
+            : std::sqrt(Vj[0] * Vj[0] + Vj[1] * Vj[1] + Vj[2] * Vj[2]);
+         if (opening && opn[j]) { r0[j] = 0.0; ps[j] = psi[j] + dt * 0.0; return; }
          r0[j] = DCStateRate(cl, q + kDCParams * j, Vabs, psi[j]);
          ps[j] = psi[j] + dt * r0[j];
       });
@@ -2861,6 +2894,12 @@ public:
       const real_t floor = sigma_floor_;
       const real_t *red = has_red ? dev_nsm_red_.Read(true) : nullptr;
       int *flo = (floor > 0.0) ? dev_floored_.ReadWrite(true) : nullptr;
+      // P1.9: contact (CloseDOF's gap projection), its relaxed form and the
+      // floor taper
+      const bool contact = contact_, opening = opening_, relaxed = relaxed_contact_;
+      const bool taper = floor_taper_;
+      const real_t vx_fac = 16.0 * std::numeric_limits<real_t>::epsilon();
+      int *opw = opening ? dev_open_.Write(true) : nullptr;
       const int *own = dev_maps_->OwnedToLocal().Read(true);
       const real_t *bk = dev_maps_->Triads().Read(true), *ep = dev_maps_->EpsF().Read(true);
       const real_t *Tk = dTk_.Read(true), *sn = dsn_.Read(true);
@@ -2897,53 +2936,112 @@ public:
          }
          // 9: CloseDOF
          const real_t *dj = d + 3 * j;
-         const real_t dn_abs = std::sqrt(dj[0] * dj[0] + dj[1] * dj[1] + dj[2] * dj[2]);
          const real_t *n = fr + 9 * j, *dv = n + 3, *sv = n + 6;
+         // contact: the slip magnitude is tangential (d carries the gap)
+         const real_t dn_abs = contact
+            ? std::hypot(fault_frame::Dot(dj, dv), fault_frame::Dot(dj, sv))
+            : std::sqrt(dj[0] * dj[0] + dj[1] * dj[1] + dj[2] * dj[2]);
          real_t X[2], sig;
          fault_frame::ToLocal(TS, 0.0, n, dv, sv, X[0], X[1], sig);
-         if (floor > 0.0)
-         {
-            // the floor replaces the range check; a value that is not
-            // finite still stops the run
-            if (!(sig - sig == 0.0)) { status |= kDFSigmaRange; }
-         }
-         else if (!(sig >= sigma_min)) { status |= kDFSigmaRange; }
-         real_t sig_law = sig;
-         if (pc)
-         {
-            const real_t *Vo = V + 3 * j;
-            const real_t Vo_abs = std::sqrt(Vo[0] * Vo[0] + Vo[1] * Vo[1] + Vo[2] * Vo[2]);
-            const real_t xpc = -(Vo_abs + vstar) * dt / len;
-            const real_t E = std::exp(xpc), omE = -std::expm1(xpc);
-            const real_t spc = E * pco[j] + omE * sig;
-            pcn[j] = spc;
-            sig_law = spc;
-            r.neg_min_pc = (r.neg_min_pc < -spc) ? -spc : r.neg_min_pc;
-            r.max_pc = (r.max_pc < spc) ? spc : r.max_pc;
-         }
-         if (has_red)
-         {
-            sig_law -= red[j];
-            if (floor == 0.0 && !(sig_law >= sigma_min)) { status |= kDFSigmaRange; }
-         }
-         if (floor > 0.0 && !(sig_law >= floor))
-         {
-            sig_law = floor;
-            flo[j] = 1;
-            r.floor_hits += 1;
-         }
          const real_t *qj = q + kDCParams * j;
          const real_t gamma = kv ? 0.5 * sF[j] * dt + sFk[j] : 0.5 * sF[j] * dt;
-         real_t Vl[2], Vn[3];
-         DCSolveSlipRate(cl, qj, X, gamma, sig_law, ps[j], dn_abs, Vl, status);
-         fault_frame::Embed(Vl[0], Vl[1], dv, sv, Vn);
-         // 10: the checks, Heun
-         const real_t Vabs = std::sqrt(Vn[0] * Vn[0] + Vn[1] * Vn[1] + Vn[2] * Vn[2]);
-         const real_t VX = X[0] * fault_frame::Dot(Vn, dv) + X[1] * fault_frame::Dot(Vn, sv);
-         if (!(Vabs == 0.0 || VX < 0.0)) { status |= kDFAntiParallel; }
+         real_t Vn[3], Vg = 0.0;
+         bool is_open = false;
+         if (contact)
+         {
+            // P1.9: CloseDOF's projection (plan eq. 4.4), g* = dstar . n
+            const real_t rc = (relaxed && has_red) ? red[j] : 0.0;
+            const real_t gap = fault_frame::Dot(ds + 3 * j, n);
+            const real_t gtr = relaxed ? gap - 0.5 * dt * (sig - rc) / gamma
+                                       : gap - 0.5 * dt * sig / gamma;
+            const real_t gnew = (gtr > 0.0) ? gtr : 0.0;
+            Vg = 2.0 * (gnew - gap) / dt;
+            if (gnew > 0.0)
+            {
+               // open: zero shear strength, X + gamma V_t = 0
+               fault_frame::Embed(-X[0] / gamma, -X[1] / gamma, dv, sv, Vn);
+               for (int c = 0; c < 3; c++) { Vn[c] += Vg * n[c]; }
+               sig = relaxed ? rc : 0.0;
+               is_open = true;
+            }
+            else { sig = sig + gamma * Vg; }
+         }
+         if (!is_open)
+         {
+            if (floor > 0.0)
+            {
+               // the floor replaces the range check; a value that is not
+               // finite still stops the run
+               if (!(sig - sig == 0.0)) { status |= kDFSigmaRange; }
+            }
+            else if (!relaxed && !(sig >= sigma_min)) { status |= kDFSigmaRange; }
+            real_t sig_law = sig;
+            if (pc)
+            {
+               const real_t *Vo = V + 3 * j;
+               const real_t Vo_abs = std::sqrt(Vo[0] * Vo[0] + Vo[1] * Vo[1] + Vo[2] * Vo[2]);
+               const real_t xpc = -(Vo_abs + vstar) * dt / len;
+               const real_t E = std::exp(xpc), omE = -std::expm1(xpc);
+               const real_t spc = E * pco[j] + omE * sig;
+               pcn[j] = spc;
+               sig_law = spc;
+               r.neg_min_pc = (r.neg_min_pc < -spc) ? -spc : r.neg_min_pc;
+               r.max_pc = (r.max_pc < spc) ? spc : r.max_pc;
+            }
+            if (has_red)
+            {
+               sig_law -= red[j];
+               // relaxed contact: sigma - r >= 0 at a closed DOF up to rounding
+               if (relaxed) { sig_law = (sig_law < 0.0) ? 0.0 : sig_law; }
+               if (floor == 0.0 && !(sig_law >= sigma_min)) { status |= kDFSigmaRange; }
+            }
+            if (floor > 0.0)
+            {
+               // CloseDOF's floor; with the taper the arm is capped by the
+               // clamping stress and the law above it scaled (plan eq. 6.2)
+               const real_t sig_tap = relaxed ? sig_law : sig;
+               const real_t tp = (sig_tap < 0.0) ? 0.0 : sig_tap;
+               const real_t arm = taper ? ((tp < floor) ? tp : floor) : floor;
+               if (!(sig_law >= arm))
+               {
+                  sig_law = arm;
+                  flo[j] = 1;
+                  r.floor_hits += 1;
+               }
+               else if (taper && sig_tap < floor && sig_law > arm)
+               {
+                  const real_t sw = sig_law * (tp / floor);
+                  sig_law = (sw < arm) ? arm : sw;
+                  flo[j] = 1;
+                  r.floor_hits += 1;
+               }
+            }
+            real_t Vl[2];
+            DCSolveSlipRate(cl, qj, X, gamma, sig_law, ps[j], dn_abs, Vl, status);
+            fault_frame::Embed(Vl[0], Vl[1], dv, sv, Vn);
+            // closed with a gap: V_g returns g to zero
+            if (contact) { for (int c = 0; c < 3; c++) { Vn[c] += Vg * n[c]; } }
+         }
+         // 10: the checks, Heun.  Contact: the slip rate is tangential; the
+         // gap rate stays out of the state, the ratio and the records
+         const real_t Vd = fault_frame::Dot(Vn, dv), Vs = fault_frame::Dot(Vn, sv);
+         const real_t V3 = std::sqrt(Vn[0] * Vn[0] + Vn[1] * Vn[1] + Vn[2] * Vn[2]);
+         const real_t Vabs = contact ? std::hypot(Vd, Vs) : V3;
+         const real_t VX = X[0] * Vd + X[1] * Vs;
+         // the host's allowance (CloseFaultHost_: 8 eps |X| |V|) doubled, so
+         // a flag here is one the host rerun stops at as well
+         if (!(Vabs == 0.0 || VX <= vx_fac * std::hypot(X[0], X[1]) * V3))
+         {
+            status |= kDFAntiParallel;
+         }
          const real_t ratio = Vabs * dt / Dc[j];
-         if (!(ratio <= 2.0)) { status |= kDFRatio; }
-         pn[j] = psi[j] + 0.5 * dt * (r0[j] + DCStateRate(cl, qj, Vabs, ps[j]));
+         if (is_open) { pn[j] = psi[j]; }   // psi frozen while open
+         else
+         {
+            if (!(ratio <= 2.0)) { status |= kDFRatio; }
+            pn[j] = psi[j] + 0.5 * dt * (r0[j] + DCStateRate(cl, qj, Vabs, ps[j]));
+         }
+         if (opening) { opw[j] = is_open ? 1 : 0; }
          // 11
          for (int c = 0; c < 3; c++)
          {
@@ -2955,8 +3053,12 @@ public:
          sl[j] = sig;
          r.neg_min_sig = (r.neg_min_sig < -sig) ? -sig : r.neg_min_sig;
          r.max_sig = (r.max_sig < sig) ? sig : r.max_sig;
-         r.max_V = (r.max_V < Vabs) ? Vabs : r.max_V;
-         r.max_ratio = (r.max_ratio < ratio) ? ratio : r.max_ratio;
+         if (!is_open)
+         {
+            // the record's |V| and ratio run over the closed DOFs
+            r.max_V = (r.max_V < Vabs) ? Vabs : r.max_V;
+            r.max_ratio = (r.max_ratio < ratio) ? ratio : r.max_ratio;
+         }
          r.status |= status;
       }, DFExtremesReducer{}, true, dev_red_ws_);
       return res;
@@ -3334,7 +3436,7 @@ private:
    bool opening_ = false;                ///< SetShearFreeOpening or SetContactOpening
    bool contact_ = false;                ///< SetContactOpening (version B, B2)
    bool relaxed_contact_ = false;        ///< SetRelaxedContact
-   std::vector<char> open_;              ///< per owned DOF: open at the last step
+   mutable std::vector<char> open_;      ///< per owned DOF: open at the last step
    std::function<real_t(real_t)> nuc_temporal_;
    std::shared_ptr<const FaultFrameField> frames_;   ///< census + N-09 frames (phase A)
    int nd_ = 0, no_ = 0, nbf_ = 1, nloc_faces_ = 0, n_shared_global_ = 0;
@@ -3424,6 +3526,11 @@ private:
    bool dev_nsm_dirty_ = true;
    Vector dev_nsm_red_;
    mutable Array<int> dev_floored_;
+   // P1.9: the open flags on the device.  dev_open_state_: 0 the host's
+   // open_ and dev_open_ agree, 1 open_ is newer (SetOpenFlags), 2
+   // dev_open_ is newer (the device fault step)
+   mutable Array<int> dev_open_;
+   mutable int dev_open_state_ = 1;
    mutable double fault_sec_ = 0.0;
    RheologyCoupler *rc_ = nullptr;   ///< off-fault rheology (null: elastic)
    Vector rcT_;                      ///< Q dsig on owned fault DOFs

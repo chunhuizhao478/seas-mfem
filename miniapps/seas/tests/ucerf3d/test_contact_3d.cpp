@@ -44,6 +44,30 @@
 //   make -f tests/ucerf3d/ucerf3d.mk test-contact-3d
 //
 // Scope (Chunhui Zhao, 2026-11-25): tetrahedral meshes, the host step.
+//
+// P1.9, U-G3 (plan rev5: "U-C1 and U-C3 on the device against the host"):
+// the device step's contact branch.  One device per process, so the host
+// run writes its end state and the device run compares:
+//
+//   seas_test_contact_3d --device cpu   --write PREFIX
+//   seas_test_contact_3d --device debug --compare PREFIX
+//   make -f tests/ucerf3d/ucerf3d.mk test-device-contact-3d
+//
+//   U-G3a  U-C1's turned block pulled apart, p = 2, 200 steps.  The device
+//          step has no Dirichlet faces yet (P1.11), so the two faces
+//          parallel to the fault are absorbing and the halves start at
+//          +-v0 n; every fault DOF stays open with sigma_eff = 0.
+//   U-G3b  U-C3's T-bend run (p = 1, 1 s): the east plane opens, the west
+//          plane slips.
+//   U-G3c  U-G3b with the relaxed contact condition (r = +2 MPa west,
+//          -1 MPa east), a 1 MPa floor and the floor taper.  With the
+//          relaxed condition the floor has nothing left to do (0 hits).
+//   U-G3d  U-G3b with the same r, floor and taper but the plain contact
+//          condition: here the floor arm and the taper act.
+//   Checks: the device step ran; the case opens; slip, slip rate, state,
+//   sigma_eff, U and Udot within --tol (1e-12) of the host, relative to the
+//   field's largest value, the slip rate within --tol-v (1e-10; G3Args);
+//   the open flags and the floor counts equal.
 
 #include "mfem.hpp"
 #include "../../domain/nitsche_wave_operator.hpp"
@@ -182,6 +206,177 @@ static void AtRest(NitscheWaveOperator &op, real_t tau, real_t sigma)
    }
    op.SetFaultState(d, V, psi);
 }
+
+// ------------------------------------------------------------------ U-G3
+struct G3Args
+{
+   std::string device = "cpu", write, compare;
+   real_t tol = 1e-12;
+   /// The slip rate's limit.  With points open the slip rate of the device
+   /// and the host part more than the other fields and the difference grows
+   /// with the steps (measured, 1 rank: U-G3a 0 at 1 step, 1e-12 m/s at 50,
+   /// 6.8e-12 at 200, 1.8e-11 at 400 of V = 2 m/s; U-G3b 4e-12 at 200, 2e-11
+   /// at 400, open and closed points alike).  The open flags stay equal.
+   /// The cause is not isolated; a guess is V = -X / gamma at an open point,
+   /// X being the difference of two large penalty terms.
+   real_t tol_v = 1e-10;
+   long steps = 0;           ///< --steps N: instead of the case's own number (a measurement)
+   bool host_fast = false;   ///< --host-fast 1: a second host run with the per-face fault kernels
+   bool On() const { return !write.empty() || !compare.empty(); }
+};
+
+/// A reduction that does not change (the cycle's frozen relaxation r).
+class ConstantReduction : public IFaultNormalStressModifier
+{
+public:
+   explicit ConstantReduction(const Vector &r) : r_(r) {}
+   int NumPoints() const override { return r_.Size(); }
+   real_t NormalStressReduction(int j) const override { return r_(j); }
+   void Advance(real_t, const real_t *, const real_t *) override {}
+   bool Constant() const override { return true; }
+private:
+   Vector r_;
+};
+
+static void G3DeviceOn(NitscheWaveOperator &op, const G3Args &a)
+{
+   if (a.device == "cpu")
+   {
+      // a host run in another order of sums (the round-off reference)
+      if (a.host_fast) { op.SetFastFaultKernels(true); }
+      return;
+   }
+   op.SetMatrixFree(true);
+   op.SetFastFaultKernels(true);
+   op.SetDeviceFault(true);
+}
+
+/// The end state of this rank: written (host run) or compared (device run).
+static void G3Finish(const std::string &name, NitscheWaveOperator &op, const Vector &U,
+                     const Vector &Ud, long steps, const G3Args &a, bool all_open)
+{
+   const int no = op.NumOwnedFaultDOFs(), n = U.Size();
+   U.HostRead();
+   Ud.HostRead();
+   std::vector<double> buf;
+   auto put = [&buf](const Vector &v) { for (int i = 0; i < v.Size(); i++) { buf.push_back(v(i)); } };
+   const Vector &d = op.Slip(), &V = op.SlipRate(), &psi = op.State(), &sig = op.LastSigmaEff();
+   put(d); put(V); put(psi); put(sig); put(U); put(Ud);
+   const std::vector<char> &open = op.OpenFlags();
+   for (int j = 0; j < no; j++) { buf.push_back(open[j] ? 1.0 : 0.0); }
+   buf.push_back(static_cast<double>(op.FloorHits()));
+   buf.push_back(static_cast<double>(op.FlooredDOFs()));
+   real_t gmax = 0.0, smax = 0.0;
+   int nopen = 0;
+   for (int j = 0; j < no; j++)
+   {
+      const real_t *nv = &op.FaultFrames()(9 * j);
+      gmax = std::max(gmax, std::abs(d(3 * j) * nv[0] + d(3 * j + 1) * nv[1] + d(3 * j + 2) * nv[2]));
+      smax = std::max(smax, std::abs(sig(j)));
+      nopen += open[j] ? 1 : 0;
+   }
+   gmax = RMax(gmax);
+   smax = RMax(smax);
+   const int hits_g = ISum(static_cast<int>(op.FloorHits()));
+   const int nopen_g = ISum(nopen), ntot = ISum(no);
+   const std::string file = (a.write.empty() ? a.compare : a.write) + "." + name + "."
+                            + std::to_string(g_rank);
+   const bool dev = a.device != "cpu";
+   if (g_rank == 0)
+   {
+      std::cout << std::setprecision(6) << "  " << name << " on device \"" << a.device << "\": "
+                << steps << " steps, open " << nopen_g << " / " << ntot << " fault DOFs, max gap "
+                << gmax << " m, floor " << hits_g << " DOF-steps\n";
+   }
+   TEST_ASSERT(op.MatrixFreeActive() == dev && op.DeviceStepActive() == dev
+               && op.DeviceFaultActive() == dev,
+               name << " G1: the device step " << (dev ? "ran" : "is off") << ": matrix-free "
+               << op.MatrixFreeActive() << ", device step " << op.DeviceStepActive()
+               << ", device fault " << op.DeviceFaultActive());
+   TEST_ASSERT(nopen_g > 0 && gmax > 0.0 && (!all_open || (nopen_g == ntot && smax == 0.0)),
+               name << " G2: the fault opens (" << nopen_g << " of " << ntot << " DOFs, gap "
+               << gmax << " m" << (all_open ? "; every DOF open with sigma_eff = 0" : "") << ")");
+   if (!a.write.empty())
+   {
+      std::ofstream o(file, std::ios::binary);
+      const long m = static_cast<long>(buf.size());
+      o.write(reinterpret_cast<const char *>(&m), sizeof(m));
+      o.write(reinterpret_cast<const char *>(buf.data()), sizeof(double) * buf.size());
+      return;
+   }
+   std::ifstream in(file, std::ios::binary);
+   long m = -1;
+   in.read(reinterpret_cast<char *>(&m), sizeof(m));
+   std::vector<double> ref(m > 0 ? m : 0);
+   if (m > 0) { in.read(reinterpret_cast<char *>(ref.data()), sizeof(double) * ref.size()); }
+   int ok = (in && m == static_cast<long>(buf.size())) ? 1 : 0;
+   MPI_Allreduce(MPI_IN_PLACE, &ok, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+   TEST_ASSERT(ok == 1, name << " G0: the host file " << file << " has this run's layout");
+   if (ok != 1) { return; }
+   // d, V, psi, sigma_eff, U, Udot: the largest difference over the largest value
+   const int len[6] = {3 * no, 3 * no, no, no, n, n};
+   real_t rel[6];
+   int off = 0;
+   for (int f = 0; f < 6; f++)
+   {
+      real_t dmax = 0.0, vmax = 0.0;
+      for (int i = 0; i < len[f]; i++)
+      {
+         dmax = std::max(dmax, std::abs(buf[off + i] - ref[off + i]));
+         vmax = std::max(vmax, std::abs(ref[off + i]));
+      }
+      off += len[f];
+      dmax = RMax(dmax);
+      vmax = RMax(vmax);
+      rel[f] = (vmax > 0.0) ? dmax / vmax : dmax;
+   }
+   // the slip rate's difference over the DOFs open and closed at the end
+   real_t dV[2] = {0.0, 0.0};
+   {
+      const int oo = 3 * no + 3 * no + no + no + n + n;
+      for (int j = 0; j < no; j++)
+         for (int c = 0; c < 3; c++)
+         {
+            const int i = 3 * no + 3 * j + c, w = (ref[oo + j] != 0.0) ? 0 : 1;
+            dV[w] = std::max(dV[w], std::abs(buf[i] - ref[i]));
+         }
+      dV[0] = RMax(dV[0]);
+      dV[1] = RMax(dV[1]);
+      if (g_rank == 0)
+      {
+         std::cout << "  " << name << ": largest slip-rate difference " << dV[0]
+                   << " m/s over the open DOFs, " << dV[1] << " m/s over the closed DOFs\n";
+      }
+   }
+   int flips = 0, host_open = 0;
+   for (int j = 0; j < no; j++)
+   {
+      flips += (buf[off + j] != ref[off + j]) ? 1 : 0;
+      host_open += (ref[off + j] != 0.0) ? 1 : 0;
+   }
+   off += no;
+   flips = ISum(flips);
+   host_open = ISum(host_open);
+   const long hits = static_cast<long>(buf[off]), hits_h = static_cast<long>(ref[off]);
+   const int fl = static_cast<int>(buf[off + 1]), fl_h = static_cast<int>(ref[off + 1]);
+   int cnt = (hits == hits_h && fl == fl_h) ? 1 : 0;
+   MPI_Allreduce(MPI_IN_PLACE, &cnt, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+   TEST_ASSERT(rel[0] <= a.tol && rel[1] <= a.tol_v && rel[2] <= a.tol && rel[3] <= a.tol,
+               name << " G3: device against host on the fault: slip " << rel[0] << ", state "
+               << rel[2] << ", sigma_eff " << rel[3] << " (relative, limit " << a.tol
+               << "); slip rate " << rel[1] << " (limit " << a.tol_v << ")");
+   TEST_ASSERT(rel[4] <= a.tol && rel[5] <= a.tol,
+               name << " G4: the volume fields: U " << rel[4] << ", Udot " << rel[5]
+               << " (relative, limit " << a.tol << ")");
+   TEST_ASSERT(flips == 0 && cnt == 1,
+               name << " G5: the open flags are the host's (" << flips << " differ; host open "
+               << host_open << ", device " << nopen_g << "), and so are the floor counts on "
+               "every rank (rank 0: " << hits << " DOF-steps on " << fl << " DOFs, host "
+               << hits_h << " on " << fl_h << ")");
+}
+
+static void TestG3Block(const G3Args &a);
+static void TestG3Bend(const G3Args &a, int variant);
 
 // ------------------------------------------------------------------ U-C1
 static void TestC1(int p)
@@ -671,12 +866,225 @@ static void TestC3(int p, real_t tfinal)
                << r1 << ", " << r2 << ")");
 }
 
+// ------------------------------------------------------------------ U-G3
+static void TestG3Block(const G3Args &a)
+{
+   const int p = 2;
+   // U-C1's box and rotation
+   const real_t al = M_PI / 6, be = 2 * M_PI / 9;
+   const real_t Rz[9] = {std::cos(al), -std::sin(al), 0, std::sin(al), std::cos(al), 0, 0, 0, 1};
+   const real_t Rx[9] = {1, 0, 0, 0, std::cos(be), -std::sin(be), 0, std::sin(be), std::cos(be)};
+   real_t R[9];
+   for (int i = 0; i < 3; i++)
+      for (int j = 0; j < 3; j++)
+      {
+         R[3 * i + j] = 0.0;
+         for (int k = 0; k < 3; k++) { R[3 * i + j] += Rx[3 * i + k] * Rz[3 * k + j]; }
+      }
+   const real_t e_y[3] = {0, 1, 0}, e_z[3] = {0, 0, 1};
+   real_t ny[3], up[3];
+   Apply(R, e_y, ny);
+   Apply(R, e_z, up);
+   std::unique_ptr<Mesh> m(Box(4, 4, 2, R, true));
+   ParMesh pm(MPI_COMM_WORLD, *m);
+   m.reset();
+   const real_t v0 = 1.0;
+   BoundaryConfig bc;
+   bc.fault_attr = 3;
+   bc.natural_attrs = {1, 5};
+   bc.absorbing_attrs = {4};   // U-C1 pulls here (Dirichlet: not on the device before P1.11)
+   SlipWeakeningClosure cl;
+   NitscheFaultSetup fs;
+   fs.closure = &cl;
+   for (int d = 0; d < 3; d++)
+   {
+      fs.orientation.ref_normal[d] = -ny[d];
+      fs.orientation.up[d] = up[d];
+      fs.up[d] = up[d];
+   }
+   fs.orientation.fault_attrs = {3};
+   fs.prestress = [](const real_t[3], real_t s[9]) { for (int i = 0; i < 9; i++) { s[i] = 0.0; } };
+   fs.parameters = [](const real_t[3], FaultPointState &st) { Params(st); };
+   NitscheWaveOperator op(pm, p, Material(), bc, {}, &fs);
+   op.SetContactOpening(true);
+   G3DeviceOn(op, a);
+   const real_t dt = ComputeMaxDt(op.Sample(), pm, p, kCuse[p]);
+   op.SetTimeStep(dt);
+   AtRest(op, 0.0, 1.0e6);
+   const ParFiniteElementSpace &fes = op.Elasticity().GetFESpace();
+   const int n = op.Height();
+   Vector U(n), Ud(n);
+   U.UseDevice(true);
+   Ud.UseDevice(true);
+   U = 0.0;
+   Ud = 0.0;
+   Ud.HostReadWrite();
+   for (int e = 0; e < pm.GetNE(); e++)
+   {
+      Vector c(3);
+      pm.GetElementCenter(e, c);
+      const real_t s = (c(0) * ny[0] + c(1) * ny[1] + c(2) * ny[2] > 0.0) ? 1.0 : -1.0;
+      Array<int> vd;
+      fes.GetElementVDofs(e, vd);
+      const int nd = vd.Size() / 3;
+      for (int i = 0; i < nd; i++)
+         for (int k = 0; k < 3; k++)
+         {
+            const int q = fes.GetOrdering() == Ordering::byNODES ? k * nd + i : 3 * i + k;
+            Ud(vd[q]) = s * v0 * ny[k];
+         }
+   }
+   {
+      const int no = op.NumOwnedFaultDOFs();
+      Vector d0(3 * no), V0(3 * no);
+      d0 = 0.0;
+      for (int j = 0; j < no; j++)
+      {
+         const real_t *nv = &op.FaultFrames()(9 * j);
+         const real_t sg = (nv[0] * ny[0] + nv[1] * ny[1] + nv[2] * ny[2]) > 0 ? 1.0 : -1.0;
+         for (int c = 0; c < 3; c++) { V0(3 * j + c) = sg * 2 * v0 * ny[c]; }
+      }
+      Vector psi(op.State());
+      op.SetFaultState(d0, V0, psi);
+   }
+   op.SetTime(0.0);
+   CentralDifferenceSolver ode;
+   ode.Init(op);
+   real_t t = 0.0;
+   const int nsteps = a.steps > 0 ? static_cast<int>(a.steps) : 200;
+   for (int s = 0; s < nsteps; s++)
+   {
+      real_t h = dt;
+      ode.Step(U, Ud, t, h);
+   }
+   if (g_rank == 0) { std::cout << "  U-G3a: dt = " << dt << " s, t = " << t << " s\n"; }
+   G3Finish("U-G3a", op, U, Ud, nsteps, a, true);
+}
+
+/// variant 0: U-G3b; 1: U-G3c (relaxed contact); 2: U-G3d (the floor and
+/// its taper with a reduction the contact condition does not see).
+static void TestG3Bend(const G3Args &a, int variant)
+{
+   const bool relaxed = variant == 1, with_r = variant >= 1;
+   const int p = 1;
+   Mesh sm("ucerf3d/mesh/T-bend.msh", 1, 1);
+   ParMesh pm(MPI_COMM_WORLD, sm);
+   sm.Clear();
+   // U-C3's setup (RunC3)
+   BoundaryConfig bc;
+   bc.fault_attr = 3;
+   bc.natural_attrs = {1};
+   bc.absorbing_attrs = {2, 5};
+   SlipWeakeningClosure cl;
+   NitscheFaultSetup fs;
+   fs.closure = &cl;
+   const real_t ref[3] = {0.0, -1.0, 0.0}, up[3] = {0.0, 0.0, 1.0};
+   for (int d = 0; d < 3; d++)
+   {
+      fs.orientation.ref_normal[d] = ref[d];
+      fs.orientation.up[d] = up[d];
+      fs.up[d] = up[d];
+   }
+   fs.orientation.fault_attrs = {3};
+   fs.prestress = [](const real_t[3], real_t s[9]) {
+      for (int i = 0; i < 9; i++) { s[i] = 0.0; }
+      s[4] = -kS;
+   };
+   fs.nucleation_spatial = [](const real_t[3], real_t s[9]) {
+      for (int i = 0; i < 9; i++) { s[i] = 0.0; }
+      s[1] = s[3] = kTxy;
+   };
+   fs.nucleation_temporal = [](real_t t) {
+      if (t <= 0.0) { return real_t(0); }
+      if (t >= kRamp) { return real_t(1); }
+      return std::exp((t - kRamp) * (t - kRamp) / (t * (t - 2.0 * kRamp)));
+   };
+   fs.parameters = [](const real_t[3], FaultPointState &st) { Params(st); };
+   if (with_r) { fs.sigma_floor = 1.0e6; }
+   NitscheWaveOperator op(pm, p, Material(), bc, {}, &fs);
+   op.SetContactOpening(true);
+   std::unique_ptr<ConstantReduction> red;
+   if (with_r)
+   {
+      // r = +2 MPa on the west plane (x < 0), -1 MPa on the east plane
+      const int no = op.NumOwnedFaultDOFs();
+      Vector r(no);
+      for (int j = 0; j < no; j++) { r(j) = (op.FaultPositions()(3 * j) < 0.0) ? 2.0e6 : -1.0e6; }
+      red = std::make_unique<ConstantReduction>(r);
+      op.SetNormalStressModifier(red.get());
+      if (relaxed) { op.SetRelaxedContact(true); }
+      op.SetFloorTaper(true);
+   }
+   G3DeviceOn(op, a);
+   const real_t dt = ComputeMaxDt(op.Sample(), pm, p, kCuse[p]);
+   op.SetTimeStep(dt);
+   AtRest(op, 0.0, kS);
+   const int n = op.Height();
+   Vector U(n), Ud(n);
+   U.UseDevice(true);
+   Ud.UseDevice(true);
+   U = 0.0;
+   Ud = 0.0;
+   op.SetTime(0.0);
+   CentralDifferenceSolver ode;
+   ode.Init(op);
+   real_t t = 0.0;
+   const long steps = a.steps > 0 ? a.steps : std::lround(std::ceil(1.0 / dt - 1e-9));
+   for (long s = 0; s < steps; s++)
+   {
+      real_t h = dt;
+      ode.Step(U, Ud, t, h);
+   }
+   G3Finish(variant == 0 ? "U-G3b" : relaxed ? "U-G3c" : "U-G3d", op, U, Ud, steps, a, false);
+}
+
 int main(int argc, char *argv[])
 {
    Mpi::Init(argc, argv);
    Hypre::Init();
    g_rank = Mpi::WorldRank();
    std::string only = (argc == 3 && std::strcmp(argv[1], "--only") == 0) ? argv[2] : "";
+   G3Args g3;
+   for (int i = 1; i + 1 < argc; i += 2)
+   {
+      const std::string k = argv[i], v = argv[i + 1];
+      if (k == "--device") { g3.device = v; }
+      else if (k == "--write") { g3.write = v; }
+      else if (k == "--compare") { g3.compare = v; }
+      else if (k == "--tol") { g3.tol = std::atof(v.c_str()); }
+      else if (k == "--tol-v") { g3.tol_v = std::atof(v.c_str()); }
+      else if (k == "--case") { only = v; }
+      else if (k == "--steps") { g3.steps = std::atol(v.c_str()); }
+      else if (k == "--host-fast") { g3.host_fast = (v == "1"); }
+   }
+   if (g3.On())
+   {
+      // U-G3 (P1.9): one device per process
+      MFEM_VERIFY(g3.write.empty() != g3.compare.empty()
+                  && ((g3.device == "cpu") == g3.compare.empty() || g3.host_fast),
+                  "test_contact_3d: --device cpu --write PREFIX, or --device debug|cuda "
+                  "--compare PREFIX");
+      Device device(g3.device);
+#if defined(HYPRE_USING_GPU) && (MFEM_HYPRE_VERSION >= 23100)
+      HYPRE_SetMemoryLocation(HYPRE_MEMORY_HOST);   // as seas_nitsche_dyn_driver
+      HYPRE_SetExecutionPolicy(HYPRE_EXEC_HOST);
+#endif
+      if (g_rank == 0)
+      {
+         std::cout << "test_contact_3d (UCERF 3-D plan rev5, P1.9, U-G3) on " << Mpi::WorldSize()
+                   << " rank(s), ";
+         device.Print();
+      }
+      if (only.empty() || only == "G3a") { TestG3Block(g3); }
+      if (only.empty() || only == "G3b") { TestG3Bend(g3, 0); }
+      if (only.empty() || only == "G3c") { TestG3Bend(g3, 1); }
+      if (only.empty() || only == "G3d") { TestG3Bend(g3, 2); }
+      if (g_rank == 0)
+      {
+         std::cout << "\n" << (num_tests - num_failed) << "/" << num_tests << " tests passed\n";
+      }
+      return num_failed == 0 ? 0 : 1;
+   }
    if (g_rank == 0)
    {
       std::cout << "test_contact_3d (UCERF 3-D plan rev5, P1.3) on " << Mpi::WorldSize()

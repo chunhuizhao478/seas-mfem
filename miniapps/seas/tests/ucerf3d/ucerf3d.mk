@@ -131,6 +131,21 @@ test-contact-3d: seas_test_contact_3d
 
 .PHONY: test-contact-3d
 
+# P1.9 (plan rev5 U-G3): the device step's contact branch against the host
+# (U-G3a U-C1's block, U-G3b U-C3's T-bend run, U-G3c that run with the
+# relaxed contact condition, U-G3d with a reduction, a floor and the floor
+# taper), debug device, 1 and 2 ranks.
+test-device-contact-3d: seas_test_contact_3d
+	@for n in 1 2; do \
+	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_contact_3d --device cpu \
+	      --write test_device_contact_3d_np$$n || exit 1; \
+	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_contact_3d --device debug \
+	      --compare test_device_contact_3d_np$$n || exit 1; \
+	   rm -f test_device_contact_3d_np$$n.U-G3*; \
+	done
+
+.PHONY: test-device-contact-3d
+
 # P1.4 (plan rev5 U-P1, U-P2): the CFS-PML band and local time stepping in
 # 3-D.  U-P1 (--only P1C): a plane P wave down a uniform column, band on the
 # two end walls, against the band's design law (about 8 min on 2 ranks).

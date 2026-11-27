@@ -141,8 +141,11 @@ public:
       const auto &f = op.GetFaultFaceOps();
       MFEM_VERIFY(f.built, "DeviceSlipLoad: call BuildFaultFaceOps first");
       const int nbf = op.GetNbfPerFace();
-      m_ = 2 * nbf;
-      ns_ = 2 * f.nf * nbf;
+      // slip components per fault DOF: 2 (dip, strike), or 3 with the
+      // opening column (contact, BuildFaultFaceOps(3); UCERF 3-D P1.9)
+      const int sc = f.slip_comps;
+      m_ = sc * nbf;
+      ns_ = sc * f.nf * nbf;
       // one row per (face, side vdof) in AddSlipLoadFast's order, then
       // grouped by target vdof keeping that order
       struct Row { int t, g, s; };
@@ -152,7 +155,7 @@ public:
          const int ng = (fc < f.nfi) ? f.n1[fc] + f.n2[fc] : f.n1[fc];
          for (int r = 0; r < ng; r++)
          {
-            rows.push_back({f.vd[f.off_vd[fc] + r], f.off_G[fc] + r * m_, 2 * fc * nbf});
+            rows.push_back({f.vd[f.off_vd[fc] + r], f.off_G[fc] + r * m_, sc * fc * nbf});
          }
       }
       std::stable_sort(rows.begin(), rows.end(),
@@ -275,6 +278,7 @@ public:
       const auto &f = op.GetFaultFaceOps();
       MFEM_VERIFY(f.built, "DeviceFaultTraction: call BuildFaultFaceOps first");
       nbf_ = op.GetNbfPerFace();
+      sc_ = f.slip_comps;   // 3: + the opening column (contact; P1.9)
       nf_ = f.nf;
       nfi_ = f.nfi;
       auto copy = [](const std::vector<int> &h, Array<int> &d)
@@ -314,14 +318,14 @@ public:
    void Mult(const Vector &u, const Vector &s, Vector &Tk, Vector &sn) const
    {
       const int nd = nf_ * nbf_;
-      MFEM_VERIFY(s.Size() == 2 * nd, "DeviceFaultTraction: slip size " << s.Size()
-                  << " != " << 2 * nd);
+      MFEM_VERIFY(s.Size() == sc_ * nd, "DeviceFaultTraction: slip size " << s.Size()
+                  << " != " << sc_ * nd);
       Tk.SetSize(2 * nd);
       sn.SetSize(nd);
       const real_t *du = u.Read(true);
       Exchange_(du);
       if (nd == 0) { return; }
-      const int nbf = nbf_, nfi = nfi_;
+      const int nbf = nbf_, nfi = nfi_, sc = sc_;
       const int *n1 = n1_.Read(true), *n2 = n2_.Read(true), *ov = off_vd_.Read(true),
                  *oa = off_A_.Read(true), *vd = vd_.Read(true), *no = nbr_off_.Read(true);
       const real_t *A = A_.Read(true), *ds = s.Read(true), *rb = recv_buf_.Read(true);
@@ -329,7 +333,7 @@ public:
       mfem::forall(3 * nd, [=] MFEM_HOST_DEVICE (int i)
       {
          const int r = i % 3, k = i / 3, f = k / nbf, kk = k % nbf;
-         const int m1 = n1[f], m2 = n2[f], nc = m1 + m2 + 2 * nbf;
+         const int m1 = n1[f], m2 = n2[f], nc = m1 + m2 + sc * nbf;
          const int *v = vd + ov[f];
          const real_t *a = A + oa[f] + static_cast<std::size_t>(r * nbf + kk) * nc;
          real_t t = 0.0;
@@ -343,8 +347,8 @@ public:
             const real_t *nb = rb + no[f - nfi];
             for (int c = 0; c < m2; c++) { t += a[m1 + c] * nb[c]; }
          }
-         const real_t *sf = ds + 2 * f * nbf;
-         for (int c = 0; c < 2 * nbf; c++) { t += a[m1 + m2 + c] * sf[c]; }
+         const real_t *sf = ds + sc * f * nbf;
+         for (int c = 0; c < sc * nbf; c++) { t += a[m1 + m2 + c] * sf[c]; }
          if (r < 2) { dT[2 * k + r] = t; }
          else { dn[k] = t; }
       });
@@ -376,7 +380,7 @@ public:
 
 private:
    MPI_Comm comm_;
-   int nbf_ = 1, nf_ = 0, nfi_ = 0;
+   int nbf_ = 1, nf_ = 0, nfi_ = 0, sc_ = 2;
    Array<int> n1_, n2_, off_vd_, off_A_, vd_, nbr_off_, send_vd_;
    Vector A_;
    std::vector<int> recv_ranks_, recv_off_, send_ranks_, send_off_;
@@ -473,12 +477,13 @@ public:
 
    /// slip_k (2 per local DOF: dip, strike) of the owned three-vectors d
    /// (3 per owned DOF), as ToKernelLocal_(d, slip_k).  Collective (the
-   /// ghost copies).
-   void ToKernelLocal(const Vector &d, Vector &slip_k) const
+   /// ghost copies).  sc = 3 (contact; P1.9): + the opening eps_f (d . n_k)
+   /// as the third component per DOF.
+   void ToKernelLocal(const Vector &d, Vector &slip_k, int sc = 2) const
    {
       MFEM_VERIFY(d.Size() == 3 * no_, "DeviceFaultMaps: size " << d.Size() << " != 3 x "
                   << no_ << " owned fault DOFs");
-      slip_k.SetSize(2 * nd_);
+      slip_k.SetSize(sc * nd_);
       const real_t *dd = d.Read(true);
       Scatter_(dd);
       if (nd_ == 0) { return; }
@@ -490,8 +495,9 @@ public:
          const int q = src[k];
          const real_t zero[3] = {0.0, 0.0, 0.0};
          const real_t *dv = (q >= 0) ? dd + 3 * q : (q == -1) ? zero : rb + 3 * (-2 - q);
-         fault_frame::ToKernel(dv, ep[k], bk + 9 * k + 3, bk + 9 * k + 6, sk[2 * k],
-                               sk[2 * k + 1]);
+         fault_frame::ToKernel(dv, ep[k], bk + 9 * k + 3, bk + 9 * k + 6, sk[sc * k],
+                               sk[sc * k + 1]);
+         if (sc == 3) { sk[3 * k + 2] = ep[k] * fault_frame::Dot(dv, bk + 9 * k); }
       });
    }
 
