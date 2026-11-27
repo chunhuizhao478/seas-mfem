@@ -61,6 +61,7 @@
 #include "../integrator/pml_elasticity_integrators.hpp"
 
 #include <cmath>
+#include <limits>
 #include <map>
 #include <memory>
 #include <vector>
@@ -69,6 +70,135 @@ namespace mfem
 {
 namespace seas
 {
+
+// The per-point kernels of the device form (UCERF 3-D plan rev5, P1.10;
+// PmlDynamicTerms::SetDevice): StepPipe_, Stage12_, Hooke_, StepMass_ and
+// MassE_ for D = 3 on flat arrays, the same operations in the same order.
+// n: the point's frame (3 x 3, row b = n_b); c: its filter coefficients,
+// kCoef reals: d[3], eB[3], gB[3], eA[3], gA[3].
+namespace pmldev
+{
+constexpr int kCoef = 16;
+constexpr int kMaxNd = 10;   ///< nodes per element (p <= 2 tetrahedra)
+
+MFEM_HOST_DEVICE inline void Hooke(real_t lam, real_t mu, const real_t H[3][3], real_t s[3][3])
+{
+   real_t tr = 0.0;
+   for (int k = 0; k < 3; k++) { tr += H[k][k]; }
+   for (int i = 0; i < 3; i++)
+      for (int j = 0; j < 3; j++)
+      { s[i][j] = mu * (H[i][j] + H[j][i]) + (i == j ? lam * tr : 0.0); }
+}
+
+MFEM_HOST_DEVICE inline void Stage12(int na, const real_t *n, real_t lam, real_t mu,
+                                     const real_t *st, real_t s2[3][3])
+{
+   const real_t *Gp = st, *phi = st + 9;
+   real_t Gt[3][3];
+   for (int i = 0; i < 3; i++)
+      for (int l = 0; l < 3; l++)
+      {
+         real_t v = Gp[i * 3 + l];
+         for (int k = 0; k < na; k++) { v -= phi[k * 3 + i] * n[3 * k + l]; }
+         Gt[i][l] = v;
+      }
+   Hooke(lam, mu, Gt, s2);
+}
+
+MFEM_HOST_DEVICE inline void StepPipe(int na, const real_t *n, const real_t *c, real_t lam,
+                                      real_t mu, const real_t G[3][3], real_t *st,
+                                      real_t ds[3][3])
+{
+   const real_t *eB = c + 3, *gB = c + 6, *eA = c + 9, *gA = c + 12;
+   real_t *Gp = st;
+   real_t *phi = st + 9;
+   for (int k = 0; k < na; k++)
+   {
+      const real_t *nk = n + 3 * k;
+      for (int i = 0; i < 3; i++)
+      {
+         real_t zn = 0.0, zo = 0.0;
+         for (int l = 0; l < 3; l++) { zn += G[i][l] * nk[l]; zo += Gp[i * 3 + l] * nk[l]; }
+         phi[k * 3 + i] = eB[k] * phi[k * 3 + i] + gB[k] * (zo + zn);
+      }
+   }
+   for (int i = 0; i < 9; i++) { Gp[i] = G[i / 3][i % 3]; }
+   real_t st2[3][3];
+   Stage12(na, n, lam, mu, st, st2);
+   real_t *f = phi + na * 3;
+   real_t sig[3][3] = {{0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}};
+   for (int b = 0; b < 3; b++)
+   {
+      const real_t *nb = n + 3 * b;
+      real_t z[3];
+      for (int i = 0; i < 3; i++)
+      {
+         z[i] = 0.0;
+         for (int l = 0; l < 3; l++) { z[i] += st2[i][l] * nb[l]; }
+      }
+      for (int k = 0; k < na; k++)
+      {
+         if (k == b) { continue; }
+         real_t *m = f, *zo = f + 3;
+         for (int i = 0; i < 3; i++)
+         {
+            m[i] = eA[k] * m[i] + gA[k] * (zo[i] + z[i]);
+            zo[i] = z[i];
+            z[i] += m[i];
+         }
+         f += 6;
+      }
+      for (int i = 0; i < 3; i++)
+         for (int j = 0; j < 3; j++) { sig[i][j] += z[i] * nb[j]; }
+   }
+   real_t Gn[3][3], s0[3][3];
+   for (int i = 0; i < 3; i++)
+      for (int l = 0; l < 3; l++) { Gn[i][l] = Gp[i * 3 + l]; }
+   Hooke(lam, mu, Gn, s0);
+   for (int i = 0; i < 3; i++)
+      for (int j = 0; j < 3; j++) { ds[i][j] = sig[i][j] - s0[i][j]; }
+}
+
+MFEM_HOST_DEVICE inline void StepMass(int na, const real_t *c, const real_t *w, real_t *st)
+{
+   const real_t *eA = c + 9, *gA = c + 12;
+   real_t y[3];
+   for (int i = 0; i < 3; i++) { y[i] = w[i]; }
+   real_t *f = st + 3;
+   for (int k = 0; k < na; k++)
+   {
+      real_t *chi = f, *zo = f + 3;
+      for (int i = 0; i < 3; i++)
+      {
+         chi[i] = eA[k] * chi[i] + gA[k] * (zo[i] + y[i]);
+         zo[i] = y[i];
+         y[i] += chi[i];
+      }
+      f += 6;
+   }
+   for (int i = 0; i < 3; i++) { st[i] = w[i]; }
+}
+
+MFEM_HOST_DEVICE inline void MassE(int na, const real_t *c, real_t al, const real_t *st,
+                                   real_t E[3])
+{
+   real_t y[3], Yd[3];
+   for (int i = 0; i < 3; i++) { y[i] = st[i]; Yd[i] = 0.0; E[i] = 0.0; }
+   const real_t *f = st + 3;
+   for (int k = 0; k < na; k++)
+   {
+      const real_t *chi = f;
+      for (int i = 0; i < 3; i++)
+      {
+         const real_t dy = c[k] * y[i] - al * chi[i];
+         E[i] += c[k] * Yd[i] - al * dy;
+         Yd[i] += dy;
+         y[i] += chi[i];
+      }
+      f += 6;
+   }
+}
+}  // namespace pmldev
 
 class PmlDynamicTerms
 {
@@ -94,6 +224,7 @@ public:
       MFEM_VERIFY(dt > 0.0, "PmlDynamicTerms::SetTimeStep: dt = " << dt);
       dt_ = dt;
       for (Coef &c : coefs_) { c.Set(band_->Alpha(), dt); }
+      dev_coef_dirty_ = true;
    }
    real_t TimeStep() const { return dt_; }
 
@@ -212,6 +343,7 @@ public:
    {
       us_ = u_s;
       std::fill(state_.begin(), state_.end(), 0.0);
+      if (dev_built_) { d_state_ = 0.0; }   // the device form's memory
       // g(t_s) at the wall face points
       for (Face &f : faces_)
       {
@@ -233,7 +365,8 @@ public:
       t_last_ = t;
       fcache_.SetSize(u_s.Size());
       fcache_ = 0.0;
-      ForceFromState_(fcache_);
+      // the device form's memory is zero here, and so is its B + E
+      if (!dev_) { ForceFromState_(fcache_); }
       entered_ = true;
    }
 
@@ -243,6 +376,12 @@ public:
    {
       MFEM_VERIFY(entered_, "PmlDynamicTerms::Advance before Enter");
       const RankCosts::Scope cost(RankCosts::Pml);
+      if (dev_)
+      {
+         UpdateAllDevice_(x);
+         t_last_ = t;
+         return;
+      }
       w_ = x;
       w_ -= us_;
       Gather_(w_);
@@ -258,6 +397,7 @@ public:
       MFEM_VERIFY(entered_, "PmlDynamicTerms::AddForce before Enter");
       MFEM_VERIFY(fcache_.Size() == F.Size(), "PmlDynamicTerms::AddForce: size");
       const RankCosts::Scope cost(RankCosts::Pml);
+      if (dev_) { b_band_.UseDevice(true); }
       F += b_band_;
       F += fcache_;   // B + E of the stored state (UpdateAll_ / Enter)
       if (beta_over_mu_ > 0.0)
@@ -269,6 +409,208 @@ public:
    }
 
    const Vector &BandLoad() const { return b_band_; }
+
+   /// The device form (UCERF 3-D plan rev5, P1.10): Advance steps every
+   /// pipeline in kernels on the mfem device and leaves B + E there; Enter
+   /// and the static terms stay on the host (once per phase).  3-D, one
+   /// element type, no band wall (Dirichlet) faces and no 2.5D term yet.
+   /// The arithmetic per point is the host's; the rows of an element are
+   /// summed in the host's order (its volume points, then its faces in
+   /// face order).  Collective on the first Advance.
+   void SetDevice(bool on)
+   {
+      MFEM_VERIFY(!on || Device::IsEnabled(), "PmlDynamicTerms::SetDevice: no mfem device");
+      MFEM_VERIFY(!on || D_ == 3, "PmlDynamicTerms::SetDevice: 3-D only");
+      dev_ = on;
+   }
+   bool OnDevice() const { return dev_; }
+
+   // The functions holding the kernels are public (nvcc extended lambdas).
+   void UpdateAllDevice_(const Vector &x)
+   {
+      if (!dev_built_) { BuildDevice_(); }
+      if (dev_coef_dirty_) { PackCoefs_(); }
+      const int n = us_.Size(), nd = dnd_, nv = 3 * nd;
+      // w = x - u_s, with the face-neighbour values
+      {
+         const real_t *xx = x.Read(true), *us = us_.Read(true);
+         real_t *g = gf_->Write(true);
+         mfem::forall(n, [=] MFEM_HOST_DEVICE (int i) { g[i] = xx[i] - us[i]; });
+      }
+      {
+         const RankCosts::Scope wait(RankCosts::WPml);
+         gf_->ExchangeFaceNbrData();
+      }
+      fcache_.SetSize(n);
+      fcache_.UseDevice(true);
+      fcache_ = 0.0;
+      const real_t al = band_->Alpha();
+      const real_t *w = gf_->Read(true);
+      const real_t *co = d_coef_.Read(true), *fr = d_frame_.Read(true);
+      const int *bi = d_bi_.Read(true), *vd = d_vd_.Read(true);
+      real_t *st = d_state_.ReadWrite(true);
+      real_t *fc = fcache_.ReadWrite(true);
+      const int nve = static_cast<int>(vol_.size());
+      if (nve > 0)
+      {
+         const int *ie = d_vie_.Read(true), *ip = d_vip_.Read(true);
+         const real_t *re = d_vre_.Read(true), *rp = d_vrp_.Read(true);
+         const real_t *vsh = d_vsh_.Read(true), *vdsh = d_vdsh_.Read(true);
+         mfem::forall(nve, [=] MFEM_HOST_DEVICE (int e)
+         {
+            const int p0 = ie[3 * e], nq = ie[3 * e + 1];
+            const int *v = vd + ie[3 * e + 2];
+            const real_t lam = re[3 * e], mu = re[3 * e + 1], rho = re[3 * e + 2];
+            real_t ue[3 * pmldev::kMaxNd], r[3 * pmldev::kMaxNd];
+            for (int i = 0; i < nv; i++) { ue[i] = w[v[i]]; r[i] = 0.0; }
+            for (int q = 0; q < nq; q++)
+            {
+               const int *pi = ip + 5 * (p0 + q);
+               const int b = pi[0], na = bi[2 * b];
+               if (na == 0) { continue; }
+               const real_t *c = co + pmldev::kCoef * bi[2 * b + 1], *nf = fr + 9 * b;
+               const real_t *sh = vsh + pi[1], *dsh = vdsh + pi[2];
+               const real_t wdet = rp[p0 + q];
+               real_t G[3][3], wv[3], ds[3][3], E[3];
+               for (int i = 0; i < 3; i++)
+                  for (int l = 0; l < 3; l++)
+                  {
+                     real_t s = 0.0;
+                     for (int k = 0; k < nd; k++) { s += ue[i * nd + k] * dsh[k * 3 + l]; }
+                     G[i][l] = s;
+                  }
+               pmldev::StepPipe(na, nf, c, lam, mu, G, st + pi[3], ds);
+               for (int i = 0; i < 3; i++)
+               {
+                  real_t s = 0.0;
+                  for (int k = 0; k < nd; k++) { s += ue[i * nd + k] * sh[k]; }
+                  wv[i] = s;
+               }
+               pmldev::StepMass(na, c, wv, st + pi[4]);
+               for (int k = 0; k < nd; k++)
+                  for (int p = 0; p < 3; p++)
+                  {
+                     real_t s = 0.0;
+                     for (int m = 0; m < 3; m++) { s += dsh[k * 3 + m] * ds[p][m]; }
+                     r[p * nd + k] += wdet * s;
+                  }
+               pmldev::MassE(na, c, al, st + pi[4], E);
+               for (int k = 0; k < nd; k++)
+                  for (int cc = 0; cc < 3; cc++) { r[cc * nd + k] += wdet * rho * E[cc] * sh[k]; }
+            }
+            for (int i = 0; i < nv; i++) { fc[v[i]] = r[i]; }
+         });
+      }
+      const int nf = static_cast<int>(faces_.size());
+      if (nf > 0)
+      {
+         const int *ie = d_fie_.Read(true), *ip = d_fip_.Read(true);
+         const int *nvd = (d_nvd_.Size() > 0) ? d_nvd_.Read(true) : nullptr;
+         const real_t *wn = (gf_->FaceNbrData().Size() > 0) ? gf_->FaceNbrData().Read(true)
+                                                            : nullptr;
+         const real_t *re = d_fre_.Read(true), *rp = d_frp_.Read(true);
+         const real_t *fsh = d_fsh_.Read(true), *fdsh = d_fdsh_.Read(true);
+         const real_t eps = eps_;
+         real_t *fb = d_fbuf_.Write(true);
+         mfem::forall(nf, [=] MFEM_HOST_DEVICE (int f)
+         {
+            const int kind = ie[5 * f], nq = ie[5 * f + 1], p0 = ie[5 * f + 2];
+            const int *v1 = vd + ie[5 * f + 3];
+            real_t u[2][3 * pmldev::kMaxNd], r[2][3 * pmldev::kMaxNd];
+            for (int i = 0; i < nv; i++) { u[0][i] = w[v1[i]]; r[0][i] = 0.0; r[1][i] = 0.0; }
+            if (kind == 0)
+            {
+               const int *v2 = vd + ie[5 * f + 4];
+               for (int i = 0; i < nv; i++) { u[1][i] = w[v2[i]]; }
+            }
+            else
+            {
+               const int *v2 = nvd + ie[5 * f + 4];
+               for (int i = 0; i < nv; i++) { u[1][i] = wn[v2[i]]; }
+            }
+            const real_t lm[2][2] = {{re[4 * f], re[4 * f + 1]}, {re[4 * f + 2], re[4 * f + 3]}};
+            const int nlocal = (kind == 1) ? 1 : 2;
+            for (int q = 0; q < nq; q++)
+            {
+               const int *pi = ip + 9 * (p0 + q);
+               const real_t *pr = rp + 4 * (p0 + q);
+               const real_t wq = pr[0], *nor = pr + 1;
+               const int b = pi[0], na = bi[2 * b];
+               const real_t *c = co + pmldev::kCoef * bi[2 * b + 1], *nfm = fr + 9 * b;
+               real_t a[2][3], jmp[3];
+               for (int s = 0; s < 2; s++)
+               {
+                  const real_t *sh = fsh + pi[1 + s];
+                  for (int i = 0; i < 3; i++)
+                  {
+                     real_t t = 0.0;
+                     for (int k = 0; k < nd; k++) { t += u[s][i * nd + k] * sh[k]; }
+                     a[s][i] = t;
+                  }
+               }
+               for (int cc = 0; cc < 3; cc++) { jmp[cc] = a[0][cc] - a[1][cc]; }
+               real_t J[3][3];
+               for (int i = 0; i < 3; i++)
+                  for (int l = 0; l < 3; l++) { J[i][l] = jmp[i] * nor[l]; }
+               real_t dcs[2][3][3], dss[2][3][3];
+               for (int s = 0; s < 2; s++)
+               {
+                  const real_t *dsh = fdsh + pi[3 + s];
+                  real_t Gs[3][3];
+                  for (int i = 0; i < 3; i++)
+                     for (int l = 0; l < 3; l++)
+                     {
+                        real_t t = 0.0;
+                        for (int k = 0; k < nd; k++) { t += u[s][i * nd + k] * dsh[k * 3 + l]; }
+                        Gs[i][l] = t;
+                     }
+                  for (int i = 0; i < 3; i++)
+                     for (int j = 0; j < 3; j++) { dcs[s][i][j] = 0.0; dss[s][i][j] = 0.0; }
+                  if (na == 0) { continue; }
+                  pmldev::StepPipe(na, nfm, c, lm[s][0], lm[s][1], Gs, st + pi[5 + s], dcs[s]);
+                  pmldev::StepPipe(na, nfm, c, lm[s][0], lm[s][1], J, st + pi[7 + s], dss[s]);
+               }
+               real_t avg_n[3];
+               for (int i = 0; i < 3; i++)
+               {
+                  real_t t = 0.0;
+                  for (int l = 0; l < 3; l++) { t += 0.5 * (dcs[0][i][l] + dcs[1][i][l]) * nor[l]; }
+                  avg_n[i] = t;
+               }
+               const real_t csym = 0.5 * eps;
+               for (int s = 0; s < nlocal; s++)
+               {
+                  const real_t *sh = fsh + pi[1 + s], *dsh = fdsh + pi[3 + s];
+                  const real_t sgn = (s == 0) ? -1.0 : 1.0;
+                  for (int k = 0; k < nd; k++)
+                     for (int p = 0; p < 3; p++)
+                     {
+                        real_t t = sgn * sh[k] * avg_n[p];
+                        real_t sy = 0.0;
+                        for (int m = 0; m < 3; m++) { sy += dsh[k * 3 + m] * dss[s][p][m]; }
+                        t += csym * sy;
+                        r[s][p * nd + k] += wq * t;
+                     }
+               }
+            }
+            real_t *o = fb + static_cast<std::size_t>(2 * nv) * f;
+            for (int i = 0; i < nv; i++) { o[i] = r[0][i]; o[nv + i] = r[1][i]; }
+         });
+         // each element adds its faces' terms, in face order
+         const int nt = d_te_.Size();
+         const int *te = d_te_.Read(true), *tp = d_tptr_.Read(true), *tf = d_tfs_.Read(true);
+         const real_t *fbr = d_fbuf_.Read(true);
+         mfem::forall(nt, [=] MFEM_HOST_DEVICE (int t)
+         {
+            const int *v = vd + te[t];
+            for (int j = tp[t]; j < tp[t + 1]; j++)
+            {
+               const real_t *o = fbr + static_cast<std::size_t>(nv) * tf[j];
+               for (int i = 0; i < nv; i++) { fc[v[i]] += o[i]; }
+            }
+         });
+      }
+   }
 
    /// B_0 + K_p acting on a field u (static mode, wall jump u - g(t)): for
    /// tests, K0 u = K_p u + StaticBand(u) to rounding.  Collective.
@@ -378,6 +720,12 @@ private:
    std::shared_ptr<const real_t> beta_t_off_;
    Vector fbs_, fb1_;
    Vector fcache_;   // B(w, Phi) + E(w, chi) of the stored state
+   // the device form (SetDevice, BuildDevice_): the tables above as flat arrays
+   bool dev_ = false, dev_built_ = false, dev_coef_dirty_ = true;
+   int dnd_ = 0;
+   Vector d_coef_, d_frame_, d_vre_, d_vrp_, d_vsh_, d_vdsh_, d_fre_, d_frp_, d_fsh_, d_fdsh_;
+   Vector d_state_, d_fbuf_;
+   Array<int> d_bi_, d_vie_, d_vip_, d_fie_, d_fip_, d_vd_, d_nvd_, d_te_, d_tptr_, d_tfs_;
    mutable Vector ue_, u1_, u2_, r_, r1_, r2_;   // scratch (per element / face)
    std::unique_ptr<ParGridFunction> gf_;   // values with face-neighbour data
 
@@ -853,8 +1201,189 @@ private:
    void Gather_(const Vector &u)
    {
       gf_->SetFromTrueDofs(u);   // DG: true dofs = local vdofs
-      const RankCosts::Scope wait(RankCosts::WPml);
-      gf_->ExchangeFaceNbrData();
+      {
+         const RankCosts::Scope wait(RankCosts::WPml);
+         gf_->ExchangeFaceNbrData();
+      }
+      // the host loops read both through raw pointers (no-ops without a device)
+      gf_->HostRead();
+      gf_->FaceNbrData().HostRead();
+   }
+
+   // ---------------- the device form (SetDevice)
+   void PackCoefs_()
+   {
+      d_coef_.SetSize(pmldev::kCoef * static_cast<int>(coefs_.size()));
+      real_t *h = d_coef_.HostWrite();
+      for (std::size_t i = 0; i < coefs_.size(); i++)
+      {
+         const Coef &c = coefs_[i];
+         real_t *o = h + pmldev::kCoef * i;
+         for (int k = 0; k < 3; k++)
+         {
+            const bool a = k < c.nact;
+            o[k] = a ? c.d[k] : 0.0;
+            o[3 + k] = a ? c.eB[k] : 0.0;
+            o[6 + k] = a ? c.gB[k] : 0.0;
+            o[9 + k] = a ? c.eA[k] : 0.0;
+            o[12 + k] = a ? c.gA[k] : 0.0;
+         }
+         o[15] = 0.0;
+      }
+      dev_coef_dirty_ = false;
+   }
+
+   void BuildDevice_()
+   {
+      MFEM_VERIFY(beta_over_mu_ == 0.0, "PmlDynamicTerms: the device form has no 2.5D term");
+      MFEM_VERIFY(state_.size() < static_cast<std::size_t>(std::numeric_limits<int>::max()),
+                  "PmlDynamicTerms: the device form holds the memory of one rank in one "
+                  "vector, at most 2^31 reals; this rank has " << state_.size()
+                  << " (use more ranks)");
+      const FiniteElementSpace &fes = elast_.GetFESpace();
+      dnd_ = (fes.GetNE() > 0) ? fes.GetFE(0)->GetDof() : 0;
+      const int nd = dnd_, nv = 3 * nd;
+      MFEM_VERIFY(nd <= pmldev::kMaxNd, "PmlDynamicTerms: the device form covers elements of "
+                  "at most " << pmldev::kMaxNd << " nodes, not " << nd);
+      auto ints = [](const std::vector<int> &h, Array<int> &d)
+      {
+         d.SetSize(static_cast<int>(h.size()));
+         int *p = d.HostWrite();
+         for (std::size_t i = 0; i < h.size(); i++) { p[i] = h[i]; }
+      };
+      auto reals = [](const std::vector<real_t> &h, Vector &d)
+      {
+         MFEM_VERIFY(h.size() < static_cast<std::size_t>(std::numeric_limits<int>::max()),
+                     "PmlDynamicTerms: a device table of " << h.size() << " reals");
+         d.SetSize(static_cast<int>(h.size()));
+         real_t *p = d.HostWrite();
+         for (std::size_t i = 0; i < h.size(); i++) { p[i] = h[i]; }
+      };
+      for (int v : vdofs_) { MFEM_VERIFY(v >= 0, "PmlDynamicTerms: negative vdof (not DG)"); }
+      for (int v : nbr_vdofs_) { MFEM_VERIFY(v >= 0, "PmlDynamicTerms: negative neighbour vdof"); }
+      ints(vdofs_, d_vd_);
+      ints(nbr_vdofs_, d_nvd_);
+      reals(vshape_, d_vsh_);
+      reals(vdshape_, d_vdsh_);
+      reals(fshape_, d_fsh_);
+      reals(fdshape_, d_fdsh_);
+      std::vector<int> hi;
+      std::vector<real_t> hr;
+      for (const BandPt &b : bpt_)
+      {
+         hi.push_back(b.nact);
+         hi.push_back(b.coef);
+         for (int k = 0; k < 3; k++)
+            for (int i = 0; i < 3; i++) { hr.push_back(b.n[k][i]); }
+      }
+      ints(hi, d_bi_);
+      reals(hr, d_frame_);
+      hi.clear();
+      hr.clear();
+      std::vector<int> pi;
+      std::vector<real_t> pr;
+      for (const VolElem &ve : vol_)
+      {
+         MFEM_VERIFY(ve.nd == nd, "PmlDynamicTerms: the device form needs one element type");
+         hi.push_back(ve.p0);
+         hi.push_back(ve.nq);
+         hi.push_back(ve.vd);
+         hr.push_back(ve.lam);
+         hr.push_back(ve.mu);
+         hr.push_back(ve.rho);
+         for (int q = 0; q < ve.nq; q++)
+         {
+            const VolPt &p = vpt_[ve.p0 + q];
+            pi.push_back(p.band);
+            pi.push_back(p.shape);
+            pi.push_back(p.dshape);
+            pi.push_back(static_cast<int>(p.st_g));
+            pi.push_back(static_cast<int>(p.st_m));
+            pr.push_back(p.wdet);
+         }
+      }
+      MFEM_VERIFY(pr.size() == vpt_.size(), "PmlDynamicTerms: volume points out of order");
+      ints(hi, d_vie_);
+      reals(hr, d_vre_);
+      ints(pi, d_vip_);
+      reals(pr, d_vrp_);
+      hi.clear();
+      hr.clear();
+      pi.clear();
+      pr.clear();
+      // element -> (face, side) in face order; an element's vdofs offset
+      std::map<int, std::pair<int, std::vector<int>>> touch;
+      for (std::size_t fi = 0; fi < faces_.size(); fi++)
+      {
+         const Face &f = faces_[fi];
+         MFEM_VERIFY(f.kind != 2, "PmlDynamicTerms: the device form has no band wall "
+                     "(Dirichlet) faces yet (UCERF 3-D plan rev5, P1.11); attribute " << f.attr);
+         MFEM_VERIFY(f.nd1 == nd && f.nd2 == nd, "PmlDynamicTerms: one element type");
+         MFEM_VERIFY(f.p0 == static_cast<int>(pr.size() / 4), "PmlDynamicTerms: face points "
+                     "out of order");
+         hi.push_back(f.kind);
+         hi.push_back(f.nq);
+         hi.push_back(f.p0);
+         hi.push_back(f.vd1);
+         hi.push_back(f.vd2);
+         hr.push_back(f.lam[0]);
+         hr.push_back(f.mu[0]);
+         hr.push_back(f.lam[1]);
+         hr.push_back(f.mu[1]);
+         for (int q = 0; q < f.nq; q++)
+         {
+            const FacePt &p = fpt_[f.p0 + q];
+            pi.push_back(p.band);
+            pi.push_back(p.shape[0]);
+            pi.push_back(p.shape[1]);
+            pi.push_back(p.dshape[0]);
+            pi.push_back(p.dshape[1]);
+            pi.push_back(static_cast<int>(p.st_c[0]));
+            pi.push_back(static_cast<int>(p.st_c[1]));
+            pi.push_back(static_cast<int>(p.st_s[0]));
+            pi.push_back(static_cast<int>(p.st_s[1]));
+            pr.push_back(p.w);
+            for (int i = 0; i < 3; i++) { pr.push_back(p.nor[i]); }
+         }
+         auto &t1 = touch[f.e1];
+         t1.first = f.vd1;
+         t1.second.push_back(2 * static_cast<int>(fi));
+         if (f.kind == 0)
+         {
+            auto &t2 = touch[f.e2];
+            t2.first = f.vd2;
+            t2.second.push_back(2 * static_cast<int>(fi) + 1);
+         }
+      }
+      ints(hi, d_fie_);
+      reals(hr, d_fre_);
+      ints(pi, d_fip_);
+      reals(pr, d_frp_);
+      std::vector<int> te, tptr(1, 0), tfs;
+      for (const auto &kv : touch)
+      {
+         te.push_back(kv.second.first);
+         for (int fs : kv.second.second) { tfs.push_back(fs); }
+         tptr.push_back(static_cast<int>(tfs.size()));
+      }
+      ints(te, d_te_);
+      ints(tptr, d_tptr_);
+      ints(tfs, d_tfs_);
+      MFEM_VERIFY(static_cast<std::size_t>(2 * nv) * faces_.size()
+                  < static_cast<std::size_t>(std::numeric_limits<int>::max()),
+                  "PmlDynamicTerms: the device form's face buffer is too large for one rank");
+      d_fbuf_.SetSize(2 * nv * static_cast<int>(faces_.size()));
+      d_fbuf_.UseDevice(true);
+      d_state_.SetSize(static_cast<int>(state_.size()));
+      d_state_.UseDevice(true);
+      {
+         // the memory so far (zero right after Enter)
+         real_t *h = d_state_.HostWrite();
+         for (std::size_t i = 0; i < state_.size(); i++) { h[i] = state_[i]; }
+      }
+      us_.UseDevice(true);
+      gf_->UseDevice(true);
+      dev_built_ = true;
    }
 
    // element values (byNODES) from the cached vdofs (as GetSubVector:

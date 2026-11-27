@@ -168,6 +168,22 @@ test-pml-lts-3d: seas_test_pml_lts_3d
 
 .PHONY: test-pml-lts-3d
 
+# P1.10 (plan rev5 U-G4): the PML band on the mfem device.  K: the
+# matrix-free stiffness with the band's penalty factor against the assembled
+# one.  W: the plane wave into the band, the device run (debug device: the
+# device code on the CPU with memory checks) against the host run, on 1 and
+# 2 ranks; one device per process, so the host run writes a file first.
+G4_TMP ?= /tmp/seas_ug4
+test-device-pml-3d: seas_test_pml_lts_3d
+	@mkdir -p $(G4_TMP)
+	for np in 1 2; do \
+	  OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_pml_lts_3d --only G4K || exit 1; \
+	  OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_pml_lts_3d --only G4W --device cpu --write $(G4_TMP)/h$$np || exit 1; \
+	  OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$np ./seas_test_pml_lts_3d --only G4W --device debug --compare $(G4_TMP)/h$$np || exit 1; \
+	done
+
+.PHONY: test-device-pml-3d
+
 # P1.5 (plan rev5 U-S1): the constant stress tensor on a dipping fault
 # (T-dip), on 1, 2 and 4 ranks.
 TEST_TP3D_SRC = tests/ucerf3d/test_tensor_prestress_3d.cpp

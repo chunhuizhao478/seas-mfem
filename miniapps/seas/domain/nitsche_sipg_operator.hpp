@@ -90,6 +90,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <vector>
 
 namespace mfem
@@ -496,9 +497,14 @@ public:
    NitscheSipgOperator(ParFiniteElementSpace &fes, const ParGridFunction &lambda,
                        const ParGridFunction &mu, const ParGridFunction *kv_lambda,
                        const ParGridFunction *kv_mu, const Array<int> &dirichlet_marker,
-                       real_t penalty_factor, real_t epsilon = -1.0)
+                       real_t penalty_factor, real_t epsilon = -1.0,
+                       const std::function<real_t(FaceElementTransformations &)> &face_scale = {})
       : fes_(fes), eps_(epsilon), kv_(kv_lambda != nullptr)
    {
+      // face_scale (UCERF 3-D P1.10): a factor on the penalty `pen` of a
+      // face, e.g. the PML band's kappa_gamma (the assembled K_p of
+      // ElasticityDomainOperator::SetPmlBand); pen_eta is not scaled (the
+      // Kelvin-Voigt operator has no band).  Empty: 1.
       MFEM_VERIFY((kv_lambda == nullptr) == (kv_mu == nullptr),
                   "NitscheSipgOperator: give both Kelvin-Voigt moduli or neither");
       ParMesh &pm = *fes.GetParMesh();
@@ -659,8 +665,9 @@ public:
          const real_t nl = nor.Norml2();
          const real_t d1 = T->Elem1->Weight(), d2 = T->Elem2->Weight();
          const real_t *g1 = &geo_[kGeo * e1], *g2 = &geo_[kGeo * e2];
-         const real_t pen = pf * (p_side(g1[10], g1[11], d1, nl) + p_side(g2[10], g2[11], d2, nl))
-                            / 4.0 * nl;
+         real_t pen = pf * (p_side(g1[10], g1[11], d1, nl) + p_side(g2[10], g2[11], d2, nl))
+                      / 4.0 * nl;
+         if (face_scale) { pen *= face_scale(*T); }
          const real_t pen_eta = kv_ ? pf * (p_side(g1[13], g1[14], d1, nl)
                                             + p_side(g2[13], g2[14], d2, nl)) / 4.0 * nl : 0.0;
          set_side(e1, inf1 / 64, e2, tab(inf1), tab(inf2), nor, 1.0, pen, pen_eta, 0.5);
@@ -699,8 +706,9 @@ public:
          }
          const real_t d1 = T->Elem1->Weight(), d2 = T->Elem2->Weight();
          const real_t *g1 = &geo_[kGeo * e1], *g2 = &geo_[kGeo * (ne_ + nb)];
-         const real_t pen = pf * (p_side(g1[10], g1[11], d1, nl) + p_side(g2[10], g2[11], d2, nl))
-                            / 4.0 * nl;
+         real_t pen = pf * (p_side(g1[10], g1[11], d1, nl) + p_side(g2[10], g2[11], d2, nl))
+                      / 4.0 * nl;
+         if (face_scale) { pen *= face_scale(*T); }
          const real_t pen_eta = kv_ ? pf * (p_side(g1[13], g1[14], d1, nl)
                                             + p_side(g2[13], g2[14], d2, nl)) / 4.0 * nl : 0.0;
          set_side(e1, inf1 / 64, kGhost0 - nb, tab(inf1), tab(inf2), nor, 1.0, pen, pen_eta, 0.5);
@@ -725,7 +733,8 @@ public:
          const real_t nl = nor.Norml2();
          const real_t d1 = T->Elem1->Weight();
          const real_t *g1 = &geo_[kGeo * e1];
-         const real_t pen = pf * p_side(g1[10], g1[11], d1, nl) * nl;
+         real_t pen = pf * p_side(g1[10], g1[11], d1, nl) * nl;
+         if (face_scale) { pen *= face_scale(*T); }
          const real_t pen_eta = kv_ ? pf * p_side(g1[13], g1[14], d1, nl) * nl : 0.0;
          set_side(e1, inf1 / 64, kDirichlet, tab(inf1), 0, nor, 1.0, pen, pen_eta, 1.0);
          n_dir_sides_++;
@@ -887,15 +896,18 @@ private:
       MFEM_VERIFY(st.Size() == nfn_ && rt.Size() == nfn_,
                   "NitscheSipgOperator: face-neighbour tables of " << st.Size() << " and "
                   << rt.Size() << " rows for " << nfn_ << " neighbours");
-      send_off_.assign(st.GetI(), st.GetI() + nfn_ + 1);
-      recv_off_.assign(rt.GetI(), rt.GetI() + nfn_ + 1);
+      // host views: a ParGridFunction exchange on a device before this
+      // (the PML band's Enter, P1.10) leaves the tables on the device
+      const int *sI = st.HostReadI(), *rI = rt.HostReadI();
+      send_off_.assign(sI, sI + nfn_ + 1);
+      recv_off_.assign(rI, rI + nfn_ + 1);
       nbr_rank_.resize(nfn_);
       for (int fn = 0; fn < nfn_; fn++) { nbr_rank_[fn] = pm.GetFaceNbrRank(fn); }
       MFEM_VERIFY(recv_off_[nfn_] == fes_.GetFaceNbrVSize(),
                   "NitscheSipgOperator: halo of " << recv_off_[nfn_] << " values, face-neighbour "
                   "space of " << fes_.GetFaceNbrVSize());
       send_map_.SetSize(send_off_[nfn_]);
-      const int *J = st.GetJ();
+      const int *J = st.HostReadJ();
       for (int i = 0; i < send_map_.Size(); i++)
       {
          MFEM_VERIFY(J[i] >= 0, "NitscheSipgOperator: negative send DOF (not an L2 space)");

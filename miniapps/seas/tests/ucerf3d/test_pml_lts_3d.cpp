@@ -104,10 +104,33 @@ void SplitWalls(Mesh &m, int wall_attr)
    m.SetAttributes();
 }
 
+/// U-G4 (P1.10): the wave run on the mfem device against the host.  One
+/// device per process: the host run (--device cpu) writes U and U' of every
+/// rank at three times, the device run (--device debug | cuda) compares.
+struct G4Opt
+{
+   std::string device = "cpu", write, compare, name;
+   // U' limit: measured on 1 rank (column, p = 2), device against host:
+   // 1.6e-12 after 14,394 steps with the band, 5.8e-13 after 2,733 steps of
+   // the same run without it (the plain device step, P1.7); U 5e-14 in both
+   real_t tol = 1e-12, tol_v = 1e-11;
+   bool band = true;      ///< false: the same run without the band (round-off reference)
+   std::string only;      ///< "col" or "mesh": one case
+   real_t snap_dv[3] = {0.0, 0.0, 0.0};
+   // results (this rank's part reduced over the ranks)
+   real_t du = 0.0, dv = 0.0, in_band = 0.0;
+   bool on_device = false, sizes_ok = true;
+   int snaps = 0;
+};
+
 /// X: the walls x = +-X; L: band thickness; Xin: half width of the inner
 /// box in x (the measurement region is |x| <= Xin); w: pulse width.
+/// g4: the U-G4 form: the walls behind the band are natural (the device
+/// step has no Dirichlet faces before P1.11) and the run goes to the mfem
+/// device when g4->device is not "cpu".
 WaveResult RunWave(Mesh &sm, int p, bool with_band, real_t X, real_t L, real_t w,
-                   real_t f_alpha, real_t R0, real_t cfl, bool ricker = false)
+                   real_t f_alpha, real_t R0, real_t cfl, bool ricker = false,
+                   G4Opt *g4 = nullptr)
 {
    const real_t mu = 3.2e10, rho = 2670.0;
    const real_t c = std::sqrt(2.0 * mu / rho);
@@ -117,6 +140,11 @@ WaveResult RunWave(Mesh &sm, int p, bool with_band, real_t X, real_t L, real_t w
    bc.dirichlet_attrs = {5};
    bc.natural_attrs = {1, 2, 7};
    bc.default_dirichlet_func = [](const Vector &, real_t, Vector &u) { u.SetSize(3); u = 0.0; };
+   if (g4)
+   {
+      bc.dirichlet_attrs.clear();
+      bc.natural_attrs = {1, 2, 5, 7};
+   }
    NitscheWaveOperator op(pm, p, MaterialField::MakeConstant(0.0, mu, rho), bc);
    WaveResult r;
    r.c = c;
@@ -137,6 +165,12 @@ WaveResult RunWave(Mesh &sm, int p, bool with_band, real_t X, real_t L, real_t w
       wm.attr = 5;
       op.SetPml(std::make_shared<PmlBand>(3, std::vector<PmlWall>{wp, wm}, prm));
       r.kappa_max = op.Pml()->KappaMax();
+   }
+   if (g4 && g4->device != "cpu")
+   {
+      op.SetMatrixFree(true);
+      op.SetFastFaultKernels(true);
+      op.SetDeviceFault(true);
    }
    const real_t ceig = NitscheStableConstant(3, p);
    r.dt = ComputeMaxDt(op.Sample(), pm, p, cfl * ceig);
@@ -177,6 +211,11 @@ WaveResult RunWave(Mesh &sm, int p, bool with_band, real_t X, real_t L, real_t w
    gu.ProjectCoefficient(cu);
    gv.ProjectCoefficient(cv);
    Vector U(gu), V(gv), us(U.Size());
+   if (g4)
+   {
+      U.UseDevice(true);
+      V.UseDevice(true);
+   }
    us = 0.0;
    if (with_band) { op.PmlEnter(us); }
    // inner DOFs: x component at nodes with |x| <= Xin
@@ -196,8 +235,47 @@ WaveResult RunWave(Mesh &sm, int p, bool with_band, real_t X, real_t L, real_t w
    auto inner_max = [&](const Vector &u)
    {
       real_t m = 0.0;
+      u.HostRead();
       for (int i : inner) { m = std::max(m, std::abs(u(i))); }
       return GMax(m, pm.GetComm());
+   };
+   // U-G4: U and U' at three times, written or compared per rank
+   std::FILE *g4f = nullptr;
+   long g4_at[3] = {-1, -1, -1};
+   const real_t g4_v0 = c * A / w;
+   auto g4_snap = [&]()
+   {
+      const int n = U.Size();
+      const real_t *u = U.HostRead(), *v = V.HostRead();
+      if (!g4->write.empty())
+      {
+         std::fwrite(&n, sizeof(int), 1, g4f);
+         std::fwrite(u, sizeof(real_t), n, g4f);
+         std::fwrite(v, sizeof(real_t), n, g4f);
+         real_t m = 0.0;
+         for (int i = 0; i < n; i++) { if (!std::binary_search(inner.begin(), inner.end(), i)) { m = std::max(m, std::abs(u[i])); } }
+         g4->in_band = std::max(g4->in_band, m / A);
+      }
+      else
+      {
+         int n0 = -1;
+         std::vector<real_t> hu(n), hv(n);
+         if (std::fread(&n0, sizeof(int), 1, g4f) != 1 || n0 != n
+             || std::fread(hu.data(), sizeof(real_t), n, g4f) != static_cast<size_t>(n)
+             || std::fread(hv.data(), sizeof(real_t), n, g4f) != static_cast<size_t>(n))
+         { g4->sizes_ok = false; return; }
+         real_t m = 0.0;
+         for (int i = 0; i < n; i++)
+         {
+            g4->du = std::max(g4->du, std::abs(u[i] - hu[i]) / A);
+            g4->dv = std::max(g4->dv, std::abs(v[i] - hv[i]) / g4_v0);
+            if (g4->snaps < 3)
+            { g4->snap_dv[g4->snaps] = std::max(g4->snap_dv[g4->snaps], std::abs(v[i] - hv[i]) / g4_v0); }
+            if (!std::binary_search(inner.begin(), inner.end(), i)) { m = std::max(m, std::abs(u[i])); }
+         }
+         g4->in_band = std::max(g4->in_band, m / A);
+      }
+      g4->snaps++;
    };
    r.A0 = A;
    CentralDifferenceSolver ode;
@@ -206,6 +284,20 @@ WaveResult RunWave(Mesh &sm, int p, bool with_band, real_t X, real_t L, real_t w
    const real_t t_end = (2.0 * X + 3.5 * w) / c;         // the echo's tail has passed x = 0
    r.steps = std::lround(std::ceil(t_end / r.dt));
    const long every = std::max(1L, r.steps / 60);
+   if (g4)
+   {
+      // the pulse's centre a quarter and a half of the way into the band,
+      // and at the wall, where the run ends
+      g4_at[0] = std::lround((Xin + 0.25 * L) / c / r.dt);
+      g4_at[1] = std::lround((Xin + 0.5 * L) / c / r.dt);
+      g4_at[2] = std::lround(X / c / r.dt);
+      r.steps = g4_at[2];
+      if (g_rank == 0) { std::printf("  U-G4: %ld steps, samples at steps %ld, %ld, %ld\n", r.steps, g4_at[0], g4_at[1], g4_at[2]); }
+      const std::string fn = (g4->write.empty() ? g4->compare : g4->write) + "." + g4->name
+                             + "." + std::to_string(Mpi::WorldRank());
+      g4f = std::fopen(fn.c_str(), g4->write.empty() ? "rb" : "wb");
+      MFEM_VERIFY(g4f, "U-G4: cannot open " << fn);
+   }
    if (g_rank == 0)
    {
       std::printf("  %s: %d DOFs here, dt = %.5f s, %ld steps to t = %.1f s (kappa_max %.3f)\n",
@@ -217,6 +309,7 @@ WaveResult RunWave(Mesh &sm, int p, bool with_band, real_t X, real_t L, real_t w
    {
       real_t h = r.dt;
       ode.Step(U, V, t, h);
+      if (g4 && (s == g4_at[0] || s == g4_at[1] || s == g4_at[2])) { g4_snap(); }
       if (s % every == 0 || s == r.steps)
       {
          const real_t m = inner_max(U) / r.A0;
@@ -226,6 +319,18 @@ WaveResult RunWave(Mesh &sm, int p, bool with_band, real_t X, real_t L, real_t w
          if (!std::isfinite(m)) { r.finite = false; break; }
          if (t >= t_out && m > r.R) { r.R = m; r.t_R = t; }
       }
+   }
+   if (g4)
+   {
+      std::fclose(g4f);
+      g4->on_device = op.PmlOnDevice();
+      g4->du = GMax(g4->du, pm.GetComm());
+      g4->dv = GMax(g4->dv, pm.GetComm());
+      g4->in_band = GMax(g4->in_band, pm.GetComm());
+      for (real_t &d : g4->snap_dv) { d = GMax(d, pm.GetComm()); }
+      int ok = (g4->sizes_ok && g4->snaps == 3) ? 1 : 0;
+      MPI_Allreduce(MPI_IN_PLACE, &ok, 1, MPI_INT, MPI_MIN, pm.GetComm());
+      g4->sizes_ok = (ok == 1);
    }
    return r;
 }
@@ -643,6 +748,127 @@ void TestP2(MPIContext &mpi, const char *deck, int n_sync)
                gl.seconds, sa.seconds, lt.seconds, gl.seconds / lt.seconds);
 }
 
+// ------------------------------------------------------------------ U-G4
+/// U-G4 K (P1.10): the matrix-free product with the band's penalty factor
+/// against the assembled K_p (ElasticityDomainOperator::SetPmlBand,
+/// penalty_only) on a random field, and against the product without a band
+/// (the factor must matter).
+void TestG4K(const char *mesh_file, int p)
+{
+   const real_t X = 90e3, L = 30e3, mu = 3.2e10, rho = 2670.0;
+   if (g_rank == 0)
+   {
+      std::cout << "\n=== U-G4 K: matrix-free K_p with the band against the assembled one, "
+                << mesh_file << ", p = " << p << " ===" << std::endl;
+   }
+   Mesh sm(mesh_file, 1, 1);
+   SplitWalls(sm, 5);
+   ParMesh pm(MPI_COMM_WORLD, sm);
+   BoundaryConfig bc;
+   bc.fault_attr = 99;
+   bc.dirichlet_attrs = {5};
+   bc.natural_attrs = {1, 2, 7};
+   bc.default_dirichlet_func = [](const Vector &, real_t, Vector &u) { u.SetSize(3); u = 0.0; };
+   NitscheWaveOperator op(pm, p, MaterialField::MakeConstant(0.6 * mu, mu, rho), bc);
+   NitscheWaveOperator plain(pm, p, MaterialField::MakeConstant(0.6 * mu, mu, rho), bc);
+   PmlBandParams prm;
+   prm.thickness = L;
+   prm.power = 2;
+   prm.R0 = 1e-3;
+   prm.c_ref = std::sqrt(2.6 * mu / rho);
+   prm.f_alpha = 0.01;
+   PmlWall wp, wm;
+   wp.n = {1.0, 0.0, 0.0};
+   wp.h = X;
+   wp.attr = 5;
+   wm.n = {-1.0, 0.0, 0.0};
+   wm.h = X;
+   wm.attr = 5;
+   op.SetPml(std::make_shared<PmlBand>(3, std::vector<PmlWall>{wp, wm}, prm));
+   const real_t kmax = op.Pml()->KappaMax();
+   op.SetMatrixFree(true);
+   plain.SetMatrixFree(true);
+   const int n = op.Height();
+   Vector x(n), Kmf, Kas, K0;
+   x.Randomize(4711 + g_rank);
+   op.StiffnessMult(x, Kmf);
+   op.Elasticity().ApplyStiffness(x, Kas);
+   plain.StiffnessMult(x, K0);
+   Kmf.HostRead();
+   K0.HostRead();
+   real_t d = 0.0, m = 0.0, d0 = 0.0;
+   for (int i = 0; i < n; i++)
+   {
+      d = std::max(d, std::abs(Kmf(i) - Kas(i)));
+      m = std::max(m, std::abs(Kas(i)));
+      d0 = std::max(d0, std::abs(K0(i) - Kas(i)));
+   }
+   d = GMax(d, pm.GetComm());
+   m = GMax(m, pm.GetComm());
+   d0 = GMax(d0, pm.GetComm());
+   std::ostringstream os;
+   os << "U-G4 K p = " << p << ": matrix-free K_p x against the assembled K_p x: " << d / m
+      << " of the largest entry (limit 1e-13); kappa_max " << kmax << "; without the band's "
+      "factor the product is off by " << d0 / m;
+   Check(op.MatrixFreeActive() && d <= 1e-13 * m && kmax > 1.0 && d0 > 1e-6 * m, os.str());
+}
+
+/// U-G4 W (P1.10): the plane wave into the band (U-P1's run, the walls
+/// behind the band natural) on the device against the host: U and U' of
+/// every DOF at three times (the pulse's centre a quarter and a half of the
+/// way into the band, and at the wall, where the run ends), |dU| / A and
+/// |dU'| / (c A / w) <= tol_v.  What the band returns is U-P1's check.
+/// Cases: the column of tets (p = 2, Ricker) and T-pml (p = 1, Gaussian).
+void TestG4W(const char *mesh_file, G4Opt g4, real_t col_h, real_t width)
+{
+   const real_t X = 90e3, L = 30e3, fa = 0.01, R0 = 1e-3;
+   for (int k = 0; k < 2; k++)
+   {
+      G4Opt o = g4;
+      o.name = k == 0 ? "G4Wcol" : "G4Wmesh";
+      if (!o.only.empty() && o.only != (k == 0 ? "col" : "mesh")) { continue; }
+      const int p = k == 0 ? 2 : 1;
+      if (g_rank == 0)
+      {
+         std::cout << "\n=== U-G4 W plane P wave into the band, device " << o.device << ", "
+                   << (k == 0 ? "column of tets" : mesh_file) << ", p = " << p << " ===" << std::endl;
+      }
+      WaveResult r;
+      if (k == 0)
+      {
+         const int nx = static_cast<int>(std::lround(2 * X / col_h));
+         Mesh sm = Mesh::MakeCartesian3D(nx, 1, 1, Element::TETRAHEDRON, 2 * X, col_h, col_h);
+         for (int v = 0; v < sm.GetNV(); v++) { sm.GetVertex(v)[0] -= X; }
+         for (int b = 0; b < sm.GetNBE(); b++) { sm.SetBdrAttribute(b, 5); }
+         sm.SetAttributes();
+         SplitWalls(sm, 5);
+         r = RunWave(sm, p, o.band, X, L, width, fa, R0, 0.5, true, &o);
+      }
+      else
+      {
+         Mesh sm(mesh_file, 1, 1);
+         SplitWalls(sm, 5);
+         r = RunWave(sm, p, o.band, X, L, width, fa, R0, 0.5, false, &o);
+      }
+      PrintWave("band", r);
+      std::ostringstream os;
+      const bool dev = o.device != "cpu";
+      os << "U-G4 W " << o.name << " (" << r.steps << " steps, kappa_max " << r.kappa_max
+         << "): the band's memory steps "
+         << (!o.band ? "nowhere (no band)" : dev ? "in device kernels" : "on the host")
+         << "; the wave is inside the band at the samples (max |u| there " << o.in_band << " A)";
+      Check(r.finite && o.sizes_ok && o.on_device == (dev && o.band) && o.in_band > 0.1, os.str());
+      if (dev)
+      {
+         os.str("");
+         os << "U-G4 W " << o.name << ": device against host at three times: U within " << o.du
+            << " of A, U' within " << o.dv << " of c A / w (limits " << o.tol << " and " << o.tol_v << "; U' at the three "
+            "times " << o.snap_dv[0] << ", " << o.snap_dv[1] << ", " << o.snap_dv[2] << ")";
+         Check(o.sizes_ok && o.du <= o.tol && o.dv <= o.tol_v, os.str());
+      }
+   }
+}
+
 }  // namespace
 
 int main(int argc, char *argv[])
@@ -655,7 +881,18 @@ int main(int argc, char *argv[])
    real_t width = 12e3, col_h = 1.5e3, col_fa = 0.01;
    const char *deck = "tests/ucerf3d/configs/T-pml_lts_band.toml";
    int n_sync = 60;
+   const char *dev_name = "cpu", *g4_write = "", *g4_compare = "";
+   real_t g4_tol = 1e-12, g4_tol_v = 1e-11;
+   const char *g4_only = "";
+   int g4_band = 1;
    OptionsParser args(argc, argv);
+   args.AddOption(&g4_tol_v, "-g4tv", "--g4-tol-v", "U-G4 W: limit for U'.");
+   args.AddOption(&g4_only, "-g4c", "--g4-case", "U-G4 W: col or mesh (default both).");
+   args.AddOption(&g4_band, "-g4b", "--g4-band", "U-G4 W: 0 runs without the band (reference).");
+   args.AddOption(&dev_name, "-dev", "--device", "U-G4: cpu (writes) or debug / cuda (compares).");
+   args.AddOption(&g4_write, "-wr", "--write", "U-G4: file prefix the host run writes.");
+   args.AddOption(&g4_compare, "-cmp", "--compare", "U-G4: file prefix the device run compares.");
+   args.AddOption(&g4_tol, "-g4t", "--g4-tol", "U-G4 W: limit of the device against the host.");
    args.AddOption(&only, "-o", "--only", "Comma-separated parts: P1, P2.");
    args.AddOption(&deck, "-d", "--deck", "The U-P2 deck.");
    args.AddOption(&col_h, "-ch", "--column-h", "U-P1 column: element size (m).");
@@ -676,8 +913,35 @@ int main(int argc, char *argv[])
       std::cout << "test_pml_lts_3d (UCERF 3-D plan rev5, P1.4) on " << Mpi::WorldSize()
                 << " rank(s)" << std::endl;
    }
+   // U-G4: the mfem device of this process (none for the host runs)
+   std::unique_ptr<Device> device;
+   if (std::string(dev_name) != "cpu")
+   {
+      device.reset(new Device(dev_name));
+#if defined(HYPRE_USING_GPU) && (MFEM_HYPRE_VERSION >= 23100)
+      HYPRE_SetMemoryLocation(HYPRE_MEMORY_HOST);   // as seas_nitsche_dyn_driver
+      HYPRE_SetExecutionPolicy(HYPRE_EXEC_HOST);
+#endif
+      if (g_rank == 0) { device->Print(); }
+   }
+
    if (Want("P1")) { TestP1(mesh_file, order, width); }
    if (Want("P1C")) { TestP1C(order, col_h, width, col_fa); }
+   if (g_only.count("G4K")) { for (int p : {1, 2}) { TestG4K(mesh_file, p); } }
+   if (g_only.count("G4W"))
+   {
+      G4Opt g4;
+      g4.device = dev_name;
+      g4.write = g4_write;
+      g4.compare = g4_compare;
+      g4.tol = g4_tol;
+      g4.tol_v = g4_tol_v;
+      g4.only = g4_only;
+      g4.band = (g4_band != 0);
+      MFEM_VERIFY((g4.device == "cpu") != g4.write.empty() && g4.write.empty() != g4.compare.empty(),
+                  "U-G4 W: --device cpu --write PREFIX, or --device debug|cuda --compare PREFIX");
+      TestG4W(mesh_file, g4, 3e3, width);
+   }
    if (Want("P2"))
    {
 #ifdef MFEM_USE_PETSC

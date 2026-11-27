@@ -504,8 +504,10 @@ public:
       {
          // plan D2: the work below runs on the device vectors; the fault
          // gathers the values of x (and dxdt) it reads.  UseDeviceStep_
-         // refuses the PML band and the early step sync, which have no
-         // device form yet.
+         // refuses the early step sync, which has no device form yet.  The
+         // PML band's memory steps on the device (P1.10), with U^{n+1},
+         // before the acceleration that reads it.
+         if (pml_) { pml_->Advance(x, t); }
          if (has_fault_) { AdvanceFault_(x, t, &dxdt, true); }
          StepAcceleration_(x, dxdt, fac1, k);
          if (has_fault_) { last_accel_ = k; }
@@ -578,6 +580,11 @@ public:
       {
          ParGridFunction g(src);
          g.ExchangeFaceNbrData();
+         // on a device the copy and the exchange leave the three on the
+         // device (P1.10); the host reads them here and later
+         src.HostRead();
+         g.HostRead();
+         g.FaceNbrData().HostRead();
          const ParFiniteElementSpace *f = g.ParFESpace();
          Array<int> d;
          own.SetSize(f->GetNE());
@@ -600,6 +607,9 @@ public:
       MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_LOR, mesh_.GetComm());
       has_damping_global_ = (global != 0);
    }
+   /// The band's memory steps in device kernels (P1.10; set by the first
+   /// device step).
+   bool PmlOnDevice() const { return pml_ && pml_->OnDevice(); }
    /// The switch into the dynamic phase at the state u_s (memory to zero,
    /// b_band from u_s and the wall data at GetTime()).  Collective.
    void PmlEnter(const Vector &u_s)
@@ -2118,18 +2128,18 @@ private:
       // G0 (3D UCERF plan rev5): the device step has none of the cycle
       // branch's pieces yet (P1 ports them); a deck that turns one on stops
       // here instead of running without it
-      MFEM_VERIFY(dim_ == 3 && !pml_ && !sponge_ && !early_sync_
+      MFEM_VERIFY(dim_ == 3 && !sponge_ && !early_sync_
                   && !has_mass_damping_ && !(opening_ && !contact_)
                   && (!nsm_ || nsm_->Constant()) && !rc_
                   && slip_measure_ == SlipMeasure::Magnitude
                   && tension_ == TensionMode::Abort,
                   "NitscheWaveOperator: the device step (--matrix-free 1 on a device) "
-                  "has no 2-D mesh, PML or sponge band, early step sync, mass "
+                  "has no 2-D mesh, sponge band, early step sync, mass "
                   "damping, shear-free opening (version A), normal-stress "
                   "modifier that changes during a phase, off-fault rheology, slip path or "
                   "zero-strength tension "
-                  "yet, and this run has one (dim " << dim_ << ", pml "
-                  << (pml_ ? 1 : 0) << ", sponge " << (sponge_ ? 1 : 0) << ", early sync "
+                  "yet, and this run has one (dim " << dim_
+                  << ", sponge " << (sponge_ ? 1 : 0) << ", early sync "
                   << (early_sync_ ? 1 : 0)
                   << ", mass damping " << (has_mass_damping_ ? 1 : 0)
                   << ", shear-free opening " << ((opening_ && !contact_) ? 1 : 0)
@@ -2146,7 +2156,9 @@ private:
                      "no Dirichlet loading yet (plan D2 takes the quasi-dynamic D g(t) "
                      "operator for it), and this deck has Dirichlet faces; run it on the "
                      "cpu device");
-         for (Vector *w : {&Kx_, &F_, &Cv_}) { w->UseDevice(true); }
+         for (Vector *w : {&Kx_, &F_, &Cv_, &pml_f_}) { w->UseDevice(true); }
+         // the band's memory steps in device kernels from here on (P1.10)
+         if (pml_) { pml_->SetDevice(true); }
          BuildDeviceDamping_();
          dev_ready_ = true;
       }
@@ -2181,6 +2193,31 @@ private:
          SetupDeviceFault_();
       }
       return true;
+   }
+
+   /// P1.10: the PML band's factor on a face's penalty for the matrix-free
+   /// product, kappa_gamma = the largest kappa (3.14) over the face's
+   /// quadrature points of order 2p + 1 with a point in a band (the face
+   /// integrator's BandFaceKappa_, so the product is that of the assembled
+   /// K_p), 1 on the other faces.  Empty without a band.
+   std::function<real_t(FaceElementTransformations &)> BandPenaltyScale_() const
+   {
+      const PmlBand *band = elast_->GetPmlBand();
+      if (!band) { return {}; }
+      const int qorder = 2 * order_ + 1;
+      return [band, qorder](FaceElementTransformations &T)
+      {
+         const IntegrationRule &ir = IntRules.Get(T.GetGeometryType(), qorder);
+         real_t kmax = 0.0;
+         Vector x(3);
+         for (int q = 0; q < ir.GetNPoints(); q++)
+         {
+            T.Transform(ir.IntPoint(q), x);
+            if (!band->InBand(x.GetData())) { continue; }
+            kmax = std::max(kmax, band->At(x).kappa);
+         }
+         return (kmax > 0.0) ? kmax : real_t(1);
+      };
    }
 
    /// Plan D3 (header): the device copies of the fault step.  Collective.
@@ -2359,7 +2396,7 @@ private:
          mf_ = std::make_unique<NitscheSipgOperator>(
                   elast_->GetFESpace(), sample_->LambdaGF(), sample_->MuGF(),
                   kv_ ? kv_lam_gf_.get() : nullptr, kv_ ? kv_mu_gf_.get() : nullptr, dmark,
-                  config_.penalty_factor);
+                  config_.penalty_factor, -1.0, BandPenaltyScale_());
          MFEM_VERIFY(mf_layout_ != NitscheSipgOperator::kTeam
                      || mf_->TeamBatchFits(mf_batch_, static_cast<bool>(kv_)),
                      "NitscheWaveOperator: the matrix-free team layout with " << mf_batch_
