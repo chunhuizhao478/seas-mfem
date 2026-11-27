@@ -1,0 +1,142 @@
+# tests/ucerf3d/configs/T-dip_tensor.toml - UCERF 3-D plan rev5, P1.5, test
+# U-S1 (tests/ucerf3d/test_tensor_prestress_3d.cpp): the constant stress
+# tensor of [stress] projected on T-dip (a 40 x 20 km fault dipping 58 degrees
+# to +y).  The QD keys are read by the deck parser only: the test runs no QD
+# step.
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "T-dip: the constant stress tensor on a dipping fault (U-S1)."
+
+[material_constant_fallback]
+lambda = 32038120320.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+[mesh]
+path  = "ucerf3d/mesh/T-dip.msh"
+order = 1
+
+[velocity]
+use_sidecar = false
+
+[stress]
+kind        = "constant_tensor"
+sigma_xx_pa = -30.0e6
+sigma_yy_pa = -25.0e6
+sigma_zz_pa = -28.0e6
+sigma_xy_pa = 10.0e6
+sigma_yz_pa = -6.0e6
+sigma_xz_pa = 2.0e6
+
+[numerics]
+cfl       = 0.5
+kv_eta    = 0.1
+kv_scale  = "node"
+kv_length = "inscribed"
+
+[time]
+tfinal     = 1.0e3
+dt_initial = 0.01
+
+[output]
+output_dir = "."
+
+[boundary]
+fault_attr    = 3
+natural_attrs = [1]
+
+[fault_geometry]
+ref_normal      = [0.0, -1.0, 0.0]
+up              = [0.0,  0.0, 1.0]
+kind            = "vertical_strike_slip"
+orientation     = "propagated"
+pin_by          = "reference"
+tangent         = "pointwise"
+junction_policy = "refuse"
+pin_min_margin  = 0.1
+
+[friction.rate_state]
+a_default       = 0.004
+b_default       = 0.03
+Dc_default      = 0.14
+V_0_default     = 1.0e-6
+f_0_default     = 0.6
+V_init_default  = 1.0e-9
+state_evolution = "aging_law"
+eta             = "auto"
+
+[cycle]
+ic                   = "scec_fd"
+switching            = true
+qd_radiation_damping = true
+mesh_scale           = 1.0
+plate_rate           = 1.0e-9
+penalty_factor       = 1.0
+
+[cycle.switch]
+V_on               = 1.0e-2
+V_off              = 1.0e-3
+T_dwell            = 10.0
+T_min              = 0.0
+T_max              = 1200.0
+max_dynamic_phases = 1
+
+[cycle.absorbing]
+faces = "off"
+
+[cycle.qd]
+solver        = "mumps"
+petsc_options = "tests/verification/petsc_ts_rk45_tandem.cfg"
+ts_atol       = 1.0e-7
+ts_rtol       = 1.0e-50
+
+[cycle.prestress]
+V_background = 1.0e-9
+
+[cycle.fields]
+V_init_dip = 1.0e-20
+
+[cycle.fields.a]
+center  = [0.0, 0.0, -9.0e3]
+axis1   = [1.0, 0.0, 0.0]
+axis2   = [0.0, 0.0, 1.0]
+half1   = 0.0
+half2   = 0.0
+inside  = 0.004
+outside = 0.004
+
+[cycle.fields.Dc]
+center  = [0.0, 0.0, -9.0e3]
+axis1   = [1.0, 0.0, 0.0]
+axis2   = [0.0, 0.0, 1.0]
+half1   = 0.0
+half2   = 0.0
+inside  = 0.14
+outside = 0.14
+
+[cycle.fields.V_init]
+center  = [0.0, 0.0, -9.0e3]
+axis1   = [1.0, 0.0, 0.0]
+axis2   = [0.0, 0.0, 1.0]
+half1   = 0.0
+half2   = 0.0
+inside  = 1.0e-9
+outside = 1.0e-9
+
+[cycle.output]
+prefix       = "T-dip_tensor"
+fast_V       = 1.0e-3
+dt_fast      = 0.1
+dt_slow      = 3155760.0
+event_V      = 1.0e-3
+event_dwell  = 10.0
+plane_origin = [0.0, 0.0, 0.0]
+plane_axis1  = [1.0, 0.0, 0.0]
+plane_axis2  = [0.0, 0.0, -1.0]

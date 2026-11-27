@@ -130,3 +130,45 @@ test-contact-3d: seas_test_contact_3d
 	done
 
 .PHONY: test-contact-3d
+
+# P1.4 (plan rev5 U-P1, U-P2): the CFS-PML band and local time stepping in
+# 3-D.  U-P1 (--only P1C): a plane P wave down a uniform column, band on the
+# two end walls, against the band's design law (about 8 min on 2 ranks).
+# U-P2 (--only P2): an event on T-pml to 14 s with global stepping, rate-2
+# clusters at one step and rate-2 clusters (about 12 min on 4 ranks).
+TEST_PL3D_SRC = tests/ucerf3d/test_pml_lts_3d.cpp
+TEST_PL3D_OBJ = $(TEST_PL3D_SRC:.cpp=.o)
+$(TEST_PL3D_OBJ): %.o: $(SRC)%.cpp $(CYCLE_HEADERS) $(CYCLE_STAMP) \
+                  $(CYCLE_SHARED_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
+
+seas_test_pml_lts_3d: $(TEST_PL3D_OBJ) $(CYCLE_LINK_OBJS)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PL3D_OBJ) $(CYCLE_LINK_OBJS) $(CYCLE_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-pml-lts-3d: seas_test_pml_lts_3d
+	OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_pml_lts_3d --only P1C
+	OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_pml_lts_3d --only P2 --sync 1480
+
+.PHONY: test-pml-lts-3d
+
+# P1.5 (plan rev5 U-S1): the constant stress tensor on a dipping fault
+# (T-dip), on 1, 2 and 4 ranks.
+TEST_TP3D_SRC = tests/ucerf3d/test_tensor_prestress_3d.cpp
+TEST_TP3D_OBJ = $(TEST_TP3D_SRC:.cpp=.o)
+$(TEST_TP3D_OBJ): %.o: $(SRC)%.cpp $(CYCLE_HEADERS) $(CYCLE_STAMP) \
+                  $(CYCLE_SHARED_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
+
+seas_test_tensor_prestress_3d: $(TEST_TP3D_OBJ) $(CYCLE_LINK_OBJS)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_TP3D_OBJ) $(CYCLE_LINK_OBJS) $(CYCLE_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-tensor-prestress-3d: seas_test_tensor_prestress_3d
+	@for n in 1 2 4; do \
+	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_tensor_prestress_3d || exit 1; \
+	done
+
+.PHONY: test-tensor-prestress-3d
