@@ -47,6 +47,10 @@ public:
    /// One fault step of length dt (s): tau[j] the shear traction the law
    /// balanced (Pa, >= 0) and V[j] = |V^{n+1}| (m/s) per owned DOF.
    virtual void Advance(real_t dt, const real_t *tau, const real_t *V) = 0;
+   /// True when the reductions do not change during a dynamic phase and
+   /// Advance does nothing: the device fault step copies them once per phase
+   /// (UCERF 3-D plan rev5, P1.8).
+   virtual bool Constant() const { return false; }
 };
 
 } // namespace seas

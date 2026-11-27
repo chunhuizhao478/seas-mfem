@@ -561,6 +561,9 @@ public:
       if (pml_) { W_->PmlEnter(u_s); }
       if (W_->HasPrakashClifton()) { W_->SetPrakashCliftonState(sigma_n); }
       W_->ResetFloorCount();
+      // [cycle.relaxation]: r may have changed since the last phase; the device
+      // fault copies it again at its first step (P1.8)
+      if (relax_mod_) { W_->NormalStressModifierChanged(); }
       if (tags_.dirichlet > 0)
       {
          // Plan 11.2: the walls' static reaction at t_s, frozen for the phase
@@ -1059,7 +1062,11 @@ public:
          f.theta(j) = fr_->PsiToTheta(W_->State()(j), W_->FaultDc()(j));
       }
       f.eta = 0.0;
-      if (relax_r_) { f.sigma_red = *relax_r_; }   // [cycle.relaxation]: frozen r
+      if (relax_r_)
+      {
+         f.sigma_red = *relax_r_;   // [cycle.relaxation]: frozen r
+         f.sigma_red.HostRead();    // the copy of a device vector is valid there only
+      }
       else { f.sigma_red.SetSize(0); }
       if (W_->ShearFreeOpening() || W_->ContactOpening())
       {

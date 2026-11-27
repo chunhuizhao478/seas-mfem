@@ -814,7 +814,11 @@ public:
       f.eta = eta_;
       // [cycle.relaxation]: the reduction the last evaluation used (r at
       // the accepted step, where the monitor reads it)
-      if (relax_) { f.sigma_red = relax_->Reduction(); }
+      if (relax_)
+      {
+         f.sigma_red = relax_->Reduction();
+         f.sigma_red.HostRead();   // the copy of a device vector is valid there only
+      }
       else { f.sigma_red.SetSize(0); }
       OpenToStation_(f);
    }

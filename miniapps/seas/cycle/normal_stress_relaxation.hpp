@@ -99,12 +99,14 @@ public:
    /// The time of r_n and dsig_n (the last accepted step, or the restart).
    real_t Time() const { return t_n_; }
    /// r_n [Pa], the value at Time().
-   const Vector &R() const { return r_; }
+   /// (HostRead here and below: with an mfem device a copy of a device vector
+   /// is valid there only; the callers index the values on the host.)
+   const Vector &R() const { r_.HostRead(); return r_; }
    /// dsig_n [Pa], the elastic normal traction change at Time().
-   const Vector &Delta() const { return d_; }
+   const Vector &Delta() const { d_.HostRead(); return d_; }
    /// What the QD kernel subtracts (RateStateFaultOperator::SetSigmaNReduction):
    /// red at the time of the last Fill.
-   const Vector &Reduction() const { return red_; }
+   const Vector &Reduction() const { red_.HostRead(); return red_; }
 
    /// red = r_n + (dsig_n - r_n) (1 - exp(-(t - t_n) / t_r)) (the file
    /// comment); t >= t_n.
@@ -130,6 +132,8 @@ public:
    /// ask per point and stage time.
    real_t ReductionAt(real_t t, int i) const
    {
+      r_.HostRead();
+      d_.HostRead();
       const real_t r = r_(i);
       if (frozen_ && (*frozen_)(i) != 0.0) { return r; }
       const real_t E = -std::expm1(-(t - t_n_) / t_r_);
@@ -204,8 +208,9 @@ class FrozenNormalStressReduction : public IFaultNormalStressModifier
 public:
    explicit FrozenNormalStressReduction(const Vector &r) : r_(r) {}
    int NumPoints() const override { return r_.Size(); }
-   real_t NormalStressReduction(int j) const override { return r_(j); }
+   real_t NormalStressReduction(int j) const override { r_.HostRead(); return r_(j); }
    void Advance(real_t, const real_t *, const real_t *) override {}
+   bool Constant() const override { return true; }
 
 private:
    const Vector &r_;

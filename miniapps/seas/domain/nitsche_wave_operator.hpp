@@ -298,6 +298,7 @@ struct DFExtremes
 {
    real_t neg_min_sig, max_sig, max_V, max_ratio, neg_min_pc, max_pc;
    int status;
+   int floor_hits;   ///< DOFs whose law saw the floor in this step (P1.8)
 };
 
 struct DFExtremesReducer
@@ -312,6 +313,7 @@ struct DFExtremesReducer
       a.neg_min_pc = fmax(a.neg_min_pc, b.neg_min_pc);
       a.max_pc = fmax(a.max_pc, b.max_pc);
       a.status |= b.status;
+      a.floor_hits += b.floor_hits;
    }
    static MFEM_HOST_DEVICE void SetInitialValue(value_type &a)
    {
@@ -324,6 +326,7 @@ struct DFExtremesReducer
       a.neg_min_pc = -kDFInf;
       a.max_pc = -kDFInf;
       a.status = 0;
+      a.floor_hits = 0;
    }
 };
 
@@ -465,6 +468,9 @@ public:
       if (UseDeviceStep_())
       {
          Acceleration_(x, &dxdt, has_fault_ ? &d_ : nullptr, *mass_, y);
+         // the device step's quench: M^{-1} C_q v = d v on the elements
+         // without a dashpot block (SetQuenchDevice_)
+         if (quench_lean_) { QuenchAxpyDevice_(dxdt, y, 1.0 + 0.5 * dt_ * quench_rate_); }
          return;
       }
       const Vector xh = HostReadView(x), vh = HostReadView(dxdt);
@@ -703,6 +709,13 @@ public:
       quench_saved_blocks_ = damping_blocks_;
       quench_saved_mass_ = std::move(mass_damped_);
       quench_saved_global_ = has_damping_global_;
+      if (Device::IsEnabled() && UseMatrixFree_())
+      {
+         SetQuenchDevice_(d);
+         quench_rate_ = d;
+         quench_on_ = true;
+         return;
+      }
       AddMassDampingBlocks_([d](int) { return d; });
       // collective (the NitscheMass constructor builds a ParFiniteElementSpace)
       mass_damped_ = std::make_unique<NitscheMass>(mesh_, order_, rho_e_, &damping_blocks_,
@@ -713,6 +726,11 @@ public:
    void ClearQuench()
    {
       MFEM_VERIFY(quench_on_, "ClearQuench: the quench is off");
+      if (quench_lean_)
+      {
+         quench_lean_ = false;
+         dev_damp_dirty_ = true;
+      }
       damping_blocks_.swap(quench_saved_blocks_);
       quench_saved_blocks_.clear();
       mass_damped_ = std::move(quench_saved_mass_);
@@ -757,6 +775,8 @@ public:
    /// Cv = C v (zero without absorbing faces).
    void ApplyDamping(const Vector &v, Vector &Cv) const
    {
+      MFEM_VERIFY(!quench_lean_, "NitscheWaveOperator::ApplyDamping with the device "
+                  "step's quench on: the dashpot blocks do not hold C_q there (SetQuench)");
       Cv.SetSize(v.Size());
       Cv = 0.0;
       if (damping_blocks_.empty()) { return; }
@@ -895,7 +915,11 @@ public:
                   "covers " << m->NumPoints() << " points, the operator owns " << no_
                   << " fault DOFs");
       nsm_ = m;
+      dev_nsm_dirty_ = true;
    }
+   /// The modifier's reductions changed (a new phase of the cycle): the
+   /// device fault copies them again at its next step (P1.8).
+   void NormalStressModifierChanged() { dev_nsm_dirty_ = true; }
    const IFaultNormalStressModifier *NormalStressModifier() const { return nsm_; }
    /// Hook H3 (fully-dynamic-cycle, document/fd_cycle_dev/HOOKS.md): a
    /// constant load b (size Height(), the layout of K x), added to F(t) in
@@ -955,11 +979,22 @@ public:
    /// distinct owned DOFs.
    long FloorHits() const { return floor_hits_; }
    int FlooredDOFs() const
-   { return static_cast<int>(std::count(floored_.begin(), floored_.end(), char(1))); }
+   {
+      if (dev_floored_.Size() > 0)
+      {
+         // the device fault's flags (P1.8), joined with the host's
+         const int *f = dev_floored_.HostRead();
+         int n = 0;
+         for (int j = 0; j < no_; j++) { n += (f[j] != 0 || floored_[j] != 0) ? 1 : 0; }
+         return n;
+      }
+      return static_cast<int>(std::count(floored_.begin(), floored_.end(), char(1)));
+   }
    void ResetFloorCount()
    {
       floor_hits_ = 0;
       std::fill(floored_.begin(), floored_.end(), char(0));
+      if (dev_floored_.Size() > 0) { dev_floored_ = 0; }
    }
    /// [cycle.opening] mode = "shear_free" (Chunhui Zhao, 2026-11-04: "start
    /// version A"; fault opening design rev 1.1, Section 3.1): at an owned DOF
@@ -2034,7 +2069,7 @@ private:
    /// k = (M + dt/2 C)^{-1}(F - K x + G d - C v ...).
    void StepAcceleration_(const Vector &x, const Vector &v, real_t fac1, Vector &k)
    {
-      if (damping_blocks_.empty())
+      if (damping_blocks_.empty() && !quench_lean_)
       {
          // the Kelvin-Voigt layer needs Udot* (at t_{n+1/2}); without it
          // the call is P6's
@@ -2052,6 +2087,7 @@ private:
          kv_tv_shift_ = 0.5 * dt_;
          Acceleration_(x, &v, has_fault_ ? &d_ : nullptr, *mass_damped_, k);
          kv_tv_shift_ = 0.0;
+         if (quench_lean_) { QuenchAxpyDevice_(v, k, 1.0); }
       }
    }
 
@@ -2066,22 +2102,24 @@ private:
       // G0 (3D UCERF plan rev5): the device step has none of the cycle
       // branch's pieces yet (P1 ports them); a deck that turns one on stops
       // here instead of running without it
-      MFEM_VERIFY(dim_ == 3 && !pml_ && !sponge_ && !early_sync_ && !quench_on_
+      MFEM_VERIFY(dim_ == 3 && !pml_ && !sponge_ && !early_sync_
                   && !has_mass_damping_ && !contact_ && !opening_ && !relaxed_contact_
-                  && !nsm_ && sigma_floor_ == 0.0 && !rc_
+                  && !floor_taper_ && (!nsm_ || nsm_->Constant()) && !rc_
                   && slip_measure_ == SlipMeasure::Magnitude
                   && tension_ == TensionMode::Abort,
                   "NitscheWaveOperator: the device step (--matrix-free 1 on a device) "
-                  "has no 2-D mesh, PML or sponge band, early step sync, quench, mass "
-                  "damping, contact, opening, relaxed contact, normal-stress modifier, "
-                  "sigma floor, off-fault rheology, slip path or zero-strength tension "
+                  "has no 2-D mesh, PML or sponge band, early step sync, mass "
+                  "damping, contact, opening, relaxed contact, floor taper, normal-stress "
+                  "modifier that changes during a phase, off-fault rheology, slip path or "
+                  "zero-strength tension "
                   "yet, and this run has one (dim " << dim_ << ", pml "
                   << (pml_ ? 1 : 0) << ", sponge " << (sponge_ ? 1 : 0) << ", early sync "
-                  << (early_sync_ ? 1 : 0) << ", quench " << (quench_on_ ? 1 : 0)
+                  << (early_sync_ ? 1 : 0)
                   << ", mass damping " << (has_mass_damping_ ? 1 : 0) << ", contact "
                   << (contact_ ? 1 : 0) << ", opening " << (opening_ ? 1 : 0)
-                  << ", relaxed " << (relaxed_contact_ ? 1 : 0) << ", nsm "
-                  << (nsm_ ? 1 : 0) << ", sigma floor " << sigma_floor_ << ", rheology "
+                  << ", relaxed " << (relaxed_contact_ ? 1 : 0) << ", floor taper "
+                  << (floor_taper_ ? 1 : 0) << ", changing nsm "
+                  << ((nsm_ && !nsm_->Constant()) ? 1 : 0) << ", rheology "
                   << (rc_ ? 1 : 0) << ", slip path "
                   << (slip_measure_ == SlipMeasure::Path ? 1 : 0) << ", zero strength "
                   << (tension_ == TensionMode::ZeroStrength ? 1 : 0)
@@ -2094,24 +2132,11 @@ private:
                      "operator for it), and this deck has Dirichlet faces; run it on the "
                      "cpu device");
          for (Vector *w : {&Kx_, &F_, &Cv_}) { w->UseDevice(true); }
-         const int nb = static_cast<int>(damping_blocks_.size()), nd = mass_->ElementDofs();
-         dev_damp_e_.SetSize(nb);
-         dev_damp_C_.SetSize(nb * 9 * nd * nd);
-         int *he = dev_damp_e_.HostWrite();
-         real_t *hc = dev_damp_C_.HostWrite();
-         int b = 0;
-         for (const auto &kv : damping_blocks_)
-         {
-            MFEM_VERIFY(kv.second.Height() == 3 * nd && kv.second.Width() == 3 * nd,
-                        "NitscheWaveOperator: damping block of element " << kv.first
-                        << " is not " << 3 * nd << " x " << 3 * nd);
-            he[b] = kv.first;
-            const real_t *c = kv.second.Data();
-            for (int i = 0; i < 9 * nd * nd; i++) { hc[static_cast<size_t>(b) * 9 * nd * nd + i] = c[i]; }
-            ++b;
-         }
+         BuildDeviceDamping_();
          dev_ready_ = true;
       }
+      // SetQuench / ClearQuench changed the dashpot blocks (P1.8)
+      if (dev_damp_dirty_) { BuildDeviceDamping_(); }
       MFEM_VERIFY(!kv_vD_, "NitscheWaveOperator: the device step has no Kelvin-Voigt "
                   "Dirichlet velocity (SetKelvinVoigt bc_velocity); run it on the cpu device");
       if (has_fault_ && (!dev_slip_ || (kv_ && !dev_kv_slip_)))
@@ -2169,6 +2194,67 @@ private:
       dev_fault_ = true;
    }
 
+   /// The dashpot blocks as flat device arrays (the device step's copy of
+   /// damping_blocks_; again after SetQuench and ClearQuench).
+   void BuildDeviceDamping_() const
+   {
+      const int nb = static_cast<int>(damping_blocks_.size()), nd = mass_->ElementDofs();
+      dev_damp_e_.SetSize(nb);
+      dev_damp_C_.SetSize(nb * 9 * nd * nd);
+      int *he = dev_damp_e_.HostWrite();
+      real_t *hc = dev_damp_C_.HostWrite();
+      int b = 0;
+      for (const auto &kv : damping_blocks_)
+      {
+         MFEM_VERIFY(kv.second.Height() == 3 * nd && kv.second.Width() == 3 * nd,
+                     "NitscheWaveOperator: damping block of element " << kv.first
+                     << " is not " << 3 * nd << " x " << 3 * nd);
+         he[b] = kv.first;
+         const real_t *c = kv.second.Data();
+         for (int i = 0; i < 9 * nd * nd; i++) { hc[static_cast<size_t>(b) * 9 * nd * nd + i] = c[i]; }
+         ++b;
+      }
+      dev_damp_dirty_ = false;
+   }
+
+   /// The quench of the device step (UCERF 3-D plan rev5, P1.8): the host
+   /// step holds C_q = d rho_e M_e as one dense block per element and inverts
+   /// (rho_e M_e + dt/2 C_e) per element.  On the device the mass matrix is
+   /// used instead of those blocks.  With alpha = d dt/2:
+   ///   element without a dashpot block:
+   ///     k_e = (rho_e (1 + alpha) M_e)^{-1} F_e - d / (1 + alpha) v_e
+   ///   element with a dashpot block C_e (absorbing face):
+   ///     k_e = (rho_e (1 + alpha) M_e + dt/2 C_e)^{-1} (F_e - (C_e + d rho_e M_e) v_e)
+   /// (F without the damping).  So: the damped mass is built with the density
+   /// rho_e (1 + alpha) and the blocks C_e in force before the quench; the
+   /// dashpot blocks that exist gain d rho_e M_e; and one product per step
+   /// subtracts quench_coef_ v (d / (1 + alpha) on the DOFs of the elements
+   /// without a block, 0 on the others; QuenchAxpyDevice_).  The same
+   /// equations as the host step, in another order of sums (round-off).
+   /// Collective.
+   void SetQuenchDevice_(real_t d)
+   {
+      const real_t s = 1.0 + 0.5 * dt_ * d;
+      AddMassDampingBlocks_([d](int) { return d; }, true);   // existing blocks only
+      quench_rho_ = rho_e_;
+      quench_rho_ *= s;
+      mass_damped_ = std::make_unique<NitscheMass>(mesh_, order_, quench_rho_,
+                                                   &quench_saved_blocks_, 0.5 * dt_);
+      const int n = mass_->NumScalarDofs();
+      quench_coef_.SetSize(height);
+      quench_coef_.UseDevice(true);
+      real_t *c = quench_coef_.HostWrite();
+      for (int i = 0; i < height; i++) { c[i] = d / s; }
+      for (const auto &kv : damping_blocks_)
+      {
+         const Array<int> &dofs = mass_->ElementScalarDofs(kv.first);
+         for (int cc = 0; cc < dim_; cc++)
+            for (int k = 0; k < dofs.Size(); k++) { c[cc * n + dofs[k]] = 0.0; }
+      }
+      quench_lean_ = true;
+      dev_damp_dirty_ = true;
+   }
+
    /// Cv = C v in the device step: one thread per element with a dashpot
    /// block, the product of ApplyDamping in the same order.
    void ApplyDampingDevice_(const Vector &v, Vector &Cv) const
@@ -2188,6 +2274,15 @@ private:
 public:
    // The function holding the kernel is public: nvcc refuses an extended
    // __host__ __device__ lambda inside a private or protected member.
+   /// k -= scale quench_coef_ v (SetQuenchDevice_; scale 1 in the step,
+   /// 1 + d dt/2 for the explicit acceleration of Mult).
+   void QuenchAxpyDevice_(const Vector &v, Vector &k, real_t scale) const
+   {
+      const int n = height;
+      const real_t *c = quench_coef_.Read(), *dv = v.Read();
+      real_t *dk = k.ReadWrite();
+      mfem::forall(n, [=] MFEM_HOST_DEVICE (int i) { dk[i] -= scale * c[i] * dv[i]; });
+   }
    template <int ND>
    void DampingDevice_(const Vector &v, Vector &Cv) const
    {
@@ -2643,7 +2738,23 @@ private:
       }
       // 8-11: the background traction S0 + g(t) Snuc inside the kernel
       const real_t g = nuc_temporal_ ? nuc_temporal_(t) : 0.0;
+      if (nsm_ && dev_nsm_dirty_)
+      {
+         // P1.8: the reductions of a modifier that is constant during a
+         // phase (UseDeviceStep_ refuses another), copied once
+         dev_nsm_red_.SetSize(no_);
+         dev_nsm_red_.UseDevice(true);
+         real_t *h = dev_nsm_red_.HostWrite();
+         for (int j = 0; j < no_; j++) { h[j] = nsm_->NormalStressReduction(j); }
+         dev_nsm_dirty_ = false;
+      }
+      if (sigma_floor_ > 0.0 && dev_floored_.Size() != no_)
+      {
+         dev_floored_.SetSize(no_);
+         dev_floored_ = 0;
+      }
       const DFExtremes r = CloseFaultDevice_(dt, g);
+      floor_hits_ += r.floor_hits;
       if (r.status != 0) { RerunCloseHost_(t, dt, r.status); }
       d_.Swap(d_new_);
       V_.Swap(V_new_);
@@ -2683,7 +2794,12 @@ private:
       if (pc_) { host_copy(sigpc_, sigpc); }
       BackgroundTraction(t, S);
       real_t ext[6];
+      // the kernel counted this step's floor hits already
+      const long hits = floor_hits_;
+      const std::vector<char> floored = floored_;
       CloseFaultHost_(t, dt, Town, S, d, V, psi, sigpc, Xl, sl, ext);
+      floor_hits_ = hits;
+      floored_ = floored;
       MFEM_VERIFY(!(status & kDFAbort), "NitscheWaveOperator: the device fault step flagged "
                   "status " << status << " (RSStatus | DFStatus) on rank " << Mpi::WorldRank()
                   << ", step " << steps_ << ", but the host rerun of boxes 9-11 did not stop "
@@ -2739,6 +2855,12 @@ public:
       const DeviceClosure cl = dev_cl_;
       const bool kv = static_cast<bool>(kv_), pc = pc_, nuc = (g != 0.0);
       const real_t sigma_min = sigma_min_, vstar = pc_vstar_, len = pc_len_;
+      // P1.8: the normal-stress hook's reductions (constant in a phase) and
+      // the floor of the law's normal stress (CloseDOF, the hard floor)
+      const bool has_red = (nsm_ != nullptr);
+      const real_t floor = sigma_floor_;
+      const real_t *red = has_red ? dev_nsm_red_.Read(true) : nullptr;
+      int *flo = (floor > 0.0) ? dev_floored_.ReadWrite(true) : nullptr;
       const int *own = dev_maps_->OwnedToLocal().Read(true);
       const real_t *bk = dev_maps_->Triads().Read(true), *ep = dev_maps_->EpsF().Read(true);
       const real_t *Tk = dTk_.Read(true), *sn = dsn_.Read(true);
@@ -2779,7 +2901,13 @@ public:
          const real_t *n = fr + 9 * j, *dv = n + 3, *sv = n + 6;
          real_t X[2], sig;
          fault_frame::ToLocal(TS, 0.0, n, dv, sv, X[0], X[1], sig);
-         if (!(sig >= sigma_min)) { status |= kDFSigmaRange; }
+         if (floor > 0.0)
+         {
+            // the floor replaces the range check; a value that is not
+            // finite still stops the run
+            if (!(sig - sig == 0.0)) { status |= kDFSigmaRange; }
+         }
+         else if (!(sig >= sigma_min)) { status |= kDFSigmaRange; }
          real_t sig_law = sig;
          if (pc)
          {
@@ -2792,6 +2920,17 @@ public:
             sig_law = spc;
             r.neg_min_pc = (r.neg_min_pc < -spc) ? -spc : r.neg_min_pc;
             r.max_pc = (r.max_pc < spc) ? spc : r.max_pc;
+         }
+         if (has_red)
+         {
+            sig_law -= red[j];
+            if (floor == 0.0 && !(sig_law >= sigma_min)) { status |= kDFSigmaRange; }
+         }
+         if (floor > 0.0 && !(sig_law >= floor))
+         {
+            sig_law = floor;
+            flo[j] = 1;
+            r.floor_hits += 1;
          }
          const real_t *qj = q + kDCParams * j;
          const real_t gamma = kv ? 0.5 * sF[j] * dt + sFk[j] : 0.5 * sF[j] * dt;
@@ -3121,8 +3260,10 @@ private:
    bool has_damping_global_ = false;   ///< any rank has absorbing faces
    /// damping_blocks_[e] += rate(e) rho_e M_e on every element (the mass
    /// matrix's own rule), and the global flag.  Collective.
+   /// existing_only: only elements that already hold a block (the device
+   /// step's quench, SetQuenchDevice_).
    template <class Rate>
-   void AddMassDampingBlocks_(Rate rate)
+   void AddMassDampingBlocks_(Rate rate, bool existing_only = false)
    {
       const ParFiniteElementSpace &fes = elast_->GetFESpace();
       Vector sh;
@@ -3136,6 +3277,7 @@ private:
          const real_t d = rate(e);
          sh.SetSize(nd);
          auto it = damping_blocks_.find(e);
+         if (existing_only && it == damping_blocks_.end()) { continue; }
          if (it == damping_blocks_.end())
          {
             it = damping_blocks_.emplace(e, DenseMatrix(dim_ * nd)).first;
@@ -3166,6 +3308,8 @@ private:
    // the quench (SetQuench): what it replaced, put back by ClearQuench
    bool quench_on_ = false;
    real_t quench_rate_ = 0.0;
+   bool quench_lean_ = false;          ///< the device step's quench (SetQuenchDevice_)
+   Vector quench_rho_, quench_coef_;   ///< rho_e (1 + d dt/2); d / (1 + d dt/2) per DOF
    std::map<int, DenseMatrix> quench_saved_blocks_;
    std::unique_ptr<NitscheMass> quench_saved_mass_;
    bool quench_saved_global_ = false;
@@ -3256,6 +3400,7 @@ private:
    mutable long long mf_bytes_ = 0;
    // the device step (plan D2; UseDeviceStep_)
    mutable bool dev_ready_ = false;
+   mutable bool dev_damp_dirty_ = false;   ///< the dashpot blocks changed (quench)
    mutable std::unique_ptr<FaultGather> dev_gather_;
    mutable std::unique_ptr<DeviceSlipLoad> dev_slip_, dev_kv_slip_;
    mutable long long dev_gather_global_ = 0;
@@ -3275,6 +3420,10 @@ private:
    mutable Vector dload_k_;            ///< kernel slip of the slip loads
    mutable Vector gbuf_;               ///< GatherFaultDofs
    Array<DFExtremes> dev_red_ws_;      ///< workspace of the reduction
+   // P1.8: the normal-stress hook's reductions and the floor's flags on the device
+   bool dev_nsm_dirty_ = true;
+   Vector dev_nsm_red_;
+   mutable Array<int> dev_floored_;
    mutable double fault_sec_ = 0.0;
    RheologyCoupler *rc_ = nullptr;   ///< off-fault rheology (null: elastic)
    Vector rcT_;                      ///< Q dsig on owned fault DOFs

@@ -225,3 +225,24 @@ test-device-cycle-3d: seas_test_device_cycle_3d
 	done
 
 .PHONY: test-device-cycle-3d
+
+# P1.8 (plan rev5 U-G2): the device step's quench, relaxation r and floor
+# against the host, debug device, 1 and 2 ranks.
+#   a  one step: quench on, r below (x < 0) and above (x >= 0) the floor
+#   b  300 steps: the same, quench on after step 100 and off after step 200
+#   c  300 steps: quench on from the start, r without a floor
+TEST_DQ3D_A = --name U-G2a --steps 1 --min-peak 0 --quench-from 0 --relax --floor 24.5e6
+TEST_DQ3D_B = --name U-G2b --steps 300 --quench-from 100 --quench-to 200 --relax --floor 24.5e6
+TEST_DQ3D_C = --name U-G2c --steps 300 --quench-from 0 --relax
+test-device-quench-3d: seas_test_device_cycle_3d
+	@for n in 1 2; do \
+	   for c in "$(TEST_DQ3D_A)" "$(TEST_DQ3D_B)" "$(TEST_DQ3D_C)"; do \
+	      $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_device_cycle_3d $$c --device cpu \
+	         --write test_device_quench_3d_np$$n.bin || exit 1; \
+	      $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_device_cycle_3d $$c --device debug \
+	         --compare test_device_quench_3d_np$$n.bin || exit 1; \
+	      rm -f test_device_quench_3d_np$$n.bin; \
+	   done; \
+	done
+
+.PHONY: test-device-quench-3d

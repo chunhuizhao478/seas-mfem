@@ -191,6 +191,7 @@ inline void WriteCycleCheckpoint(const std::string &prefix, const CheckpointInfo
              << info.relax_r.Size() << "\n";
          for (const Vector *v : {&info.relax_r, &info.relax_d})
          {
+            v->HostRead();   // a copy of a device vector is valid there only (P1.8)
             for (int i = 0; i < v->Size(); i++) { out << (i ? " " : "") << (*v)(i); }
             out << "\n";
          }

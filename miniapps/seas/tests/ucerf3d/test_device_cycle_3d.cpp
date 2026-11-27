@@ -22,6 +22,17 @@
 //   G2  the same fault points, and the event ran (peak slip rate)
 //   G3  slip, slip rate and state at every fault DOF
 //   G4  the largest |u| and |v| of the volume fields
+//   G5  (U-G2) the floor's counts: DOF-steps at the floor and distinct DOFs
+//
+// U-G2 (P1.8): the same run with the quench, the relaxation r and the floor
+// of the law's normal stress, which the device step has since P1.8:
+//   --quench-from K --quench-to L   SetQuench after step K, ClearQuench after
+//                                   step L (-1: never), rate --quench-d
+//   --relax 1                       r = --relax-lo Pa at x < 0 and --relax-hi
+//                                   Pa at x >= 0 (DynPhase::SetNormalStressRelaxation)
+//   --floor F                       [cycle].sigma_n_floor_pa = F
+// With sigma_n = 25 MPa, r = 1 MPa / 0.2 MPa and the floor at 24.5 MPa the
+// law's normal stress is below the floor at x < 0 and above it at x >= 0.
 //
 // Usage (from miniapps/seas; PETSc needed):
 //   mpirun -np N ./seas_test_device_cycle_3d --device cpu --write /tmp/ug1.bin
@@ -86,8 +97,10 @@ int main(int argc, char *argv[])
    MPIContext mpi(&argc, &argv);
    const char *deck = "tests/ucerf3d/configs/T-plane_device_step.toml";
    const char *device_str = "cpu", *write = "", *compare = "";
-   int steps = 300;
-   real_t tol = 1e-12;
+   int steps = 300, quench_from = -1, quench_to = -1;
+   bool relax = false;
+   real_t tol = 1e-12, min_peak = 1.0, quench_d = 0.5, relax_lo = 1.0e6, relax_hi = 0.2e6, floor = 0.0;
+   const char *name = "U-G1";
    OptionsParser args(argc, argv);
    args.AddOption(&deck, "-d", "--deck", "The U-G1 deck.");
    args.AddOption(&device_str, "-dev", "--device", "mfem device: cpu (host step), debug, cuda.");
@@ -95,6 +108,16 @@ int main(int argc, char *argv[])
    args.AddOption(&write, "-w", "--write", "Write the hand-back state to this file.");
    args.AddOption(&compare, "-c", "--compare", "Compare the hand-back state with this file.");
    args.AddOption(&tol, "-tol", "--tol", "Tolerance of the comparison (relative to the largest).");
+   args.AddOption(&min_peak, "-mp", "--min-peak", "G2: the peak slip rate must exceed this [m/s].");
+   args.AddOption(&name, "-name", "--name", "Test name in the check lines (U-G1, U-G2 ...).");
+   args.AddOption(&quench_from, "-qf", "--quench-from", "SetQuench after this step (-1: no quench).");
+   args.AddOption(&quench_to, "-qt", "--quench-to", "ClearQuench after this step (-1: never).");
+   args.AddOption(&quench_d, "-qd", "--quench-d", "Quench rate d [1/s].");
+   args.AddOption(&relax, "-relax", "--relax", "-no-relax", "--no-relax",
+                  "Relaxation r: --relax-lo at x < 0, --relax-hi at x >= 0.");
+   args.AddOption(&relax_lo, "-rlo", "--relax-lo", "r at x < 0 [Pa].");
+   args.AddOption(&relax_hi, "-rhi", "--relax-hi", "r at x >= 0 [Pa].");
+   args.AddOption(&floor, "-floor", "--floor", "[cycle].sigma_n_floor_pa [Pa] (0: off).");
    args.Parse();
    if (!args.Good()) { if (mpi.IsRoot()) { args.PrintUsage(std::cout); } return 1; }
 #ifndef MFEM_USE_PETSC
@@ -104,13 +127,22 @@ int main(int argc, char *argv[])
    Device device(device_str);
    cycle::CycleConfig cfg = cycle::CycleConfig::Load(deck);
    cfg.device_step = std::string(device_str) != "cpu";
+   if (quench_from >= 0)
+   {
+      cfg.quench.on = true;
+      cfg.quench.d = quench_d;
+   }
+   if (floor > 0.0) { cfg.sigma_n_floor = floor; }
    MFEMInitializePetsc(&argc, &argv, cfg.qd.petsc_options.c_str(), NULL);
    {
       if (mpi.IsRoot())
       {
-         std::cout << "test_device_cycle_3d (UCERF 3-D plan rev5, P1.7, U-G1) on " << mpi.Size()
-                   << " rank(s): " << deck << ", [cycle].device_step = "
-                   << (cfg.device_step ? "true" : "false") << "\n";
+         std::cout << "test_device_cycle_3d (UCERF 3-D plan rev5, P1.7 and P1.8, " << name
+                   << ") on " << mpi.Size() << " rank(s): " << deck << ", [cycle].device_step = "
+                   << (cfg.device_step ? "true" : "false") << "; quench after step "
+                   << quench_from << " to " << quench_to << " (d = " << quench_d
+                   << " 1/s), relaxation " << (relax ? 1 : 0) << " (" << relax_lo << ", "
+                   << relax_hi << " Pa), floor " << floor << " Pa\n";
          device.Print();
       }
       std::unique_ptr<Mesh> smesh = cycle::LoadScaledMesh(cfg.shared.mesh.path, cfg.mesh_scale);
@@ -129,6 +161,16 @@ int main(int argc, char *argv[])
       cycle::DynPhase dyn(pmesh, cfg, qd.Table(), par, pre, 1.0, nullptr, qd.Domain().FrameField());
       NitscheWaveOperator &W = dyn.Op();
       const int N = qd.Table().Size();
+      // U-G2: the relaxation r per owned fault DOF, by position
+      Vector rr;
+      if (relax)
+      {
+         const Vector &Xf = W.FaultPositions();
+         Xf.HostRead();
+         rr.SetSize(N);
+         for (int j = 0; j < N; j++) { rr(j) = (Xf(3 * j) < 0.0) ? relax_lo : relax_hi; }
+         dyn.SetNormalStressRelaxation(rr);
+      }
       // the switch-in
       Vector sk(2 * N), d, V, psi, us(W.Height());
       sk = 0.0;
@@ -138,8 +180,12 @@ int main(int argc, char *argv[])
       real_t peak = 0.0;
       StopWatch sw;
       sw.Start();
+      int quench_steps = 0;
       for (int k = 0; k < steps; k++)
       {
+         if (quench_from >= 0 && k == quench_from) { dyn.SetQuench(); }
+         if (quench_to >= 0 && k == quench_to && dyn.Quenched()) { dyn.ClearQuench(); }
+         if (dyn.Quenched()) { quench_steps++; }
          dyn.Step();
          if ((k + 1) % 50 == 0 || k + 1 == steps)
          {
@@ -180,11 +226,15 @@ int main(int argc, char *argv[])
       dyn.Ud().HostRead();
       const real_t umax = GMax(mpi, dyn.U().Normlinf()), vmax = GMax(mpi, dyn.Ud().Normlinf());
       const bool mf = W.MatrixFreeActive(), ds = W.DeviceStepActive(), df = W.DeviceFaultActive();
+      long fhits = 0, fdofs = 0;
+      dyn.FloorCount(fhits, fdofs);
       if (mpi.IsRoot())
       {
          std::printf("  %d steps of %.6f s to tau = %.4f s; peak |V| %.6f m/s; max |u| %.6e m, "
-                     "max |v| %.6e m/s; matrix-free %d, device step %d, device fault %d\n",
-                     steps, dyn.Dt(), dyn.Tau(), peak, umax, vmax, mf, ds, df);
+                     "max |v| %.6e m/s; matrix-free %d, device step %d, device fault %d; "
+                     "%d quenched steps; floor: %ld DOF-steps, %ld DOFs\n",
+                     steps, dyn.Dt(), dyn.Tau(), peak, umax, vmax, mf, ds, df, quench_steps,
+                     fhits, fdofs);
       }
       // rows sorted by position (the same order on any device and rank count)
       const size_t M = all.size() / NR;
@@ -194,8 +244,9 @@ int main(int argc, char *argv[])
       if (mpi.IsRoot() && write[0])
       {
          std::ofstream f(write, std::ios::binary);
-         const double head[5] = {static_cast<double>(M), static_cast<double>(steps), dyn.Tau(),
-                                 umax, vmax};
+         const double head[8] = {static_cast<double>(M), static_cast<double>(steps), dyn.Tau(),
+                                 umax, vmax, static_cast<double>(fhits),
+                                 static_cast<double>(fdofs), static_cast<double>(quench_steps)};
          f.write(reinterpret_cast<const char *>(head), sizeof(head));
          for (const auto &r : rows) { f.write(reinterpret_cast<const char *>(r.data()), sizeof(double) * NR); }
          MFEM_VERIFY(f.good(), "cannot write " << write);
@@ -204,13 +255,13 @@ int main(int argc, char *argv[])
       if (compare[0])
       {
          std::ostringstream os;
-         os << "U-G1 G1: the device step ran: matrix-free product " << mf << ", device step "
+         os << name << " G1: the device step ran: matrix-free product " << mf << ", device step "
             << ds << ", device fault " << df << " (device \"" << device_str << "\")";
          Check(mpi, cfg.device_step && mf && ds && df, os.str());
          if (mpi.IsRoot())
          {
             std::ifstream f(compare, std::ios::binary);
-            double head[5] = {0, 0, 0, 0, 0};
+            double head[8] = {0, 0, 0, 0, 0, 0, 0, 0};
             f.read(reinterpret_cast<char *>(head), sizeof(head));
             MFEM_VERIFY(f.good(), "cannot read " << compare);
             const size_t Mr = static_cast<size_t>(head[0]);
@@ -233,23 +284,31 @@ int main(int argc, char *argv[])
                mp = std::max(mp, std::abs(ref[i][9]));
             }
             os.str("");
-            os << "U-G1 G2: the same " << M << " fault points (" << ex << " m), " << steps
+            os << name << " G2: the same " << M << " fault points (" << ex << " m), " << steps
                << " steps to tau = " << dyn.Tau() << " s, and the event ran (peak |V| " << peak
-               << " m/s > 1)";
-            Check(mpi, same && M > 0 && ex == 0.0 && peak > 1.0, os.str());
+               << " m/s > " << min_peak << ")";
+            Check(mpi, same && M > 0 && ex == 0.0 && peak > min_peak, os.str());
             os.str("");
-            os << "U-G1 G3: device against host at the hand-back: slip " << ed << " m of " << md
+            os << name << " G3: device against host at the hand-back: slip " << ed << " m of " << md
                << " (" << ed / md << "), slip rate " << ev << " m/s of " << mv << " ("
                << ev / mv << "), state " << ep << " of " << mp << " (" << ep / mp
                << "); relative limit " << tol;
             Check(mpi, same && ed <= tol * md && ev <= tol * mv && ep <= tol * mp, os.str());
             os.str("");
             const double eu = std::abs(umax - head[3]) / head[3], evv = std::abs(vmax - head[4]) / head[4];
-            os << "U-G1 G4: the largest |u| (" << eu << ") and |v| (" << evv
+            os << name << " G4: the largest |u| (" << eu << ") and |v| (" << evv
                << ") of the volume fields, relative, limit " << tol;
             Check(mpi, eu <= tol && evv <= tol, os.str());
+            os.str("");
+            os << name << " G5: the floor's counts " << fhits << " DOF-steps and " << fdofs
+               << " DOFs (host " << static_cast<long>(head[5]) << ", "
+               << static_cast<long>(head[6]) << "), " << quench_steps
+               << " quenched steps (host " << static_cast<long>(head[7]) << ")";
+            Check(mpi, static_cast<long>(head[5]) == fhits && static_cast<long>(head[6]) == fdofs
+                  && static_cast<long>(head[7]) == quench_steps
+                  && (floor == 0.0 || !relax || fdofs > 0), os.str());
          }
-         else { num_tests += 3; }
+         else { num_tests += 4; }
       }
    }
    MFEMFinalizePetsc();
