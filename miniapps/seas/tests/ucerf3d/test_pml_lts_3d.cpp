@@ -117,6 +117,11 @@ struct G4Opt
    bool band = true;      ///< false: the same run without the band (round-off reference)
    std::string only;      ///< "col" or "mesh": one case
    real_t snap_dv[3] = {0.0, 0.0, 0.0};
+   // U-G5 (P1.11): the walls behind the band are held and move,
+   // g = (ga + gb t) e, and (kv) the Kelvin-Voigt term takes their velocity
+   bool held = false, kv = false;
+   real_t dload = 0.0, dload_far = 0.0;   ///< device Dirichlet load against the host's
+   long dir_builds = 0;
    // results (this rank's part reduced over the ranks)
    real_t du = 0.0, dv = 0.0, in_band = 0.0;
    bool on_device = false, sizes_ok = true;
@@ -140,10 +145,30 @@ WaveResult RunWave(Mesh &sm, int p, bool with_band, real_t X, real_t L, real_t w
    bc.dirichlet_attrs = {5};
    bc.natural_attrs = {1, 2, 7};
    bc.default_dirichlet_func = [](const Vector &, real_t, Vector &u) { u.SetSize(3); u = 0.0; };
-   if (g4)
+   if (g4 && !g4->held)
    {
       bc.dirichlet_attrs.clear();
       bc.natural_attrs = {1, 2, 5, 7};
+   }
+   BoundaryConfig bcv = bc;
+   if (g4 && g4->held)
+   {
+      // moving walls: 0.1 A at t = 0, and another 0.1 A every 10 s
+      const real_t ga = 1e-4, gb = 1e-5;
+      bc.default_dirichlet_func = [=](const Vector &, real_t t, Vector &u)
+      {
+         u.SetSize(3);
+         u(0) = 0.6 * (ga + gb * t);
+         u(1) = 0.3 * (ga + gb * t);
+         u(2) = -0.2 * (ga + gb * t);
+      };
+      bcv.default_dirichlet_func = [=](const Vector &, real_t, Vector &u)
+      {
+         u.SetSize(3);
+         u(0) = 0.6 * gb;
+         u(1) = 0.3 * gb;
+         u(2) = -0.2 * gb;
+      };
    }
    NitscheWaveOperator op(pm, p, MaterialField::MakeConstant(0.0, mu, rho), bc);
    WaveResult r;
@@ -165,6 +190,11 @@ WaveResult RunWave(Mesh &sm, int p, bool with_band, real_t X, real_t L, real_t w
       wm.attr = 5;
       op.SetPml(std::make_shared<PmlBand>(3, std::vector<PmlWall>{wp, wm}, prm));
       r.kappa_max = op.Pml()->KappaMax();
+   }
+   if (g4 && g4->kv)
+   {
+      op.SetKelvinVoigt(0.1, NitscheWaveOperator::KVScale::Node, -1.0,
+                        NitscheWaveOperator::KVLength::Inscribed, &bcv);
    }
    if (g4 && g4->device != "cpu")
    {
@@ -324,6 +354,29 @@ WaveResult RunWave(Mesh &sm, int p, bool with_band, real_t X, real_t L, real_t w
    {
       std::fclose(g4f);
       g4->on_device = op.PmlOnDevice();
+      if (g4->held && g4->device != "cpu")
+      {
+         // the device step's load F0 + (t - ta) Fd against the host assembly,
+         // now and 1e9 s later (the rate Fd)
+         g4->dir_builds = op.DeviceDirichletBuilds();
+         for (int k = 0; k < 2; k++)
+         {
+            const real_t tt = t + (k == 0 ? 0.0 : 1e9);
+            Vector Fh, Fd;
+            op.Elasticity().AssembleDirichletOnlyRHS(Fh, tt);
+            op.DeviceDirichletLoad(tt, Fd);
+            Fd.HostRead();
+            real_t d = 0.0, m = 0.0;
+            for (int i = 0; i < Fh.Size(); i++)
+            {
+               d = std::max(d, std::abs(Fd(i) - Fh(i)));
+               m = std::max(m, std::abs(Fh(i)));
+            }
+            d = GMax(d, pm.GetComm());
+            m = GMax(m, pm.GetComm());
+            (k == 0 ? g4->dload : g4->dload_far) = (m > 0.0) ? d / m : 1.0;
+         }
+      }
       g4->du = GMax(g4->du, pm.GetComm());
       g4->dv = GMax(g4->dv, pm.GetComm());
       g4->in_band = GMax(g4->in_band, pm.GetComm());
@@ -869,6 +922,71 @@ void TestG4W(const char *mesh_file, G4Opt g4, real_t col_h, real_t width)
    }
 }
 
+/// U-G5 W (P1.11): U-G4 W's runs with held, moving walls behind the band
+/// (Dirichlet load and band wall faces on the device), and the column
+/// without a band with the Kelvin-Voigt term taking the walls' velocity.
+void TestG5W(const char *mesh_file, G4Opt g4, real_t col_h, real_t width)
+{
+   const real_t X = 90e3, L = 30e3, fa = 0.01, R0 = 1e-3;
+   const char *names[3] = {"G5Wcol", "G5Wmesh", "G5Wkv"};
+   const char *keys[3] = {"col", "mesh", "kv"};
+   for (int k = 0; k < 3; k++)
+   {
+      G4Opt o = g4;
+      o.name = names[k];
+      o.held = true;
+      o.kv = (k == 2);
+      o.band = (k != 2);
+      if (!o.only.empty() && o.only != keys[k]) { continue; }
+      const int p = (k == 1) ? 1 : 2;
+      if (g_rank == 0)
+      {
+         std::cout << "\n=== U-G5 W held moving walls" << (o.band ? " behind the band" : "")
+                   << (o.kv ? ", Kelvin-Voigt with the walls' velocity" : "") << ", device "
+                   << o.device << ", " << (k == 1 ? mesh_file : "column of tets") << ", p = "
+                   << p << " ===" << std::endl;
+      }
+      WaveResult r;
+      if (k != 1)
+      {
+         const int nx = static_cast<int>(std::lround(2 * X / col_h));
+         Mesh sm = Mesh::MakeCartesian3D(nx, 1, 1, Element::TETRAHEDRON, 2 * X, col_h, col_h);
+         for (int v = 0; v < sm.GetNV(); v++) { sm.GetVertex(v)[0] -= X; }
+         for (int b = 0; b < sm.GetNBE(); b++) { sm.SetBdrAttribute(b, 5); }
+         sm.SetAttributes();
+         SplitWalls(sm, 5);
+         r = RunWave(sm, p, o.band, X, L, width, fa, R0, o.kv ? 0.25 : 0.5, true, &o);
+      }
+      else
+      {
+         Mesh sm(mesh_file, 1, 1);
+         SplitWalls(sm, 5);
+         r = RunWave(sm, p, o.band, X, L, width, fa, R0, 0.5, false, &o);
+      }
+      PrintWave(o.band ? "band" : "held wall", r);
+      const bool dev = o.device != "cpu";
+      std::ostringstream os;
+      os << "U-G5 W " << o.name << " (" << r.steps << " steps): the run is finite, the wave is "
+         "in the outer 30 km at the samples (max |u| there " << o.in_band << " A)";
+      Check(r.finite && o.sizes_ok && o.on_device == (dev && o.band) && o.in_band > 0.1, os.str());
+      if (dev)
+      {
+         os.str("");
+         os << "U-G5 W " << o.name << ": device against host at three times: U within " << o.du
+            << " of A, U' within " << o.dv << " of c A / w (limits " << o.tol << " and "
+            << o.tol_v << ")";
+         Check(o.sizes_ok && o.du <= o.tol && o.dv <= o.tol_v, os.str());
+         os.str("");
+         os << "U-G5 W " << o.name << ": the device step's Dirichlet load (built " << o.dir_builds
+            << " time(s)) against the host assembly: " << o.dload << " at the end, " << o.dload_far
+            << " 1e9 s later (relative, limit 1e-12)";
+         // one pair for the displacement data, one more for the Kelvin-Voigt velocity data
+         Check(o.dir_builds == (o.kv ? 2 : 1) && o.dload <= 1e-12 && o.dload_far <= 1e-12,
+               os.str());
+      }
+   }
+}
+
 }  // namespace
 
 int main(int argc, char *argv[])
@@ -941,6 +1059,19 @@ int main(int argc, char *argv[])
       MFEM_VERIFY((g4.device == "cpu") != g4.write.empty() && g4.write.empty() != g4.compare.empty(),
                   "U-G4 W: --device cpu --write PREFIX, or --device debug|cuda --compare PREFIX");
       TestG4W(mesh_file, g4, 3e3, width);
+   }
+   if (g_only.count("G5W"))
+   {
+      G4Opt g4;
+      g4.device = dev_name;
+      g4.write = g4_write;
+      g4.compare = g4_compare;
+      g4.tol = g4_tol;
+      g4.tol_v = g4_tol_v;
+      g4.only = g4_only;
+      MFEM_VERIFY((g4.device == "cpu") != g4.write.empty() && g4.write.empty() != g4.compare.empty(),
+                  "U-G5 W: --device cpu --write PREFIX, or --device debug|cuda --compare PREFIX");
+      TestG5W(mesh_file, g4, 3e3, width);
    }
    if (Want("P2"))
    {

@@ -610,6 +610,12 @@ public:
    /// The band's memory steps in device kernels (P1.10; set by the first
    /// device step).
    bool PmlOnDevice() const { return pml_ && pml_->OnDevice(); }
+   /// The device step's Dirichlet load at t, F0 + (t - ta) Fd (for tests:
+   /// against Elasticity().AssembleDirichletOnlyRHS).  Collective.
+   void DeviceDirichletLoad(real_t t, Vector &F) const
+   { DevDirichletLoad_(*elast_, bc_, t, dev_dir_, F); }
+   /// How often the device step assembled its Dirichlet load pair (P1.11).
+   long DeviceDirichletBuilds() const { return dev_dir_builds_; }
    /// The switch into the dynamic phase at the state u_s (memory to zero,
    /// b_band from u_s and the wall data at GetTime()).  Collective.
    void PmlEnter(const Vector &u_s)
@@ -930,6 +936,16 @@ public:
    /// The modifier's reductions changed (a new phase of the cycle): the
    /// device fault copies them again at its next step (P1.8).
    void NormalStressModifierChanged() { dev_nsm_dirty_ = true; }
+   /// The Dirichlet data changed other than through the operator's clock (a
+   /// new phase of the cycle moves t0): the device step assembles its two
+   /// load vectors again at its next step (P1.11).  The device step also
+   /// checks the Dirichlet functions at one point every step
+   /// (DevDirichletStale_), so a missed call is caught for them.
+   void DirichletDataChanged()
+   {
+      dev_dir_.built = false;
+      dev_dir_kv_.built = false;
+   }
    const IFaultNormalStressModifier *NormalStressModifier() const { return nsm_; }
    /// Hook H3 (fully-dynamic-cycle, document/fd_cycle_dev/HOOKS.md): a
    /// constant load b (size Height(), the layout of K x), added to F(t) in
@@ -1514,6 +1530,7 @@ public:
          /*Vp=*/0.0, /*Wf=*/0.0, /*lf=*/0.0, bc_velocity ? *bc_velocity : bc_, DGMethod::IP,
          SolverType::OperatorOnly, config_);
       kv_vD_ = (bc_velocity != nullptr);
+      if (kv_vD_) { kv_bc_ = *bc_velocity; }
       MFEM_VERIFY(!kv_vD_ || bc_velocity->dirichlet_attrs == bc_.dirichlet_attrs,
                   "SetKelvinVoigt: bc_velocity must have the same Dirichlet attributes");
       MFEM_VERIFY(kv_->GetFESpace().GetVSize() == height,
@@ -1986,8 +2003,9 @@ private:
       {
          ScopedStageTimer timer(timers_, StageTimers::DynDirichletRHS);
          const RankCosts::Scope cost(RankCosts::Rhs);
-         // the device step has no Dirichlet faces (UseDeviceStep_)
-         if (dev) { F_ = 0.0; }
+         // the device step: F0 + (t - ta) Fd, the two vectors assembled on
+         // the host once per phase (P1.11)
+         if (dev) { DevDirichletLoad_(*elast_, bc_, GetTime(), dev_dir_, F_); }
          else { elast_->AssembleDirichletOnlyRHS(F_, GetTime()); }
       }
       F_ -= Kx_;
@@ -2052,7 +2070,11 @@ private:
          {
             ScopedStageTimer timer(timers_, StageTimers::DynDirichletRHS);
             const RankCosts::Scope cost(RankCosts::Rhs);
-            kv_->AssembleDirichletOnlyRHS(FvD_, GetTime() - kv_tv_shift_);
+            if (dev)
+            {
+               DevDirichletLoad_(*kv_, kv_bc_, GetTime() - kv_tv_shift_, dev_dir_kv_, FvD_);
+            }
+            else { kv_->AssembleDirichletOnlyRHS(FvD_, GetTime() - kv_tv_shift_); }
             F_ += FvD_;
          }
          if (has_fault_)
@@ -2122,6 +2144,122 @@ private:
    /// SetFastFaultKernels or SetKelvinVoigt: copies the dashpot blocks and
    /// the fault's face operators (slip-load blocks, gathered vdofs) to the
    /// device.
+   // ---------------- the Dirichlet load of the device step (P1.11)
+   // The host assembles D g(t) from the Dirichlet functions at every step.
+   // The device step takes the load affine in time,
+   //    F(t) = F0 + (t - ta) Fd,   F0 = D g(ta),  Fd = (D g(ta + T) - F0) / T,
+   // two host assemblies when the data changes (a new phase) and one axpy on
+   // the device per step.  That is the cycle's loading (cycle/loading.hpp:
+   // u(x, t) = t u(x, 1), at t0 + tau).  The midpoint D g(ta + T / 2) checks
+   // it; a load that is not affine in time stops here.  T is long on
+   // purpose: the plate rate is about 1e-9 m/s against metres of g, and the
+   // difference over a short T would lose its digits; for an affine load T
+   // does not enter the result.
+   struct DevDirichlet_
+   {
+      Vector F0, Fd;
+      real_t ta = 0.0;
+      bool built = false;
+      std::vector<real_t> s0, sd;   ///< the functions at the sample point: value at ta, rate
+   };
+   static constexpr real_t kDevDirichletSpan = 1e12;   ///< T [s]
+
+   /// The exterior Dirichlet functions of `bc` at the sample point, at t.
+   void DirichletSample_(const BoundaryConfig &bc, real_t t, std::vector<real_t> &v) const
+   {
+      v.clear();
+      Vector x(const_cast<real_t *>(dev_dir_x_), dim_), u;
+      auto take = [&](const DirichletFunc &f)
+      {
+         f(x, t, u);
+         for (int i = 0; i < u.Size(); i++) { v.push_back(u(i)); }
+      };
+      if (bc.default_dirichlet_func) { take(bc.default_dirichlet_func); }
+      for (const auto &kv : bc.dirichlet_funcs) { take(kv.second); }
+   }
+
+   /// The functions no longer follow the stored line (a new t0).  The
+   /// sample point is the same on every rank, so every rank decides alike.
+   bool DevDirichletStale_(const BoundaryConfig &bc, real_t t, const DevDirichlet_ &d) const
+   {
+      DirichletSample_(bc, t, dev_dir_sample_);
+      if (dev_dir_sample_.size() != d.s0.size()) { return true; }
+      real_t scale = 0.0;
+      for (std::size_t i = 0; i < d.s0.size(); i++)
+      {
+         scale = std::max(scale, std::abs(d.s0[i]) + std::abs(d.sd[i] * (t - d.ta)));
+      }
+      for (std::size_t i = 0; i < d.s0.size(); i++)
+      {
+         const real_t pred = d.s0[i] + (t - d.ta) * d.sd[i];
+         if (std::abs(dev_dir_sample_[i] - pred) > 1e-10 * scale) { return true; }
+      }
+      return false;
+   }
+
+   /// Collective.
+   void BuildDevDirichlet_(const ElasticityDomainOperator<ParMesh> &op,
+                           const BoundaryConfig &bc, real_t t, DevDirichlet_ &d) const
+   {
+      if (!dev_dir_x_set_)
+      {
+         Vector lo, hi;
+         mesh_.GetBoundingBox(lo, hi, 1);
+         const real_t frac[3] = {0.6180339887, 0.7236067977, 0.4142135624};
+         for (int i = 0; i < dim_; i++) { dev_dir_x_[i] = lo(i) + frac[i] * (hi(i) - lo(i)); }
+         dev_dir_x_set_ = true;
+      }
+      const real_t T = kDevDirichletSpan;
+      Vector Fb(height), Fm(height);
+      d.F0.SetSize(height);
+      d.Fd.SetSize(height);
+      d.F0.UseDevice(true);
+      d.Fd.UseDevice(true);
+      {
+         Vector Fa = HostWriteView(d.F0);
+         op.AssembleDirichletOnlyRHS(Fa, t);
+      }
+      op.AssembleDirichletOnlyRHS(Fb, t + T);
+      op.AssembleDirichletOnlyRHS(Fm, t + 0.5 * T);
+      const real_t *fa = d.F0.HostRead();
+      real_t *fd = d.Fd.HostWrite();
+      real_t loc[2] = {0.0, 0.0};
+      for (int i = 0; i < height; i++)
+      {
+         loc[0] = std::max(loc[0], std::max(std::abs(fa[i]), std::abs(Fb(i))));
+         loc[1] = std::max(loc[1], std::abs(Fm(i) - 0.5 * (fa[i] + Fb(i))));
+         fd[i] = (Fb(i) - fa[i]) / T;
+      }
+      MPI_Allreduce(MPI_IN_PLACE, loc, 2, MPITypeMap<real_t>::mpi_type, MPI_MAX,
+                    mesh_.GetComm());
+      MFEM_VERIFY(loc[1] <= 1e-12 * loc[0],
+                  "NitscheWaveOperator: the device step takes the Dirichlet load affine in "
+                  "time, and this one is not: D g(t + T / 2) differs from the mean of D g(t) "
+                  "and D g(t + T) by " << loc[1] << " of " << loc[0] << " (t = " << t
+                  << " s, T = " << T << " s); run it on the cpu device");
+      d.ta = t;
+      DirichletSample_(bc, t, d.s0);
+      DirichletSample_(bc, t + T, d.sd);
+      for (std::size_t i = 0; i < d.s0.size(); i++) { d.sd[i] = (d.sd[i] - d.s0[i]) / T; }
+      d.built = true;
+      dev_dir_builds_++;
+   }
+
+   /// F = F0 + (t - ta) Fd on the device (built or rebuilt first if needed).
+   void DevDirichletLoad_(const ElasticityDomainOperator<ParMesh> &op, const BoundaryConfig &bc,
+                          real_t t, DevDirichlet_ &d, Vector &F) const
+   {
+      if (bc.dirichlet_attrs.empty())
+      {
+         F.SetSize(height);
+         F = 0.0;
+         return;
+      }
+      if (!d.built || DevDirichletStale_(bc, t, d)) { BuildDevDirichlet_(op, bc, t, d); }
+      F = d.F0;
+      F.Add(t - d.ta, d.Fd);
+   }
+
    bool UseDeviceStep_() const
    {
       if (!Device::IsEnabled() || !UseMatrixFree_()) { return false; }
@@ -2151,12 +2289,7 @@ private:
                   << "); run it on the cpu device");
       if (!dev_ready_)
       {
-         MFEM_VERIFY(bc_.dirichlet_attrs.empty(),
-                     "NitscheWaveOperator: the device step (--matrix-free 1 on a device) has "
-                     "no Dirichlet loading yet (plan D2 takes the quasi-dynamic D g(t) "
-                     "operator for it), and this deck has Dirichlet faces; run it on the "
-                     "cpu device");
-         for (Vector *w : {&Kx_, &F_, &Cv_, &pml_f_}) { w->UseDevice(true); }
+         for (Vector *w : {&Kx_, &F_, &Cv_, &pml_f_, &FvD_}) { w->UseDevice(true); }
          // the band's memory steps in device kernels from here on (P1.10)
          if (pml_) { pml_->SetDevice(true); }
          BuildDeviceDamping_();
@@ -2164,8 +2297,6 @@ private:
       }
       // SetQuench / ClearQuench changed the dashpot blocks (P1.8)
       if (dev_damp_dirty_) { BuildDeviceDamping_(); }
-      MFEM_VERIFY(!kv_vD_, "NitscheWaveOperator: the device step has no Kelvin-Voigt "
-                  "Dirichlet velocity (SetKelvinVoigt bc_velocity); run it on the cpu device");
       if (has_fault_ && (!dev_slip_ || (kv_ && !dev_kv_slip_)))
       {
          MFEM_VERIFY(UseFastFault_(), "NitscheWaveOperator: the device step needs the "
@@ -3460,6 +3591,14 @@ private:
    std::unique_ptr<PmlDynamicTerms> pml_;   ///< dynamic PML (null: none)
    std::shared_ptr<const PmlBand> sponge_;  ///< sponge comparator (null: none)
    mutable Vector pml_f_;
+   // the device step's Dirichlet loads (P1.11): displacement data on K,
+   // velocity data on the Kelvin-Voigt copy
+   mutable DevDirichlet_ dev_dir_, dev_dir_kv_;
+   mutable real_t dev_dir_x_[3] = {0.0, 0.0, 0.0};   ///< the sample point
+   mutable bool dev_dir_x_set_ = false;
+   mutable std::vector<real_t> dev_dir_sample_;
+   mutable long dev_dir_builds_ = 0;
+   BoundaryConfig kv_bc_;   ///< SetKelvinVoigt's bc_velocity (if given)
    mutable Vector zero_v_;     ///< hook H3: zero velocity for StiffnessMult
 
    // Fault (P6)

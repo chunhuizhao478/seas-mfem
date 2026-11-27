@@ -344,6 +344,7 @@ public:
       us_ = u_s;
       std::fill(state_.begin(), state_.end(), 0.0);
       if (dev_built_) { d_state_ = 0.0; }   // the device form's memory
+      dev_wall_dirty_ = true;               // g(t_s) and the data's t0 moved
       // g(t_s) at the wall face points
       for (Face &f : faces_)
       {
@@ -378,7 +379,7 @@ public:
       const RankCosts::Scope cost(RankCosts::Pml);
       if (dev_)
       {
-         UpdateAllDevice_(x);
+         UpdateAllDevice_(x, t);
          t_last_ = t;
          return;
       }
@@ -413,7 +414,8 @@ public:
    /// The device form (UCERF 3-D plan rev5, P1.10): Advance steps every
    /// pipeline in kernels on the mfem device and leaves B + E there; Enter
    /// and the static terms stay on the host (once per phase).  3-D, one
-   /// element type, no band wall (Dirichlet) faces and no 2.5D term yet.
+   /// element type, no 2.5D term yet.  Band wall (Dirichlet) faces take
+   /// their data affine in time (BuildWallData_, P1.11).
    /// The arithmetic per point is the host's; the rows of an element are
    /// summed in the host's order (its volume points, then its faces in
    /// face order).  Collective on the first Advance.
@@ -426,10 +428,11 @@ public:
    bool OnDevice() const { return dev_; }
 
    // The functions holding the kernels are public (nvcc extended lambdas).
-   void UpdateAllDevice_(const Vector &x)
+   void UpdateAllDevice_(const Vector &x, real_t t)
    {
       if (!dev_built_) { BuildDevice_(); }
       if (dev_coef_dirty_) { PackCoefs_(); }
+      if (dev_wall_dirty_) { BuildWallData_(t); }
       const int n = us_.Size(), nd = dnd_, nv = 3 * nd;
       // w = x - u_s, with the face-neighbour values
       {
@@ -511,6 +514,8 @@ public:
          const real_t *re = d_fre_.Read(true), *rp = d_frp_.Read(true);
          const real_t *fsh = d_fsh_.Read(true), *fdsh = d_fdsh_.Read(true);
          const real_t eps = eps_;
+         const real_t *wl = (d_wall_.Size() > 0) ? d_wall_.Read(true) : nullptr;
+         const real_t tw = t - wall_ta_;
          real_t *fb = d_fbuf_.Write(true);
          mfem::forall(nf, [=] MFEM_HOST_DEVICE (int f)
          {
@@ -523,13 +528,15 @@ public:
                const int *v2 = vd + ie[5 * f + 4];
                for (int i = 0; i < nv; i++) { u[1][i] = w[v2[i]]; }
             }
-            else
+            else if (kind == 1)
             {
                const int *v2 = nvd + ie[5 * f + 4];
                for (int i = 0; i < nv; i++) { u[1][i] = wn[v2[i]]; }
             }
             const real_t lm[2][2] = {{re[4 * f], re[4 * f + 1]}, {re[4 * f + 2], re[4 * f + 3]}};
-            const int nlocal = (kind == 1) ? 1 : 2;
+            // a wall (kind 2) has one side; its jump is w - (g(t) - g(t_s))
+            const int nsides = (kind == 2) ? 1 : 2;
+            const int nlocal = (kind == 0) ? 2 : 1;
             for (int q = 0; q < nq; q++)
             {
                const int *pi = ip + 9 * (p0 + q);
@@ -538,7 +545,13 @@ public:
                const int b = pi[0], na = bi[2 * b];
                const real_t *c = co + pmldev::kCoef * bi[2 * b + 1], *nfm = fr + 9 * b;
                real_t a[2][3], jmp[3];
-               for (int s = 0; s < 2; s++)
+               if (kind == 2)
+               {
+                  // g(t) - g(t_s) = c0 + (t - ta) gd (BuildWallData_)
+                  const real_t *wq6 = wl + ie[5 * f + 4] + 6 * q;
+                  for (int i = 0; i < 3; i++) { a[1][i] = wq6[i] + tw * wq6[3 + i]; }
+               }
+               for (int s = 0; s < nsides; s++)
                {
                   const real_t *sh = fsh + pi[1 + s];
                   for (int i = 0; i < 3; i++)
@@ -553,7 +566,7 @@ public:
                for (int i = 0; i < 3; i++)
                   for (int l = 0; l < 3; l++) { J[i][l] = jmp[i] * nor[l]; }
                real_t dcs[2][3][3], dss[2][3][3];
-               for (int s = 0; s < 2; s++)
+               for (int s = 0; s < nsides; s++)
                {
                   const real_t *dsh = fdsh + pi[3 + s];
                   real_t Gs[3][3];
@@ -574,10 +587,14 @@ public:
                for (int i = 0; i < 3; i++)
                {
                   real_t t = 0.0;
-                  for (int l = 0; l < 3; l++) { t += 0.5 * (dcs[0][i][l] + dcs[1][i][l]) * nor[l]; }
+                  for (int l = 0; l < 3; l++)
+                  {
+                     t += (nsides == 2 ? 0.5 * (dcs[0][i][l] + dcs[1][i][l]) : dcs[0][i][l])
+                          * nor[l];
+                  }
                   avg_n[i] = t;
                }
-               const real_t csym = 0.5 * eps;
+               const real_t csym = (nsides == 2) ? 0.5 * eps : eps;
                for (int s = 0; s < nlocal; s++)
                {
                   const real_t *sh = fsh + pi[1 + s], *dsh = fdsh + pi[3 + s];
@@ -721,7 +738,10 @@ private:
    Vector fbs_, fb1_;
    Vector fcache_;   // B(w, Phi) + E(w, chi) of the stored state
    // the device form (SetDevice, BuildDevice_): the tables above as flat arrays
-   bool dev_ = false, dev_built_ = false, dev_coef_dirty_ = true;
+   bool dev_ = false, dev_built_ = false, dev_coef_dirty_ = true, dev_wall_dirty_ = true;
+   int n_wall_pts_ = 0;      // points of the band wall (kind 2) faces
+   real_t wall_ta_ = 0.0;    // BuildWallData_'s ta
+   Vector d_wall_;           // per wall point: c0[3], gd[3]
    int dnd_ = 0;
    Vector d_coef_, d_frame_, d_vre_, d_vrp_, d_vsh_, d_vdsh_, d_fre_, d_frp_, d_fsh_, d_fdsh_;
    Vector d_state_, d_fbuf_;
@@ -1316,16 +1336,21 @@ private:
       for (std::size_t fi = 0; fi < faces_.size(); fi++)
       {
          const Face &f = faces_[fi];
-         MFEM_VERIFY(f.kind != 2, "PmlDynamicTerms: the device form has no band wall "
-                     "(Dirichlet) faces yet (UCERF 3-D plan rev5, P1.11); attribute " << f.attr);
-         MFEM_VERIFY(f.nd1 == nd && f.nd2 == nd, "PmlDynamicTerms: one element type");
+         MFEM_VERIFY(f.nd1 == nd && (f.kind == 2 || f.nd2 == nd),
+                     "PmlDynamicTerms: one element type");
          MFEM_VERIFY(f.p0 == static_cast<int>(pr.size() / 4), "PmlDynamicTerms: face points "
                      "out of order");
          hi.push_back(f.kind);
          hi.push_back(f.nq);
          hi.push_back(f.p0);
          hi.push_back(f.vd1);
-         hi.push_back(f.vd2);
+         // a wall face (kind 2): its offset in the wall data (BuildWallData_)
+         if (f.kind == 2)
+         {
+            hi.push_back(6 * n_wall_pts_);
+            n_wall_pts_ += f.nq;
+         }
+         else { hi.push_back(f.vd2); }
          hr.push_back(f.lam[0]);
          hr.push_back(f.mu[0]);
          hr.push_back(f.lam[1]);
@@ -1335,13 +1360,15 @@ private:
             const FacePt &p = fpt_[f.p0 + q];
             pi.push_back(p.band);
             pi.push_back(p.shape[0]);
-            pi.push_back(p.shape[1]);
+            // a wall face has one side: the second entries are not read
+            const bool two = (f.kind != 2);
+            pi.push_back(two ? p.shape[1] : 0);
             pi.push_back(p.dshape[0]);
-            pi.push_back(p.dshape[1]);
+            pi.push_back(two ? p.dshape[1] : 0);
             pi.push_back(static_cast<int>(p.st_c[0]));
-            pi.push_back(static_cast<int>(p.st_c[1]));
+            pi.push_back(two ? static_cast<int>(p.st_c[1]) : 0);
             pi.push_back(static_cast<int>(p.st_s[0]));
-            pi.push_back(static_cast<int>(p.st_s[1]));
+            pi.push_back(two ? static_cast<int>(p.st_s[1]) : 0);
             pr.push_back(p.w);
             for (int i = 0; i < 3; i++) { pr.push_back(p.nor[i]); }
          }
@@ -1383,7 +1410,56 @@ private:
       }
       us_.UseDevice(true);
       gf_->UseDevice(true);
+      MFEM_VERIFY(n_wall_pts_ < std::numeric_limits<int>::max() / 6,
+                  "PmlDynamicTerms: too many band wall points for one rank");
+      d_wall_.SetSize(6 * n_wall_pts_);
+      d_wall_.UseDevice(true);
+      dev_wall_dirty_ = true;
       dev_built_ = true;
+   }
+
+   /// The band wall (Dirichlet, kind 2) faces of the device form (UCERF 3-D
+   /// plan rev5, P1.11).  The host evaluates g(t) at every wall point every
+   /// step; the device takes it affine in time, per point
+   ///    g(t) - g(t_s) = c0 + (t - ta) gd,
+   ///    c0 = g(ta) - g(t_s),  gd = (g(ta + T) - g(ta)) / T,
+   /// from three host evaluations after every Enter (the midpoint checks the
+   /// line; a wall datum that is not affine in time stops here).  T is long
+   /// on purpose, as NitscheWaveOperator::BuildDevDirichlet_ explains.
+   void BuildWallData_(real_t t)
+   {
+      wall_ta_ = t;
+      dev_wall_dirty_ = false;
+      if (n_wall_pts_ == 0) { return; }
+      MFEM_VERIFY(entered_, "PmlDynamicTerms: the device form's wall faces need Enter");
+      const real_t T = 1e12;
+      real_t *o = d_wall_.HostWrite();
+      Vector g0(3), g1(3), gm(3);
+      int k = 0;
+      real_t bad = 0.0, scale = 0.0;
+      for (const Face &f : faces_)
+      {
+         if (f.kind != 2) { continue; }
+         for (int q = 0; q < f.nq; q++, k++)
+         {
+            const FacePt &fp = fpt_[f.p0 + q];
+            Vector xv(const_cast<real_t *>(fp.x), 3);
+            elast_.EvalDirichlet(f.attr, xv, t, g0);
+            elast_.EvalDirichlet(f.attr, xv, t + T, g1);
+            elast_.EvalDirichlet(f.attr, xv, t + 0.5 * T, gm);
+            for (int c = 0; c < 3; c++)
+            {
+               o[6 * k + c] = g0(c) - fp.gs[c];
+               o[6 * k + 3 + c] = (g1(c) - g0(c)) / T;
+               bad = std::max(bad, std::abs(gm(c) - 0.5 * (g0(c) + g1(c))));
+               scale = std::max(scale, std::max(std::abs(g0(c)), std::abs(g1(c))));
+            }
+         }
+      }
+      MFEM_VERIFY(k == n_wall_pts_, "PmlDynamicTerms: wall points out of order");
+      MFEM_VERIFY(bad <= 1e-12 * scale, "PmlDynamicTerms: the device form takes the wall data "
+                  "affine in time, and g(t + T / 2) differs from the mean of g(t) and g(t + T) "
+                  "by " << bad << " of " << scale << "; run it on the cpu device");
    }
 
    // element values (byNODES) from the cached vdofs (as GetSubVector:

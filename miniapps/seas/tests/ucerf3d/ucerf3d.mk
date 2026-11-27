@@ -184,6 +184,32 @@ test-device-pml-3d: seas_test_pml_lts_3d
 
 .PHONY: test-device-pml-3d
 
+# P1.11 (plan rev5 U-G5): Dirichlet loading on the mfem device, the debug
+# device against the host on 1 and 2 ranks.  W: held, moving walls behind
+# the band (the band's wall faces) and the Kelvin-Voigt term with the walls'
+# velocity.  a, b, c: U-L1's deck (walls and creep faces), the same without
+# creep faces (U-L2) and U-G1's event between held walls, in the cycle's
+# dynamic phase.
+G5_TMP ?= /tmp/seas_ug5
+G5_DECK = tests/ucerf3d/configs/T-bend_loading_A.toml
+G5_RUN = OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP)
+test-device-dirichlet-3d: seas_test_pml_lts_3d seas_test_device_cycle_3d
+	@mkdir -p $(G5_TMP)
+	for np in 1 2; do \
+	  $(G5_RUN) $$np ./seas_test_pml_lts_3d --only G5W --device cpu --write $(G5_TMP)/w$$np || exit 1; \
+	  $(G5_RUN) $$np ./seas_test_pml_lts_3d --only G5W --device debug --compare $(G5_TMP)/w$$np || exit 1; \
+	  for dev in "cpu --write" "debug --compare"; do \
+	    $(G5_RUN) $$np ./seas_test_device_cycle_3d --device $$dev $(G5_TMP)/a$$np.bin --name U-G5a \
+	       --deck $(G5_DECK) --t-s 1e6 --min-peak -1 --reenter 50 || exit 1; \
+	    $(G5_RUN) $$np ./seas_test_device_cycle_3d --device $$dev $(G5_TMP)/b$$np.bin --name U-G5b \
+	       --deck $(G5_DECK) --t-s 1e6 --min-peak -1 --creep 0 || exit 1; \
+	    $(G5_RUN) $$np ./seas_test_device_cycle_3d --device $$dev $(G5_TMP)/c$$np.bin --name U-G5c \
+	       --absorbing off --t-s 1e6 || exit 1; \
+	  done; \
+	done
+
+.PHONY: test-device-dirichlet-3d
+
 # P1.5 (plan rev5 U-S1): the constant stress tensor on a dipping fault
 # (T-dip), on 1, 2 and 4 ranks.
 TEST_TP3D_SRC = tests/ucerf3d/test_tensor_prestress_3d.cpp

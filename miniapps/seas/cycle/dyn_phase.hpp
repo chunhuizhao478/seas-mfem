@@ -294,10 +294,11 @@ public:
                      "device (--device cuda, or debug to check the device path on the CPU)");
          MFEM_VERIFY(!(lts != nullptr && lts->on), "DynPhase: [cycle].device_step with "
                      "[cycle.lts]: the device step has no local time stepping yet");
-         // The device step has no Dirichlet loading yet (P1.11).  With
-         // [cycle.absorbing] every outer Dirichlet face may have moved to an
-         // absorbing attribute: if no face keeps a Dirichlet attribute, the
-         // operator is built without the (unused) Dirichlet list.
+         // With [cycle.absorbing] every outer Dirichlet face may have moved
+         // to an absorbing attribute: if no face keeps a Dirichlet
+         // attribute, the operator is built without the (unused) Dirichlet
+         // list.  Otherwise the device step takes the wall and creep loads
+         // affine in time (P1.11, NitscheWaveOperator::DevDirichletLoad_).
          long long nd = 0;
          for (int be = 0; be < wmesh->GetNBE(); be++)
          {
@@ -564,6 +565,9 @@ public:
       // [cycle.relaxation]: r may have changed since the last phase; the device
       // fault copies it again at its first step (P1.8)
       if (relax_mod_) { W_->NormalStressModifierChanged(); }
+      // the wall and creep loads are at t0 + tau and t0 moved: the device
+      // step assembles its load pair again at its first step (P1.11)
+      W_->DirichletDataChanged();
       if (tags_.dirichlet > 0)
       {
          // Plan 11.2: the walls' static reaction at t_s, frozen for the phase
