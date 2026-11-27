@@ -217,7 +217,8 @@ public:
                              BCMode bc_mode = BCMode::FarField,
                              int face_basis_type = BasisType::GaussLobatto,
                              const FaultFrameSource &fault_frames = {},
-                             const DirichletFunc &dirichlet_func = nullptr)
+                             const DirichletFunc &dirichlet_func = nullptr,
+                             const BoundaryConfig *prescribed_slip = nullptr)
       : mesh_(mesh), order_(order),
         lambda_val_(lambda), mu_val_(mu),
         Vp_(Vp), Wf_(Wf), lf_(lf),
@@ -260,6 +261,15 @@ public:
       {
          bdr_config_.dirichlet_attrs = {5};
          bdr_config_.natural_attrs = {1};
+      }
+      // P1.6: more prescribed-slip attributes with their face functions
+      // (null, the default: the lists above, as before)
+      if (prescribed_slip)
+      {
+         MFEM_VERIFY(bc_mode == BCMode::FarField, "ElasticityDomainOperator: "
+                     "prescribed_slip needs BCMode::FarField");
+         for (int a : prescribed_slip->dirichlet_attrs) { bdr_config_.dirichlet_attrs.insert(a); }
+         bdr_config_.skeleton_funcs = prescribed_slip->skeleton_funcs;
       }
 
       InitOperator();
@@ -733,6 +743,10 @@ private:
    void EvalDirichletFunc(int attr, const Vector &x, real_t t,
                           Vector &u_D) const
    {
+      MFEM_VERIFY(bdr_config_.skeleton_funcs.empty() ||
+                  bdr_config_.skeleton_funcs.count(attr) == 0,
+                  "boundary attr " << attr << " has a prescribed-slip face function "
+                  "(BoundaryConfig::skeleton_funcs) but tags an exterior face");
       auto it = bdr_config_.dirichlet_funcs.find(attr);
       if (it != bdr_config_.dirichlet_funcs.end())
       {
@@ -747,6 +761,37 @@ private:
       MFEM_ABORT("No DirichletFunc set for boundary attr " << attr
                  << ". Set default_dirichlet_func or per-attr func "
                     "in BoundaryConfig.");
+   }
+
+   /// The Dirichlet value on an interior or shared skeleton face (before
+   /// ComputeSkeletonDirichletSign).  P1.6: an attribute in
+   /// BoundaryConfig::skeleton_funcs takes its face function with the
+   /// face's oriented normal (FTr->ElementNo: the local face index);
+   /// every other attribute is EvalDirichletFunc, as before.
+   void EvalSkeletonDirichletFunc(int attr, FaceElementTransformations *FTr,
+                                  const Vector &x, real_t t, Vector &u_D) const
+   {
+      if (!bdr_config_.skeleton_funcs.empty())
+      {
+         auto it = bdr_config_.skeleton_funcs.find(attr);
+         if (it != bdr_config_.skeleton_funcs.end())
+         {
+            EvalSkeletonFaceFunc_(it->second, FTr->ElementNo, x, t, u_D);
+            return;
+         }
+      }
+      EvalDirichletFunc(attr, x, t, u_D);
+   }
+   void EvalSkeletonFaceFunc_(const DirichletFaceFunc &f, int local_face,
+                              const Vector &x, real_t t, Vector &u_D) const
+   {
+#ifdef MFEM_USE_MPI
+      MFEM_VERIFY(field_mode_, "BoundaryConfig::skeleton_funcs needs the fault frame "
+                  "field (a parallel mesh with a fault)");
+      f(x, t, frame_field_->CreepNormal(local_face), u_D);
+#else
+      MFEM_ABORT("BoundaryConfig::skeleton_funcs needs MPI (the fault frame field)");
+#endif
    }
 
    /// Common initialization shared by both constructors.

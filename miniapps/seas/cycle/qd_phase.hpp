@@ -264,10 +264,23 @@ public:
       if (cfg.pml.On()) { SetupPmlBand_(pmesh); }
       FaultFrameSource frames;
       frames.config = std::make_shared<const FaultFrameConfig>(CycleFrameConfig(cfg));
+      // [cycle.loading] creep_attrs (P1.6, option A): creep faces off the
+      // plane, each with its own jump (MakeCreepFaceLoading)
+      BoundaryConfig creep_bc;
+      if (cfg.loading.CreepFaces())
+      {
+         MFEM_VERIFY(pmesh.Dimension() == 3, "[cycle.loading] creep_attrs needs a 3-D mesh");
+         for (int a : cfg.loading.creep_attrs)
+         {
+            creep_bc.dirichlet_attrs.insert(a);
+            creep_bc.skeleton_funcs[a] = MakeCreepFaceLoading(cfg.loading, cfg.plate_rate);
+         }
+      }
       dom_ = std::make_unique<DomainOp>(pmesh, s.mesh.order, lambda, mu, cfg.plate_rate,
                                         seed_.Wf, seed_.lf, DGMethod::IP, st,
                                         BCMode::FarField, BasisType::GaussLobatto, frames,
-                                        MakeCycleLoading(cfg, pml_wall_factor_));
+                                        MakeCycleLoading(cfg, pml_wall_factor_),
+                                        cfg.loading.CreepFaces() ? &creep_bc : nullptr);
       if (pml_band_ && cfg.pml.Cfs()) { dom_->SetPmlBand(pml_band_); }
       if (st == SolverType::MUMPS_BLR) { dom_->SetBLRTol(cfg.qd.blr_tol); }
       if (st == SolverType::QD_PCG)

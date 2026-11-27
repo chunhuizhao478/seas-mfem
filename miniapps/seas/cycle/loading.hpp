@@ -36,6 +36,11 @@
 // prescribed-slip faces (interior Dirichlet faces) leave the band, where the
 // function gives a block value instead of the jump.
 //
+// creep_attrs (UCERF 3-D plan rev5, P1.6, loading option A): prescribed-slip
+// faces of other attributes need not lie on the plane; each takes the plate
+// direction projected onto the face (MakeCreepFaceLoading below).  The band
+// check above keeps to the walls' attribute.
+//
 // Scope (Chunhui Zhao, 2026-10-25).
 
 #ifndef MFEM_SEAS_CYCLE_LOADING_HPP
@@ -49,6 +54,7 @@
 #include <array>
 #include <cmath>
 #include <set>
+#include <string>
 
 namespace mfem
 {
@@ -89,6 +95,42 @@ inline DirichletFunc MakePlateLoading(const LoadingConfig &L, real_t Vp,
       {
          if (s[i] != 0.0) { u(i) = Vh * s[i]; }
       }
+   };
+}
+
+/// [cycle.loading] creep_attrs (UCERF 3-D plan rev5, P1.6, option A): the
+/// value on a prescribed-slip face with oriented unit normal n,
+///    u = sgn(-m . n) Vp t s_n,   s_n = (s - (s . n) n) / |s - (s . n) n|,
+/// the plate direction projected onto the face, at the full plate rate.
+/// The operator multiplies it by ComputeSkeletonDirichletSign, so the
+/// imposed jump is u(side opposite to n) - u(side n points to) = u; with n
+/// pointing away from m that is the side m points to moving by +Vp t s_n
+/// against the other, as the walls do (file comment).  On a face of the
+/// plane (n = +-ref direction, s . n = 0) this is the band value of
+/// MakePlateLoading.  A face nearly perpendicular to the plane (|m . n| <
+/// creep_min_alignment: no side) or to s (|s - (s . n) n| <
+/// creep_min_alignment: no direction) is refused.  u(x, t) = t u(x, 1).
+inline DirichletFaceFunc MakeCreepFaceLoading(const LoadingConfig &L, real_t Vp)
+{
+   MFEM_VERIFY(L.Plate(), "MakeCreepFaceLoading: [cycle.loading] kind = \"plate\"");
+   const std::array<real_t, 3> m = L.plane_normal, s = L.slip_dir;
+   const real_t amin = L.creep_min_alignment;
+   return [Vp, m, s, amin](const Vector &x, real_t t, const real_t *n, Vector &u)
+   {
+      const int dim = x.Size();
+      u.SetSize(dim);
+      real_t mn = 0.0, sn = 0.0;
+      for (int i = 0; i < dim; i++) { mn += m[i] * n[i]; sn += s[i] * n[i]; }
+      real_t p[3] = {0.0, 0.0, 0.0}, len = 0.0;
+      for (int i = 0; i < dim; i++) { p[i] = s[i] - sn * n[i]; len += p[i] * p[i]; }
+      len = std::sqrt(len);
+      MFEM_VERIFY(std::abs(mn) >= amin && len >= amin, "[cycle.loading] creep face at ("
+                  << x(0) << ", " << x(1) << (dim == 3 ? ", " : "")
+                  << (dim == 3 ? std::to_string(x(2)) : std::string()) << "): |m . n| = "
+                  << std::abs(mn) << ", |s - (s . n) n| = " << len
+                  << "; one is below creep_min_alignment = " << amin);
+      const real_t Vh = ((mn < 0.0) ? Vp : -Vp) * t / len;
+      for (int i = 0; i < dim; i++) { u(i) = Vh * p[i]; }
    };
 }
 

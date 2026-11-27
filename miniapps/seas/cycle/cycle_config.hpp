@@ -307,6 +307,14 @@
 //                   faces, which ComputeSkeletonDirichletSign signs by the
 //                   oriented normal; the factor keeps that jump equal to the
 //                   side m points to moving by +(Vp t / 2) s)
+//                   creep_attrs [none] (UCERF 3-D plan rev5, P1.6, loading
+//                   option A): attributes of interior prescribed-slip
+//                   faces that need not lie on the plane (creep surfaces
+//                   below non-planar faults).  A face with oriented normal
+//                   n takes the jump sgn(-m . n) Vp t s_n, s_n = unit
+//                   (s - (s . n) n): the plate direction projected onto the
+//                   face.  creep_min_alignment [0.05]: a face with |m . n|
+//                   or |s - (s . n) n| below it is refused.  3-D meshes.
 //   [cycle.absorbing]  the dynamic regime's absorbing outer boundary (P5,
 //                   cycle/absorbing_faces.hpp; QD is unchanged): faces
 //                   ["off" | "bottom" | "outer" | "all"]: "bottom" = the
@@ -654,7 +662,17 @@ struct LoadingConfig
    std::array<real_t, 3> slip_dir = {{1.0, 0.0, 0.0}};      ///< s, unit, s . m = 0
    real_t band = 1000.0;                                    ///< b [m]
    real_t band_sign = 1.0;   ///< sgn(-m . ref_normal), set by Load
+   /// creep_attrs (UCERF 3-D plan rev5, P1.6, loading option A): boundary
+   /// attributes of prescribed-slip (creep) faces that need not lie on the
+   /// plane; each face takes the jump sgn(-m . n) Vp t s_n, s_n the unit
+   /// vector along s - (s . n) n, n the face's oriented normal
+   /// (cycle/loading.hpp).  Empty (the default): off (option B, or creep
+   /// faces on the plane with the walls' attribute, as before).
+   std::vector<int> creep_attrs;
+   /// the smallest |m . n| and |s - (s . n) n| a creep face may have
+   real_t creep_min_alignment = 0.05;
    bool Plate() const { return kind == "plate"; }
+   bool CreepFaces() const { return !creep_attrs.empty(); }
 };
 
 /// [cycle.finite_width] (Chunhui Zhao, 2026-10-30): the 2.5D finite-width
@@ -1798,7 +1816,8 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
    {
       const std::string sec = "cycle.loading";
       const toml::value &l = cy.at("loading");
-      OnlyKeys(l, sec, {"kind", "plane_point", "plane_normal", "slip_dir", "band"});
+      OnlyKeys(l, sec, {"kind", "plane_point", "plane_normal", "slip_dir", "band",
+                        "creep_attrs", "creep_min_alignment"});
       LoadingConfig &L = c.loading;
       L.kind = Str(l, sec, "kind", L.kind);
       MFEM_VERIFY(L.kind == "bp5" || L.kind == "plate",
@@ -1806,7 +1825,8 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
       if (L.kind == "bp5")
       {
          MFEM_VERIFY(!l.contains("plane_point") && !l.contains("plane_normal") &&
-                     !l.contains("slip_dir") && !l.contains("band"),
+                     !l.contains("slip_dir") && !l.contains("band") &&
+                     !l.contains("creep_attrs") && !l.contains("creep_min_alignment"),
                      "[" << sec << "] kind = \"bp5\" takes no other key (it is the fault "
                      "plane y = 0, slip along x, band 1 km); use kind = \"plate\"");
       }
@@ -1830,6 +1850,19 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
                      "[fault_geometry].ref_normal = " << mr << ": the plane normal lies in "
                      "the fault plane, so the side of the prescribed jump is undefined");
          L.band_sign = (mr < 0.0) ? 1.0 : -1.0;
+         // P1.6: creep faces off the plane, by attribute
+         L.creep_attrs = Ints(l, sec, "creep_attrs", {});
+         L.creep_min_alignment = Real(l, sec, "creep_min_alignment", L.creep_min_alignment);
+         MFEM_VERIFY(L.CreepFaces() || !l.contains("creep_min_alignment"),
+                     "[" << sec << "].creep_min_alignment needs creep_attrs");
+         MFEM_VERIFY(L.creep_min_alignment > 0.0 && L.creep_min_alignment < 1.0,
+                     "[" << sec << "].creep_min_alignment must be in (0, 1)");
+         for (int a : L.creep_attrs)
+         {
+            MFEM_VERIFY(a >= 1 && a != c.fault_attr && a != 5 && a != 1,
+                        "[" << sec << "].creep_attrs: " << a << " is the fault, wall (5) or "
+                        "free-surface (1) attribute, or not a boundary attribute");
+         }
       }
    }
    if (!c.loading.Plate())

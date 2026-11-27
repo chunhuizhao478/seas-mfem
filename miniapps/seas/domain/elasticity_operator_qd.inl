@@ -342,14 +342,16 @@ void ElasticityDomainOperator<MeshType>::BuildQDStageOperators(
       // callback values.  Columns are local (dim p + c) until the offset of
       // this rank's points is known.
       std::vector<int> pt_attr;
+      std::vector<int> pt_face;   // P1.6: local face index (skeleton faces), -1 boundary
       std::vector<real_t> pt_xyz;
       Vector u_D_3d, phys(dim);
       auto add_point = [&](FaceElementTransformations *Tr,
-                           const IntegrationPoint &ipq, int attr)
+                           const IntegrationPoint &ipq, int attr, int face = -1)
       {
          Tr->SetAllIntPoints(&ipq);
          Tr->Elem1->Transform(Tr->GetElement1IntPoint(), phys);
          pt_attr.push_back(attr);
+         pt_face.push_back(face);
          for (int d = 0; d < dim; d++) { pt_xyz.push_back(phys(d)); }
       };
 
@@ -419,7 +421,7 @@ void ElasticityDomainOperator<MeshType>::BuildQDStageOperators(
          sign_q.SetSize(nq);
          for (int q = 0; q < nq; q++)
          {
-            add_point(FTr, ir_dir.IntPoint(q), attr);
+            add_point(FTr, ir_dir.IntPoint(q), attr, FTr->ElementNo);
             sign_q(q) = ComputeSkeletonDirichletSign(FTr);
          }
          u_D_3d.SetSize(dim * nq);
@@ -463,6 +465,11 @@ void ElasticityDomainOperator<MeshType>::BuildQDStageOperators(
       }
       ops->g_attr.SetSize(static_cast<int>(pt_attr.size()));
       for (int p = 0; p < ops->g_attr.Size(); p++) { ops->g_attr[p] = pt_attr[p]; }
+      if (!bdr_config_.skeleton_funcs.empty())
+      {
+         ops->g_face.SetSize(static_cast<int>(pt_face.size()));
+         for (int p = 0; p < ops->g_face.Size(); p++) { ops->g_face[p] = pt_face[p]; }
+      }
       ops->g_xyz.SetSize(static_cast<int>(pt_xyz.size()));
       for (int i = 0; i < ops->g_xyz.Size(); i++) { ops->g_xyz(i) = pt_xyz[i]; }
       ops->g.SetSize(ng);
@@ -491,7 +498,14 @@ void ElasticityDomainOperator<MeshType>::EvaluateQDDirichletValues(
    for (int p = 0; p < ops.NumPoints(); p++)
    {
       const Vector x(ops.g_xyz.GetData() + dim * p, dim);
-      EvalDirichletFunc(ops.g_attr[p], x, time, u_D_val);
+      const auto sk = (ops.g_face.Size() > 0 && ops.g_face[p] >= 0)
+                      ? bdr_config_.skeleton_funcs.find(ops.g_attr[p])
+                      : bdr_config_.skeleton_funcs.end();
+      if (sk != bdr_config_.skeleton_funcs.end())
+      {
+         EvalSkeletonFaceFunc_(sk->second, ops.g_face[p], x, time, u_D_val);   // P1.6
+      }
+      else { EvalDirichletFunc(ops.g_attr[p], x, time, u_D_val); }
       for (int c = 0; c < dim; c++) { g[dim * p + c] = u_D_val(c); }
    }
    ops.g_eval_seconds += MPI_Wtime() - t0;

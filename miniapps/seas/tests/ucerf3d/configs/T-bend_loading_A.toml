@@ -1,0 +1,151 @@
+# tests/ucerf3d/configs/T-bend_loading_A.toml - UCERF 3-D plan rev5, P1.6,
+# tests U-L1 and U-L2 (tests/ucerf3d/test_loading_3d.cpp): loading option A on
+# T-bend (a vertical 40 x 20 km fault with a 20 degree bend at x = 0, and a
+# creep surface, attribute 6, below it from 20 to 30 km).  The walls move by
+# -+ Vp t / 2 along x across the plane y = 0 (the BP5 values) and every creep
+# face slips at Vp along the plate direction projected onto the face.
+# Option B is this deck without creep_attrs (the test removes the key).
+# The QD keys are read by the deck parser only: the test runs no QD step.
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "T-bend: loading option A, creep faces off the plane (U-L1, U-L2)."
+
+[material_constant_fallback]
+lambda = 32038120320.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+[mesh]
+path  = "ucerf3d/mesh/T-bend.msh"
+order = 1
+
+[velocity]
+use_sidecar = false
+
+[stress]
+kind          = "fault_local_prestress"
+tau_strike_pa = 0.0
+tau_dip_pa    = 0.0
+sigma_n_pa    = 25.0e6
+
+[numerics]
+cfl       = 0.5
+kv_eta    = 0.1
+kv_scale  = "node"
+kv_length = "inscribed"
+
+[time]
+tfinal     = 1.0e3
+dt_initial = 0.01
+
+[output]
+output_dir = "."
+
+[boundary]
+fault_attr    = 3
+natural_attrs = [1]
+
+[fault_geometry]
+ref_normal      = [0.0, -1.0, 0.0]
+up              = [0.0,  0.0, 1.0]
+kind            = "vertical_strike_slip"
+orientation     = "propagated"
+pin_by          = "reference"
+tangent         = "pointwise"
+junction_policy = "refuse"
+pin_min_margin  = 0.1
+
+[friction.rate_state]
+a_default       = 0.004
+b_default       = 0.03
+Dc_default      = 0.14
+V_0_default     = 1.0e-6
+f_0_default     = 0.6
+V_init_default  = 1.0e-9
+sigma_n_default = 25.0e6
+state_evolution = "aging_law"
+eta             = "auto"
+
+[cycle]
+ic                   = "scec_fd"
+switching            = true
+qd_radiation_damping = true
+mesh_scale           = 1.0
+plate_rate           = 1.0e-9
+penalty_factor       = 1.0
+
+[cycle.switch]
+V_on               = 1.0e-2
+V_off              = 1.0e-3
+T_dwell            = 10.0
+T_min              = 0.0
+T_max              = 1200.0
+max_dynamic_phases = 1
+
+[cycle.loading]
+kind         = "plate"
+plane_point  = [0.0, 0.0, 0.0]
+plane_normal = [0.0, 1.0, 0.0]
+slip_dir     = [1.0, 0.0, 0.0]
+band         = 1000.0
+creep_attrs  = [6]
+
+[cycle.absorbing]
+faces = "off"
+
+[cycle.qd]
+solver        = "mumps"
+petsc_options = "tests/verification/petsc_ts_rk45_tandem.cfg"
+ts_atol       = 1.0e-7
+ts_rtol       = 1.0e-50
+
+[cycle.prestress]
+V_background = 1.0e-9
+
+[cycle.fields]
+V_init_dip = 1.0e-20
+
+[cycle.fields.a]
+center  = [0.0, 0.0, -9.0e3]
+axis1   = [1.0, 0.0, 0.0]
+axis2   = [0.0, 0.0, 1.0]
+half1   = 0.0
+half2   = 0.0
+inside  = 0.004
+outside = 0.004
+
+[cycle.fields.Dc]
+center  = [0.0, 0.0, -9.0e3]
+axis1   = [1.0, 0.0, 0.0]
+axis2   = [0.0, 0.0, 1.0]
+half1   = 0.0
+half2   = 0.0
+inside  = 0.14
+outside = 0.14
+
+[cycle.fields.V_init]
+center  = [0.0, 0.0, -9.0e3]
+axis1   = [1.0, 0.0, 0.0]
+axis2   = [0.0, 0.0, 1.0]
+half1   = 0.0
+half2   = 0.0
+inside  = 1.0e-9
+outside = 1.0e-9
+
+[cycle.output]
+prefix       = "T-bend_loading_A"
+fast_V       = 1.0e-3
+dt_fast      = 0.1
+dt_slow      = 3155760.0
+event_V      = 1.0e-3
+event_dwell  = 10.0
+plane_origin = [0.0, 0.0, 0.0]
+plane_axis1  = [1.0, 0.0, 0.0]
+plane_axis2  = [0.0, 0.0, -1.0]

@@ -219,6 +219,15 @@ public:
          std::shared_ptr<const real_t> t0 = t0_;
          bc_.default_dirichlet_func = [load, t0](const Vector &x, real_t tau, Vector &u)
          { load(x, *t0 + tau, u); };
+         // [cycle.loading] creep_attrs (P1.6, option A), as QD
+         for (int a : cfg.loading.creep_attrs)
+         {
+            const DirichletFaceFunc creep = MakeCreepFaceLoading(cfg.loading, cfg.plate_rate);
+            bc_.dirichlet_attrs.insert(a);
+            bc_.skeleton_funcs[a] = [creep, t0](const Vector &x, real_t tau, const real_t *n,
+                                                Vector &u)
+            { creep(x, *t0 + tau, n, u); };
+         }
       }
 
       // Fault setup: closure, orientation, frame, parameters.

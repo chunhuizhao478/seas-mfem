@@ -178,6 +178,9 @@ struct QDStageOperators
    /// per point (the mesh dimension: 3, or 2 on a 2D in-plane mesh), point
    /// p at entries dim p .. dim p + dim - 1.
    Array<int> g_attr;
+   /// P1.6: the local face index of a skeleton-face point, -1 for a boundary
+   /// face point; empty unless BoundaryConfig::skeleton_funcs is in use.
+   Array<int> g_face;
    Vector g_xyz;                   ///< [dim * points]
    Vector g;                       ///< g(t) of the current stage
    int dim = 3;                    ///< components per Dirichlet point

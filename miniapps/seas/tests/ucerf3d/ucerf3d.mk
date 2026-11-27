@@ -172,3 +172,31 @@ test-tensor-prestress-3d: seas_test_tensor_prestress_3d
 	done
 
 .PHONY: test-tensor-prestress-3d
+
+# P1.6 (plan rev5 U-L1, U-L2): loading options A (walls and creep faces
+# off the plane) and B (walls only) on T-bend: all checks on 1 rank; on 2
+# and 4 ranks without the two static solves (the second direct solve on
+# several ranks was killed for memory on the 15 GB test machine); then with
+# the mesh cut along the fault and creep planes on 2 and 4 ranks, so that
+# the creep faces are shared.
+TEST_LD3D_SRC = tests/ucerf3d/test_loading_3d.cpp
+TEST_LD3D_OBJ = $(TEST_LD3D_SRC:.cpp=.o)
+$(TEST_LD3D_OBJ): %.o: $(SRC)%.cpp $(CYCLE_HEADERS) $(CYCLE_STAMP) \
+                  $(CYCLE_SHARED_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(CYCLE_CXXFLAGS) -c $< -o $@
+
+seas_test_loading_3d: $(TEST_LD3D_OBJ) $(CYCLE_LINK_OBJS)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_LD3D_OBJ) $(CYCLE_LINK_OBJS) $(CYCLE_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-loading-3d: seas_test_loading_3d
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_loading_3d
+	@for n in 2 4; do \
+	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_loading_3d --no-solve || exit 1; \
+	done
+	@for n in 2 4; do \
+	   $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $$n ./seas_test_loading_3d --split --no-solve || exit 1; \
+	done
+
+.PHONY: test-loading-3d

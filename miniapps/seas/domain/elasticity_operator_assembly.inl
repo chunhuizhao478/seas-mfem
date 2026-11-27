@@ -1460,7 +1460,7 @@
                Vector phys(dim);
                FTr->Elem1->Transform(FTr->GetElement1IntPoint(), phys);
                phys_y_qp(q) = phys(1);
-               EvalDirichletFunc(dirichlet_interior_attrs_[fi], phys, time, u_D_val);
+               EvalSkeletonDirichletFunc(dirichlet_interior_attrs_[fi], FTr, phys, time, u_D_val);
                // Per-QP orientation sign (Tandem DGCurvilinearCommon.h:97-98)
                real_t dir_sign = ComputeSkeletonDirichletSign(FTr);
                for (int c = 0; c < dim; c++)
@@ -1485,7 +1485,7 @@
             Vector fc_br2(dim);
             FTr->Face->Transform(ip_c, fc_br2);
             Vector u_D_br2;
-            EvalDirichletFunc(dirichlet_interior_attrs_[fi], fc_br2, time, u_D_br2);
+            EvalSkeletonDirichletFunc(dirichlet_interior_attrs_[fi], FTr, fc_br2, time, u_D_br2);
             // Orientation sign for BR2 (face-constant, affine faces)
             const IntegrationPoint &ip_s = Geometries.GetCenter(FTr->GetGeometryType());
             FTr->SetAllIntPoints(&ip_s);
@@ -1779,7 +1779,7 @@
                   Vector phys(dim);
                   FTr->Elem1->Transform(FTr->GetElement1IntPoint(), phys);
                   phys_y_qp(q) = phys(1);
-                  EvalDirichletFunc(dirichlet_shared_attrs_[fi], phys, time, u_D_val);
+                  EvalSkeletonDirichletFunc(dirichlet_shared_attrs_[fi], FTr, phys, time, u_D_val);
                   real_t dir_sign = ComputeSkeletonDirichletSign(FTr);
                   for (int c = 0; c < dim; c++)
                   {
@@ -1804,7 +1804,7 @@
                Vector fc_br2(dim);
                FTr->Face->Transform(ip_c, fc_br2);
                Vector u_D_br2;
-               EvalDirichletFunc(dirichlet_shared_attrs_[fi], fc_br2, time, u_D_br2);
+               EvalSkeletonDirichletFunc(dirichlet_shared_attrs_[fi], FTr, fc_br2, time, u_D_br2);
                // Orientation sign for BR2 (face-constant, affine faces)
                FTr->SetAllIntPoints(&ip_c);
                real_t dir_sign_br2 = ComputeSkeletonDirichletSign(FTr);

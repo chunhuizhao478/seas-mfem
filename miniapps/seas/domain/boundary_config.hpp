@@ -32,6 +32,16 @@ namespace seas
 /// The output vector is pre-sized to dim (3 for 3D).
 using DirichletFunc = std::function<void(const Vector &x, real_t t, Vector &u)>;
 
+/// @brief Prescribed slip on interior (skeleton) Dirichlet faces that depends
+/// on the face (UCERF 3-D plan rev5, P1.6: creep faces of a non-planar
+/// surface).  n: the face's oriented unit normal from the fault frame
+/// field's prescribed-slip census (3 values; z = 0 on a 2-D mesh).  The
+/// operator multiplies the value by ComputeSkeletonDirichletSign, as it does
+/// a DirichletFunc's, so the imposed jump is u(side opposite to n) - u(side
+/// n points to).
+using DirichletFaceFunc =
+   std::function<void(const Vector &x, real_t t, const real_t *n, Vector &u)>;
+
 /// @brief Boundary configuration for the elasticity domain operator.
 ///
 /// Specifies which mesh boundary attributes correspond to Dirichlet,
@@ -53,6 +63,13 @@ struct BoundaryConfig
    /// Default Dirichlet function applied to all Dirichlet attrs
    /// not listed in dirichlet_funcs.
    DirichletFunc default_dirichlet_func;
+
+   /// Per-attribute prescribed-slip functions of the face normal (P1.6).
+   /// An attribute listed here must also be in dirichlet_attrs and may tag
+   /// interior faces only; it needs the fault frame field (a parallel mesh
+   /// with a fault).  Empty (the default): every Dirichlet face uses
+   /// dirichlet_funcs / default_dirichlet_func, as before.
+   std::map<int, DirichletFaceFunc> skeleton_funcs;
 };
 
 /// Create the standard BP5 Dirichlet loading function.
