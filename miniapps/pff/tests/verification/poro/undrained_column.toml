@@ -1,0 +1,72 @@
+# Poro verification 1: undrained column (no flow, k = 0).
+# Column [0, 0.5 mm] x [0, 10 mm], rollers on the sides (u_x = 0) and the
+# bottom (u_y = 0), a step pressure P on the top from t = 0, d = 0 (run with -fd).
+# The response is a 1D P wave of the undrained constrained modulus
+#   H_u = K + 4G/3 + alpha^2 M,  c_u = sqrt(H_u / rho),
+# bouncing between the top and the fixed bottom: the top displacement and the
+# confinement work peak at t = 2L/c_u with u_top = 2 P L / H_u, i.e.
+#   max confinement_work = 2 P^2 L W / H_u,
+# where the kinetic energy returns to zero. See check_poro_verification.py.
+
+[case]
+name = "undrained_column"
+model = "hydromech"
+source = "verification (no MOOSE input): ElkPorousFlowFullySaturatedMassTimeDerivative without flow"
+
+[mesh]
+file = "column_L10_h0p25.msh"            # make_column_mesh.py --L 0.01 --W 0.0005 --ny 40 --nx 2
+dim = 2
+corner = [0.0, 0.0, 0.0]
+
+[boundaries]
+pressure = []
+absorbing = []
+fixed_x = ["left", "right"]
+fixed_y = ["bottom"]
+confinement = ["top"]
+
+[material]
+E = 10e9
+nu = 0.3
+density = 2600
+
+[phase_field]
+model = "AT1"
+Gc = 100
+l = 2e-4
+eta = 1e-6
+p = 2
+decomposition = "spectral"
+driving = "half_history_enhanced"
+
+[pulse]                                  # no pulse (EM = 0); one window = the run
+shape_alpha = 4.658e5
+shape_beta = 4.661e5
+rise_time = 3e-6
+pulse_duration = 2e-5
+EM = 0.0
+gap = 0.008
+num_pulses = 1
+
+[confinement]
+pressure = 1e6
+
+[time]
+mass = "consistent"
+end_time = 2e-5
+cfl = 0.4
+
+[poro]
+K_s = 50e9
+K_f = 2.24e9
+phi0 = 0.2
+phi_lb = 0.2
+phi_ub = 0.999
+g_min = 1e-6
+viscosity = 1e-3
+permeability_model = "none"
+k0 = 0.0
+preconditioner = "jacobi"
+
+[output]
+directory = "out/undrained_column"

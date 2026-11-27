@@ -65,7 +65,11 @@ private:
       if (data.contains("boundaries"))
       {
          const auto &t = data.at("boundaries");
-         Check(t, "boundaries", {"pressure", "absorbing", "fixed_z", "confinement", "drained"});
+         Check(t, "boundaries", {"pressure", "absorbing", "fixed_x", "fixed_y", "fixed_z",
+                                 "confinement", "drained"
+                                });
+         c.fixed_x_bdr = Names(t, "fixed_x");
+         c.fixed_y_bdr = Names(t, "fixed_y");
          c.pressure_bdr = Names(t, "pressure");
          c.absorbing_bdr = Names(t, "absorbing");
          c.fixed_z_bdr = Names(t, "fixed_z");
@@ -141,8 +145,11 @@ private:
       if (data.contains("confinement"))
       {
          const auto &t = data.at("confinement");
-         Check(t, "confinement", {"pressure"});
+         Check(t, "confinement", {"pressure", "initial_state"});
          c.confinement_pressure = Real(t, "pressure", 0.0);
+         const std::string is = Str(t, "initial_state", "none");
+         if (is == "static") { c.static_initial_state = true; }
+         else if (is != "none") { throw std::invalid_argument("[confinement] initial_state must be none or static"); }
       }
       if (data.contains("damping"))
       {
@@ -188,8 +195,17 @@ private:
                            "fluid_density", "initial_pore_pressure", "porosity_model",
                            "permeability_model", "k0", "perm_exponent", "coeff_b", "wc",
                            "d_threshold", "fc", "w_res", "anisotropic", "normal_source",
-                           "regularize_normal", "normal_reg_eps"
+                           "regularize_normal", "normal_reg_eps", "drained_pressure",
+                           "preconditioner"
                           });
+         {
+            const std::string dp = Str(t, "drained_pressure", "zero");
+            if (dp == "pulse") { c.drained_pulse = true; }
+            else if (dp != "zero") { throw std::invalid_argument("[poro] drained_pressure must be zero or pulse"); }
+            const std::string pc = Str(t, "preconditioner", "amg");
+            if (pc == "jacobi") { c.poro_amg = false; }
+            else if (pc != "amg") { throw std::invalid_argument("[poro] preconditioner must be amg or jacobi"); }
+         }
          PoroDamageParams &P = c.poro;
          P.K = c.K();
          P.K_s = Real(t, "K_s", 0.0);

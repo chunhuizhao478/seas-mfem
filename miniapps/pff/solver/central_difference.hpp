@@ -60,9 +60,12 @@ public:
 
    /// Advance state from t^n to t^n + dt with damage D (true dofs, held
    /// fixed over the step), pulse factor s = Shape(t^n), damping zeta(t^n),
-   /// mass-proportional damping alpha(t^n).
+   /// mass-proportional damping alpha(t^n). f_add (optional) is a further
+   /// internal force at t^n, e.g. the pore-pressure force of the hydromech
+   /// model (rhs -= f_add; it is not part of F_int, psi or the KV term).
    void Step(CentralDifferenceState &S, const Vector &D, real_t s, real_t zeta,
-             real_t dt, CentralDifferenceStepInfo &info, real_t alpha = 0.0) const
+             real_t dt, CentralDifferenceStepInfo &info, real_t alpha = 0.0,
+             const Vector *f_add = nullptr) const
    {
       const int n = S.u.Size();
       op_.InternalForce(S.u, D, info.F_int, &info.psi);
@@ -88,6 +91,7 @@ public:
       {
          rhs(i) = info.f_ext(i) - info.F_int(i) - info.f_kv(i) - cv(i);
       }
+      if (f_add) { rhs -= *f_add; }
       const real_t dt_avg = (S.dt_prev > 0.0) ? 0.5 * (S.dt_prev + dt) : 0.5 * dt;
       // v^n = v^{n-1/2} + (t^n - t^{n-1/2}) a^n; at the first step v_half holds v^0.
       const real_t h = 0.5 * S.dt_prev;

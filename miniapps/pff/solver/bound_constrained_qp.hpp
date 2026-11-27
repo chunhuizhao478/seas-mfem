@@ -10,6 +10,8 @@
 //   r = A x - b
 //   active   = { i : (x_i <= lo_i and r_i > 0) or (x_i >= hi_i and r_i < 0) }
 //   inactive = the rest; converged when ||r_inactive|| <= max(rtol ||r_0||, atol)
+//   with the active set unchanged from the previous iterate, or on two
+//   consecutive iterates
 //   step: solve A_II dx_I = -r_I (dx_A = 0) with PCG + BoomerAMG,
 //         x <- P(x + s dx), s halved until the energy decreases.
 //
@@ -56,6 +58,7 @@ public:
       Vector r(n), dx(n), xt(n), rhs(n);
       Array<int> active, prev_active;
       st = Stats();
+      bool prev_tol_met = false;
       for (int it = 0; it <= max_it; it++)
       {
          Residual(A, b, x, r);
@@ -77,10 +80,16 @@ public:
             mfem::out << "    damage QP it " << it << " |r_I| = " << rn
                       << " active = " << st.active << "\n";
          }
-         if (rn <= std::max(rel_tol * st.r0, abs_tol) && SameSet(comm, active, prev_active))
+         // Converged on a repeated active set, or when the tolerance is met on
+         // two consecutive iterates: a node on a bound with r_i at round-off
+         // can enter and leave the set forever (cmame hydromech, step 644:
+         // |r_I| = 1.5e-16 with the count alternating 14237/14238).
+         const bool tol_met = rn <= std::max(rel_tol * st.r0, abs_tol);
+         if (tol_met && (SameSet(comm, active, prev_active) || prev_tol_met))
          {
             return true;
          }
+         prev_tol_met = tol_met;
          if (it == max_it) { break; }
          prev_active = active;
 

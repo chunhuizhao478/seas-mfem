@@ -9,7 +9,7 @@ model = "hydromech"
 source = "pulsepower/cmame_revision/2d_hydromech/benchmark/elasticity_E1d25.i"
 
 [mesh]
-file = "../2d_mesh/2d_mesh.msh"
+file = "../2d_mesh/2d_mesh_v22.msh"      # msh 2.2 of farms 2d_mesh.msh; physical curves: OuterBoundary 1, RefinedBoundary 2, HoleBoundary 3
 dim = 2
 corner = [0.01, 0.01, 0.0]
 
@@ -53,6 +53,7 @@ num_pulses = 100
 
 [confinement]
 pressure = 1e6
+initial_state = "static"                 # static_solve.i (confinement, pp = 0) read by SolutionIC
 
 [time]
 mass = "consistent"                      # MOOSE ADInertialForce (Andy 2026-11-22; lumped grows ~20% more damage at zeta_pulse = 0)
@@ -69,7 +70,7 @@ phi_ub = 0.999
 g_min = 1e-6
 viscosity = 1e-3
 fluid_density = 1000
-initial_pore_pressure = 0.0              # taken from static_solve_out.e in MOOSE
+initial_pore_pressure = 96500.0          # static_solve.i ConstantIC pp (uniform; the steady flux kernel keeps it)
 porosity_model = "damage"
 permeability_model = "darcy_poiseuille"
 k0 = 5e-19

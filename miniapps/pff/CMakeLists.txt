@@ -21,7 +21,8 @@ set(PFF_UNIT_TESTS
     test_pulse_load
     test_config
     test_explicit_operator
-    test_damage_step)
+    test_damage_step
+    test_pore_pressure)
 
 foreach(test ${PFF_UNIT_TESTS})
   add_mfem_miniapp(pff_${test}

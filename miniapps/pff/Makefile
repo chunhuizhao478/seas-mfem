@@ -25,7 +25,8 @@ LIBS_PFF = $(MFEM_LIBS)
 # Unit tests (serial, no mesh): tests/unit/test_*.cpp, one executable each
 # -----------------------------------------------------------------------------
 UNIT_TESTS = test_phase_field_functions test_strain_split test_poro_damage \
-             test_pulse_load test_config test_explicit_operator test_damage_step
+             test_pulse_load test_config test_explicit_operator test_damage_step \
+             test_pore_pressure
 UNIT_BINS = $(addprefix tests/unit/,$(UNIT_TESTS))
 
 HEADERS = $(wildcard common/*.hpp config/*.hpp constitutive/*.hpp phasefield/*.hpp \

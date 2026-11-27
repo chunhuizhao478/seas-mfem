@@ -164,6 +164,26 @@ GH200). The CPU result is the reference of each GPU gate.
 5. **C4/G4 hydromech** (`multiphysics/poroelastic/`): Terzaghi, Mandel, the
    undrained column speed; cmame 2D hydromech pp(t) and damage pattern; the
    static initial state uses the phase-R quasi-static solver.
+   Status (2026-11-26): code and verification done, the cmame comparison is
+   open. `multiphysics/poroelastic/pore_pressure_operator.hpp` (backward
+   Euler p step, pore-pressure force, PCG with BoomerAMG or Jacobi) and
+   `pff_driver` with `model = "hydromech"`: u^{n+1} explicit with
+   -int alpha(d^n) p^n div(phi), then p^{n+1}, then the history H at the
+   quadrature points and d^{n+1}; the step uses the undrained stiffness bound.
+   The static initial state is a CG solve on the split force at d = 0 (the
+   phase-R solver was not needed); with pp = 96500 Pa (static_solve.i) its
+   elastic energy is 5.40895e-3 J/m, MOOSE 5.408951e-3. Verification
+   (tests/verification/poro, closed forms): undrained column modulus and
+   rebound time within 1 %; Terzaghi pressure and settlement within 0.32 %;
+   de Leeuw's cylinder (Mandel-Cryer; replaces Mandel's slab, Andy
+   2026-11-26) within 0.45 %, peak 0.11 %. Energy budgets close to 3e-4.
+   The damage QP now also stops when the tolerance holds on two consecutive
+   iterates (a round-off active-set cycle in the hydromech run); the cmame
+   solid results are unchanged bit for bit over 2049 steps.
+   cmame 2D hydromech pulse 1 (4 ranks, 185 s): crack 0.772 J/m with the
+   seed, d >= 0.5 to 1.29 mm (dry solid: 2.147 J/m, 3.94 mm), energy_error
+   0.05 %; MOOSE reference M-C4a running (Mac). Not wired: strain porosity,
+   normal_strain permeability, fixed-point coupling, 3D hydromech runs.
 6. **C5/G5 3D and timing**: spe_hftc cube and cmame 3D em_5J first pulses
    against MOOSE; a wall-time table against Vista/LS6 MOOSE and between CPU
    and GPU.

@@ -42,6 +42,27 @@
 // [confinement] (cmame): constant pressure on [boundaries] confinement from
 // t = 0 (MOOSE Pressure BC static_pressure_outer, no preload); its work is
 // confinement_work (external_work is the pulse only), part of energy_error.
+//
+// Phase C4, [case] model = "hydromech" (farms@cdms pulsepower/cmame_revision/
+// 2d_hydromech/benchmark/elasticity_E1d25.i + fracture_E1d25.i): u-p Biot with
+// the damage-dependent properties of multiphysics/poroelastic. One step
+// (PLAN.md, single pass): u^{n+1} explicitly with the pore-pressure force
+// -int alpha(d^n) p^n div(phi); p^{n+1} by backward Euler with eps_v(u^{n+1})
+// (pore_pressure_operator.hpp); the history H = max(H, <2 psi+ + c_p p^2>_+)
+// at the quadrature points (ElkPorousFlowHistoryEnergyEnhanced), whose element
+// mean (the CONSTANT MONOMIAL psie_active_enhanced MOOSE transfers) drives
+// d^{n+1} as 1/2 H. MOOSE integrates u with implicit Newmark (beta 1/4) at
+// dt = 1e-8 and iterates the damage coupling (fixed_point_max_its = 10); pff
+// is explicit with the step from the undrained stiffness bound
+// (UndrainedStiffnessRatio). [confinement] initial_state = "static": u^0 is
+// the static equilibrium under the confinement and the initial pore pressure
+// (MOOSE static_solve.i read by SolutionIC), d = 0.
+// Extra columns (hydromech): fluid_energy (1/2 int p^2/M), fluid_dissipated
+// (int int grad p . k/mu grad p dt), fluid_boundary_work (work of the drained
+// boundary on the fluid), p_min, p_max, pp_its. energy_error then is the
+// change since t^1 of kinetic + elastic + crack + fluid_energy +
+// fluid_dissipated - the works (the seeded damage and the preload energy are
+// in the t^1 reference).
 
 #include "mfem.hpp"
 #include "../config/pff_config_parser.hpp"
@@ -52,6 +73,7 @@
 #include "../domain/qs_damage_operator.hpp"
 #include "../solver/bound_constrained_qp.hpp"
 #include "../phasefield/initial_damage.hpp"
+#include "../multiphysics/poroelastic/pore_pressure_operator.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -172,11 +194,14 @@ int main(int argc, char *argv[])
    else if (std::string(mass_override) == "lumped") { c.consistent_mass = false; }
    else { MFEM_VERIFY(std::string(mass_override).empty(), "-mass must be consistent or lumped"); }
 
-   MFEM_VERIFY(c.model == CaseModel::Solid, "pff_driver: hydromech is phase C4");
+   const bool hydromech = c.model == CaseModel::Hydromech;
+   MFEM_VERIFY(!hydromech || (c.zeta_pulse == 0.0 && c.zeta_quench == 0.0),
+               "pff_driver: hydromech has no stiffness damping (zeta_pulse = zeta_quench = 0)");
+   MFEM_VERIFY(hydromech || c.drained_bdr.empty(), "pff_driver: [boundaries] drained needs model = hydromech");
    MFEM_VERIFY((c.confinement_pressure == 0.0) == c.confinement_bdr.empty(),
                "pff_driver: [confinement] pressure and [boundaries] confinement go together");
-   MFEM_VERIFY(frozen_damage || c.pf.driving == DrivingEnergy::Active,
-               "pff_driver: the history driving energy is phase C4 (hydromech)");
+   MFEM_VERIFY(frozen_damage || (c.pf.driving == DrivingEnergy::HalfHistoryEnhanced) == hydromech,
+               "pff_driver: driving = half_history_enhanced goes with model = hydromech, active with solid");
    MFEM_VERIFY(frozen_damage || c.coupling == CouplingScheme::SinglePass,
                "pff_driver: [coupling] fixed_point is not implemented for the explicit step");
    MFEM_VERIFY(c.quench != QuenchMode::Implicit, "pff_driver: quench = 'implicit' is not implemented");
@@ -242,6 +267,14 @@ int main(int argc, char *argv[])
                                 list, 2);
       fixed.Append(list);
    }
+   for (int comp = 0; comp < 2; comp++)
+   {
+      const std::vector<std::string> &bdr = comp == 0 ? c.fixed_x_bdr : c.fixed_y_bdr;
+      if (bdr.empty()) { continue; }
+      Array<int> list;
+      Vfes.GetEssentialTrueDofs(Marker(ResolveAttributes(bdr, names, dim - 1), max_attr), list, comp);
+      fixed.Append(list);
+   }
    fixed.Sort();
    fixed.Unique();
 
@@ -259,7 +292,10 @@ int main(int argc, char *argv[])
    PulseLoad pulse(c.pulse);
    ExplicitElasticityOperator op(Vfes, Sfes, ep, pulse, fixed);
 
-   const real_t omega2 = op.MaxEigenvalue(power_its);
+   const real_t omega2_drained = op.MaxEigenvalue(power_its);
+   // hydromech: the undrained stiffness bounds the explicit step
+   const real_t undrained_ratio = hydromech ? UndrainedStiffnessRatio(c.poro, c.G(), dim) : 1.0;
+   const real_t omega2 = omega2_drained * undrained_ratio;
    const real_t omega = std::sqrt(omega2);
    const real_t Tw = c.pulse.pulse_duration;
    const long long global_ne = pmesh.GetGlobalNE();
@@ -276,6 +312,13 @@ int main(int argc, char *argv[])
                 << " power iterations), dt_crit(zeta=0) = " << CriticalStep(omega, 0.0)
                 << " s\n  peak pressure on the borehole " << op.PeakOnPressureBoundary()
                 << " Pa, end time " << c.end_time << " s\n";
+      if (hydromech)
+      {
+         const PoroPoint q0 = EvalPoroPoint(c.poro, 0.0);
+         mfem::out << "  hydromech: alpha(0) = " << q0.alpha << ", M(0) = " << 1.0 / q0.inv_M
+                   << " Pa, k0/mu = " << q0.mobility << " m^2/(Pa s), undrained stiffness ratio "
+                   << undrained_ratio << " (in omega_max above)\n";
+      }
    }
 
    // State.
@@ -345,6 +388,92 @@ int main(int argc, char *argv[])
                    << c.pf.OnsetDrivingEnergy() << " J/m^3\n";
       }
    }
+   // Hydromech state: pore pressure (true dofs), drained dofs, history at the points.
+   std::unique_ptr<PorePressureOperator> poro;
+   Vector Pp, drained_peak, Hq, f_poro;
+   Array<int> drained;
+   PorePressureOperator::StepInfo pinfo;
+   real_t Ef_n = 0.0, W_fdiss = 0.0, W_fbdry = 0.0;
+   long pp_its_total = 0;
+   const real_t c_hist = hydromech ? HistoryPressureCoefficient(c.poro) : 0.0;
+   if (hydromech)
+   {
+      if (!c.drained_bdr.empty())
+      {
+         Sfes.GetEssentialTrueDofs(Marker(ResolveAttributes(c.drained_bdr, names, dim - 1), max_attr),
+                                   drained);
+      }
+      poro.reset(new PorePressureOperator(Vfes, Sfes, c.poro, drained, dir,
+                                          c.poro_amg ? PoroPreconditioner::AMG : PoroPreconditioner::Jacobi));
+      Pp.SetSize(Sfes.GetTrueVSize());
+      Pp = c.initial_pore_pressure;
+      // drained value: 0, or the pulse pressure Peak(x) Shape(t) (FunctionDirichletBC pp)
+      drained_peak.SetSize(Sfes.GetTrueVSize());
+      drained_peak = 0.0;
+      if (c.drained_pulse)
+      {
+         ParGridFunction pk(&Sfes);
+         FunctionCoefficient pf([&pulse](const Vector &x)
+         {
+            real_t X[3] = {0.0, 0.0, 0.0};
+            for (int k = 0; k < x.Size(); k++) { X[k] = x(k); }
+            return pulse.Peak(X);
+         });
+         pk.ProjectCoefficient(pf);
+         pk.GetTrueDofs(drained_peak);
+      }
+      for (int t : drained) { Pp(t) = drained_peak(t) * pulse.Shape(0.0); }
+      Hq.SetSize(pmesh.GetNE() * dir.GetNPoints());
+      Hq = 0.0;
+      f_poro.SetSize(n);
+      real_t rate = 0.0;
+      poro->Energies(D, Pp, Ef_n, rate);
+      if (c.static_initial_state)
+      {
+         // K u0 = b_c - F_p(p0) with the fixed dofs held, d = 0 (linear): CG on F_int.
+         struct KOp : public Operator
+         {
+            const ExplicitElasticityOperator &o; const Vector &D0;
+            KOp(const ExplicitElasticityOperator &o_, const Vector &D0_, int n_) : Operator(n_), o(o_), D0(D0_) {}
+            void Mult(const Vector &x, Vector &y) const override
+            {
+               Vector xx(x);
+               for (int t : o.FixedTrueDofs()) { xx(t) = 0.0; }
+               o.InternalForce(xx, D0, y);
+               for (int t : o.FixedTrueDofs()) { y(t) = x(t); }
+            }
+         } Kop(op, D, n);
+         Vector rhs(op.ConfinementVector());
+         f_poro = 0.0;
+         poro->AddCouplingForce(D, Pp, f_poro);
+         rhs -= f_poro;
+         for (int t : fixed) { rhs(t) = 0.0; }
+         CGSolver cg(comm);
+         cg.SetOperator(Kop);
+         cg.SetRelTol(1e-12);
+         cg.SetAbsTol(0.0);
+         cg.SetMaxIter(200000);
+         cg.SetPrintLevel(0);
+         S.u = 0.0;
+         cg.Mult(rhs, S.u);
+         MFEM_VERIFY(cg.GetConverged(), "static initial state: CG did not converge ("
+                     << cg.GetNumIterations() << " iterations, |r| = " << cg.GetFinalNorm() << ")");
+         real_t psi0 = 0.0;
+         Vector F0;
+         op.InternalForce(S.u, D, F0, &psi0);
+         S.F_prev = F0;
+         if (Mpi::Root())
+         {
+            mfem::out << "  static initial state: CG " << cg.GetNumIterations()
+                      << " iterations, elastic energy " << psi0 << "\n";
+         }
+      }
+   }
+   else
+   {
+      MFEM_VERIFY(!c.static_initial_state,
+                  "pff_driver: [confinement] initial_state = 'static' is wired for hydromech only");
+   }
    // Crack energy Gc/(c0 l) int alpha(d) + 1/2 d . kappa K d of the damage d.
    auto crack_energy = [&](const Vector &d)
    {
@@ -381,11 +510,12 @@ int main(int argc, char *argv[])
       MFEM_VERIFY(csv.good(), "cannot write " << path);
       csv << "step,t,dt,p_wall,v_max,kinetic,elastic,external_work,damping_work,kv_work,"
           "energy_error,shadow_energy,shadow_input,shadow_dissipated,shadow_error,"
-          "crack_energy,d_max,fracture_extent,extent_090,damage_qp_its,mass_damping_work,confinement_work\n"
-          << std::setprecision(12);
+          "crack_energy,d_max,fracture_extent,extent_090,damage_qp_its,mass_damping_work,confinement_work"
+          << (hydromech ? ",fluid_energy,fluid_dissipated,fluid_boundary_work,p_min,p_max,pp_its" : "")
+          << "\n" << std::setprecision(12);
    }
    std::unique_ptr<ParaViewDataCollection> pv;
-   ParGridFunction vel(&Vfes), disp(&Vfes), dout(&Sfes);
+   ParGridFunction vel(&Vfes), disp(&Vfes), dout(&Sfes), ppout(&Sfes);
    if (pv_interval > 0)
    {
       pv.reset(new ParaViewDataCollection(c.name + "_c1", &pmesh));
@@ -393,6 +523,7 @@ int main(int argc, char *argv[])
       pv->RegisterField("velocity", &vel);
       pv->RegisterField("displacement", &disp);
       pv->RegisterField("d", &dout);
+      if (hydromech) { pv->RegisterField("pp", &ppout); }
    }
 
    // Work accounting (trapezoidal in u).
@@ -400,7 +531,7 @@ int main(int argc, char *argv[])
    fext_prev = 0.0; fdamp_prev = 0.0; fkv_prev = 0.0; fmass_prev = 0.0;
    const Vector &f_conf = op.ConfinementVector();   // constant in time
    real_t W_ext = 0.0, W_damp = 0.0, W_kv = 0.0, W_mass = 0.0, W_conf = 0.0;
-   real_t Ec_first = 0.0;
+   real_t Ec_first = 0.0, err_ref = 0.0;
    // Discrete (shadow) energy of the central difference scheme, conserved up to
    // round-off for linear K and constant dt:
    //   H^{n-1/2} = 1/2 v^{n-1/2} M v^{n-1/2} + 1/2 u^n . F_int(u^{n-1}),
@@ -443,7 +574,31 @@ int main(int argc, char *argv[])
       if (step_n == 1) { H_ref = H; }
       const Vector u_n(S.u);
       const Vector d_n(D);
-      cd.Step(S, D, s, zeta, dt, info, alpha_at(S.t));
+      // hydromech: pore-pressure force of p^n at d^n; the values at t^n for the output
+      const real_t Ef_out = Ef_n, Wfd_out = W_fdiss, Wfb_out = W_fbdry;
+      real_t p_rng[2] = {0.0, 0.0};
+      Vector p_n;
+      if (hydromech)
+      {
+         f_poro = 0.0;
+         poro->AddCouplingForce(D, Pp, f_poro);
+         real_t loc[2] = {Pp.Size() ? -Pp.Min() : -std::numeric_limits<real_t>::max(),
+                          Pp.Size() ? Pp.Max() : -std::numeric_limits<real_t>::max()};
+         MPI_Allreduce(loc, p_rng, 2, MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
+         p_rng[0] = -p_rng[0];
+         if (pv && step_n % pv_interval == 0) { p_n = Pp; }
+      }
+      cd.Step(S, D, s, zeta, dt, info, alpha_at(S.t), hydromech ? &f_poro : nullptr);
+      if (hydromech)
+      {
+         // p^{n+1} with eps_v(u^{n+1}) - eps_v(u^n), properties at d^n
+         for (int t : drained) { Pp(t) = drained_peak(t) * pulse.Shape(S.t); }
+         poro->Step(D, S.u, u_n, dt, Pp, pinfo);
+         pp_its_total += pinfo.iterations;
+         Ef_n = pinfo.fluid_energy;
+         W_fdiss += dt * pinfo.dissipation_rate;
+         W_fbdry += dt * pinfo.boundary_power;
+      }
 
       // Damage d^{n+1} from psie_active(u^{n+1}).
       int qp_its_step = 0;
@@ -451,7 +606,35 @@ int main(int argc, char *argv[])
       {
          op.Force().ElementActiveEnergy(S.u, psi_el);
          psi_el.HostRead();
-         for (int e = 0; e < pmesh.GetNE(); e++) { Dgf(e) = c.pf.DrivingFrom(psi_el(e)); }
+         if (hydromech)
+         {
+            // H at the quadrature points with p^{n+1} there; its element mean drives d
+            // (psi+ is the element value: constant on P1 simplices)
+            ParGridFunction pg(&Sfes);
+            pg.SetFromTrueDofs(Pp);
+            const int nq = dir.GetNPoints();
+            for (int e = 0; e < pmesh.GetNE(); e++)
+            {
+               ElementTransformation &T = *pmesh.GetElementTransformation(e);
+               real_t sum = 0.0, vol = 0.0;
+               for (int q = 0; q < nq; q++)
+               {
+                  const IntegrationPoint &ip = dir.IntPoint(q);
+                  T.SetIntPoint(&ip);
+                  const real_t pq = pg.GetValue(T, ip);
+                  real_t &H = Hq(e * nq + q);
+                  H = std::max(std::max(2.0 * psi_el(e) + c_hist * pq * pq, real_t(0.0)), H);
+                  const real_t w = ip.weight * T.Weight();
+                  sum += w * H;
+                  vol += w;
+               }
+               Dgf(e) = c.pf.DrivingFrom(sum / vol);
+            }
+         }
+         else
+         {
+            for (int e = 0; e < pmesh.GetNE(); e++) { Dgf(e) = c.pf.DrivingFrom(psi_el(e)); }
+         }
          for (int i = 0; i < D.Size(); i++) { lo(i) = std::max(D(i), seed(i)); }
          dx = lo;   // the projected start point d_old (SNESVI projects onto the bounds)
          bool assembled = false;
@@ -536,7 +719,13 @@ int main(int argc, char *argv[])
       // The seeded initial damage (lo = seed at the first solve) is not part of
       // the budget: MOOSE subtracts dissipated_energy_first_step; here Ec at t^1.
       if (step_n == 1) { Ec_first = Ec; }
-      const real_t err = ke + info.psi + (Ec - Ec_first) - W_ext - W_conf + W_damp + W_kv + W_mass;
+      real_t err = ke + info.psi + (Ec - Ec_first) - W_ext - W_conf + W_damp + W_kv + W_mass;
+      if (hydromech)
+      {
+         err += Ef_out + Wfd_out - Wfb_out;
+         if (step_n <= 1) { err_ref = err; }
+         err -= err_ref;
+      }
       real_t dmax = 0.0, ext = 0.0, ext90 = 0.0;
       if (!frozen_damage)
       {
@@ -551,7 +740,13 @@ int main(int argc, char *argv[])
              << vmax << ',' << ke << ',' << info.psi << ',' << W_ext << ',' << W_damp << ','
              << W_kv << ',' << err << ',' << H << ',' << Ws_in << ',' << Ws_out << ','
              << shadow_err_report << ',' << Ec << ',' << dmax << ',' << ext << ',' << ext90
-             << ',' << qp_its_step << ',' << W_mass << ',' << W_conf << '\n';
+             << ',' << qp_its_step << ',' << W_mass << ',' << W_conf;
+         if (hydromech)
+         {
+            csv << ',' << Ef_out << ',' << Wfd_out << ',' << Wfb_out << ',' << p_rng[0] << ','
+                << p_rng[1] << ',' << pinfo.iterations;
+         }
+         csv << '\n';
          if (step_n % 200 == 0)
          {
             mfem::out << "step " << step_n << " t = " << t_n << " dt = " << dt << " v_max = "
@@ -561,6 +756,10 @@ int main(int argc, char *argv[])
             if (!frozen_damage)
             {
                mfem::out << " d_max = " << dmax << " extent = " << ext << " crack = " << Ec;
+            }
+            if (hydromech)
+            {
+               mfem::out << " p = [" << p_rng[0] << ", " << p_rng[1] << "] E_f = " << Ef_out;
             }
             mfem::out << "\n";
          }
@@ -572,6 +771,7 @@ int main(int argc, char *argv[])
          un.Add(-dt, S.v_half);
          disp.SetFromTrueDofs(un);
          dout.SetFromTrueDofs(d_n);
+         if (hydromech) { ppout.SetFromTrueDofs(p_n); }
          pv->SetCycle(static_cast<int>(step_n));
          pv->SetTime(t_n);
          pv->Save();
@@ -582,6 +782,10 @@ int main(int argc, char *argv[])
    {
       mfem::out << "done: " << S.step << " steps to t = " << S.t << " in " << tic_toc.RealTime()
                 << " s (" << tic_toc.RealTime() / std::max<long>(S.step, 1) << " s/step)\n";
+      if (hydromech)
+      {
+         mfem::out << "  pore-pressure PCG iterations " << pp_its_total << "\n";
+      }
       if (!frozen_damage)
       {
          mfem::out << "  damage QP solves " << damage_solves << " (" << damage_qp_its

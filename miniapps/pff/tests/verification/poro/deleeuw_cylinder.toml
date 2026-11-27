@@ -1,0 +1,82 @@
+# Poro verification 3: de Leeuw's cylinder (the plane-strain Mandel-Cryer problem).
+# Quarter disc of radius a = 10 mm with rollers on the axes, a step radial
+# pressure P on r = a from t = 0, r = a drained (p = 0), d = 0 (run with -fd).
+# Mass-proportional damping removes the waves of the step load, as in
+# terzaghi_column.toml. Chosen with Andy on 2026-11-26 in place of Mandel's
+# slab, which needs a rigid-plate boundary no production case uses.
+# With H = K + 4G/3, S = 1/M + alpha^2/H, c = (k/mu)/S, m = G/H,
+# e = alpha^2/(H S) and x = a sqrt(s/c), the Laplace transform of the centre
+# pressure is
+#   p(0, s) = alpha P (1 - 1/I0(x)) / (H S s [1 - m + m e - 2 m e I1(x)/(x I0(x))]).
+# It starts at the undrained alpha M P/(H_u - G), RISES above it (Mandel-Cryer)
+# and then decays. The csv column p_max is the centre pressure.
+# See check_poro_verification.py (residue series of the transform).
+
+[case]
+name = "deleeuw_cylinder"
+model = "hydromech"
+source = "verification (no MOOSE input): de Leeuw (1965) cylinder, Mandel-Cryer effect"
+
+[mesh]
+file = "quarter_disc_a10_nr24.msh"       # make_quarter_disc_mesh.py --a 0.01 --nr 24
+dim = 2
+corner = [0.0, 0.0, 0.0]
+
+[boundaries]
+pressure = []
+absorbing = []
+drained = ["outer"]
+fixed_x = ["left"]
+fixed_y = ["bottom"]
+confinement = ["outer"]
+
+[material]
+E = 10e9
+nu = 0.3
+density = 2600
+
+[phase_field]
+model = "AT1"
+Gc = 100
+l = 2e-4
+eta = 1e-6
+p = 2
+decomposition = "spectral"
+driving = "half_history_enhanced"
+
+[pulse]                                  # no pulse (EM = 0); one window = the run
+shape_alpha = 4.658e5
+shape_beta = 4.661e5
+rise_time = 3e-6
+pulse_duration = 1.2e-3
+EM = 0.0
+gap = 0.008
+num_pulses = 1
+
+[damping]
+t_free = 0.0
+quench = "mass"
+alpha_mass = 8.8e5                       # as terzaghi_column.toml
+
+[confinement]
+pressure = 1e6
+
+[time]
+mass = "consistent"
+end_time = 1.2e-3
+cfl = 0.4
+
+[poro]
+K_s = 50e9
+K_f = 2.24e9
+phi0 = 0.2
+phi_lb = 0.2
+phi_ub = 0.999
+g_min = 1e-6
+viscosity = 1e-3
+permeability_model = "none"
+k0 = 3.84e-15
+preconditioner = "jacobi"
+
+[output]
+directory = "out/deleeuw_cylinder"

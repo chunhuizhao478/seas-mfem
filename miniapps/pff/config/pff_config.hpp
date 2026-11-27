@@ -8,18 +8,23 @@
 //
 //   [case]         name, model = "solid" | "hydromech", source (MOOSE input path)
 //   [mesh]         file, dim, uniform_refinements, corner point
-//   [boundaries]   attribute lists: pressure, absorbing, fixed_z, confinement
+//   [boundaries]   attribute lists: pressure, absorbing, fixed_x/y/z, confinement,
+//                  drained (hydromech: prescribed pore pressure)
 //   [material]     E, nu, density
 //   [phase_field]  model, Gc or ft, l, eta, p, decomposition, driving,
 //                  initial_damage boxes
 //   [pulse]        ElkPulseLoadExperiment parameters
-//   [confinement]  static outer pressure
+//   [confinement]  static outer pressure; initial_state = "none" (applied from
+//                  rest at t = 0) | "static" (start from the static equilibrium
+//                  under it, MOOSE static_solve.i + SolutionIC)
 //   [damping]      zeta_pulse, zeta_quench, t_free, quench ("stiffness" | "mass" | "implicit"),
 //                  alpha_mass
 //   [time]         end_time or num_pulses, cfl, dt_max, dt_quiet, mass ("consistent"
 //                  default, MOOSE ADInertialForce; or "lumped")
 //   [coupling]     scheme, max_passes, tolerance
-//   [poro]         Biot/porosity/permeability parameters (hydromech only)
+//   [poro]         Biot/porosity/permeability parameters (hydromech only),
+//                  drained_pressure = "zero" | "pulse" (value on [boundaries]
+//                  drained), preconditioner = "amg" | "jacobi"
 //   [output]       directory, interval, fields
 //   [metrics]      d_threshold, r_core, r_hole
 //
@@ -75,7 +80,7 @@ struct CaseConfig
    // attributes written as strings; resolved against the mesh file's
    // $PhysicalNames by ResolveAttributes (io/gmsh_physical_names.hpp).
    std::vector<std::string> pressure_bdr, absorbing_bdr, fixed_z_bdr, confinement_bdr,
-       drained_bdr;
+       drained_bdr, fixed_x_bdr, fixed_y_bdr;
 
    // [material]
    real_t E = 0.0, nu = 0.0, density = 0.0;
@@ -91,6 +96,7 @@ struct CaseConfig
 
    // [confinement]
    real_t confinement_pressure = 0.0;
+   bool static_initial_state = false;   ///< [confinement] initial_state = "static"
 
    // [damping]
    real_t zeta_pulse = 0.0, zeta_quench = 0.0, t_free = 0.0, alpha_mass = 0.0;
@@ -109,6 +115,8 @@ struct CaseConfig
    PoroDamageParams poro;
    real_t fluid_density = 1000.0;
    real_t initial_pore_pressure = 0.0;
+   bool drained_pulse = false;          ///< [poro] drained_pressure = "pulse" (FunctionDirichletBC pp = pulse)
+   bool poro_amg = true;                ///< [poro] preconditioner
 
    // [output]
    std::string output_dir = "pff_out";
