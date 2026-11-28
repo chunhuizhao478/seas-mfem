@@ -8,7 +8,7 @@
 //      step, event counters, state, displacement, traction, slip rate;
 //   2. io/petsc_ts_checkpoint.hpp WritePetscTSCheckpoint (PETSC_TS_V2):
 //      time, next dt, TS step number, rejections;
-//   3. the cycle block (FD_CYCLE_V4), appended here: the commit of the binary
+//   3. the cycle block (FD_CYCLE_V4; V5 with rows on change), appended here: the commit of the binary
 //      that wrote it (rule M10), the IC set, the regime, the step, the
 //      number of dynamic phases entered so far (the regime controller's
 //      state in the QD regime), FdCycleOutput's state (cadence clock,
@@ -40,6 +40,7 @@
 #include "../io/petsc_ts_checkpoint.hpp"
 #include "../common/mpi_context.hpp"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -93,6 +94,33 @@ struct CheckpointData
    Vector state, displacement, traction, slip_rate;
 };
 
+/// The V5 line of the cycle block: FdCycleOutput::State::last_logV (rows
+/// on change), "out_last_logV N v1 ... vN"; NaN (no row yet) is "nan".
+inline void WriteLastLogV(std::ostream &out, const std::vector<real_t> &v)
+{
+   out << "out_last_logV " << v.size();
+   for (real_t x : v)
+   {
+      if (std::isnan(x)) { out << " nan"; }
+      else { out << " " << x; }
+   }
+   out << "\n";
+}
+
+/// Reads what WriteLastLogV wrote after its tag.
+inline void ReadLastLogV(std::istream &in, std::vector<real_t> &v)
+{
+   size_t n = 0;
+   in >> n;
+   v.resize(n);
+   for (real_t &x : v)
+   {
+      std::string w;      // operator>> does not read "nan" into a real
+      in >> w;
+      x = (w == "nan") ? std::numeric_limits<real_t>::quiet_NaN() : std::stod(w);
+   }
+}
+
 #ifdef MFEM_USE_PETSC
 
 inline void WriteCycleCheckpoint(const std::string &prefix, const CheckpointInfo &info,
@@ -111,7 +139,11 @@ inline void WriteCycleCheckpoint(const std::string &prefix, const CheckpointInfo
       MFEM_VERIFY(out.good(), "WriteCycleCheckpoint: cannot append to " << fn);
       const FdCycleOutput::State &o = info.out;
       out << std::setprecision(17) << std::scientific;
-      out << "FD_CYCLE_V4\n";
+      // V5 = V4 plus out_last_logV, written only with [cycle.output]
+      // row_dlog10_V > 0 (the vector is empty without it), so a run without
+      // the key writes the V4 block unchanged.
+      const bool v5 = !o.last_logV.empty();
+      out << (v5 ? "FD_CYCLE_V5\n" : "FD_CYCLE_V4\n");
       out << "commit " << info.commit << "\n";
       out << "ic " << info.ic << "\n";
       out << "regime " << info.regime << "\n";
@@ -124,6 +156,7 @@ inline void WriteCycleCheckpoint(const std::string &prefix, const CheckpointInfo
       out << "out_event_peak_V " << o.event_peak_V << "\n";
       out << "out_below_since " << o.below_since << "\n";
       out << "out_last_above " << o.last_above << "\n";
+      if (v5) { WriteLastLogV(out, o.last_logV); }
       out << "out_files " << o.files.size() << "\n";
       for (size_t i = 0; i < o.files.size(); i++)
       {
@@ -200,8 +233,9 @@ inline void ReadCycleCheckpoint(const std::string &prefix, const std::string &co
       if (tok == "FD_CYCLE_V2") { version = 2; break; }
       if (tok == "FD_CYCLE_V3") { version = 3; break; }
       if (tok == "FD_CYCLE_V4") { version = 4; break; }
+      if (tok == "FD_CYCLE_V5") { version = 5; break; }
    }
-   MFEM_VERIFY(version > 0, "ReadCycleCheckpoint: " << fn << " has no FD_CYCLE_V1-V4 "
+   MFEM_VERIFY(version > 0, "ReadCycleCheckpoint: " << fn << " has no FD_CYCLE_V1-V5 "
                "block (not written by seas_fd_cycle_driver)");
    auto tag = [&](const char *want)
    {
@@ -232,6 +266,8 @@ inline void ReadCycleCheckpoint(const std::string &prefix, const std::string &co
       // below (the old dwell, one step longer); above, the checkpoint's t.
       o.last_above = (in_event != 0 && o.below_since >= 0.0) ? o.below_since : info.t;
    }
+   o.last_logV.clear();
+   if (version >= 5) { tag("out_last_logV"); ReadLastLogV(in, o.last_logV); }
    tag("out_files"); in >> nfiles;
    o.in_event = (in_event != 0);
    o.files.resize(nfiles);

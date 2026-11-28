@@ -15,6 +15,10 @@
 //            files trimmed) ends it with the same row
 //   profiles the first row and the cadence (dt_slow, dt_fast while
 //            max V > fast_V)
+//   rows on change  [cycle.output] row_dlog10_V: a station row when a
+//            station's log10 V moved by the key since its last row, none
+//            closer than dt_fast; the references through a restart and
+//            the checkpoint's line; with 0 the cadence only
 //   off-fault a linear field on a small hex mesh, read at a station and
 //            projected on rotated axes, both regimes' row layout
 //   locate   LocateOnFaces and StationOwners: a point where several faces
@@ -25,6 +29,7 @@
 
 #include "mfem.hpp"
 #include "../../cycle/bench_output.hpp"
+#include "../../cycle/checkpoint.hpp"
 
 #include <array>
 #include <cmath>
@@ -184,6 +189,153 @@ void EventCases(const std::string &work)
       const cycle::EventUpdate u = out.UpdateEvents(0.5, 1e-4);
       Check("UpdateEvents dwell 0: Ended at t", u.change == cycle::EventChange::Ended &&
             u.t_end == 0.5);
+   }
+}
+
+/// [cycle.output] row_dlog10_V: rows on change.  Station s sits on face s's
+/// first DOF (with 2 ranks, each rank owns one station).
+void RowChangeCases(const std::string &work)
+{
+   std::vector<int> faces;
+   if (nranks_ == 1) { faces = {0, 1}; }
+   else { faces = {rank_}; }
+   cycle::OutputConfig oc;
+   oc.dir = work;
+   oc.fast_V = 1e-3;
+   oc.dt_fast = 0.1;
+   oc.dt_slow = 100.0;
+   oc.event_V = 1e-3;
+   oc.stations.resize(2);
+   oc.stations[0].name = "sta0";
+   oc.stations[1].name = "sta1";
+   std::vector<cycle::StationLocation> locs(2);
+   for (size_t i = 0; i < faces.size(); i++)
+   {
+      locs[faces[i]].distance = 0.0;
+      locs[faces[i]].nearest = 3 * static_cast<int>(i);
+      locs[faces[i]].key = {{0.0, 0.0, 0.0}};
+   }
+   auto fill_of = [&faces](double v0, double v1)
+   {
+      return [&faces, v0, v1](cycle::StationFields &f) { f = Fields(faces, v0, v1, 1.0, 2.0); };
+   };
+   // t, V at station 0, V at station 1 (max V <= fast_V throughout).
+   struct Step { double t, v0, v1; };
+   const std::vector<Step> seq = {
+      {0.0, 1e-9, 1e-9},      // the first row
+      {10.0, 2e-9, 1e-9},     // station 0 moved 0.30: no row at 0.5
+      {20.0, 4e-9, 1e-9},     // 0.60 since its row: a row
+      {20.05, 4e-8, 1e-9},    // 1.0, but closer than dt_fast: no row
+      {30.0, 4e-9, 1e-8},     // station 1 moved 1.0: a row for both
+      {40.0, 4e-9, 1e-8},     // nothing moved
+      {130.0, 4e-9, 1e-8}};   // the cadence (dt_slow after the row at 30)
+   auto times = [&](const std::string &prefix, int s)
+   {
+      std::vector<double> t;
+      if (rank_ == 0)
+      {
+         for (const auto &r : Rows(work + "/" + prefix + "_sta" + std::to_string(s) + ".txt"))
+         {
+            t.push_back(r[0]);
+         }
+      }
+      return t;
+   };
+   auto text = [](const std::vector<double> &t)
+   {
+      std::ostringstream o;
+      for (double x : t) { o << x << " "; }
+      return o.str();
+   };
+   {
+      // Without the key: the cadence only, and no state kept.
+      oc.prefix = "rc_off";
+      cycle::FdCycleOutput out(oc, MPI_COMM_WORLD, locs, "test");
+      for (const Step &s : seq) { out.Write(s.t, std::max(s.v0, s.v1), fill_of(s.v0, s.v1)); }
+      const bool none = out.GetState().last_logV.empty();
+      MPI_Barrier(MPI_COMM_WORLD);
+      const std::vector<double> want = {0.0, 130.0};
+      const std::vector<double> t0 = times("rc_off", 0), t1 = times("rc_off", 1);
+      Check("row_dlog10_V = 0: cadence rows only", rank_ != 0 || (t0 == want && t1 == want),
+            text(t0));
+      Check("row_dlog10_V = 0: no reference kept", none);
+   }
+   oc.row_dlog10_V = 0.5;
+   {
+      oc.prefix = "rc_on";
+      cycle::FdCycleOutput out(oc, MPI_COMM_WORLD, locs, "test");
+      std::vector<int> wrote;
+      for (const Step &s : seq)
+      {
+         wrote.push_back(out.Write(s.t, std::max(s.v0, s.v1), fill_of(s.v0, s.v1)) ? 1 : 0);
+      }
+      MPI_Barrier(MPI_COMM_WORLD);
+      const std::vector<double> want = {0.0, 20.0, 30.0, 130.0};
+      const std::vector<double> t0 = times("rc_on", 0), t1 = times("rc_on", 1);
+      Check("row_dlog10_V: rows on change, both stations",
+            rank_ != 0 || (t0 == want && t1 == want), text(t0));
+      Check("row_dlog10_V: Write returns the rows",
+            wrote == std::vector<int>({1, 0, 1, 0, 1, 0, 1}));
+   }
+   {
+      // Restart in the middle: the reference of each station comes back
+      // (station 0's last row has 4e-9, not the 4e-8 seen at 20.05).
+      oc.prefix = "rc_re";
+      cycle::FdCycleOutput::State st;
+      {
+         cycle::FdCycleOutput out(oc, MPI_COMM_WORLD, locs, "test");
+         for (int k = 0; k < 5; k++)
+         {
+            out.Write(seq[k].t, std::max(seq[k].v0, seq[k].v1), fill_of(seq[k].v0, seq[k].v1));
+         }
+         st = out.GetState();
+      }
+      // Through the checkpoint's line (checkpoint.hpp, V5).
+      std::stringstream line;
+      line << std::setprecision(17) << std::scientific;
+      cycle::WriteLastLogV(line, st.last_logV);
+      std::string tag;
+      std::vector<real_t> back;
+      line >> tag;
+      cycle::ReadLastLogV(line, back);
+      Check("out_last_logV round trip", tag == "out_last_logV" && back == st.last_logV);
+      st.last_logV = back;
+      cycle::FdCycleOutput out(oc, MPI_COMM_WORLD, locs, "test", &st);
+      const bool r1 = out.Write(40.0, 1e-8, fill_of(1.0e-8, 1e-8));   // 0.40 at station 0
+      const bool r2 = out.Write(50.0, 2e-8, fill_of(2.0e-8, 1e-8));   // 0.70: a row
+      MPI_Barrier(MPI_COMM_WORLD);
+      const std::vector<double> want = {0.0, 20.0, 30.0, 50.0};
+      const std::vector<double> t0 = times("rc_re", 0);
+      Check("row_dlog10_V: restart keeps the references",
+            !r1 && r2 && (rank_ != 0 || t0 == want), text(t0));
+   }
+   {
+      // A state without references (a checkpoint written without the key):
+      // the first call takes them and writes no row for it.
+      oc.prefix = "rc_v4";
+      cycle::FdCycleOutput::State st;
+      {
+         cycle::FdCycleOutput out(oc, MPI_COMM_WORLD, locs, "test");
+         out.Write(0.0, 1e-9, fill_of(1e-9, 1e-9));
+         st = out.GetState();
+      }
+      st.last_logV.clear();
+      cycle::FdCycleOutput out(oc, MPI_COMM_WORLD, locs, "test", &st);
+      const bool r1 = out.Write(10.0, 1e-6, fill_of(1e-6, 1e-9));    // the reference
+      const bool r2 = out.Write(20.0, 2e-6, fill_of(2e-6, 1e-9));    // 0.30: no row
+      const bool r3 = out.Write(30.0, 4e-6, fill_of(4e-6, 1e-9));    // 0.60: a row
+      Check("row_dlog10_V: no reference at restart", !r1 && !r2 && r3);
+   }
+   {
+      // NaN in the checkpoint line.
+      std::stringstream line;
+      const std::vector<real_t> v = {std::numeric_limits<real_t>::quiet_NaN(), -8.5};
+      cycle::WriteLastLogV(line, v);
+      std::string tag;
+      std::vector<real_t> back;
+      line >> tag;
+      cycle::ReadLastLogV(line, back);
+      Check("out_last_logV: nan", back.size() == 2 && std::isnan(back[0]) && back[1] == -8.5);
    }
 }
 
@@ -474,6 +626,7 @@ int main(int argc, char **argv)
    MPI_Barrier(MPI_COMM_WORLD);
    if (rank_ == 0) { std::cout << "test_cycle_bench on " << nranks_ << " rank(s)\n"; }
    EventCases(work);
+   RowChangeCases(work);
    WriterCases(work);
    LocateCases();
    if (rank_ == 0)

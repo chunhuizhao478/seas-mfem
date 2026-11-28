@@ -42,7 +42,11 @@
 //
 // Cadence: a row when t - t_last >= 0.99 dt_out, dt_out = dt_fast while the
 // global max V > fast_V, else dt_slow (deck values; the decision is reduced
-// over ranks).  ForceWrite writes regardless.
+// over ranks).  ForceWrite writes regardless.  With [cycle.output]
+// row_dlog10_V > 0 a row is also due, at least dt_fast after the last one,
+// when log10 V_strike at any station has moved by that much since the
+// station's last row (the owners evaluate their stations at each call for
+// this; with 0, the default, nothing is evaluated between rows).
 //
 // Restart: State() flushes and records each file's size; a writer built
 // with a State truncates its files to those sizes and appends, so a run
@@ -349,6 +353,7 @@ public:
    /// Columns of a station row: t, slip_s, slip_d, log10 V_s, log10 V_d,
    /// tau_s, tau_d (MPa), log10 theta.
    static constexpr int kStationColumns = 8;
+   static constexpr int kLogVStrike = 3;   ///< the row's log10 V_s column
 
    /// What a checkpoint keeps to continue the files.
    struct State
@@ -360,6 +365,9 @@ public:
       real_t event_peak_V = 0.0;
       real_t below_since = -1.0;            ///< < 0: not below event_V in an event
       real_t last_above = -1.0;             ///< in an event: last max V >= event_V
+      /// row_dlog10_V > 0 only: log10 V_strike of the last row of each
+      /// station this rank owns (deck order); NaN = none yet.
+      std::vector<real_t> last_logV;
       std::vector<std::string> files;       ///< this rank's files, by name
       std::vector<long long> sizes;         ///< their sizes in bytes
    };
@@ -411,6 +419,14 @@ public:
             stations_.push_back(std::make_unique<RowFile>(path, d.str(), columns));
          }
       }
+      // Rows on change: one reference per owned station.  A checkpoint
+      // written without the key (or by a run that owned other stations)
+      // has none: the first call takes it.  Without the key, none is kept.
+      if (cfg_.row_dlog10_V <= 0.0) { state_.last_logV.clear(); }
+      else if (state_.last_logV.size() != owned_.size())
+      {
+         state_.last_logV.assign(owned_.size(), std::numeric_limits<real_t>::quiet_NaN());
+      }
       if (rank_ == 0)
       {
          const std::string gpath = Path("_global.txt");
@@ -447,15 +463,42 @@ public:
    {
       const real_t dt_out = (Vmax > cfg_.fast_V) ? cfg_.dt_fast : cfg_.dt_slow;
       int due = (t - state_.last_write_time >= dt_out * kOutputTimeTolerance) ? 1 : 0;
+      // Rows on change: the owners look at their stations when the cadence
+      // gives no row and the last row is at least dt_fast old.
+      const bool change = cfg_.row_dlog10_V > 0.0;
+      std::vector<std::vector<real_t>> rows;
+      if (change && !due && !owned_.empty() &&
+          t - state_.last_write_time >= cfg_.dt_fast * kOutputTimeTolerance)
+      {
+         StationFields f;
+         fill(f);
+         rows.resize(owned_.size());
+         for (size_t k = 0; k < owned_.size(); k++)
+         {
+            rows[k] = StationRow_(t, f, locs_[owned_[k]]);
+            real_t &last = state_.last_logV[k];
+            if (std::isnan(last)) { last = rows[k][kLogVStrike]; }   // the reference
+            else if (std::abs(rows[k][kLogVStrike] - last) >= cfg_.row_dlog10_V) { due = 1; }
+         }
+      }
       MPI_Allreduce(MPI_IN_PLACE, &due, 1, MPI_INT, MPI_MAX, comm_);
       if (!due) { return false; }
       if (!owned_.empty())
       {
-         StationFields f;
-         fill(f);
+         if (rows.empty())
+         {
+            StationFields f;
+            fill(f);
+            rows.resize(owned_.size());
+            for (size_t k = 0; k < owned_.size(); k++)
+            {
+               rows[k] = StationRow_(t, f, locs_[owned_[k]]);
+            }
+         }
          for (size_t k = 0; k < owned_.size(); k++)
          {
-            stations_[k]->Row(StationRow_(t, f, locs_[owned_[k]]));
+            stations_[k]->Row(rows[k]);
+            if (change) { state_.last_logV[k] = rows[k][kLogVStrike]; }
          }
       }
       state_.last_write_time = t;

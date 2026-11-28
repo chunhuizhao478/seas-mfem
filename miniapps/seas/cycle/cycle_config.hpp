@@ -198,6 +198,14 @@ struct OutputConfig
    real_t fast_V = 1.0e-3;
    real_t dt_fast = 0.1;
    real_t dt_slow = 0.1 * 365.25 * 24.0 * 3600.0;
+   /// Rows on change (0 = off, the cadence above only): with a value > 0 a
+   /// row is also written at a step where, at any station, log10 V_strike
+   /// differs by at least this much from that station's last row, no closer
+   /// than dt_fast to the last row.  It records slip-rate changes that
+   /// happen while max V <= fast_V (afterslip at stations away from the
+   /// rupture, nucleation), which rows dt_slow apart miss.  All stations
+   /// get the row, as with the cadence.
+   real_t row_dlog10_V = 0.0;
    /// Event catalog: an event starts when max V > event_V and ends after
    /// event_dwell seconds below it (the SCEC definition).
    real_t event_V = 1.0e-3;
@@ -748,13 +756,17 @@ inline CycleConfig CycleConfig::Load(const std::string &deck)
    {
       const std::string sec = "cycle.output";
       const toml::value &o = cy.at("output");
-      OnlyKeys(o, sec, {"prefix", "fast_V", "dt_fast", "dt_slow", "event_V", "event_dwell",
-                        "plane_origin", "plane_axis1", "plane_axis2", "station"});
+      OnlyKeys(o, sec, {"prefix", "fast_V", "dt_fast", "dt_slow", "row_dlog10_V", "event_V",
+                        "event_dwell", "plane_origin", "plane_axis1", "plane_axis2",
+                        "station"});
       OutputConfig &oc = c.output;
       oc.prefix = Str(o, sec, "prefix", "", true);
       oc.fast_V = Real(o, sec, "fast_V", oc.fast_V);
       oc.dt_fast = Real(o, sec, "dt_fast", oc.dt_fast);
       oc.dt_slow = Real(o, sec, "dt_slow", oc.dt_slow);
+      oc.row_dlog10_V = Real(o, sec, "row_dlog10_V", oc.row_dlog10_V);
+      MFEM_VERIFY(oc.row_dlog10_V >= 0.0,
+                  "[cycle.output] row_dlog10_V must be >= 0 (0 = off)");
       oc.event_V = Real(o, sec, "event_V", oc.event_V);
       oc.event_dwell = Real(o, sec, "event_dwell", oc.event_dwell);
       oc.plane_origin = Vec3(o, sec, "plane_origin", oc.plane_origin);
