@@ -17,6 +17,12 @@
 #   [cycle.fields.V_init] inside = 0.01: Tandem's V_i, so the IC is the
 #                  uploads' (V_i = 0.01 m/s, tau0 += eta V_i), not the SCEC
 #                  description's 0.03
+#   [cycle.output] row_dlog10_V = 0.1: a station row also when any station's
+#                  log10 slip rate has changed by 0.1 since its last row, so
+#                  the afterslip peaks at strk+-36dp+00 and strk+00dp+22,
+#                  which come after max V falls below fast_V, are in the
+#                  files (run 1173532, without the key, had no row from 6 min
+#                  to 36 days after each event; Chunhui Zhao, 2026-11-27)
 # Same IC formulas (scec_fd + eta_V_init), QD numerics (stage operators,
 # H-matrix eps 1e-10, rk 5dp at atol 1e-8), stations and SCEC outputs as the
 # p = 2 run.
@@ -238,6 +244,7 @@ prefix       = "bp5_qd_p4_2500m_1800yr"
 fast_V       = 1.0e-3
 dt_fast      = 0.1
 dt_slow      = 3155760.0
+row_dlog10_V = 0.1
 event_V      = 1.0e-3
 event_dwell  = 10.0
 plane_origin = [0.0, 0.0, 0.0]
