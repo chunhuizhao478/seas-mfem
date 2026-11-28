@@ -39,6 +39,13 @@
 // ElementLengthAux method = max, libMesh Elem::hmax(): the largest distance
 // between two vertices of the element. Not wired (MFEM_VERIFY in the
 // constructor): the strain porosity model.
+//
+// Fast path: on meshes of first-order simplices (every case mesh) the element
+// gradients are constant, so the constructor stores them with the element dofs
+// and the force, the right-hand side, the matrix and the energies are plain
+// loops over these arrays (same quadrature, same formulas; the generic
+// integrators above remain for other meshes and as the reference in the unit
+// test, SetFastPath(false)).
 
 #ifndef MFEM_PFF_PORE_PRESSURE_OPERATOR_HPP
 #define MFEM_PFF_PORE_PRESSURE_OPERATOR_HPP
@@ -111,6 +118,7 @@ public:
       drained_.Append(drained_tdofs);
       dim_ = vfes.GetParMesh()->Dimension();
       tensor_perm_ = P.perm_model == PermeabilityModel::NormalStrain;
+      SetupFast();
       u_gf_ = 0.0;
       uold_gf_ = 0.0;
       if (tensor_perm_)
@@ -135,6 +143,15 @@ public:
          }
       }
    }
+
+   /// Use the P1-simplex loops (default where the mesh allows) or the generic integrators.
+   void SetFastPath(bool on)
+   {
+      MFEM_VERIFY(!on || fast_ok_, "PorePressureOperator: the fast path needs first-order simplices");
+      fast_ = on;
+      sp_.reset(); A0_.reset(); Ac_.reset(); Ae_.reset(); prec_.reset();
+   }
+   bool FastPath() const { return fast_; }
 
    /// Element size h_c of the normal_strain model (empty for the other models).
    const Vector &ElementHmax() const { return hmax_; }
@@ -176,6 +193,34 @@ public:
    {
       d_gf_.SetFromTrueDofs(D);
       p_gf_.SetFromTrueDofs(Pp);
+      if (fast_)
+      {
+         Vector loc(vfes_.GetVSize());
+         loc = 0.0;
+         const int nd = dim_ + 1, nq = ir_.GetNPoints();
+         for (int e = 0; e < ne_; e++)
+         {
+            const int *sd = &sdof_[e * nd], *vd = &vdof_[e * nd * dim_];
+            const real_t *G = &grad_[e * nd * dim_];
+            real_t sum = 0.0;
+            for (int q = 0; q < nq; q++)
+            {
+               real_t dq = 0.0, pq = 0.0;
+               for (int a = 0; a < nd; a++)
+               {
+                  dq += shape_(q, a) * d_gf_(sd[a]);
+                  pq += shape_(q, a) * p_gf_(sd[a]);
+               }
+               sum += ir_.IntPoint(q).weight * detj_(e) * BiotCoefficient(P_, dq) * pq;
+            }
+            for (int c = 0; c < dim_; c++)
+               for (int a = 0; a < nd; a++) { loc(vd[a + c * nd]) -= sum * G[a + c * nd]; }
+         }
+         Vector t(vfes_.GetTrueVSize());
+         ToTrue(vfes_, loc, t);
+         F += t;
+         return;
+      }
       ParLinearForm lf(&vfes_);
       lf.AddDomainIntegrator(new CouplingIntegrator(*this));
       lf.Assemble();
@@ -209,59 +254,77 @@ public:
       p_gf_.SetFromTrueDofs(p_old_valid_ ? p_old_ : Pp);
       dt_ = dt;
 
-      a_.reset(new ParBilinearForm(&sfes_));
-      StorageCoefficient storage(*this);
-      MobilityCoefficient mobility(*this);
-      MobilityTensorCoefficient mobility_tensor(*this);
-      auto *mi = new MassIntegrator(storage);
-      mi->SetIntRule(&ir_);
-      a_->AddDomainIntegrator(mi);
-      auto *di = tensor_perm_ ? new DiffusionIntegrator(mobility_tensor)
-                 : new DiffusionIntegrator(mobility);
-      di->SetIntRule(&ir_);
-      a_->AddDomainIntegrator(di);
-      a_->Assemble();
-      a_->Finalize();
+      const bool reuse = frozen_ && A0_ && dt == frozen_dt_;
+      MFEM_VERIFY(!frozen_ || !A0_ || reuse, "PorePressureOperator::Step: frozen operator, dt changed");
+      Vector B0(sfes_.GetTrueVSize());
+      if (fast_)
+      {
+         FastAssemble(!reuse, B0);
+      }
+      else if (!reuse)
+      {
+         a_.reset(new ParBilinearForm(&sfes_));
+         StorageCoefficient storage(*this);
+         MobilityCoefficient mobility(*this);
+         MobilityTensorCoefficient mobility_tensor(*this);
+         auto *mi = new MassIntegrator(storage);
+         mi->SetIntRule(&ir_);
+         a_->AddDomainIntegrator(mi);
+         auto *di = tensor_perm_ ? new DiffusionIntegrator(mobility_tensor)
+                    : new DiffusionIntegrator(mobility);
+         di->SetIntRule(&ir_);
+         a_->AddDomainIntegrator(di);
+         a_->Assemble();
+         a_->Finalize();
+      }
 
-      ParLinearForm b(&sfes_);
-      SourceCoefficient source(*this);
-      auto *li = new DomainLFIntegrator(source);
-      li->SetIntRule(&ir_);
-      b.AddDomainIntegrator(li);
-      b.Assemble();
+      if (!fast_)
+      {
+         ParLinearForm b(&sfes_);
+         SourceCoefficient source(*this);
+         auto *li = new DomainLFIntegrator(source);
+         li->SetIntRule(&ir_);
+         b.AddDomainIntegrator(li);
+         b.Assemble();
+         b.ParallelAssemble(B0);
+      }
 
       // Unconstrained operator and right-hand side, for the boundary reaction.
-      std::unique_ptr<HypreParMatrix> A0(a_->ParallelAssemble());
-      Vector B0(sfes_.GetTrueVSize());
-      b.ParallelAssemble(B0);
-
-      // Eliminated copy for the solve (drained rows and columns).
       Vector B(B0), X(Pp);
-      std::unique_ptr<HypreParMatrix> Ac(new HypreParMatrix(*A0)), Ae;
-      if (HasGlobalDrained())
+      if (!reuse)
       {
-         Ae.reset(Ac->EliminateRowsCols(drained_));
-         Ac->EliminateBC(*Ae, drained_, X, B);
+         if (fast_)
+         {
+            if (!a_) { a_.reset(new ParBilinearForm(&sfes_)); }
+            A0_.reset(a_->ParallelAssemble(sp_.get()));
+         }
+         else { A0_.reset(a_->ParallelAssemble()); }
+         // Eliminated copy for the solve (drained rows and columns).
+         Ac_.reset(new HypreParMatrix(*A0_));
+         Ae_.reset();
+         if (HasGlobalDrained()) { Ae_.reset(Ac_->EliminateRowsCols(drained_)); }
+         if (pc_ == PoroPreconditioner::AMG)
+         {
+            auto *amg = new HypreBoomerAMG(*Ac_);
+            amg->SetPrintLevel(0);
+            prec_.reset(amg);
+         }
+         else
+         {
+            prec_.reset(new HypreDiagScale(*Ac_));
+         }
+         frozen_dt_ = dt;
       }
+      if (Ae_) { Ac_->EliminateBC(*Ae_, drained_, X, B); }
+      HypreParMatrix *A0 = A0_.get();
 
       CGSolver cg(sfes_.GetComm());
       cg.SetRelTol(1e-12);
       cg.SetAbsTol(0.0);
       cg.SetMaxIter(2000);
       cg.SetPrintLevel(0);
-      std::unique_ptr<Solver> prec;
-      if (pc_ == PoroPreconditioner::AMG)
-      {
-         auto *amg = new HypreBoomerAMG(*Ac);
-         amg->SetPrintLevel(0);
-         prec.reset(amg);
-      }
-      else
-      {
-         prec.reset(new HypreDiagScale(*Ac));
-      }
-      cg.SetPreconditioner(*prec);
-      cg.SetOperator(*Ac);
+      cg.SetPreconditioner(*prec_);
+      cg.SetOperator(*Ac_);
       cg.Mult(B, X);
       MFEM_VERIFY(cg.GetConverged(), "pore-pressure PCG did not converge ("
                   << cg.GetNumIterations() << " iterations, |r| = " << cg.GetFinalNorm() << ")");
@@ -291,6 +354,48 @@ public:
       real_t loc[2] = {0.0, 0.0}, glob[2];
       Vector grad(dim_), Kg(dim_);
       DenseMatrix Kt;
+      if (fast_)
+      {
+         const int nd = dim_ + 1, nq = ir_.GetNPoints();
+         real_t K[9];
+         for (int e = 0; e < ne_; e++)
+         {
+            const int *sd = &sdof_[e * nd];
+            const real_t *G = &grad_[e * nd * dim_];
+            real_t gp[3] = {0.0, 0.0, 0.0}, gd[3] = {0.0, 0.0, 0.0}, eps[9];
+            for (int c = 0; c < dim_; c++)
+               for (int a = 0; a < nd; a++) { gp[c] += G[a + c * nd] * pg(sd[a]); }
+            if (tensor_perm_) { ElementKinematics(e, gd, eps); }
+            for (int q = 0; q < nq; q++)
+            {
+               real_t dq = 0.0, pq = 0.0;
+               for (int a = 0; a < nd; a++)
+               {
+                  dq += shape_(q, a) * d_gf_(sd[a]);
+                  pq += shape_(q, a) * pg(sd[a]);
+               }
+               const PoroPoint pt = EvalPoroPoint(P_, dq);
+               const real_t w = ir_.IntPoint(q).weight * detj_(e);
+               loc[0] += w * 0.5 * pt.inv_M * pq * pq;
+               if (tensor_perm_)
+               {
+                  EffectivePermeability(P_, dq, gd, eps, hmax_(e), K);
+                  real_t s2 = 0.0;
+                  for (int j = 0; j < dim_; j++)
+                     for (int i = 0; i < dim_; i++) { s2 += gp[i] * K[i + 3 * j] * gp[j]; }
+                  loc[1] += w * s2 / P_.viscosity;
+               }
+               else
+               {
+                  loc[1] += w * pt.mobility * (gp[0] * gp[0] + gp[1] * gp[1] + gp[2] * gp[2]);
+               }
+            }
+         }
+         MPI_Allreduce(loc, glob, 2, MPITypeMap<real_t>::mpi_type, MPI_SUM, sfes_.GetComm());
+         fluid_energy = glob[0];
+         diss_rate = glob[1];
+         return;
+      }
       for (int e = 0; e < mesh.GetNE(); e++)
       {
          ElementTransformation &T = *mesh.GetElementTransformation(e);
@@ -320,6 +425,16 @@ public:
       diss_rate = glob[1];
    }
 
+   /// Freeze the operator: while frozen, Step assembles the matrix and the
+   /// preconditioner once and reuses them (the caller keeps the damage and dt
+   /// fixed and the permeability must not depend on u: the static start at
+   /// d below the normal_strain threshold). Unfreezing drops the stored matrix.
+   void Freeze(bool on)
+   {
+      frozen_ = on;
+      A0_.reset(); Ac_.reset(); Ae_.reset(); prec_.reset();
+   }
+
    /// Forget the stored p^n (call after the state is changed from outside).
    void Reset() { p_old_valid_ = false; }
 
@@ -330,6 +445,156 @@ public:
    const PoroDamageParams &Params() const { return P_; }
 
 private:
+   static void ToTrue(ParFiniteElementSpace &fes, const Vector &loc, Vector &t)
+   {
+      const Operator *Pr = fes.GetProlongationMatrix();
+      if (Pr) { Pr->MultTranspose(loc, t); }
+      else { t = loc; }
+   }
+
+   void SetupFast()
+   {
+      ParMesh &mesh = *sfes_.GetParMesh();
+      ne_ = mesh.GetNE();
+      const Geometry::Type simplex = dim_ == 3 ? Geometry::TETRAHEDRON
+                                     : (dim_ == 2 ? Geometry::TRIANGLE : Geometry::SEGMENT);
+      int ok = 1;
+      for (int e = 0; e < ne_ && ok; e++)
+      {
+         ok = mesh.GetElementBaseGeometry(e) == simplex && sfes_.GetFE(e)->GetOrder() == 1 &&
+              vfes_.GetFE(e)->GetOrder() == 1 && sfes_.GetFE(e)->GetDof() == dim_ + 1;
+      }
+      if (mesh.GetNodes()) { ok = 0; }
+      int gok = 0;
+      MPI_Allreduce(&ok, &gok, 1, MPI_INT, MPI_MIN, sfes_.GetComm());
+      fast_ok_ = fast_ = gok == 1;
+      if (!fast_) { return; }
+      const int nd = dim_ + 1, nq = ir_.GetNPoints();
+      sdof_.SetSize(ne_ * nd);
+      vdof_.SetSize(ne_ * nd * dim_);
+      grad_.SetSize(ne_ * nd * dim_);
+      detj_.SetSize(ne_);
+      Array<int> dofs;
+      DenseMatrix dshape(nd, dim_);
+      for (int e = 0; e < ne_; e++)
+      {
+         sfes_.GetElementDofs(e, dofs);
+         for (int a = 0; a < nd; a++)
+         {
+            MFEM_VERIFY(dofs[a] >= 0, "PorePressureOperator: unexpected dof sign");
+            sdof_[e * nd + a] = dofs[a];
+         }
+         vfes_.GetElementVDofs(e, dofs);
+         for (int i = 0; i < nd * dim_; i++) { vdof_[e * nd * dim_ + i] = dofs[i]; }
+         ElementTransformation &T = *mesh.GetElementTransformation(e);
+         T.SetIntPoint(&ir_.IntPoint(0));
+         sfes_.GetFE(e)->CalcPhysDShape(T, dshape);
+         for (int c = 0; c < dim_; c++)
+            for (int a = 0; a < nd; a++) { grad_(e * nd * dim_ + a + c * nd) = dshape(a, c); }
+         detj_(e) = T.Weight();
+      }
+      shape_.SetSize(nq, nd);
+      if (ne_ > 0)
+      {
+         Vector sh(nd);
+         for (int q = 0; q < nq; q++)
+         {
+            sfes_.GetFE(0)->CalcShape(ir_.IntPoint(q), sh);
+            for (int a = 0; a < nd; a++) { shape_(q, a) = sh(a); }
+         }
+      }
+   }
+
+   /// grad d (3) and the total strain (3x3) of element e from d_gf_ and u_gf_.
+   void ElementKinematics(int e, real_t *gd, real_t *eps) const
+   {
+      const int nd = dim_ + 1;
+      const int *sd = &sdof_[e * nd], *vd = &vdof_[e * nd * dim_];
+      const real_t *G = &grad_[e * nd * dim_];
+      real_t gu[9];
+      for (int i = 0; i < 9; i++) { gu[i] = eps[i] = 0.0; }
+      for (int c = 0; c < 3; c++) { gd[c] = 0.0; }
+      for (int c = 0; c < dim_; c++)
+         for (int a = 0; a < nd; a++)
+         {
+            gd[c] += G[a + c * nd] * d_gf_(sd[a]);
+            for (int i = 0; i < dim_; i++) { gu[i + 3 * c] += u_gf_(vd[a + i * nd]) * G[a + c * nd]; }
+         }
+      for (int j = 0; j < dim_; j++)
+         for (int i = 0; i < dim_; i++) { eps[i + 3 * j] = 0.5 * (gu[i + 3 * j] + gu[j + 3 * i]); }
+   }
+
+   /// Fast path of Step: the local matrix sp_ (if matrix) and the true-dof right-hand side.
+   void FastAssemble(bool matrix, Vector &B0)
+   {
+      const int nd = dim_ + 1, nq = ir_.GetNPoints();
+      Vector loc(sfes_.GetVSize());
+      loc = 0.0;
+      const bool first = !sp_;
+      if (matrix)
+      {
+         if (first) { sp_.reset(new SparseMatrix(sfes_.GetVSize())); }
+         else { *sp_ = 0.0; }
+      }
+      DenseMatrix elmat(nd);
+      Array<int> rows(nd);
+      real_t K[9], gd[3], eps[9];
+      for (int e = 0; e < ne_; e++)
+      {
+         const int *sd = &sdof_[e * nd], *vd = &vdof_[e * nd * dim_];
+         const real_t *G = &grad_[e * nd * dim_];
+         real_t ddiv = 0.0;
+         for (int c = 0; c < dim_; c++)
+            for (int a = 0; a < nd; a++)
+            {
+               ddiv += G[a + c * nd] * (u_gf_(vd[a + c * nd]) - uold_gf_(vd[a + c * nd]));
+            }
+         if (matrix && tensor_perm_) { ElementKinematics(e, gd, eps); }
+         elmat = 0.0;
+         real_t bel[4] = {0.0, 0.0, 0.0, 0.0};
+         for (int q = 0; q < nq; q++)
+         {
+            real_t dq = 0.0, pq = 0.0;
+            for (int a = 0; a < nd; a++)
+            {
+               dq += shape_(q, a) * d_gf_(sd[a]);
+               pq += shape_(q, a) * p_gf_(sd[a]);
+            }
+            const PoroPoint pt = EvalPoroPoint(P_, dq);
+            const real_t w = ir_.IntPoint(q).weight * detj_(e);
+            const real_t src = w * (pt.inv_M * pq - pt.alpha * ddiv) / dt_;
+            for (int a = 0; a < nd; a++) { bel[a] += src * shape_(q, a); }
+            if (!matrix) { continue; }
+            const real_t st = w * pt.inv_M / dt_;
+            if (tensor_perm_) { EffectivePermeability(P_, dq, gd, eps, hmax_(e), K); }
+            for (int b = 0; b < nd; b++)
+               for (int a = 0; a < nd; a++)
+               {
+                  real_t kab = 0.0;
+                  if (tensor_perm_)
+                  {
+                     for (int j = 0; j < dim_; j++)
+                        for (int i = 0; i < dim_; i++)
+                        {
+                           kab += G[a + i * nd] * K[i + 3 * j] * G[b + j * nd];
+                        }
+                     kab /= P_.viscosity;
+                  }
+                  else
+                  {
+                     for (int i = 0; i < dim_; i++) { kab += G[a + i * nd] * G[b + i * nd]; }
+                     kab *= pt.mobility;
+                  }
+                  elmat(a, b) += st * shape_(q, a) * shape_(q, b) + w * kab;
+               }
+         }
+         for (int a = 0; a < nd; a++) { loc(sd[a]) += bel[a]; rows[a] = sd[a]; }
+         if (matrix) { sp_->AddSubMatrix(rows, rows, elmat, 0); }
+      }
+      if (matrix && first) { sp_->Finalize(0); }
+      ToTrue(sfes_, loc, B0);
+   }
+
    bool HasGlobalDrained() const
    {
       int loc = drained_.Size(), glob = 0;
@@ -402,10 +667,20 @@ private:
    Array<int> drained_;
    int dim_ = 0;
    bool tensor_perm_ = false;
+   bool fast_ = false, fast_ok_ = false;
+   int ne_ = 0;
+   Array<int> sdof_, vdof_;
+   Vector grad_, detj_;
+   DenseMatrix shape_;
+   std::unique_ptr<SparseMatrix> sp_;
    Vector hmax_;
    real_t dt_ = 1.0;
    mutable ParGridFunction d_gf_, p_gf_, u_gf_, uold_gf_;
    std::unique_ptr<ParBilinearForm> a_;
+   std::unique_ptr<HypreParMatrix> A0_, Ac_, Ae_;
+   std::unique_ptr<Solver> prec_;
+   bool frozen_ = false;
+   real_t frozen_dt_ = 0.0;
    Vector p_old_;
    bool p_old_valid_ = false;
 };

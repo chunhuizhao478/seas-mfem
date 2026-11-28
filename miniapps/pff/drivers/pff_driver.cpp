@@ -479,6 +479,11 @@ int main(int argc, char *argv[])
             Kop.poro = poro.get();
             Kop.P0 = &P_static0;
             Kop.dt_u = c.dt_max;
+            MFEM_VERIFY(c.poro.perm_model != PermeabilityModel::NormalStrain
+                        || ParNormlp(D, infinity(), comm) < c.poro.d_threshold,
+                        "initial_state = 'static_undrained': seeded damage at the normal_strain "
+                        "threshold makes the static step nonlinear (not wired)");
+            poro->Freeze(true);
             Vector zero(n), p;
             zero = 0.0;
             Kop.Pressure(zero, p);
@@ -504,6 +509,7 @@ int main(int argc, char *argv[])
          if (c.static_undrained)
          {
             Kop.Pressure(S.u, Pp);
+            poro->Freeze(false);
             poro->Energies(D, Pp, Ef_n, rate);
             if (Mpi::Root())
             {

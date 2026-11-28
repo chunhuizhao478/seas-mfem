@@ -271,10 +271,98 @@ static void TestNormalStrainPermeability()
    TEST_REL(Pp.Max(), 2.5e6, 1e-9, "tensor step keeps a uniform pressure (max)");
 }
 
+// The P1-simplex loops against the generic MFEM integrators (same quadrature,
+// same formulas): force, one step with a drained boundary, energies; isotropic
+// darcy_poiseuille in 2D (cmame 2d_hydromech values) and the normal_strain
+// tensor in 3D (cmame 3d_hydromech values).
+static void TestFastPath(int dim)
+{
+   std::cout << "\n[fast path against the generic integrators, " << dim << "D]\n";
+   const real_t L = 1e-3;
+   Mesh serial = dim == 2 ? Mesh::MakeCartesian2D(7, 5, Element::TRIANGLE, true, 1.4 * L, L)
+                 : Mesh::MakeCartesian3D(4, 3, 3, Element::TETRAHEDRON, 1.4 * L, L, L);
+   ParMesh mesh(MPI_COMM_WORLD, serial);
+   H1_FECollection h1(1, dim);
+   ParFiniteElementSpace V(&mesh, &h1, dim, Ordering::byNODES), S(&mesh, &h1);
+   const IntegrationRule &ir = IntRules.Get(dim == 2 ? Geometry::TRIANGLE : Geometry::TETRAHEDRON, 2);
+   PoroDamageParams P = Params();
+   P.k0 = 5e-19;
+   P.perm_exponent = 10.0;
+   if (dim == 2)
+   {
+      P.perm_model = PermeabilityModel::DarcyPoiseuille;
+      P.wc = 4.13e-7;
+   }
+   else
+   {
+      P.perm_model = PermeabilityModel::NormalStrain;
+   }
+   Array<int> ess_bdr(mesh.bdr_attributes.Max()), drained;
+   ess_bdr = 0;
+   ess_bdr[0] = 1;
+   S.GetEssentialTrueDofs(ess_bdr, drained);
+   PorePressureOperator fast(V, S, P, drained, ir, PoroPreconditioner::Jacobi);
+   PorePressureOperator gen(V, S, P, drained, ir, PoroPreconditioner::Jacobi);
+   TEST_ASSERT(fast.FastPath(), "simplex mesh takes the fast path");
+   gen.SetFastPath(false);
+
+   ParGridFunction dg(&S), pg(&S), ug(&V), u0(&V);
+   FunctionCoefficient df([&](const Vector &x)
+   { return std::min(1.0, std::max(0.0, 0.2 + 0.7 * x(0) / (1.4 * L) + 0.2 * std::sin(9e3 * x(1)))); });
+   FunctionCoefficient pf([&](const Vector &x) { return 3e6 * std::cos(4e3 * x(0)) + 2e9 * x(1); });
+   VectorFunctionCoefficient uf(dim, [&](const Vector &x, Vector &u)
+   { for (int c = 0; c < x.Size(); c++) { u(c) = 1e-3 * L * std::sin(3e3 * x(c) + c) + 2e-3 * x((c + 1) % x.Size()); } });
+   VectorFunctionCoefficient u0f(dim, [&](const Vector &x, Vector &u)
+   { for (int c = 0; c < x.Size(); c++) { u(c) = 5e-4 * L * std::cos(2e3 * x(c)); } });
+   dg.ProjectCoefficient(df);
+   pg.ProjectCoefficient(pf);
+   ug.ProjectCoefficient(uf);
+   u0.ProjectCoefficient(u0f);
+   Vector D(S.GetTrueVSize()), Pp(S.GetTrueVSize()), U(V.GetTrueVSize()), U0(V.GetTrueVSize());
+   dg.GetTrueDofs(D);
+   pg.GetTrueDofs(Pp);
+   ug.GetTrueDofs(U);
+   u0.GetTrueDofs(U0);
+
+   Vector Ff(V.GetTrueVSize()), Fg(V.GetTrueVSize());
+   Ff = 0.0;
+   Fg = 0.0;
+   fast.AddCouplingForce(D, Pp, Ff);
+   gen.AddCouplingForce(D, Pp, Fg);
+   Fg -= Ff;
+   const real_t fn = std::sqrt(InnerProduct(MPI_COMM_WORLD, Ff, Ff));
+   TEST_ASSERT(std::sqrt(InnerProduct(MPI_COMM_WORLD, Fg, Fg)) <= 1e-11 * fn && fn > 0.0,
+               "coupling force agrees to 1e-11");
+
+   PorePressureOperator::StepInfo fi, gi;
+   Vector Pf(Pp), Pg(Pp);
+   for (int t : drained) { Pf(t) = Pg(t) = 1e6; }
+   // a large step so that the diffusion block matters next to the storage block
+   const real_t dt = dim == 2 ? 1e-6 : 1e-4;
+   fast.Step(D, U, U0, dt, Pf, fi);
+   gen.Step(D, U, U0, dt, Pg, gi);
+   Vector diff(Pf);
+   diff -= Pg;
+   const real_t pn = std::sqrt(InnerProduct(MPI_COMM_WORLD, Pg, Pg));
+   TEST_ASSERT(std::sqrt(InnerProduct(MPI_COMM_WORLD, diff, diff)) <= 1e-8 * pn, "step agrees to 1e-8");
+   TEST_REL(fi.fluid_energy, gi.fluid_energy, 1e-8, "fluid energy agrees");
+   TEST_REL(fi.dissipation_rate, gi.dissipation_rate, 1e-8, "dissipation rate agrees");
+   TEST_REL(fi.boundary_power, gi.boundary_power, 1e-6, "drained boundary power agrees");
+   TEST_ASSERT(gi.dissipation_rate > 0.0 && std::abs(gi.boundary_power) > 0.0, "the step has flow");
+   // a second step reuses the stored sparsity
+   fast.Step(D, U0, U, dt, Pf, fi);
+   gen.Step(D, U0, U, dt, Pg, gi);
+   diff = Pf;
+   diff -= Pg;
+   TEST_ASSERT(std::sqrt(InnerProduct(MPI_COMM_WORLD, diff, diff)) <= 1e-8 * pn, "second step agrees to 1e-8");
+}
+
 int main(int argc, char *argv[])
 {
    Mpi::Init(argc, argv);
    Hypre::Init();
+   TestFastPath(2);
+   TestFastPath(3);
    TestNormalStrainPermeability();
    TestCouplingAndStorage();
    TestDiffusion(PoroPreconditioner::Jacobi, "jacobi");
