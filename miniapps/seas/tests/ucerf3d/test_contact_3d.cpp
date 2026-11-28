@@ -293,9 +293,14 @@ static void G3Finish(const std::string &name, NitscheWaveOperator &op, const Vec
                name << " G1: the device step " << (dev ? "ran" : "is off") << ": matrix-free "
                << op.MatrixFreeActive() << ", device step " << op.DeviceStepActive()
                << ", device fault " << op.DeviceFaultActive());
-   TEST_ASSERT(nopen_g > 0 && gmax > 0.0 && (!all_open || (nopen_g == ntot && smax == 0.0)),
+   // --steps N (a shorter run, e.g. the one-step CUDA check V-G1): the bend
+   // has not opened yet after a few steps, so the count is reported only
+   const bool short_run = (a.steps > 0 && !all_open);
+   TEST_ASSERT(short_run
+               || (nopen_g > 0 && gmax > 0.0 && (!all_open || (nopen_g == ntot && smax == 0.0))),
                name << " G2: the fault opens (" << nopen_g << " of " << ntot << " DOFs, gap "
-               << gmax << " m" << (all_open ? "; every DOF open with sigma_eff = 0" : "") << ")");
+               << gmax << " m" << (all_open ? "; every DOF open with sigma_eff = 0" : "")
+               << (short_run ? "; a short run (--steps), not required" : "") << ")");
    if (!a.write.empty())
    {
       std::ofstream o(file, std::ios::binary);

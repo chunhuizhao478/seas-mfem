@@ -120,6 +120,8 @@ struct G4Opt
    // U-G5 (P1.11): the walls behind the band are held and move,
    // g = (ga + gb t) e, and (kv) the Kelvin-Voigt term takes their velocity
    bool held = false, kv = false;
+   long max_steps = 0;    ///< > 0: stop after this many steps (V-G1: one step on CUDA)
+   int snaps_want = 3;
    real_t dload = 0.0, dload_far = 0.0;   ///< device Dirichlet load against the host's
    long dir_builds = 0;
    // results (this rank's part reduced over the ranks)
@@ -321,6 +323,14 @@ WaveResult RunWave(Mesh &sm, int p, bool with_band, real_t X, real_t L, real_t w
       g4_at[0] = std::lround((Xin + 0.25 * L) / c / r.dt);
       g4_at[1] = std::lround((Xin + 0.5 * L) / c / r.dt);
       g4_at[2] = std::lround(X / c / r.dt);
+      if (g4->max_steps > 0)
+      {
+         // a short run: samples at a third, two thirds and the end of it
+         g4_at[0] = std::max(1L, g4->max_steps / 3);
+         g4_at[1] = std::max(1L, 2 * g4->max_steps / 3);
+         g4_at[2] = g4->max_steps;
+      }
+      g4->snaps_want = 1 + (g4_at[1] != g4_at[0] ? 1 : 0) + (g4_at[2] != g4_at[1] ? 1 : 0);
       r.steps = g4_at[2];
       if (g_rank == 0) { std::printf("  U-G4: %ld steps, samples at steps %ld, %ld, %ld\n", r.steps, g4_at[0], g4_at[1], g4_at[2]); }
       const std::string fn = (g4->write.empty() ? g4->compare : g4->write) + "." + g4->name
@@ -381,7 +391,7 @@ WaveResult RunWave(Mesh &sm, int p, bool with_band, real_t X, real_t L, real_t w
       g4->dv = GMax(g4->dv, pm.GetComm());
       g4->in_band = GMax(g4->in_band, pm.GetComm());
       for (real_t &d : g4->snap_dv) { d = GMax(d, pm.GetComm()); }
-      int ok = (g4->sizes_ok && g4->snaps == 3) ? 1 : 0;
+      int ok = (g4->sizes_ok && g4->snaps == g4->snaps_want) ? 1 : 0;
       MPI_Allreduce(MPI_IN_PLACE, &ok, 1, MPI_INT, MPI_MIN, pm.GetComm());
       g4->sizes_ok = (ok == 1);
    }
@@ -910,7 +920,8 @@ void TestG4W(const char *mesh_file, G4Opt g4, real_t col_h, real_t width)
          << "): the band's memory steps "
          << (!o.band ? "nowhere (no band)" : dev ? "in device kernels" : "on the host")
          << "; the wave is inside the band at the samples (max |u| there " << o.in_band << " A)";
-      Check(r.finite && o.sizes_ok && o.on_device == (dev && o.band) && o.in_band > 0.1, os.str());
+      Check(r.finite && o.sizes_ok && o.on_device == (dev && o.band)
+            && (o.in_band > 0.1 || o.max_steps > 0), os.str());
       if (dev)
       {
          os.str("");
@@ -968,7 +979,8 @@ void TestG5W(const char *mesh_file, G4Opt g4, real_t col_h, real_t width)
       std::ostringstream os;
       os << "U-G5 W " << o.name << " (" << r.steps << " steps): the run is finite, the wave is "
          "in the outer 30 km at the samples (max |u| there " << o.in_band << " A)";
-      Check(r.finite && o.sizes_ok && o.on_device == (dev && o.band) && o.in_band > 0.1, os.str());
+      Check(r.finite && o.sizes_ok && o.on_device == (dev && o.band)
+            && (o.in_band > 0.1 || o.max_steps > 0), os.str());
       if (dev)
       {
          os.str("");
@@ -1002,9 +1014,11 @@ int main(int argc, char *argv[])
    const char *dev_name = "cpu", *g4_write = "", *g4_compare = "";
    real_t g4_tol = 1e-12, g4_tol_v = 1e-11;
    const char *g4_only = "";
-   int g4_band = 1;
+   int g4_band = 1, g4_steps = 0;
    OptionsParser args(argc, argv);
    args.AddOption(&g4_tol_v, "-g4tv", "--g4-tol-v", "U-G4 W: limit for U'.");
+   args.AddOption(&g4_steps, "-g4n", "--g4-steps", "U-G4 W, U-G5 W: stop after this many steps "
+                  "(0: the whole run).");
    args.AddOption(&g4_only, "-g4c", "--g4-case", "U-G4 W: col or mesh (default both).");
    args.AddOption(&g4_band, "-g4b", "--g4-band", "U-G4 W: 0 runs without the band (reference).");
    args.AddOption(&dev_name, "-dev", "--device", "U-G4: cpu (writes) or debug / cuda (compares).");
@@ -1055,6 +1069,7 @@ int main(int argc, char *argv[])
       g4.tol = g4_tol;
       g4.tol_v = g4_tol_v;
       g4.only = g4_only;
+      g4.max_steps = g4_steps;
       g4.band = (g4_band != 0);
       MFEM_VERIFY((g4.device == "cpu") != g4.write.empty() && g4.write.empty() != g4.compare.empty(),
                   "U-G4 W: --device cpu --write PREFIX, or --device debug|cuda --compare PREFIX");
@@ -1069,6 +1084,7 @@ int main(int argc, char *argv[])
       g4.tol = g4_tol;
       g4.tol_v = g4_tol_v;
       g4.only = g4_only;
+      g4.max_steps = g4_steps;
       MFEM_VERIFY((g4.device == "cpu") != g4.write.empty() && g4.write.empty() != g4.compare.empty(),
                   "U-G5 W: --device cpu --write PREFIX, or --device debug|cuda --compare PREFIX");
       TestG5W(mesh_file, g4, 3e3, width);
