@@ -97,7 +97,10 @@ struct CaseConfig
 
    // [confinement]
    real_t confinement_pressure = 0.0;
-   bool static_initial_state = false;   ///< [confinement] initial_state = "static"
+   bool static_initial_state = false;   ///< [confinement] initial_state = "static" or "static_undrained"
+   bool static_undrained = false;       ///< "static_undrained": p follows the static step (one
+                                        ///< backward-Euler step of size dt_max from p0, as the
+                                        ///< inertia-free first step of the cmame 3D MOOSE inputs)
 
    // [damping]
    real_t zeta_pulse = 0.0, zeta_quench = 0.0, t_free = 0.0, alpha_mass = 0.0;

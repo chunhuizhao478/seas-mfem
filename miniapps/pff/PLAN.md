@@ -182,8 +182,20 @@ GH200). The CPU result is the reference of each GPU gate.
    solid results are unchanged bit for bit over 2049 steps.
    cmame 2D hydromech pulse 1 (4 ranks, 185 s): crack 0.772 J/m with the
    seed, d >= 0.5 to 1.29 mm (dry solid: 2.147 J/m, 3.94 mm), energy_error
-   0.05 %; MOOSE reference M-C4a running (Mac). Not wired: strain porosity,
-   normal_strain permeability, fixed-point coupling, 3D hydromech runs.
+   0.05 %. MOOSE reference M-C4a (Mac, 2 ranks, 13,044 s, farms 46ad2eb) at
+   10 us: d >= 0.5 front 1.291 mm in both (same node), d >= 0.9 1.015 vs
+   1.095 mm, crack without the seed 0.5075 vs 0.5249 J/m (-3.3 %), pore
+   pressure range [-19.4, 14.6] vs [-18.5, 15.3] MPa, energies within 1-4 %.
+   100 pulses in pff (483e8a2, 4 ranks, 12,178 s): the crack arrests, d >= 0.5
+   front 1.55 mm at pulse 10 and 1.67 mm from pulse 21 on, crack without the
+   seed 0.51/0.68/0.76 J/m at pulses 1/10/100, energy_error 0.008 % of the
+   pulse work; no MOOSE multi-pulse reference.
+   3D wiring (2026-11-27): the normal_strain permeability tensor (grad d
+   normal, strain of u^{n+1}, h_c = largest vertex distance of the element as
+   libMesh hmax) and `initial_state = "static_undrained"` (the inertia-free
+   first MOOSE step of the 3D inputs: p follows the static compression).
+   Not wired: strain porosity, fixed-point coupling. The 3D em_5J comparison
+   is part of C5.
 6. **C5/G5 3D and timing**: spe_hftc cube and cmame 3D em_5J first pulses
    against MOOSE; a wall-time table against Vista/LS6 MOOSE and between CPU
    and GPU.

@@ -149,7 +149,11 @@ private:
          c.confinement_pressure = Real(t, "pressure", 0.0);
          const std::string is = Str(t, "initial_state", "none");
          if (is == "static") { c.static_initial_state = true; }
-         else if (is != "none") { throw std::invalid_argument("[confinement] initial_state must be none or static"); }
+         else if (is == "static_undrained") { c.static_initial_state = true; c.static_undrained = true; }
+         else if (is != "none")
+         {
+            throw std::invalid_argument("[confinement] initial_state must be none, static or static_undrained");
+         }
       }
       if (data.contains("damping"))
       {

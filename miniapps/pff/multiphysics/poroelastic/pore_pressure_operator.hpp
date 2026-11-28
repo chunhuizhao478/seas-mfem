@@ -29,9 +29,16 @@
 // the storage term, diffusion number k M dt / (mu h^2) < 0.1).
 //
 // The quadrature is the rule of the force kernel (order 2: MOOSE's default for
-// FIRST order variables). Not wired here (MFEM_VERIFY in the constructor): the
-// strain porosity model and the normal_strain permeability (they need the
-// mechanical strain and the element size at the points).
+// FIRST order variables).
+//
+// permeability_model = normal_strain (cmame 3d_hydromech/em_5J, Heider 2021 eqs.
+// 46-48 as in NDSmallDeformationIsotropicElasticity::updatePermeabilityForCracking):
+// the tensor k = k0 I + d^b (w^2/12)(I - n n) at each point, from grad d, the
+// total small strain of u^{n+1} (MOOSE "mechanical_strain" of the current
+// iterate; single pass here) and h_c = the element size. MOOSE takes h_c from
+// ElementLengthAux method = max, libMesh Elem::hmax(): the largest distance
+// between two vertices of the element. Not wired (MFEM_VERIFY in the
+// constructor): the strain porosity model.
 
 #ifndef MFEM_PFF_PORE_PRESSURE_OPERATOR_HPP
 #define MFEM_PFF_PORE_PRESSURE_OPERATOR_HPP
@@ -48,7 +55,9 @@ namespace pff
 
 enum class PoroPreconditioner { AMG, Jacobi };
 
-/// Properties at one damage value (isotropic permeability models).
+/// Properties at one damage value. mobility is the isotropic value; for the
+/// normal_strain model it is the matrix value k0 / mu (zero strain, no normal),
+/// and the tensor comes from PorePressureOperator::MobilityAt.
 struct PoroPoint
 {
    real_t alpha, phi, inv_M, mobility;   ///< mobility = k / mu
@@ -97,12 +106,67 @@ public:
    {
       MFEM_VERIFY(P.porosity_model == PorosityModel::Damage,
                   "PorePressureOperator: porosity_model = 'strain' is not wired yet");
-      MFEM_VERIFY(P.perm_model != PermeabilityModel::NormalStrain,
-                  "PorePressureOperator: permeability_model = 'normal_strain' is not wired yet");
       MFEM_VERIFY(P.K > 0.0 && P.K_s > 0.0 && P.K_f > 0.0 && P.viscosity > 0.0,
                   "PorePressureOperator: K, K_s, K_f and viscosity must be positive");
       drained_.Append(drained_tdofs);
       dim_ = vfes.GetParMesh()->Dimension();
+      tensor_perm_ = P.perm_model == PermeabilityModel::NormalStrain;
+      u_gf_ = 0.0;
+      uold_gf_ = 0.0;
+      if (tensor_perm_)
+      {
+         // libMesh Elem::hmax(): largest vertex-to-vertex distance.
+         ParMesh &mesh = *vfes.GetParMesh();
+         hmax_.SetSize(mesh.GetNE());
+         Array<int> v;
+         for (int e = 0; e < mesh.GetNE(); e++)
+         {
+            mesh.GetElementVertices(e, v);
+            real_t h2 = 0.0;
+            for (int a = 0; a < v.Size(); a++)
+               for (int b = a + 1; b < v.Size(); b++)
+               {
+                  const real_t *xa = mesh.GetVertex(v[a]), *xb = mesh.GetVertex(v[b]);
+                  real_t s = 0.0;
+                  for (int c = 0; c < dim_; c++) { s += (xa[c] - xb[c]) * (xa[c] - xb[c]); }
+                  h2 = std::max(h2, s);
+               }
+            hmax_(e) = std::sqrt(h2);
+         }
+      }
+   }
+
+   /// Element size h_c of the normal_strain model (empty for the other models).
+   const Vector &ElementHmax() const { return hmax_; }
+
+   /// Set the damage and displacement that MobilityAt and Energies read (Step
+   /// does this itself with u^{n+1}).
+   void SetState(const Vector &D, const Vector &U) const
+   {
+      d_gf_.SetFromTrueDofs(D);
+      u_gf_.SetFromTrueDofs(U);
+   }
+
+   /// k / mu (dim x dim) at the point T is set to, from the damage and the
+   /// displacement last passed to Step (zero before the first step).
+   void MobilityAt(ElementTransformation &T, const IntegrationPoint &ip, DenseMatrix &K) const
+   {
+      K.SetSize(dim_);
+      real_t k[9], gd[3] = {0.0, 0.0, 0.0}, eps[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+      real_t h = 0.0;
+      if (tensor_perm_)
+      {
+         Vector g(gd, dim_);
+         d_gf_.GetGradient(T, g);
+         DenseMatrix gu;
+         u_gf_.GetVectorGradient(T, gu);
+         for (int j = 0; j < dim_; j++)
+            for (int i = 0; i < dim_; i++) { eps[i + 3 * j] = 0.5 * (gu(i, j) + gu(j, i)); }
+         h = hmax_(T.ElementNo);
+      }
+      EffectivePermeability(P_, d_gf_.GetValue(T, ip), gd, eps, h, k);
+      for (int j = 0; j < dim_; j++)
+         for (int i = 0; i < dim_; i++) { K(i, j) = k[i + 3 * j] / P_.viscosity; }
    }
 
    const Array<int> &DrainedTrueDofs() const { return drained_; }
@@ -148,10 +212,12 @@ public:
       a_.reset(new ParBilinearForm(&sfes_));
       StorageCoefficient storage(*this);
       MobilityCoefficient mobility(*this);
+      MobilityTensorCoefficient mobility_tensor(*this);
       auto *mi = new MassIntegrator(storage);
       mi->SetIntRule(&ir_);
       a_->AddDomainIntegrator(mi);
-      auto *di = new DiffusionIntegrator(mobility);
+      auto *di = tensor_perm_ ? new DiffusionIntegrator(mobility_tensor)
+                 : new DiffusionIntegrator(mobility);
       di->SetIntRule(&ir_);
       a_->AddDomainIntegrator(di);
       a_->Assemble();
@@ -223,7 +289,8 @@ public:
       pg.SetFromTrueDofs(Pp);
       ParMesh &mesh = *sfes_.GetParMesh();
       real_t loc[2] = {0.0, 0.0}, glob[2];
-      Vector grad(dim_);
+      Vector grad(dim_), Kg(dim_);
+      DenseMatrix Kt;
       for (int e = 0; e < mesh.GetNE(); e++)
       {
          ElementTransformation &T = *mesh.GetElementTransformation(e);
@@ -236,7 +303,16 @@ public:
             pg.GetGradient(T, grad);
             const real_t w = ip.weight * T.Weight();
             loc[0] += w * 0.5 * pt.inv_M * p * p;
-            loc[1] += w * pt.mobility * (grad * grad);
+            if (tensor_perm_)
+            {
+               MobilityAt(T, ip, Kt);
+               Kt.Mult(grad, Kg);
+               loc[1] += w * (Kg * grad);
+            }
+            else
+            {
+               loc[1] += w * pt.mobility * (grad * grad);
+            }
          }
       }
       MPI_Allreduce(loc, glob, 2, MPITypeMap<real_t>::mpi_type, MPI_SUM, sfes_.GetComm());
@@ -274,6 +350,13 @@ private:
       MobilityCoefficient(const PorePressureOperator &o_) : o(o_) {}
       real_t Eval(ElementTransformation &T, const IntegrationPoint &ip) override
       { return EvalPoroPoint(o.P_, o.d_gf_.GetValue(T, ip)).mobility; }
+   };
+   struct MobilityTensorCoefficient : public MatrixCoefficient
+   {
+      const PorePressureOperator &o;
+      MobilityTensorCoefficient(const PorePressureOperator &o_) : MatrixCoefficient(o_.dim_), o(o_) {}
+      void Eval(DenseMatrix &K, ElementTransformation &T, const IntegrationPoint &ip) override
+      { o.MobilityAt(T, ip, K); }
    };
    struct SourceCoefficient : public Coefficient
    {
@@ -318,6 +401,8 @@ private:
    PoroPreconditioner pc_;
    Array<int> drained_;
    int dim_ = 0;
+   bool tensor_perm_ = false;
+   Vector hmax_;
    real_t dt_ = 1.0;
    mutable ParGridFunction d_gf_, p_gf_, u_gf_, uold_gf_;
    std::unique_ptr<ParBilinearForm> a_;

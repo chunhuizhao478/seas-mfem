@@ -436,18 +436,59 @@ int main(int argc, char *argv[])
          struct KOp : public Operator
          {
             const ExplicitElasticityOperator &o; const Vector &D0;
+            // static_undrained: the pressure follows u through one backward-Euler
+            // step of size dt_u from p0, p(u) = p(0) + (linear in u), so the
+            // operator gets F_p(p(u)) - F_p(p(0)) (symmetric positive).
+            PorePressureOperator *poro = nullptr; const Vector *P0 = nullptr, *Fp0 = nullptr;
+            real_t dt_u = 0.0; mutable long pits = 0;
             KOp(const ExplicitElasticityOperator &o_, const Vector &D0_, int n_) : Operator(n_), o(o_), D0(D0_) {}
+            void Pressure(const Vector &u, Vector &p) const
+            {
+               Vector zero(u.Size());
+               zero = 0.0;
+               p = *P0;
+               PorePressureOperator::StepInfo si;
+               poro->Reset();
+               poro->Step(D0, u, zero, dt_u, p, si);
+               poro->Reset();
+               pits += si.iterations;
+            }
             void Mult(const Vector &x, Vector &y) const override
             {
                Vector xx(x);
                for (int t : o.FixedTrueDofs()) { xx(t) = 0.0; }
                o.InternalForce(xx, D0, y);
+               if (poro)
+               {
+                  Vector p, fp(y.Size());
+                  Pressure(xx, p);
+                  fp = 0.0;
+                  poro->AddCouplingForce(D0, p, fp);
+                  y += fp;
+                  y -= *Fp0;
+               }
                for (int t : o.FixedTrueDofs()) { y(t) = x(t); }
             }
          } Kop(op, D, n);
          Vector rhs(op.ConfinementVector());
          f_poro = 0.0;
-         poro->AddCouplingForce(D, Pp, f_poro);
+         Vector P_static0(Pp);
+         if (c.static_undrained)
+         {
+            MFEM_VERIFY(c.dt_max > 0.0, "initial_state = 'static_undrained' takes its step from [time] dt_max");
+            Kop.poro = poro.get();
+            Kop.P0 = &P_static0;
+            Kop.dt_u = c.dt_max;
+            Vector zero(n), p;
+            zero = 0.0;
+            Kop.Pressure(zero, p);
+            poro->AddCouplingForce(D, p, f_poro);
+            Kop.Fp0 = &f_poro;
+         }
+         else
+         {
+            poro->AddCouplingForce(D, Pp, f_poro);
+         }
          rhs -= f_poro;
          for (int t : fixed) { rhs(t) = 0.0; }
          CGSolver cg(comm);
@@ -460,6 +501,16 @@ int main(int argc, char *argv[])
          cg.Mult(rhs, S.u);
          MFEM_VERIFY(cg.GetConverged(), "static initial state: CG did not converge ("
                      << cg.GetNumIterations() << " iterations, |r| = " << cg.GetFinalNorm() << ")");
+         if (c.static_undrained)
+         {
+            Kop.Pressure(S.u, Pp);
+            poro->Energies(D, Pp, Ef_n, rate);
+            if (Mpi::Root())
+            {
+               mfem::out << "  static undrained step dt = " << c.dt_max << ": pore-pressure PCG iterations "
+                         << Kop.pits << ", fluid energy " << Ef_n << "\n";
+            }
+         }
          real_t psi0 = 0.0;
          Vector F0;
          op.InternalForce(S.u, D, F0, &psi0);

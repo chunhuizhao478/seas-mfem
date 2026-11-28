@@ -175,10 +175,107 @@ static void TestCflRatio()
             "3D ratio = 1 + alpha^2 M/K");
 }
 
+// normal_strain permeability (cmame 3d_hydromech/em_5J/elasticity_mesh2x.i:
+// permeability_model = normal_strain, perm_exponent = 10, damage_gradient
+// normal, element_size h_c, anisotropic, threshold 0.5, f_c = 1, k0 = 5e-19;
+// NDSmallDeformationIsotropicElasticity::updatePermeabilityForCracking):
+// k = k0 I + d^b (h_c (1 + eps_nn))^2 / 12 (I - n n). With d linear in x the
+// normal is e_x, with u = (e x, 0, 0) eps_nn = e; a pressure gradient along the
+// normal sees k0 only, one in the crack plane the full fracture term.
+static void TestNormalStrainPermeability()
+{
+   std::cout << "\n[normal_strain permeability tensor]\n";
+   const real_t L = 1e-3;
+   Mesh serial = Mesh::MakeCartesian3D(3, 2, 2, Element::TETRAHEDRON, 1.5 * L, L, L);
+   ParMesh mesh(MPI_COMM_WORLD, serial);
+   H1_FECollection h1(1, 3);
+   ParFiniteElementSpace V(&mesh, &h1, 3, Ordering::byNODES), S(&mesh, &h1);
+   const IntegrationRule &ir = IntRules.Get(Geometry::TETRAHEDRON, 2);
+   PoroDamageParams P = Params();
+   P.perm_model = PermeabilityModel::NormalStrain;
+   P.k0 = 5e-19;
+   P.perm_exponent = 10.0;
+   P.d_threshold = 0.5;
+   P.fc = 1.0;
+   P.anisotropic = true;
+   P.normal_source = CrackNormalSource::DamageGradient;
+   Array<int> none;
+   PorePressureOperator op(V, S, P, none, ir, PoroPreconditioner::Jacobi);
+
+   // Elem::hmax of the tets of a 0.5 mm cube cell: the body diagonal or a face
+   // diagonal or... at most the body diagonal, at least the face diagonal.
+   const Vector &h = op.ElementHmax();
+   real_t hloc[2] = {h.Size() ? h.Max() : 0.0, h.Size() ? -h.Min() : -1e30}, hg[2];
+   MPI_Allreduce(hloc, hg, 2, MPITypeMap<real_t>::mpi_type, MPI_MAX, MPI_COMM_WORLD);
+   TEST_REL(hg[0], 0.5 * L * std::sqrt(3.0), 1e-12, "largest hmax = cell body diagonal");
+   TEST_ASSERT(-hg[1] >= 0.5 * L * std::sqrt(2.0) * (1.0 - 1e-12), "hmax >= cell face diagonal");
+
+   const real_t e = 2e-3, d0 = 0.7, dslope = 0.1 / (1.5 * L);
+   ParGridFunction dg(&S), ug(&V), pg(&S);
+   FunctionCoefficient df([&](const Vector &x) { return d0 + dslope * x(0); });
+   VectorFunctionCoefficient uf(3, [&](const Vector &x, Vector &u) { u = 0.0; u(0) = e * x(0); });
+   dg.ProjectCoefficient(df);
+   ug.ProjectCoefficient(uf);
+   Vector D(S.GetTrueVSize()), U(V.GetTrueVSize()), Pp(S.GetTrueVSize());
+   dg.GetTrueDofs(D);
+   ug.GetTrueDofs(U);
+   op.SetState(D, U);
+
+   // reference integrals of d^b h^2 over the mesh at the same points
+   real_t loc[2] = {0.0, 0.0}, glob[2];
+   for (int el = 0; el < mesh.GetNE(); el++)
+   {
+      ElementTransformation &T = *mesh.GetElementTransformation(el);
+      for (int q = 0; q < ir.GetNPoints(); q++)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         T.SetIntPoint(&ip);
+         const real_t w = ip.weight * T.Weight();
+         loc[0] += w;
+         loc[1] += w * std::pow(dg.GetValue(T, ip), 10.0) * h(el) * h(el);
+      }
+   }
+   MPI_Allreduce(loc, glob, 2, MPITypeMap<real_t>::mpi_type, MPI_SUM, MPI_COMM_WORLD);
+   const real_t vol = glob[0], kfrac = glob[1] * (1.0 + e) * (1.0 + e) / 12.0;
+
+   const real_t gp = 1e9;
+   real_t Ef, rate;
+   FunctionCoefficient px([&](const Vector &x) { return gp * x(0); });
+   pg.ProjectCoefficient(px);
+   pg.GetTrueDofs(Pp);
+   op.Energies(D, Pp, Ef, rate);
+   TEST_REL(rate, P.k0 / P.viscosity * gp * gp * vol, 1e-10, "gradient along the normal: matrix k0 only");
+   FunctionCoefficient py([&](const Vector &x) { return gp * x(1); });
+   pg.ProjectCoefficient(py);
+   pg.GetTrueDofs(Pp);
+   op.Energies(D, Pp, Ef, rate);
+   TEST_REL(rate, (P.k0 * vol + kfrac) / P.viscosity * gp * gp, 1e-10,
+            "gradient in the crack plane: k0 + d^b (h (1 + eps_nn))^2 / 12");
+   TEST_ASSERT(kfrac > 1e6 * P.k0 * vol, "fracture term dominates in the plane");
+
+   // below the threshold: matrix permeability in every direction
+   dg = 0.4;
+   dg.GetTrueDofs(D);
+   op.SetState(D, U);
+   op.Energies(D, Pp, Ef, rate);
+   TEST_REL(rate, P.k0 / P.viscosity * gp * gp * vol, 1e-10, "d < 0.5: k0 I");
+
+   // one step with the tensor in the operator: uniform p, no strain change, no
+   // drained boundary -> p stays uniform (the diffusion block has zero row sums)
+   dg.ProjectCoefficient(df);
+   dg.GetTrueDofs(D);
+   Pp = 2.5e6;
+   PorePressureOperator::StepInfo info;
+   op.Step(D, U, U, 1e-8, Pp, info);
+   TEST_REL(Pp.Min(), 2.5e6, 1e-9, "tensor step keeps a uniform pressure (min)");
+   TEST_REL(Pp.Max(), 2.5e6, 1e-9, "tensor step keeps a uniform pressure (max)");
+}
+
 int main(int argc, char *argv[])
 {
    Mpi::Init(argc, argv);
    Hypre::Init();
+   TestNormalStrainPermeability();
    TestCouplingAndStorage();
    TestDiffusion(PoroPreconditioner::Jacobi, "jacobi");
    TestDiffusion(PoroPreconditioner::AMG, "amg");

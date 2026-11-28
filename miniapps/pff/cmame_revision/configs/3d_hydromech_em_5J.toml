@@ -49,6 +49,10 @@ num_pulses = 50
 
 [confinement]
 pressure = 1e6
+# MOOSE: u = 0 and pp = p0 at t = 0, then one step of dt = 1e-8 without inertia,
+# dashpots and pulse ([Controls] period0), so the pore pressure follows the
+# static compression undrained (no static_solve file, unlike the 2D inputs).
+initial_state = "static_undrained"       # the step is [time] dt_max
 
 [time]
 mass = "consistent"                      # MOOSE ADInertialForce (Andy 2026-11-22; lumped grows ~20% more damage at zeta_pulse = 0)
